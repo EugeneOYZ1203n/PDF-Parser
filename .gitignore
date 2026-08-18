@@ -1,1 +1,4 @@
 /references
+/.venv/Lib/site-packages
+/.venv
+__pycache__

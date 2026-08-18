@@ -4,7 +4,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from layers import LayerSpec, SubFilterSpec, NONE_OPTION
+from inspector.layers import LayerSpec, SubFilterSpec, NONE_OPTION
 
 
 class ControlPanel(ttk.Frame):
