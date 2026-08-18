@@ -151,11 +151,15 @@ class _Page:
     meta = _Meta()
 
 
-def test_classify_groups_small_close_filled_paths_as_text():
+def test_classify_returns_clusters_as_text_candidates_no_heuristic():
     # All four glyphs share one seq (one drawing, several items) so
     # filter_layout_panels -- which only drops a *lone*-item re/qu drawing
     # -- leaves them alone; a real CAD text-as-vector-paths drawing is
-    # exactly this shape (one seq, many glyph items).
+    # exactly this shape (one seq, many glyph items). "far_away" is a
+    # single unrelated path that stays in its own separate cluster purely
+    # because it's spatially far from the glyphs -- not because of any
+    # drawing-vs-text heuristic (Vector no longer has one; classify()
+    # returns every surviving cluster as-is, letting OCR itself decide).
     text_like = [
         _make_path(
             seq=0, item_index=i, bbox=(10 + i * 5, 10, 10 + i * 5 + 3, 16),
@@ -163,26 +167,27 @@ def test_classify_groups_small_close_filled_paths_as_text():
         )
         for i in range(4)
     ]
-    drawing_like = _make_path(
+    far_away = _make_path(
         seq=100, kind="l", bbox=(100, 100, 180, 180), stroke_color=(0, 0, 0)
     )
 
-    drawing_paths, text_clusters = Vector().classify(text_like + [drawing_like], _Page())
+    clusters = Vector().classify(text_like + [far_away], _Page())
 
-    assert drawing_like in drawing_paths
-    assert len(text_clusters) == 1
-    assert len(text_clusters[0]) == 4
+    sizes = sorted(len(c) for c in clusters)
+    assert sizes == [1, 4]
+    assert any(far_away in c for c in clusters if len(c) == 1)
 
 
-def test_classify_single_item_cluster_is_not_text():
+def test_classify_keeps_single_item_cluster():
     # kind="l" (not re/qu) so filter_layout_panels' lone-panel rule doesn't
-    # drop it before it reaches the final grouping/classification step.
+    # drop it before it reaches the final grouping step. A single-path
+    # cluster is returned as-is like any other -- there's no minimum
+    # member-count heuristic gating what counts as a text candidate.
     lone = _make_path(kind="l", bbox=(0, 0, 3, 6), fill_color=(0, 0, 0))
 
-    drawing_paths, text_clusters = Vector().classify([lone], _Page())
+    clusters = Vector().classify([lone], _Page())
 
-    assert drawing_paths == [lone]
-    assert text_clusters == []
+    assert clusters == [[lone]]
 
 
 def test_filter_large_bbox_drops_oversized_path():
@@ -263,6 +268,36 @@ def test_filter_aspect_ratio_drops_long_thin_group():
     assert line_like not in result
 
 
+def test_cluster_spatial_union_find_merges_close_groups_without_splitting():
+    close_a = [_make_path(bbox=(0, 0, 2, 2))]
+    close_b = [_make_path(bbox=(4, 0, 6, 2))]  # gap=2 from close_a -> within default threshold=8.0
+    far = [_make_path(bbox=(100, 100, 102, 102))]
+
+    result = Vector().cluster_spatial_union_find([close_a, close_b, far])
+
+    sizes = sorted(len(g) for g in result)
+    assert sizes == [1, 2]  # close_a+close_b merge into one group; far stays alone
+
+
+def test_cluster_spatial_union_find_never_splits_an_incoming_group():
+    # A single incoming group already spans a huge bbox gap internally (as
+    # if an earlier operation grouped these paths for some other reason) --
+    # unlike cluster_spatial (which re-flattens and re-derives from
+    # scratch), cluster_spatial_union_find treats the whole incoming group
+    # as one atomic unit and never re-splits it.
+    pre_grouped = [
+        _make_path(bbox=(0, 0, 2, 2)), _make_path(bbox=(500, 500, 502, 502)),
+    ]
+    other = [_make_path(bbox=(1000, 1000, 1002, 1002))]
+
+    result = Vector().cluster_spatial_union_find([pre_grouped, other])
+
+    sizes = sorted(len(g) for g in result)
+    assert sizes == [1, 2]
+    pre_grouped_ids = {id(p) for p in pre_grouped}
+    assert any(len(g) == 2 and {id(p) for p in g} == pre_grouped_ids for g in result)
+
+
 def test_cluster_groups_by_dimension_merges_similar_sized_groups():
     g1 = [_make_path(bbox=(0, 0, 10, 10))]
     g2 = [_make_path(bbox=(50, 50, 60, 60))]  # same size as g1, far away -> still merges
@@ -274,26 +309,28 @@ def test_cluster_groups_by_dimension_merges_similar_sized_groups():
     assert sizes == [1, 2]
 
 
-def test_cluster_default_order_matches_manual_chain():
+def test_cluster_default_order_is_spatial_only():
     a = _make_path(seq=0, bbox=(10, 10, 13, 16), fill_color=(0, 0, 0))
     b = _make_path(seq=0, item_index=1, bbox=(15, 10, 18, 16), fill_color=(0, 0, 0))
     c = _make_path(seq=100, kind="l", bbox=(100, 100, 180, 180), stroke_color=(0, 0, 0))
     paths = [a, b, c]
 
+    assert list(Vector.CLUSTER_STEPS) == ["cluster_spatial", "none", "none", "none"]
+
     snapshots = Vector().cluster(paths, _Page())
     assert len(snapshots) == 4
-    assert len(snapshots[0]) >= 1  # sanity: every step produced something
 
     vector = Vector()
     spatial = vector.cluster_spatial(paths)
-    seq_clusters = vector.cluster_by_seq(spatial)
-    overlap_groups = vector.group_overlapping(seq_clusters, _Page())
-    dimension_groups = vector.cluster_groups_by_dimension(overlap_groups)
 
     def _sorted_ids(groups):
         return sorted(tuple(sorted(id(p) for p in g)) for g in groups)
 
-    assert _sorted_ids(snapshots[-1]) == _sorted_ids(dimension_groups)
+    # The default order is one layer of spatial clustering only -- the
+    # other 3 ordinal positions are "none" (identity), so every later
+    # snapshot is just the untouched spatial-clustering result.
+    assert _sorted_ids(snapshots[0]) == _sorted_ids(spatial)
+    assert snapshots[0] == snapshots[1] == snapshots[2] == snapshots[3]
 
 
 def test_cluster_order_changes_result():
@@ -304,10 +341,12 @@ def test_cluster_order_changes_result():
     b = _make_path(bbox=(50, 50, 60, 60))
     paths = [a, b]
 
-    default_order = list(Vector.CLUSTER_STEPS)
-    assert default_order[-1] == "cluster_groups_by_dimension"
-    default_final = Vector().cluster(paths, _Page(), default_order)[-1]
-    assert len(default_final) == 1  # dimension-clustering (last) merges them
+    default_final = Vector().cluster(paths, _Page())[-1]
+    assert len(default_final) == 2  # default order is spatial-only -- far apart, stays split
+
+    full_order = ["cluster_spatial", "cluster_by_seq", "group_overlapping", "cluster_groups_by_dimension"]
+    full_final = Vector().cluster(paths, _Page(), full_order)[-1]
+    assert len(full_final) == 1  # dimension-clustering (last) merges same-size groups regardless of position
 
     reordered = ["cluster_groups_by_dimension", "cluster_spatial", "cluster_by_seq", "group_overlapping"]
     reordered_final = Vector().cluster(paths, _Page(), reordered)[-1]

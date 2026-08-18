@@ -19,7 +19,7 @@ from typing import Callable
 import io
 
 import pymupdf as fitz
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 if __name__ == "__main__" and __package__ is None:
     # Allow running this file directly (`python rastervec/debug_app.py`),
@@ -28,8 +28,9 @@ if __name__ == "__main__" and __package__ is None:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rastervec import geometry
+from rastervec.helpers.render_ocr import RenderOCR
 from rastervec.logging_setup import configure_logging
-from rastervec.models import DrawingVector, Page, TextWord, VectorPath
+from rastervec.models import DrawingVector, Page, TextVectorResult, TextWord, VectorPath
 from rastervec.pipeline import ClusteringStageResult, Pipeline, StageOutput
 from rastervec.reader import Reader
 from rastervec.renderer import Renderer
@@ -102,6 +103,14 @@ class DebugAppState:
     # The clustering stage's 4-operation order -- lives here (not in
     # filter_state) since changing it drives which cache slot above is used.
     clustering_order: list[str] = field(default_factory=lambda: list(Vector.CLUSTER_STEPS))
+    # ocr_text_clusters inspector: (page_index, clustering_order, cluster
+    # index) -> {"image", "bbox_corners"} (see _ocr_cluster_preview).
+    # Deliberately its own dict, not filter_state -- filter_state is keyed
+    # only by stage key (shared across every page/order visit of that
+    # stage, fine for cheap UI toggles), but this holds real recomputed
+    # render+OCR data that's only valid for the exact page/order/cluster it
+    # was built from.
+    ocr_detail_cache: dict[tuple, dict] = field(default_factory=dict)
 
 
 _DEFAULT_PATH_COLOR = "#111827"
@@ -115,6 +124,10 @@ _HOVER_TOLERANCE_PX = 5.0
 
 
 _RENDERER = Renderer()  # stateless; the debug app's one shared instance
+# RenderOCR's own PaddleOCR engine is cached at module scope inside
+# helpers/render_ocr.py, so this instance is cheap -- but still shared
+# rather than constructed per call, for symmetry with _RENDERER.
+_RENDER_OCR = RenderOCR()
 
 
 def _path_color_hex(path: VectorPath, default: str = _DEFAULT_PATH_COLOR) -> str:
@@ -141,6 +154,15 @@ class RenderContext:
     # recompute it requires (see DebugApp._set_clustering_order).
     clustering_order: list[str] = field(default_factory=list)
     set_clustering_order: "Callable[[list[str]], None] | None" = None
+    # The live Page for the page currently being viewed -- only
+    # ocr_text_clusters needs it today (to re-render a cluster on demand
+    # for its inspector panel; see _ocr_cluster_preview), but it's cheap and
+    # generally useful, so it's populated for every stage, not just that one.
+    page: Page | None = None
+    # DebugAppState.ocr_detail_cache, threaded through so
+    # _render_ocr_text_clusters_stage can key/read/write it without needing
+    # a back-reference to DebugApp itself.
+    ocr_detail_cache: dict[tuple, dict] | None = None
 
 
 def _set_tag_visible(canvas: tk.Canvas, tag: str, visible: bool) -> None:
@@ -659,6 +681,7 @@ def _cluster_size_stats_text(clusters: list[list[VectorPath]]) -> str:
 
 _CLUSTER_STEP_LABELS: dict[str, str] = {
     "cluster_spatial": "Spatial",
+    "cluster_spatial_union_find": "Spatial (UF)",
     "cluster_by_seq": "Sequence",
     "group_overlapping": "Overlap",
     "cluster_groups_by_dimension": "Dimension",
@@ -670,10 +693,11 @@ _ORDINAL_LABELS = ("1st", "2nd", "3rd", "4th")
 
 def _render_clustering_stage(ctx: RenderContext) -> None:
     """The single configurable clustering/grouping stage: cluster_spatial,
-    cluster_by_seq, group_overlapping, and cluster_groups_by_dimension all
-    run here now, in whatever order the 4 dropdowns pick (default:
-    Vector.CLUSTER_STEPS's order -- spatial, sequence, overlap, dimension).
-    Changing a dropdown swaps it with whichever other dropdown currently
+    cluster_by_seq, group_overlapping, cluster_groups_by_dimension, or
+    "none" (skip that ordinal position) run here, in whatever order the 4
+    dropdowns pick (default: Vector.CLUSTER_STEPS's order -- just one layer
+    of spatial clustering, the other 3 positions "none"). Changing a
+    dropdown swaps it with whichever other dropdown currently
     holds that value (keeping the 4 dropdowns a valid permutation) and
     calls ctx.set_clustering_order, which persists the new order and
     triggers a full pipeline recompute for it (clustering's result depends
@@ -721,7 +745,7 @@ def _render_clustering_stage(ctx: RenderContext) -> None:
         ttk.Label(row, text=f"{ordinal}:", width=5).pack(side="left")
         var = tk.StringVar(value=_CLUSTER_STEP_LABELS[order[i]])
         combo = ttk.Combobox(
-            row, textvariable=var, state="readonly", width=11,
+            row, textvariable=var, state="readonly", width=14,
             values=list(_CLUSTER_STEP_LABELS.values()),
         )
         combo.pack(side="left")
@@ -895,6 +919,178 @@ def _render_drawing_vectors_stage(ctx: RenderContext) -> None:
         )
 
 
+_OCR_PASSED_COLOR = "#059669"
+_OCR_FAILED_COLOR = "#dc2626"
+_OCR_SELECTED_WIDTH = 3
+_OCR_PREVIEW_MAX_SIDE = 200
+_OCR_BBOX_OVERLAY_COLOR = (220, 38, 38)
+
+
+def _ocr_passed(result: TextVectorResult) -> bool:
+    return bool(result.text.strip())
+
+
+def _ocr_cluster_preview(result: TextVectorResult, page: Page) -> dict:
+    """Renders one OCR'd text cluster at the single rotation it was
+    actually read at (result.rotation_used) and re-OCRs just that one
+    rotation, purely to recover the detected-text bbox in that rendered
+    image's own pixel space for the inspector's overlay -- the production
+    TextVectorResult keeps `text`/`confidence` (used directly below, not
+    re-derived here) but not that bbox. One render + one OCR call per
+    cluster -- callers only care which cluster this is, not the other 7
+    rotations RenderOCR.ocr_cluster tried and discarded, so unlike an
+    earlier version of this panel, this never replays all 8."""
+    image = _RENDERER.render_vector_cluster(result.cluster_paths, page, dpi=300).convert("RGB")
+    angle = result.rotation_used % 360
+    if angle:
+        image = image.rotate(
+            -angle, expand=True, fillcolor=(255, 255, 255), resample=Image.BICUBIC,
+        )
+    _text, _confidence, bbox_corners = _RENDER_OCR.ocr(image)
+    return {"image": image, "bbox_corners": bbox_corners}
+
+
+def _ocr_preview_photo(preview: dict) -> "ImageTk.PhotoImage":
+    image = preview["image"].copy()
+    scale = max(1, _OCR_PREVIEW_MAX_SIDE // max(image.width, image.height, 1))
+    if scale > 1:
+        image = image.resize((image.width * scale, image.height * scale), Image.NEAREST)
+    bbox_corners = preview["bbox_corners"]
+    if bbox_corners:
+        draw = ImageDraw.Draw(image)
+        draw.polygon(
+            [(x * scale, y * scale) for x, y in bbox_corners],
+            outline=_OCR_BBOX_OVERLAY_COLOR, width=2,
+        )
+    return ImageTk.PhotoImage(image)
+
+
+def _render_ocr_text_clusters_stage(ctx: RenderContext) -> None:
+    results: list[TextVectorResult] = ctx.output.data or []
+    passed = [r for r in results if _ocr_passed(r)]
+    failed = [r for r in results if not _ocr_passed(r)]
+
+    ttk.Label(ctx.side_panel, text=f"{len(results)} OCR'd text cluster(s)").pack(
+        anchor="w", padx=4, pady=(4, 6)
+    )
+
+    show_passed = ctx.filters.setdefault("show_passed", {"value": True})
+    show_failed = ctx.filters.setdefault("show_failed", {"value": True})
+    selected = ctx.filters.setdefault("selected_index", {"value": 0})
+
+    def _visible(result: TextVectorResult) -> bool:
+        return show_passed["value"] if _ocr_passed(result) else show_failed["value"]
+
+    visible_indices = [i for i, r in enumerate(results) if _visible(r)]
+    if selected["value"] not in visible_indices:
+        selected["value"] = visible_indices[0] if visible_indices else None
+
+    def _select(index: int) -> None:
+        selected["value"] = index
+        ctx.on_change()
+
+    def _step_cluster(delta: int) -> None:
+        if not visible_indices:
+            return
+        pos = visible_indices.index(selected["value"]) if selected["value"] in visible_indices else 0
+        _select(visible_indices[(pos + delta) % len(visible_indices)])
+
+    # Small counts per page (text-as-vector-paths clusters are rare
+    # compared to raw path counts), so plain tag_bind hover -- like
+    # _render_native_stage -- is plenty; no need for the filter stages'
+    # viewport-culling/spatial-index machinery here.
+    for i in visible_indices:
+        result = results[i]
+        x0, y0 = fitz.Point(result.bbox[0], result.bbox[1]) * ctx.matrix
+        x1, y1 = fitz.Point(result.bbox[2], result.bbox[3]) * ctx.matrix
+        is_selected = i == selected["value"]
+        color = _OCR_PASSED_COLOR if _ocr_passed(result) else _OCR_FAILED_COLOR
+        item_id = ctx.canvas.create_rectangle(
+            x0, y0, x1, y1, outline=color,
+            width=_OCR_SELECTED_WIDTH if is_selected else 2, tags=("overlay",),
+        )
+        ctx.canvas.tag_bind(
+            item_id,
+            "<Enter>",
+            lambda _event, r=result: ctx.tooltip.show(
+                ctx.canvas.winfo_pointerx(),
+                ctx.canvas.winfo_pointery(),
+                f"{r.text!r}\nconfidence: {r.confidence:.2f}\n"
+                f"rotation used: {r.rotation_used}deg\n{len(r.cluster_paths)} path(s)\n"
+                "(click to inspect)",
+            ),
+        )
+        ctx.canvas.tag_bind(item_id, "<Leave>", lambda _event: ctx.tooltip.hide())
+        ctx.canvas.tag_bind(item_id, "<Button-1>", lambda _event, idx=i: _select(idx))
+
+    # --- inspector panel: rendered image (at rotation_used) + cluster nav ---
+    if selected["value"] is not None and ctx.page is not None and ctx.ocr_detail_cache is not None:
+        index = selected["value"]
+        result = results[index]
+        pos = visible_indices.index(index) + 1
+
+        ttk.Separator(ctx.side_panel, orient="horizontal").pack(fill="x", padx=4, pady=6)
+
+        nav = ttk.Frame(ctx.side_panel)
+        nav.pack(fill="x", padx=4)
+        ttk.Button(nav, text="< ←", width=4, command=lambda: _step_cluster(-1)).pack(side="left")
+        ttk.Label(
+            nav, text=f"Cluster {pos}/{len(visible_indices)}", anchor="center",
+        ).pack(side="left", expand=True, fill="x")
+        ttk.Button(nav, text="→ >", width=4, command=lambda: _step_cluster(1)).pack(side="right")
+
+        ctx.canvas.focus_set()
+        ctx.canvas.bind("<Left>", lambda _e: _step_cluster(-1))
+        ctx.canvas.bind("<Right>", lambda _e: _step_cluster(1))
+
+        cache_key = (ctx.page.meta.index, tuple(ctx.clustering_order), index)
+        if cache_key not in ctx.ocr_detail_cache:
+            ctx.ocr_detail_cache[cache_key] = _ocr_cluster_preview(result, ctx.page)
+        preview = ctx.ocr_detail_cache[cache_key]
+
+        photo = _ocr_preview_photo(preview)
+        ctx.filters["_photo_ref"] = photo  # keep a reference so Tk doesn't GC it
+        tk.Label(ctx.side_panel, image=photo, bg="#808080").pack(padx=4, pady=(6, 4))
+
+        lines = [
+            f"text: {result.text!r}",
+            f"confidence: {result.confidence:.3f}",
+            f"rotation used: {result.rotation_used}deg",
+            f"{len(result.cluster_paths)} path(s)",
+            "passed" if _ocr_passed(result) else "failed (no text detected)",
+        ]
+        info = tk.Text(
+            ctx.side_panel, height=7, width=26, wrap="word", font=("TkDefaultFont", 8),
+        )
+        info.insert("1.0", "\n".join(lines))
+        info.configure(state="disabled")
+        info.pack(fill="both", expand=True, padx=4, pady=(4, 8))
+
+    # --- passed/failed filter, pinned to the bottom of the panel ---
+    ttk.Separator(ctx.side_panel, orient="horizontal").pack(side="bottom", fill="x", padx=4, pady=4)
+    failed_var = tk.BooleanVar(value=show_failed["value"])
+
+    def _on_failed_toggle() -> None:
+        show_failed["value"] = failed_var.get()
+        ctx.on_change()
+
+    ttk.Checkbutton(
+        ctx.side_panel, text=f"Show failed ({len(failed)})", variable=failed_var,
+        command=_on_failed_toggle,
+    ).pack(side="bottom", anchor="w", padx=4, pady=1)
+
+    passed_var = tk.BooleanVar(value=show_passed["value"])
+
+    def _on_passed_toggle() -> None:
+        show_passed["value"] = passed_var.get()
+        ctx.on_change()
+
+    ttk.Checkbutton(
+        ctx.side_panel, text=f"Show passed ({len(passed)})", variable=passed_var,
+        command=_on_passed_toggle,
+    ).pack(side="bottom", anchor="w", padx=4, pady=1)
+
+
 # Stage key -> view-render function. Add one entry here alongside each new
 # StageSpec in rastervec/pipeline.py's Pipeline.STAGES.
 _STAGE_RENDERERS = {
@@ -909,13 +1105,22 @@ _STAGE_RENDERERS = {
     "filter_large_group_bbox": _render_filter_stage_buckets,
     "filter_aspect_ratio": _render_filter_stage_buckets,
     "drawing_vectors": _render_drawing_vectors_stage,
+    "ocr_text_clusters": _render_ocr_text_clusters_stage,
 }
 
 
 class DebugApp:
-    def __init__(self, root: tk.Tk, pdf_path: str, page_index: int = 0) -> None:
+    def __init__(
+        self, root: tk.Tk, pdf_path: str, page_index: int = 0, final_stage: str | None = None,
+    ) -> None:
         self.root = root
         self.pdf_path = os.path.abspath(pdf_path)
+        # Fixed for the app's lifetime (a startup flag, not something the UI
+        # changes), so it lives here rather than in DebugAppState -- it
+        # doesn't need to be part of the stage_cache key. None runs every
+        # stage, unchanged from before this existed. Threaded into every
+        # Pipeline.run_page() call in _get_stage_outputs.
+        self.final_stage = final_stage
         # Only the requested page is ever loaded (Reader.select()s it out of
         # the rest of the document) -- the debug app operates on one page at
         # a time, so there's no reason to pay to load the others.
@@ -1065,7 +1270,10 @@ class DebugApp:
         self.render()
 
     def change_stage(self, delta: int) -> None:
-        stage_count = len(self.pipeline.STAGES)
+        # Bounded by however many stages actually ran (self.final_stage may
+        # truncate this well below len(self.pipeline.STAGES)), not the full
+        # STAGES list -- _get_stage_outputs is cached, so this is free.
+        stage_count = len(self._get_stage_outputs())
         new_index = self.state.stage_index + delta
         if not (0 <= new_index < stage_count):
             return
@@ -1079,7 +1287,8 @@ class DebugApp:
         if cached is not None:
             return cached
         outputs = self.pipeline.run_page(
-            self.reader, page_index, clustering_order=self.state.clustering_order,
+            self.reader, page_index,
+            clustering_order=self.state.clustering_order, final_stage=self.final_stage,
         )
         self.state.stage_cache[cache_key] = outputs
         return outputs
@@ -1125,6 +1334,8 @@ class DebugApp:
         self.canvas.delete("overlay_hover")  # stray hover highlights from a switched-away stage
         self.canvas.unbind("<Motion>")  # only the vector-stage-buckets renderer rebinds these
         self.canvas.unbind("<Leave>")
+        self.canvas.unbind("<Left>")  # only ocr_text_clusters' inspector rebinds these
+        self.canvas.unbind("<Right>")
         if self.tooltip is not None:
             self.tooltip.hide()
         for child in self.side_panel.winfo_children():
@@ -1164,6 +1375,8 @@ class DebugApp:
             epoch_box=self._render_epoch_box,
             clustering_order=list(self.state.clustering_order),
             set_clustering_order=self._set_clustering_order,
+            page=page,
+            ocr_detail_cache=self.state.ocr_detail_cache,
         )
         renderer(ctx)
 
@@ -1189,6 +1402,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="0-based page index to load (default: 0). Only this page is "
         "loaded -- the app doesn't page through the rest of the document.",
     )
+    parser.add_argument(
+        "--final-stage",
+        choices=Pipeline.stage_keys(),
+        default=None,
+        help="Stop the pipeline after this stage instead of running every stage -- e.g. "
+        "--final-stage drawing_vectors skips ocr_text_clusters (and the PaddleOCR engine "
+        "it would otherwise build) entirely, so the stage-nav bar simply won't cycle past "
+        "it. Default: run every stage.",
+    )
     return parser
 
 
@@ -1205,7 +1427,7 @@ def main(argv: list[str] | None = None) -> int:
         root.destroy()
         return 0
 
-    app = DebugApp(root, pdf_path, page_index=args.page)
+    app = DebugApp(root, pdf_path, page_index=args.page, final_stage=args.final_stage)
     try:
         root.mainloop()
     finally:

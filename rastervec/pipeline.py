@@ -17,16 +17,20 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from tqdm import tqdm
+
 if __name__ == "__main__" and __package__ is None:
     # Allow running this file directly (`python rastervec/pipeline.py`),
     # not just as a module (`python -m rastervec.pipeline`), by putting
     # the repo root -- the parent of this package -- on sys.path.
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from rastervec.helpers.render_ocr import RenderOCR
 from rastervec.logging_setup import configure_logging, get_logger
-from rastervec.models import DrawingVector, Page, TextWord, VectorPath
+from rastervec.models import DrawingVector, Page, TextVectorResult, TextWord, VectorPath
 from rastervec.native import Native
 from rastervec.reader import Reader
+from rastervec.renderer import Renderer
 from rastervec.vector import Vector
 
 _LOG = get_logger("pipeline")
@@ -93,6 +97,11 @@ class PipelineContext:
     filter_large_group_bbox: dict[GroupKey, VectorStageBuckets] | None = None
     filter_aspect_ratio: dict[GroupKey, VectorStageBuckets] | None = None
     drawing_vectors: list[DrawingVector] | None = None
+    # Populated alongside drawing_vectors -- whatever filter_aspect_ratio's
+    # final round left pending (every filter/cluster stage's drops go to
+    # drawing_vectors instead, never here). Consumed by ocr_text_clusters.
+    text_clusters: list[list[VectorPath]] | None = None
+    ocr_text_clusters: list[TextVectorResult] | None = None
     # Future stages add fields here as they're implemented (raster_images,
     # etc.) so later stages can read earlier stages' output.
 
@@ -248,23 +257,51 @@ def _run_filter_aspect_ratio(ctx: PipelineContext) -> dict[GroupKey, VectorStage
 def _run_drawing_vectors(ctx: PipelineContext) -> list[DrawingVector]:
     """Final aggregation: every group any filter stage dropped along the
     way was already "classified as Drawing" the moment it was dropped (see
-    VectorStageBuckets's docstring), so it's folded in here unconditionally
-    alongside whatever the final filter_aspect_ratio round's own drawing/
-    text split decides. Text clusters are the only content that doesn't
-    end up here."""
+    VectorStageBuckets's docstring), so it's folded in here unconditionally.
+    Whatever filter_aspect_ratio's final round still has pending is *not*
+    drawing content -- there's no further drawing-vs-text heuristic applied
+    to it (Vector no longer has one); it's stashed on ctx.text_clusters
+    as-is for ocr_text_clusters to actually OCR, the only content that
+    doesn't end up in drawing_vectors."""
     vector = Vector()
     all_drawing_paths: list[VectorPath] = []
+    all_text_clusters: list[list[VectorPath]] = []
 
     for buckets in ctx.filter_aspect_ratio.values():
         for group in buckets.previous:
             all_drawing_paths.extend(group)
         for group in buckets.this_stage:
             all_drawing_paths.extend(group)
-        drawing_paths, _text_clusters = vector.classify_clusters(buckets.pending)
-        all_drawing_paths.extend(drawing_paths)
+        all_text_clusters.extend(buckets.pending)
 
+    ctx.text_clusters = all_text_clusters
     ctx.drawing_vectors = vector.build_drawing_vectors(all_drawing_paths)
     return ctx.drawing_vectors
+
+
+def _run_ocr_text_clusters(ctx: PipelineContext) -> list[TextVectorResult]:
+    """OCRs each text-classified vector cluster from drawing_vectors's
+    split (ctx.text_clusters) via Renderer.render_vector_cluster +
+    RenderOCR.ocr_cluster -- one high-res isolated render per cluster,
+    OCR'd across several rotations and confidence-voted (see
+    RenderOCR.combine_rotation_results). RenderOCR's underlying PaddleOCR
+    engine is cached at module scope (see helpers/render_ocr.py), so
+    constructing a fresh RenderOCR() here per run is cheap after the
+    first call. Each cluster is a real (if engine-warm-cheap) multi-
+    rotation OCR round-trip, so a page with many text clusters can take a
+    visible moment -- the CLI and the debug app (which runs the pipeline
+    synchronously before its window becomes interactive) both just call
+    Pipeline.run_page() directly, so a tqdm bar here is the only progress
+    feedback available while this stage runs."""
+    renderer = Renderer()
+    render_ocr = RenderOCR()
+    clusters = ctx.text_clusters or []
+    results = [
+        render_ocr.ocr_cluster(cluster, ctx.page, renderer)
+        for cluster in tqdm(clusters, desc="OCR text clusters", unit="cluster")
+    ]
+    ctx.ocr_text_clusters = results
+    return results
 
 
 class Pipeline:
@@ -300,11 +337,36 @@ class Pipeline:
             run=_run_filter_aspect_ratio,
         ),
         StageSpec(key="drawing_vectors", label="Drawing Vectors", run=_run_drawing_vectors),
+        StageSpec(
+            key="ocr_text_clusters",
+            label="OCR: Text Clusters",
+            run=_run_ocr_text_clusters,
+        ),
     ]
 
+    @classmethod
+    def stage_keys(cls) -> list[str]:
+        return [spec.key for spec in cls.STAGES]
+
     def run_page(
-        self, reader: Reader, page_index: int, clustering_order: list[str] | None = None,
+        self,
+        reader: Reader,
+        page_index: int,
+        clustering_order: list[str] | None = None,
+        final_stage: str | None = None,
     ) -> list[StageOutput]:
+        """Runs Pipeline.STAGES in order, stopping after `final_stage`
+        (inclusive) instead of running every stage -- e.g. `final_stage=
+        "drawing_vectors"` skips ocr_text_clusters (and any later stage)
+        entirely, never even constructing a RenderOCR/PaddleOCR engine, so
+        it's a real way to skip the OCR round-trip while iterating on
+        earlier stages, not just a display-time filter. `None` (default)
+        runs every stage, unchanged from before this parameter existed."""
+        if final_stage is not None and final_stage not in self.stage_keys():
+            raise ValueError(
+                f"unknown final_stage {final_stage!r}; must be one of {self.stage_keys()}"
+            )
+
         ctx = PipelineContext(
             reader=reader, page_index=page_index, clustering_order=clustering_order,
         )
@@ -319,6 +381,8 @@ class Pipeline:
                 outputs.append(
                     StageOutput(spec.key, spec.label, "error", None, str(exc))
                 )
+            if spec.key == final_stage:
+                break
 
         return outputs
 
@@ -333,6 +397,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="0-based page index to process (default: 0).",
+    )
+    parser.add_argument(
+        "--final-stage",
+        choices=Pipeline.stage_keys(),
+        default=None,
+        help="Stop after this stage instead of running the whole pipeline -- e.g. "
+        "--final-stage drawing_vectors skips ocr_text_clusters (and the PaddleOCR "
+        "engine it would otherwise build) entirely. Default: run every stage.",
     )
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument(
@@ -356,7 +428,7 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(level)
 
     with Reader(args.pdf) as reader:
-        outputs = Pipeline().run_page(reader, args.page)
+        outputs = Pipeline().run_page(reader, args.page, final_stage=args.final_stage)
 
         for output in outputs:
             if output.status == "error":

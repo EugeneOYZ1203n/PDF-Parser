@@ -2,12 +2,18 @@
 
 extract_paths/separate_by_layer/separate_by_color/build_drawing_vectors are
 implemented, plus the full classification pipeline: filter out layout
-panels and oversized items; run 4 clustering/grouping operations
-(cluster_spatial, cluster_by_seq, group_overlapping,
-cluster_groups_by_dimension -- see CLUSTER_STEPS) in a configurable order
-via cluster(); filter out oversized groups and extreme-aspect-ratio groups
-(lines/rules); then a size/fill heuristic decides drawing vs. text-candidate
-per final group. See classify()'s docstring for the full order.
+panels and oversized items; run up to 4 clustering/grouping operations
+(cluster_spatial, cluster_spatial_union_find, cluster_by_seq,
+group_overlapping, cluster_groups_by_dimension, or "none" to skip an
+ordinal position) in a configurable order via cluster() -- CLUSTER_STEPS
+is the default order, just one layer of cluster_spatial; filter out
+oversized groups and extreme-aspect-ratio groups (lines/rules). Every
+group that survives all of that is a text candidate handed to OCR
+(pipeline.py's ocr_text_clusters stage) -- there's no separate drawing-
+vs-text heuristic at this point (the filters above already routed
+everything else to drawing_vectors); OCR success/failure itself is the
+signal for whether a given cluster was actually text. See classify()'s
+docstring for the full order.
 """
 from __future__ import annotations
 
@@ -34,13 +40,19 @@ def _is_dashed(dashes: str | None) -> bool:
 class Vector:
     """Extracts and classifies vector drawing paths from a page."""
 
-    # The 4 clustering/grouping operations `cluster()` can chain in any
-    # order -- this is also the default order `classify()` uses.
+    # The default order `cluster()`/`classify()` use when no explicit order
+    # is given: just cluster_spatial, one layer -- the other 3 ordinal
+    # positions default to "none" (a no-op), so out of the box only the
+    # single high-tolerance spatial pass runs. Callers (the debug app) can
+    # still chain any of the other real operations -- cluster_spatial_
+    # union_find, cluster_by_seq, group_overlapping,
+    # cluster_groups_by_dimension -- into any of the 4 ordinal positions
+    # via an explicit `order`.
     CLUSTER_STEPS: tuple[str, ...] = (
         "cluster_spatial",
-        "cluster_by_seq",
-        "group_overlapping",
-        "cluster_groups_by_dimension",
+        "none",
+        "none",
+        "none",
     )
 
     def __init__(
@@ -51,8 +63,6 @@ class Vector:
         large_bbox_area_fraction: float = 0.2,
         max_aspect_ratio: float = 10.0,
         group_dimension_tolerance: float = 0.35,
-        text_max_dim: float = 30.0,
-        text_min_fill_fraction: float = 0.5,
     ) -> None:
         # spatial_threshold is deliberately "high tolerance" (a loose gap
         # threshold, so nearby-but-not-touching paths still merge) --
@@ -63,8 +73,6 @@ class Vector:
         self.large_bbox_area_fraction = large_bbox_area_fraction
         self.max_aspect_ratio = max_aspect_ratio
         self.group_dimension_tolerance = group_dimension_tolerance
-        self.text_max_dim = text_max_dim
-        self.text_min_fill_fraction = text_min_fill_fraction
         self._clustering = Clustering()
 
     # ------------------------------------------------------------------
@@ -250,6 +258,25 @@ class Vector:
             paths, get_bbox=lambda p: p.bbox, threshold=self.spatial_threshold
         )
 
+    def cluster_spatial_union_find(
+        self, groups: list[list[VectorPath]]
+    ) -> list[list[VectorPath]]:
+        """Same distance rule as cluster_spatial (bbox gap <=
+        spatial_threshold, via the same grid-bucketed union-find), but
+        applied to the *incoming groups themselves* rather than the raw
+        paths: each group is treated as one atomic unit (by its aggregate
+        bbox), so groups an earlier operation already formed only ever get
+        merged together here, never re-split or re-derived from scratch --
+        unlike cluster_spatial, which always re-flattens its input first
+        (see _apply_cluster_step). Reuses Clustering.cluster_spatial at
+        the group level the same way cluster_groups_by_dimension reuses
+        Clustering.cluster_by_dimension."""
+        super_groups = self._clustering.cluster_spatial(
+            groups, get_bbox=lambda g: union_bbox([p.bbox for p in g]),
+            threshold=self.spatial_threshold,
+        )
+        return [[p for g in super_group for p in g] for super_group in super_groups]
+
     def cluster_by_seq(self, groups: list[list[VectorPath]]) -> list[list[VectorPath]]:
         """Lower-tolerance pass within each spatial cluster: splits it
         further by drawing sequence-number proximity."""
@@ -350,6 +377,8 @@ class Vector:
             # refinement of its input.
             flat = [p for g in groups for p in g]
             return self.cluster_spatial(flat)
+        if step == "cluster_spatial_union_find":
+            return self.cluster_spatial_union_find(groups)
         if step == "cluster_by_seq":
             return self.cluster_by_seq(groups)
         if step == "group_overlapping":
@@ -361,11 +390,13 @@ class Vector:
     def cluster(
         self, paths: list[VectorPath], page: Page, order: list[str] | None = None,
     ) -> list[list[list[VectorPath]]]:
-        """Apply the 4 clustering/grouping operations (CLUSTER_STEPS) in
-        `order` (default CLUSTER_STEPS itself), each step's input being the
-        previous step's output groups. Returns one groups-list snapshot per
-        step, in the same order as `order`, so callers (the debug app) can
-        show/compare the clustering state after each individual step."""
+        """Apply up to 4 clustering/grouping operations in `order` (default
+        CLUSTER_STEPS -- just one layer of cluster_spatial, the other 3
+        ordinal positions "none"), each step's input being the previous
+        step's output groups ("none" passes its input through unchanged).
+        Returns one groups-list snapshot per step, in the same order as
+        `order`, so callers (the debug app) can show/compare the clustering
+        state after each individual step."""
         order = list(order) if order else list(self.CLUSTER_STEPS)
         groups: list[list[VectorPath]] = [[p] for p in paths]
         snapshots: list[list[list[VectorPath]]] = []
@@ -374,58 +405,30 @@ class Vector:
             snapshots.append(groups)
         return snapshots
 
-    def classify_clusters(
-        self, clusters: list[list[VectorPath]]
-    ) -> tuple[list[VectorPath], list[list[VectorPath]]]:
-        drawing_paths: list[VectorPath] = []
-        text_clusters: list[list[VectorPath]] = []
-
-        for cluster in clusters:
-            if self._looks_like_text(cluster):
-                text_clusters.append(cluster)
-            else:
-                drawing_paths.extend(cluster)
-
-        _LOG.debug(
-            "classify_clusters: %d cluster(s) -> %d drawing path(s), %d text cluster(s)",
-            len(clusters),
-            len(drawing_paths),
-            len(text_clusters),
-        )
-        return drawing_paths, text_clusters
-
     def classify(
         self, paths: list[VectorPath], page: Page, cluster_order: list[str] | None = None,
-    ) -> tuple[list[VectorPath], list[list[VectorPath]]]:
+    ) -> list[list[VectorPath]]:
         """The full pipeline, in order: filter out layout panels and
-        oversized items; run the 4 clustering/grouping operations in
-        `cluster_order` (default CLUSTER_STEPS -- spatial closeness, then
-        seq-number proximity, then overlapping/nearly-touching shapes, then
-        dimension similarity); filter out oversized groups and
-        extreme-aspect-ratio groups (lines/rules); then classify each final
-        group as text or drawing. Paths/groups dropped by any filter along
-        the way are drawing content too (this method's `drawing_paths`
-        return only reflects the final grouping step -- pipeline.py's
-        per-stage wiring is what folds every filter's drops back in for the
-        pipeline's actual drawing_vectors output)."""
+        oversized items; run the clustering/grouping operations in
+        `cluster_order` (default CLUSTER_STEPS -- just one layer of
+        spatial-closeness clustering; pass an explicit order to chain in
+        cluster_spatial_union_find/cluster_by_seq/group_overlapping/
+        cluster_groups_by_dimension too); filter out oversized groups and
+        extreme-aspect-ratio groups (lines/rules). Every group that
+        survives all of that is returned as-is -- there's no drawing-vs-
+        text heuristic here: everything any filter step drops along the
+        way is drawing content (pipeline.py's per-stage wiring folds that
+        back in for drawing_vectors), and everything left standing is a
+        text candidate for OCR to actually confirm or reject (see
+        pipeline.py's ocr_text_clusters stage) -- a cluster OCR finds no
+        text in was never "drawing" by some pre-filter guess, it's simply
+        a cluster OCR failed on, and stays visible as such in the debug
+        app rather than being silently reclassified."""
         kept = self.filter_layout_panels(paths)
         kept = self.filter_large_bbox(kept, page)
         final_clusters = self.cluster(kept, page, cluster_order)[-1]
         size_kept = self.filter_large_group_bbox(final_clusters, page)
-        aspect_kept = self.filter_aspect_ratio(size_kept)
-        return self.classify_clusters(aspect_kept)
-
-    def _looks_like_text(self, cluster: list[VectorPath]) -> bool:
-        if len(cluster) < 2:
-            return False
-
-        for path in cluster:
-            x0, y0, x1, y1 = path.bbox
-            if (x1 - x0) > self.text_max_dim or (y1 - y0) > self.text_max_dim:
-                return False
-
-        filled = sum(1 for path in cluster if path.fill_color is not None)
-        return (filled / len(cluster)) >= self.text_min_fill_fraction
+        return self.filter_aspect_ratio(size_kept)
 
     # ------------------------------------------------------------------
     # Drawing vectors

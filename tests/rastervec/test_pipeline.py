@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pymupdf as fitz
+import pytest
 
 from rastervec.models import DrawingVector, Page, TextWord, VectorPath
 from rastervec.pipeline import ClusteringStageResult, Pipeline, PipelineContext, StageSpec
@@ -20,6 +21,7 @@ _EXPECTED_STAGE_KEYS = [
     "filter_large_group_bbox",
     "filter_aspect_ratio",
     "drawing_vectors",
+    "ocr_text_clusters",
 ]
 
 _VECTOR_CLASSIFICATION_STAGE_KEYS = [
@@ -57,6 +59,34 @@ def test_run_page_reader_and_native_ok(synthetic_pdf_factory, tmp_pdf_path):
     for key in _VECTOR_CLASSIFICATION_STAGE_KEYS:
         assert isinstance(by_key[key].data, dict)
     assert isinstance(by_key["drawing_vectors"].data, list)
+    assert by_key["ocr_text_clusters"].data == []  # no text-as-vector clusters on this page
+
+
+def test_run_page_final_stage_stops_early_and_skips_ocr_engine(
+    synthetic_pdf_factory, tmp_pdf_path, monkeypatch,
+):
+    doc = synthetic_pdf_factory([{"texts": [{"point": (10, 20), "text": "Hello"}]}])
+    path = tmp_pdf_path(doc)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("RenderOCR must never be constructed once final_stage stops before it")
+
+    monkeypatch.setattr("rastervec.pipeline.RenderOCR", _boom)
+
+    with Reader(path) as reader:
+        outputs = Pipeline().run_page(reader, 0, final_stage="drawing_vectors")
+
+    assert [o.key for o in outputs] == _EXPECTED_STAGE_KEYS[:-1]  # everything but ocr_text_clusters
+    assert all(o.status == "ok" for o in outputs)
+
+
+def test_run_page_final_stage_unknown_raises(synthetic_pdf_factory, tmp_pdf_path):
+    doc = synthetic_pdf_factory([{}])
+    path = tmp_pdf_path(doc)
+
+    with Reader(path) as reader:
+        with pytest.raises(ValueError):
+            Pipeline().run_page(reader, 0, final_stage="not_a_real_stage")
 
 
 def test_run_page_vector_stages_on_drawing_pdf(tmp_pdf_path):
