@@ -88,3 +88,63 @@ def test_cluster_by_seq_single_item_group_passthrough():
     clusters = clustering.cluster_by_seq([group], _seq, max_gap=3)
 
     assert clusters == [group]
+
+
+def test_group_by_overlap_merges_partial_overlap():
+    a = _item(0, 0, 10, 10)
+    b = _item(5, 5, 15, 15)  # partial overlap with a
+
+    groups = Clustering().group_by_overlap([[a, b]], _bbox)
+
+    assert len(groups) == 1
+    assert len(groups[0]) == 2
+
+
+def test_group_by_overlap_keeps_full_containment_separate():
+    outer = _item(0, 0, 10, 10)
+    inner = _item(2, 2, 4, 4)  # fully inside outer -> not merged
+
+    groups = Clustering().group_by_overlap([[outer, inner]], _bbox)
+
+    sizes = sorted(len(g) for g in groups)
+    assert sizes == [1, 1]
+
+
+def test_group_by_overlap_keeps_disjoint_separate():
+    a = _item(0, 0, 1, 1)
+    b = _item(100, 100, 101, 101)
+
+    groups = Clustering().group_by_overlap([[a, b]], _bbox)
+
+    sizes = sorted(len(g) for g in groups)
+    assert sizes == [1, 1]
+
+
+def test_group_by_overlap_default_tolerance_keeps_near_miss_separate():
+    a = _item(0, 0, 10, 10)
+    b = _item(12, 0, 20, 10)  # gap = 2, no tolerance requested -> stays separate
+
+    groups = Clustering().group_by_overlap([[a, b]], _bbox)
+
+    sizes = sorted(len(g) for g in groups)
+    assert sizes == [1, 1]
+
+
+def test_group_by_overlap_tolerance_merges_near_miss():
+    a = _item(0, 0, 10, 10)
+    b = _item(12, 0, 20, 10)  # gap = 2 <= tolerance -> merges
+
+    groups = Clustering().group_by_overlap([[a, b]], _bbox, tolerance=3.0)
+
+    assert len(groups) == 1
+    assert len(groups[0]) == 2
+
+
+def test_group_by_overlap_tolerance_still_excludes_full_containment():
+    outer = _item(0, 0, 10, 10)
+    inner = _item(2, 2, 4, 4)  # fully inside outer -> never merges, any tolerance
+
+    groups = Clustering().group_by_overlap([[outer, inner]], _bbox, tolerance=100.0)
+
+    sizes = sorted(len(g) for g in groups)
+    assert sizes == [1, 1]

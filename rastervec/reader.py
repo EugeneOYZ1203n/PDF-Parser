@@ -29,12 +29,35 @@ def _page_meta(fitz_page: "fitz.Page", index: int) -> PageMeta:
 
 
 class Reader:
-    """Consumes a PDF and splits it into pages."""
+    """Consumes a PDF and splits it into pages.
 
-    def __init__(self, path: str) -> None:
+    Pass `page_index` to restrict the opened document to just that one page
+    (via `fitz.Document.select`, which drops every other page from the
+    document's own page tree) -- useful for tools like the debug app that
+    only ever need one page at a time and shouldn't pay to load the rest of
+    a large PDF. `original_page_count` still reports the source PDF's full
+    page count for display purposes even when restricted.
+    """
+
+    def __init__(self, path: str, page_index: int | None = None) -> None:
         self.path = path
         self._doc = fitz.open(path)
-        _LOG.info("opened %s (%d pages)", path, self._doc.page_count)
+        self.original_page_count = self._doc.page_count
+        self._page_offset = 0
+
+        if page_index is not None:
+            if not (0 <= page_index < self.original_page_count):
+                raise IndexError(
+                    f"page index {page_index} out of range for document "
+                    f"with {self.original_page_count} page(s)"
+                )
+            self._doc.select([page_index])
+            self._page_offset = page_index
+
+        _LOG.info(
+            "opened %s (%d/%d page(s) loaded)",
+            path, self._doc.page_count, self.original_page_count,
+        )
 
     def page_count(self) -> int:
         return self._doc.page_count
@@ -48,7 +71,7 @@ class Reader:
             )
 
         fitz_page = self._doc[index]
-        meta = _page_meta(fitz_page, index)
+        meta = _page_meta(fitz_page, index + self._page_offset)
         _LOG.debug(
             "page %d: rotation=%d mediabox=%s",
             index,

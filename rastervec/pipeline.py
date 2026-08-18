@@ -41,16 +41,35 @@ class VectorStageBuckets:
     decided vs. what an earlier stage in the filter/cluster pipeline already
     decided vs. what's still waiting to be decided by a later stage.
 
-    For filter stages, entries are singleton groups (`[[path]]`) since a
-    filter decides path-by-path; for cluster stages, entries are the actual
-    cluster groupings produced by that stage. `pending` is always a flat
-    list of not-yet-decided VectorPath (clustering consumes its whole input
-    in one pass, so it's only ever non-empty for filter stages).
+    `this_stage`/`previous` entries are always groups (`list[VectorPath]`):
+    a filter stage that decides path-by-path wraps each dropped path in a
+    singleton group (`[path]`); a filter stage that decides group-by-group
+    (filter_aspect_ratio) contributes each dropped group as-is; a cluster
+    stage's entries are its actual cluster groupings. Every filter stage's
+    drops are "classified as Drawing this round" (nothing is ever discarded
+    -- see _run_drawing_vectors). `pending` holds whatever the next stage
+    still needs to consume: a flat list[VectorPath] for path-level filter
+    stages, or a list[list[VectorPath]] (groups) once clustering has run.
     """
 
     this_stage: list[list[VectorPath]]
     previous: list[list[VectorPath]]
-    pending: list[VectorPath]
+    pending: list[VectorPath] | list[list[VectorPath]]
+
+
+@dataclass
+class ClusteringStageResult:
+    """One (layer, color) group's result from the single configurable
+    clustering stage: the `order` the 4 Vector.CLUSTER_STEPS operations ran
+    in, `steps[i]` = the groups snapshot after applying `order[i]` (so
+    `steps[-1]` is the final clustering result fed to the two filter stages
+    after this one), and `previous` = every group the two filter stages
+    before this one already dropped (classified as Drawing -- carried
+    through so drawing_vectors can still fold it in)."""
+
+    order: list[str]
+    steps: list[list[list[VectorPath]]]
+    previous: list[list[VectorPath]]
 
 
 @dataclass
@@ -65,10 +84,14 @@ class PipelineContext:
     paths_by_layer: dict[str, list[VectorPath]] | None = None
     paths_by_layer_color: dict[str, dict[tuple, list[VectorPath]]] | None = None
     filter_layout_panels: dict[GroupKey, VectorStageBuckets] | None = None
-    filter_background_fill: dict[GroupKey, VectorStageBuckets] | None = None
-    cluster_spatial: dict[GroupKey, VectorStageBuckets] | None = None
-    cluster_by_dimension: dict[GroupKey, VectorStageBuckets] | None = None
-    cluster_by_seq: dict[GroupKey, VectorStageBuckets] | None = None
+    filter_large_bbox: dict[GroupKey, VectorStageBuckets] | None = None
+    # None means "use Vector.CLUSTER_STEPS's default order" -- settable by
+    # the debug app before calling Pipeline.run_page to interactively
+    # reorder the clustering stage's 4 operations.
+    clustering_order: list[str] | None = None
+    clustering: dict[GroupKey, ClusteringStageResult] | None = None
+    filter_large_group_bbox: dict[GroupKey, VectorStageBuckets] | None = None
+    filter_aspect_ratio: dict[GroupKey, VectorStageBuckets] | None = None
     drawing_vectors: list[DrawingVector] | None = None
     # Future stages add fields here as they're implemented (raster_images,
     # etc.) so later stages can read earlier stages' output.
@@ -151,12 +174,12 @@ def _run_filter_layout_panels(ctx: PipelineContext) -> dict[GroupKey, VectorStag
     return result
 
 
-def _run_filter_background_fill(ctx: PipelineContext) -> dict[GroupKey, VectorStageBuckets]:
+def _run_filter_large_bbox(ctx: PipelineContext) -> dict[GroupKey, VectorStageBuckets]:
     vector = Vector()
     result: dict[GroupKey, VectorStageBuckets] = {}
 
     for key, buckets in ctx.filter_layout_panels.items():
-        kept = vector.filter_background_fill(buckets.pending, ctx.page)
+        kept = vector.filter_large_bbox(buckets.pending, ctx.page)
         dropped = _split_dropped(buckets.pending, kept)
         result[key] = VectorStageBuckets(
             this_stage=[[p] for p in dropped],
@@ -164,61 +187,80 @@ def _run_filter_background_fill(ctx: PipelineContext) -> dict[GroupKey, VectorSt
             pending=kept,
         )
 
-    ctx.filter_background_fill = result
+    ctx.filter_large_bbox = result
     return result
 
 
-def _run_cluster_spatial(ctx: PipelineContext) -> dict[GroupKey, VectorStageBuckets]:
+def _run_clustering(ctx: PipelineContext) -> dict[GroupKey, ClusteringStageResult]:
     vector = Vector()
-    result: dict[GroupKey, VectorStageBuckets] = {}
+    order = ctx.clustering_order or list(vector.CLUSTER_STEPS)
+    result: dict[GroupKey, ClusteringStageResult] = {}
 
-    for key, buckets in ctx.filter_background_fill.items():
-        clusters = vector.cluster_spatial(buckets.pending)
-        dropped_so_far = list(ctx.filter_layout_panels[key].this_stage) + list(
-            buckets.this_stage
-        )
-        result[key] = VectorStageBuckets(
-            this_stage=clusters, previous=dropped_so_far, pending=[]
+    for key, buckets in ctx.filter_large_bbox.items():
+        snapshots = vector.cluster(buckets.pending, ctx.page, order)
+        result[key] = ClusteringStageResult(
+            order=order,
+            steps=snapshots,
+            previous=list(buckets.previous) + list(buckets.this_stage),
         )
 
-    ctx.cluster_spatial = result
+    ctx.clustering = result
     return result
 
 
-def _run_cluster_by_dimension(ctx: PipelineContext) -> dict[GroupKey, VectorStageBuckets]:
+def _run_filter_large_group_bbox(ctx: PipelineContext) -> dict[GroupKey, VectorStageBuckets]:
     vector = Vector()
     result: dict[GroupKey, VectorStageBuckets] = {}
 
-    for key, buckets in ctx.cluster_spatial.items():
-        clusters = vector.cluster_by_dimension(buckets.this_stage)
+    for key, cluster_result in ctx.clustering.items():
+        groups = cluster_result.steps[-1]
+        kept = vector.filter_large_group_bbox(groups, ctx.page)
+        kept_ids = {id(g) for g in kept}
+        dropped = [g for g in groups if id(g) not in kept_ids]
         result[key] = VectorStageBuckets(
-            this_stage=clusters, previous=buckets.previous, pending=[]
+            this_stage=dropped,
+            previous=list(cluster_result.previous),
+            pending=kept,
         )
 
-    ctx.cluster_by_dimension = result
+    ctx.filter_large_group_bbox = result
     return result
 
 
-def _run_cluster_by_seq(ctx: PipelineContext) -> dict[GroupKey, VectorStageBuckets]:
+def _run_filter_aspect_ratio(ctx: PipelineContext) -> dict[GroupKey, VectorStageBuckets]:
     vector = Vector()
     result: dict[GroupKey, VectorStageBuckets] = {}
 
-    for key, buckets in ctx.cluster_by_dimension.items():
-        clusters = vector.cluster_by_seq(buckets.this_stage)
+    for key, buckets in ctx.filter_large_group_bbox.items():
+        kept = vector.filter_aspect_ratio(buckets.pending)
+        kept_ids = {id(g) for g in kept}
+        dropped = [g for g in buckets.pending if id(g) not in kept_ids]
         result[key] = VectorStageBuckets(
-            this_stage=clusters, previous=buckets.previous, pending=[]
+            this_stage=dropped,
+            previous=list(buckets.previous) + list(buckets.this_stage),
+            pending=kept,
         )
 
-    ctx.cluster_by_seq = result
+    ctx.filter_aspect_ratio = result
     return result
 
 
 def _run_drawing_vectors(ctx: PipelineContext) -> list[DrawingVector]:
+    """Final aggregation: every group any filter stage dropped along the
+    way was already "classified as Drawing" the moment it was dropped (see
+    VectorStageBuckets's docstring), so it's folded in here unconditionally
+    alongside whatever the final filter_aspect_ratio round's own drawing/
+    text split decides. Text clusters are the only content that doesn't
+    end up here."""
     vector = Vector()
     all_drawing_paths: list[VectorPath] = []
 
-    for buckets in ctx.cluster_by_seq.values():
-        drawing_paths, _text_clusters = vector.classify_clusters(buckets.this_stage)
+    for buckets in ctx.filter_aspect_ratio.values():
+        for group in buckets.previous:
+            all_drawing_paths.extend(group)
+        for group in buckets.this_stage:
+            all_drawing_paths.extend(group)
+        drawing_paths, _text_clusters = vector.classify_clusters(buckets.pending)
         all_drawing_paths.extend(drawing_paths)
 
     ctx.drawing_vectors = vector.build_drawing_vectors(all_drawing_paths)
@@ -242,22 +284,30 @@ class Pipeline:
             run=_run_filter_layout_panels,
         ),
         StageSpec(
-            key="filter_background_fill",
-            label="Filter: Background Fill",
-            run=_run_filter_background_fill,
+            key="filter_large_bbox",
+            label="Filter: Large Bbox",
+            run=_run_filter_large_bbox,
         ),
-        StageSpec(key="cluster_spatial", label="Cluster: Spatial", run=_run_cluster_spatial),
+        StageSpec(key="clustering", label="Clustering", run=_run_clustering),
         StageSpec(
-            key="cluster_by_dimension",
-            label="Cluster: Dimension",
-            run=_run_cluster_by_dimension,
+            key="filter_large_group_bbox",
+            label="Filter: Large Group Bbox",
+            run=_run_filter_large_group_bbox,
         ),
-        StageSpec(key="cluster_by_seq", label="Cluster: Sequence", run=_run_cluster_by_seq),
+        StageSpec(
+            key="filter_aspect_ratio",
+            label="Filter: Aspect Ratio",
+            run=_run_filter_aspect_ratio,
+        ),
         StageSpec(key="drawing_vectors", label="Drawing Vectors", run=_run_drawing_vectors),
     ]
 
-    def run_page(self, reader: Reader, page_index: int) -> list[StageOutput]:
-        ctx = PipelineContext(reader=reader, page_index=page_index)
+    def run_page(
+        self, reader: Reader, page_index: int, clustering_order: list[str] | None = None,
+    ) -> list[StageOutput]:
+        ctx = PipelineContext(
+            reader=reader, page_index=page_index, clustering_order=clustering_order,
+        )
         outputs: list[StageOutput] = []
 
         for spec in self.STAGES:

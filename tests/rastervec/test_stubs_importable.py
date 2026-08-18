@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 
+from rastervec.evaluation import Evaluation
 from rastervec.helpers.clustering import Clustering
 from rastervec.helpers.junction import JunctionDetector
 from rastervec.helpers.masking import Masking
@@ -17,7 +18,8 @@ from rastervec.renderer import Renderer
     "obj, method, args",
     [
         (Raster(), "extract_images", (None,)),
-        (Renderer(), "build_pdf", ([], "out.pdf")),
+        (Renderer(), "render_vector_cluster", (None, None, 300)),
+        (Evaluation(), "build_pdf", ([], "out.pdf")),
         (Clustering(), "cluster_hsv", (None,)),
         (Masking(), "dilate_mask", (None, 1.0)),
         (JunctionDetector(), "generate_synthetic_data", (1,)),

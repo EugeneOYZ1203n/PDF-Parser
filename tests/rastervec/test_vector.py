@@ -142,49 +142,32 @@ def test_filter_layout_panels_keeps_single_item_line():
     assert result == [single_line]
 
 
-def test_filter_background_fill_drops_dominant_large_fill():
-    background = _make_path(bbox=(0, 0, 200, 200), fill_color=(1, 1, 1))
-    small_content = _make_path(bbox=(10, 10, 13, 16), fill_color=(0, 0, 0))
-
-    class _Meta:
-        width = 200
-        height = 200
-
-    class _Page:
-        meta = _Meta()
-
-    result = Vector().filter_background_fill([background, small_content], _Page())
-
-    assert background not in result
-    assert small_content in result
+class _Meta:
+    width = 200
+    height = 200
 
 
-def test_filter_background_fill_no_dominant_fill_keeps_everything():
-    a = _make_path(bbox=(0, 0, 10, 10), fill_color=(1, 0, 0))
-    b = _make_path(bbox=(20, 20, 30, 30), fill_color=(0, 1, 0))
-
-    class _Meta:
-        width = 200
-        height = 200
-
-    class _Page:
-        meta = _Meta()
-
-    result = Vector().filter_background_fill([a, b], _Page())
-
-    assert result == [a, b]
+class _Page:
+    meta = _Meta()
 
 
 def test_classify_groups_small_close_filled_paths_as_text():
+    # All four glyphs share one seq (one drawing, several items) so
+    # filter_layout_panels -- which only drops a *lone*-item re/qu drawing
+    # -- leaves them alone; a real CAD text-as-vector-paths drawing is
+    # exactly this shape (one seq, many glyph items).
     text_like = [
-        _make_path(seq=i, bbox=(10 + i * 5, 10, 10 + i * 5 + 3, 16), fill_color=(0, 0, 0))
+        _make_path(
+            seq=0, item_index=i, bbox=(10 + i * 5, 10, 10 + i * 5 + 3, 16),
+            fill_color=(0, 0, 0),
+        )
         for i in range(4)
     ]
     drawing_like = _make_path(
         seq=100, kind="l", bbox=(100, 100, 180, 180), stroke_color=(0, 0, 0)
     )
 
-    drawing_paths, text_clusters = Vector().classify(text_like + [drawing_like])
+    drawing_paths, text_clusters = Vector().classify(text_like + [drawing_like], _Page())
 
     assert drawing_like in drawing_paths
     assert len(text_clusters) == 1
@@ -192,12 +175,160 @@ def test_classify_groups_small_close_filled_paths_as_text():
 
 
 def test_classify_single_item_cluster_is_not_text():
-    lone = _make_path(bbox=(0, 0, 3, 6), fill_color=(0, 0, 0))
+    # kind="l" (not re/qu) so filter_layout_panels' lone-panel rule doesn't
+    # drop it before it reaches the final grouping/classification step.
+    lone = _make_path(kind="l", bbox=(0, 0, 3, 6), fill_color=(0, 0, 0))
 
-    drawing_paths, text_clusters = Vector().classify([lone])
+    drawing_paths, text_clusters = Vector().classify([lone], _Page())
 
     assert drawing_paths == [lone]
     assert text_clusters == []
+
+
+def test_filter_large_bbox_drops_oversized_path():
+    big = _make_path(bbox=(0, 0, 190, 190))  # 36100 / 40000 = 90% of page
+    small = _make_path(bbox=(10, 10, 20, 20))
+
+    result = Vector().filter_large_bbox([big, small], _Page())
+
+    assert big not in result
+    assert small in result
+
+
+def test_group_overlapping_merges_partial_overlap_not_full_containment():
+    # page is 200x200 -> tolerance = max(0.5% * 200, 3px) = 3px
+    a = _make_path(bbox=(0, 0, 10, 10))
+    b = _make_path(bbox=(5, 5, 15, 15))  # partially overlaps a -> merge
+    # fully inside a, and far enough from b (gap > tolerance) that it
+    # can't sneak into the group via a near-miss merge with b instead
+    c = _make_path(bbox=(0.5, 0.5, 1.5, 1.5))
+
+    groups = Vector().group_overlapping([[a, b, c]], _Page())
+
+    merged = [g for g in groups if a in g]
+    assert len(merged) == 1
+    assert sorted(merged[0], key=id) == sorted([a, b], key=id)
+    assert any(g == [c] for g in groups)
+
+
+def test_group_overlapping_merges_within_gap_tolerance():
+    # page is 200x200 -> tolerance = max(0.5% * 200, 3px) = 3px
+    a = _make_path(bbox=(0, 0, 10, 10))
+    b = _make_path(bbox=(12, 0, 20, 10))  # gap = 2px <= 3px tolerance -> merge
+    c = _make_path(bbox=(40, 0, 50, 10))  # gap = 20px > tolerance -> stays separate
+
+    groups = Vector().group_overlapping([[a, b, c]], _Page())
+
+    merged = [g for g in groups if a in g]
+    assert len(merged) == 1
+    assert sorted(merged[0], key=id) == sorted([a, b], key=id)
+    assert any(g == [c] for g in groups)
+
+
+def test_group_overlapping_tolerance_scales_with_page_size():
+    class _BigMeta:
+        width = 3000
+        height = 3000
+
+    class _BigPage:
+        meta = _BigMeta()
+
+    # tolerance = max(0.5% * 3000, 3px) = 15px
+    a = _make_path(bbox=(0, 0, 10, 10))
+    b = _make_path(bbox=(20, 0, 30, 10))  # gap = 10px -- merges only on the big page
+
+    groups = Vector().group_overlapping([[a, b]], _BigPage())
+
+    assert len(groups) == 1
+    assert len(groups[0]) == 2
+
+
+def test_filter_large_group_bbox_drops_oversized_group():
+    big_group = [_make_path(bbox=(0, 0, 190, 190))]  # 90% of 200x200 page
+    small_group = [_make_path(bbox=(10, 10, 20, 20))]
+
+    result = Vector().filter_large_group_bbox([big_group, small_group], _Page())
+
+    assert small_group in result
+    assert big_group not in result
+
+
+def test_filter_aspect_ratio_drops_long_thin_group():
+    line_like = [_make_path(bbox=(0, 0, 100, 2))]
+    square_like = [_make_path(bbox=(0, 0, 10, 10))]
+
+    result = Vector().filter_aspect_ratio([line_like, square_like])
+
+    assert square_like in result
+    assert line_like not in result
+
+
+def test_cluster_groups_by_dimension_merges_similar_sized_groups():
+    g1 = [_make_path(bbox=(0, 0, 10, 10))]
+    g2 = [_make_path(bbox=(50, 50, 60, 60))]  # same size as g1, far away -> still merges
+    g3 = [_make_path(bbox=(0, 0, 100, 100))]  # very different size -> stays separate
+
+    result = Vector().cluster_groups_by_dimension([g1, g2, g3])
+
+    sizes = sorted(len(g) for g in result)
+    assert sizes == [1, 2]
+
+
+def test_cluster_default_order_matches_manual_chain():
+    a = _make_path(seq=0, bbox=(10, 10, 13, 16), fill_color=(0, 0, 0))
+    b = _make_path(seq=0, item_index=1, bbox=(15, 10, 18, 16), fill_color=(0, 0, 0))
+    c = _make_path(seq=100, kind="l", bbox=(100, 100, 180, 180), stroke_color=(0, 0, 0))
+    paths = [a, b, c]
+
+    snapshots = Vector().cluster(paths, _Page())
+    assert len(snapshots) == 4
+    assert len(snapshots[0]) >= 1  # sanity: every step produced something
+
+    vector = Vector()
+    spatial = vector.cluster_spatial(paths)
+    seq_clusters = vector.cluster_by_seq(spatial)
+    overlap_groups = vector.group_overlapping(seq_clusters, _Page())
+    dimension_groups = vector.cluster_groups_by_dimension(overlap_groups)
+
+    def _sorted_ids(groups):
+        return sorted(tuple(sorted(id(p) for p in g)) for g in groups)
+
+    assert _sorted_ids(snapshots[-1]) == _sorted_ids(dimension_groups)
+
+
+def test_cluster_order_changes_result():
+    # Same size, far apart -- dimension-clustering merges them regardless
+    # of position; spatial clustering (threshold=8.0 default) keeps them
+    # separate since they're far apart.
+    a = _make_path(bbox=(0, 0, 10, 10))
+    b = _make_path(bbox=(50, 50, 60, 60))
+    paths = [a, b]
+
+    default_order = list(Vector.CLUSTER_STEPS)
+    assert default_order[-1] == "cluster_groups_by_dimension"
+    default_final = Vector().cluster(paths, _Page(), default_order)[-1]
+    assert len(default_final) == 1  # dimension-clustering (last) merges them
+
+    reordered = ["cluster_groups_by_dimension", "cluster_spatial", "cluster_by_seq", "group_overlapping"]
+    reordered_final = Vector().cluster(paths, _Page(), reordered)[-1]
+    # dimension merges them first, but spatial (now 2nd) re-flattens and
+    # re-clusters from scratch -- far apart, so it splits them back up.
+    assert len(reordered_final) == 2
+
+
+def test_cluster_none_step_is_identity():
+    a = _make_path(bbox=(0, 0, 10, 10))
+    b = _make_path(bbox=(50, 50, 60, 60))
+    paths = [a, b]
+
+    order = ["none", "cluster_spatial", "none", "none"]
+    snapshots = Vector().cluster(paths, _Page(), order)
+
+    # "none" makes no change: step 0's output is just each path alone,
+    # same as the initial singleton groups cluster() starts from.
+    assert sorted(len(g) for g in snapshots[0]) == [1, 1]
+    # steps 2 and 3 ("none" again) leave step 1's (cluster_spatial's) result untouched.
+    assert snapshots[1] == snapshots[2] == snapshots[3]
 
 
 def test_build_drawing_vectors_aggregates_by_seq():

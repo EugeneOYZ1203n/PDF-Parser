@@ -78,3 +78,26 @@ def test_context_manager_closes_doc(synthetic_pdf_factory, tmp_pdf_path):
         pass
 
     assert reader._doc.is_closed
+
+
+def test_page_index_restricts_to_one_page(synthetic_pdf_factory, tmp_pdf_path):
+    doc = synthetic_pdf_factory([{"width": 100, "height": 100}, {"width": 300, "height": 150}, {}])
+    path = tmp_pdf_path(doc)
+
+    with Reader(path, page_index=1) as reader:
+        assert reader.page_count() == 1
+        assert reader.original_page_count == 3
+
+        page = reader.get_page(0)
+        assert page.meta.index == 1
+        assert page.meta.number == 2
+        assert page.meta.width == pytest.approx(300)
+        assert page.meta.height == pytest.approx(150)
+
+
+def test_page_index_out_of_range_raises(synthetic_pdf_factory, tmp_pdf_path):
+    doc = synthetic_pdf_factory([{}])
+    path = tmp_pdf_path(doc)
+
+    with pytest.raises(IndexError, match="1 page"):
+        Reader(path, page_index=5)

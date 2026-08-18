@@ -1,8 +1,11 @@
 """Clustering helper.
 
-cluster_spatial/cluster_by_dimension/cluster_by_seq are used by
-Vector.classify's 3-factor clustering (spatial closeness, then dimension
-similarity, then seq-number proximity). cluster_hsv (Raster.separate_by_color's
+cluster_spatial/cluster_by_dimension/cluster_by_seq/group_by_overlap are
+used by Vector's classification pipeline (spatial closeness -> seq-number
+proximity -> overlap grouping -> dimension similarity, applied twice: once
+per-path early on via cluster_by_dimension's generic T support -- no
+longer used that way by Vector directly, kept for reuse -- and once
+per-group late in the pipeline). cluster_hsv (Raster.separate_by_color's
 HSV pixel clustering) is not implemented yet -- that's a Raster-phase
 concern, deferred along with numpy/image-library imports until Raster is
 actually built.
@@ -53,6 +56,43 @@ def _group_by_root(items: list, uf: _UnionFind) -> list[list]:
     for index, item in enumerate(items):
         buckets[uf.find(index)].append(item)
     return list(buckets.values())
+
+
+def _bbox_fully_contains(
+    a: tuple[float, float, float, float], b: tuple[float, float, float, float]
+) -> bool:
+    """True if a and b's bboxes overlap and one fully contains (or equals)
+    the other. No intersection returns False -- see
+    Clustering.group_by_overlap, which never merges a contained pair
+    regardless of gap tolerance (a fully-enclosed item is a distinct thing,
+    not part of the same shape)."""
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    if ix1 <= ix0 or iy1 <= iy0:
+        return False
+    inter_area = (ix1 - ix0) * (iy1 - iy0)
+    area_a = max(ax1 - ax0, 0.0) * max(ay1 - ay0, 0.0)
+    area_b = max(bx1 - bx0, 0.0) * max(by1 - by0, 0.0)
+    if area_a <= 0.0 or area_b <= 0.0:
+        return False
+    return inter_area >= area_a - 1e-9 or inter_area >= area_b - 1e-9
+
+
+def _bboxes_close_or_overlapping(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+    tolerance: float,
+) -> bool:
+    """True if a and b's bboxes overlap/touch/are within `tolerance` of each
+    other, UNLESS one fully contains (or equals) the other -- a
+    fully-enclosed item never merges, regardless of tolerance. rect_gap
+    already returns 0.0 for overlapping/touching boxes, so this one check
+    covers both "actually touching" and "merely nearby"."""
+    if _bbox_fully_contains(a, b):
+        return False
+    return rect_gap(a, b) <= tolerance
 
 
 class Clustering:
@@ -199,6 +239,35 @@ class Clustering:
             len(groups),
             len(result),
             max_gap,
+        )
+        return result
+
+    def group_by_overlap(
+        self,
+        groups: list[list],
+        get_bbox: Callable[[Any], tuple],
+        *,
+        tolerance: float = 0.0,
+    ) -> list[list]:
+        """Merge items whose bboxes overlap, touch, or are within
+        `tolerance` of each other into the same group; items where one bbox
+        fully contains/equals the other are left un-merged (a
+        fully-enclosed item, e.g. text sitting inside a drawing's frame, is
+        a distinct thing, not part of the same shape) regardless of
+        tolerance. Applied per incoming group, same calling convention as
+        cluster_by_dimension/cluster_by_seq -- items in different incoming
+        groups are never compared against each other."""
+
+        def close(a, b) -> bool:
+            return _bboxes_close_or_overlapping(get_bbox(a), get_bbox(b), tolerance)
+
+        result: list[list] = []
+        for group in groups:
+            result.extend(self._split_group_pairwise(group, close))
+
+        _LOG.debug(
+            "group_by_overlap: %d group(s) -> %d cluster(s) (tolerance=%s)",
+            len(groups), len(result), tolerance,
         )
         return result
 

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import pymupdf as fitz
 
 from rastervec.models import DrawingVector, Page, TextWord, VectorPath
-from rastervec.pipeline import Pipeline, PipelineContext, StageSpec, VectorStageBuckets
+from rastervec.pipeline import ClusteringStageResult, Pipeline, PipelineContext, StageSpec
 from rastervec.reader import Reader
 
 _EXPECTED_STAGE_KEYS = [
@@ -15,19 +15,19 @@ _EXPECTED_STAGE_KEYS = [
     "layer_separation",
     "color_separation",
     "filter_layout_panels",
-    "filter_background_fill",
-    "cluster_spatial",
-    "cluster_by_dimension",
-    "cluster_by_seq",
+    "filter_large_bbox",
+    "clustering",
+    "filter_large_group_bbox",
+    "filter_aspect_ratio",
     "drawing_vectors",
 ]
 
 _VECTOR_CLASSIFICATION_STAGE_KEYS = [
     "filter_layout_panels",
-    "filter_background_fill",
-    "cluster_spatial",
-    "cluster_by_dimension",
-    "cluster_by_seq",
+    "filter_large_bbox",
+    "clustering",
+    "filter_large_group_bbox",
+    "filter_aspect_ratio",
 ]
 
 
@@ -95,22 +95,20 @@ def test_run_page_vector_stages_on_drawing_pdf(tmp_pdf_path):
     ]
     assert len(dropped_panels) == 1
 
-    spatial_buckets: dict = by_key["cluster_spatial"].data
-    all_spatial_clusters = [
-        cluster for buckets in spatial_buckets.values() for cluster in buckets.this_stage
+    clustering_results: dict = by_key["clustering"].data
+    all_first_step_clusters = [
+        cluster for result in clustering_results.values() for cluster in result.steps[0]
     ]
-    assert any(any(p.kind == "l" for p in cluster) for cluster in all_spatial_clusters)
-    # the dropped panel carries forward into "previous" for every later stage.
+    assert any(any(p.kind == "l" for p in cluster) for cluster in all_first_step_clusters)
+    # the dropped panel carries forward into "previous" for every group.
     assert all(
-        any(g[0].kind == "re" for g in buckets.previous)
-        for buckets in spatial_buckets.values()
-        if buckets.previous
+        any(g[0].kind == "re" for g in result.previous)
+        for result in clustering_results.values()
+        if result.previous
     )
-
-    seq_buckets: dict = by_key["cluster_by_seq"].data
-    assert isinstance(seq_buckets, dict)
-    for buckets in seq_buckets.values():
-        assert isinstance(buckets, VectorStageBuckets)
+    for result in clustering_results.values():
+        assert isinstance(result, ClusteringStageResult)
+        assert len(result.steps) == len(result.order) == 4
 
     drawing_vectors: list[DrawingVector] = by_key["drawing_vectors"].data
     assert isinstance(drawing_vectors, list)
