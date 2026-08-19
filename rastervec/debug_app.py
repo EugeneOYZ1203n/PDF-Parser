@@ -89,20 +89,29 @@ class DebugAppState:
     page_index: int = 0
     zoom: float = 1.5
     stage_index: int = 0
-    # Keyed by (page_index, clustering_order) -- changing the clustering
-    # stage's operation order is a full pipeline recompute (see
-    # DebugApp._set_clustering_order), so it gets its own cache slot rather
-    # than invalidating/replacing the page's other-order results (letting
-    # the user flip back and forth between orders without recomputing).
-    stage_cache: dict[tuple[int, tuple[str, ...]], list[StageOutput]] = field(
-        default_factory=dict
-    )
+    # Keyed by (page_index, clustering_order, clustering_params) -- changing
+    # the clustering stage's operation order or any method's parameter
+    # override is a full pipeline recompute (see DebugApp.
+    # _set_clustering_order/_set_clustering_params), so each combination
+    # gets its own cache slot rather than invalidating/replacing the page's
+    # other-order/other-params results (letting the user flip back and
+    # forth without recomputing).
+    stage_cache: dict[tuple, list[StageOutput]] = field(default_factory=dict)
     # stage key -> arbitrary dict of checkbox state, kept across redraws of
     # that stage (reset per page since it's cached with stage_cache anyway).
     filter_state: dict[str, dict] = field(default_factory=dict)
-    # The clustering stage's 4-operation order -- lives here (not in
-    # filter_state) since changing it drives which cache slot above is used.
-    clustering_order: list[str] = field(default_factory=lambda: list(Vector.CLUSTER_STEPS))
+    # The clustering stage's (up to 8-operation, repeats allowed) order --
+    # lives here (not in filter_state) since changing it drives which cache
+    # slot above is used.
+    clustering_order: list[str] = field(default_factory=lambda: list(Vector.PIPELINE_STEPS))
+    # Step key -> {param_name: value} overrides for that pipeline method
+    # (see Vector.cluster's step_params / PipelineContext.clustering_params)
+    # -- lives here rather than filter_state for the same reason as
+    # clustering_order: it drives the stage_cache key. Empty/missing means
+    # "use that method's own default" (see _cluster_step_param_default).
+    # Values are usually float/int but group_overlapping's "bbox_scope" is
+    # a string ("path"/"cluster").
+    clustering_params: dict[str, dict[str, float | str]] = field(default_factory=dict)
     # ocr_text_clusters inspector: (page_index, clustering_order, cluster
     # index) -> {"image", "bbox_corners"} (see _ocr_cluster_preview).
     # Deliberately its own dict, not filter_state -- filter_state is keyed
@@ -114,9 +123,7 @@ class DebugAppState:
 
 
 _DEFAULT_PATH_COLOR = "#111827"
-_THIS_STAGE_COLOR = "#2563eb"
-_PREVIOUS_COLOR = "#9ca3af"
-_PENDING_GROUP_COLOR = "#059669"
+_DROPPED_COLOR = "#9ca3af"
 _CENTROID_COLOR = "#dc2626"
 _CENTROID_RADIUS = 3
 _MAX_HOVER_HIGHLIGHT_PATHS = 400
@@ -149,11 +156,16 @@ class RenderContext:
     # the canvas, so switching stage/page/zoom away mid-draw can't leave
     # ghost items drawn by a now-superseded render.
     epoch_box: dict = field(default_factory=lambda: {"value": 0})
-    # Only used by the clustering stage: the current 4-operation order, and
-    # a callback to persist a new order + trigger the full pipeline
-    # recompute it requires (see DebugApp._set_clustering_order).
+    # Only used by the clustering stage: the current (up to 8-operation)
+    # order, and a callback to persist a new order + trigger the full
+    # pipeline recompute it requires (see DebugApp._set_clustering_order).
     clustering_order: list[str] = field(default_factory=list)
     set_clustering_order: "Callable[[list[str]], None] | None" = None
+    # Only used by the clustering stage: the current per-method parameter
+    # overrides, and a callback to persist a change + trigger the full
+    # pipeline recompute it requires (see DebugApp._set_clustering_params).
+    clustering_params: dict[str, dict[str, float | str]] = field(default_factory=dict)
+    set_clustering_params: "Callable[[dict[str, dict[str, float | str]]], None] | None" = None
     # The live Page for the page currently being viewed -- only
     # ocr_text_clusters needs it today (to re-render a cluster on demand
     # for its inspector panel; see _ocr_cluster_preview), but it's cheap and
@@ -421,6 +433,50 @@ def _get_display_matrix(fitz_page: "fitz.Page", zoom: float) -> "fitz.Matrix":
     return fitz_page.rotation_matrix * fitz.Matrix(zoom, zoom)
 
 
+def _add_reconstruction_toggle(ctx: RenderContext, build_image_fn) -> bool:
+    """Adds a "Show Reconstructed PDF"/"Show Original PDF" toggle button to
+    the top of ctx.side_panel, for the (few) stages that support it --
+    native, drawing_vectors, ocr_text_clusters. Persisted per-stage in
+    ctx.filters (survives redraws of that stage the same way every other
+    checkbox here does), so switching stages away and back remembers
+    whether reconstruction was showing.
+
+    When active, this draws the reconstructed page (built lazily by
+    calling `build_image_fn()`, a zero-arg callable the caller supplies so
+    the actual Renderer.render_reconstructed_page call -- and whatever
+    page_meta/element-list plumbing it needs -- stays local to each
+    stage's own renderer) as one big canvas item, tagged "overlay" so the
+    next redraw_overlay()'s canvas.delete("overlay") cleans it up
+    automatically. It's drawn *on top of* the real page pixmap (which is
+    never touched/hidden) rather than replacing it -- since the
+    reconstruction covers the exact same rect at the exact same zoom, this
+    fully occludes the original without risking the base "page_image"
+    item's separate lifecycle (that item is only ever (re)created by
+    DebugApp.render() on page/zoom changes, not on every stage switch).
+
+    Returns whether reconstruction is currently showing -- callers should
+    skip drawing their normal overlay entirely when this is True, since
+    the toggle replaces the overlay rather than layering under it."""
+    state = ctx.filters.setdefault("show_reconstructed", {"value": False})
+
+    def _toggle() -> None:
+        state["value"] = not state["value"]
+        ctx.on_change()
+
+    label = "Show Original PDF" if state["value"] else "Show Reconstructed PDF"
+    ttk.Button(ctx.side_panel, text=label, command=_toggle).pack(
+        anchor="w", fill="x", padx=4, pady=(4, 8)
+    )
+
+    if state["value"]:
+        image = build_image_fn()
+        photo = ImageTk.PhotoImage(image)
+        ctx.filters["_reconstructed_photo_ref"] = photo  # keep alive -- Tk won't retain it otherwise
+        ctx.canvas.create_image(0, 0, anchor="nw", image=photo, tags=("overlay",))
+
+    return state["value"]
+
+
 def _render_reader_stage(ctx: RenderContext) -> None:
     # Base PDF only -- no overlay, confirms the pixmap itself is correct.
     pass
@@ -428,6 +484,13 @@ def _render_reader_stage(ctx: RenderContext) -> None:
 
 def _render_native_stage(ctx: RenderContext) -> None:
     words: list[TextWord] = ctx.output.data or []
+
+    if ctx.page is not None and _add_reconstruction_toggle(
+        ctx, lambda: _RENDERER.render_reconstructed_page(
+            ctx.page.meta, native_words=words, zoom=geometry.matrix_scale(ctx.matrix)[0],
+        ),
+    ):
+        return
 
     for word in words:
         coords = []
@@ -532,138 +595,12 @@ def _render_color_separation_stage(ctx: RenderContext) -> None:
 _RECULL_CHUNK_SIZE = 400
 
 
-def _entry_bbox(item) -> tuple[float, float, float, float]:
-    """item is either a group (list[VectorPath]) or a single VectorPath --
-    filter stages mix both (path-level filters drop singleton paths,
-    filter_aspect_ratio drops/keeps whole groups)."""
-    return geometry.union_bbox([p.bbox for p in item]) if isinstance(item, list) else item.bbox
-
-
-def _draw_filter_bucket_payload(ctx: RenderContext, category: str, payload) -> int | None:
-    if not isinstance(payload, list):
-        return _draw_vector_path(ctx.canvas, ctx.matrix, payload, tags=("overlay", category))
-    if category == "bucket_this":
-        color, width = _THIS_STAGE_COLOR, 2
-    elif category == "bucket_previous":
-        color, width = _PREVIOUS_COLOR, 1
-    else:
-        color, width = _PENDING_GROUP_COLOR, 1
-    bbox = geometry.union_bbox([p.bbox for p in payload])
-    return _draw_bbox(ctx.canvas, ctx.matrix, bbox, color, width=width, tags=("overlay", category))
-
-
-def _render_filter_stage_buckets(ctx: RenderContext) -> None:
-    """Shared renderer for the filter vector stages (filter_layout_panels,
-    filter_large_bbox, filter_large_group_bbox, filter_aspect_ratio) -- each
-    produces the same dict[(layer, color), VectorStageBuckets] shape (see
-    pipeline.py). A filter stage never decides "text": what it drops is
-    always drawing content (VectorStageBuckets's docstring), so the this/
-    previous checkboxes read "classified as Drawing", not the generic
-    "classified this stage".
-
-    These stages can have tens of thousands of dropped items, which was
-    laggy even with tag-based visibility toggling (thousands of live
-    canvas items). Instead: build a spatial index per category once, and
-    only ever draw the (small) subset whose bbox overlaps the current
-    viewport, redrawing the delta on scroll/resize (_recull, wired to
-    DebugApp._on_viewport_changed) and streaming even that in via small
-    after_idle chunks so no single draw blocks the UI. Hover is computed
-    on demand against the full in-memory bboxes regardless of what's
-    currently drawn -- see _bind_bucket_hover."""
-    buckets_by_group: dict = ctx.output.data or {}
-
-    show_this = ctx.filters.setdefault("show_this_stage", {"value": True})
-    show_previous = ctx.filters.setdefault("show_previous", {"value": False})
-    show_pending = ctx.filters.setdefault("show_pending", {"value": True})
-
-    all_this = [g for b in buckets_by_group.values() for g in b.this_stage if g]
-    all_previous = [g for b in buckets_by_group.values() for g in b.previous if g]
-    all_pending = [p for b in buckets_by_group.values() for p in b.pending]
-
-    ttk.Label(ctx.side_panel, text=ctx.output.label).pack(anchor="w", padx=4, pady=(4, 6))
-
-    categories = {
-        "bucket_this": {
-            "show": show_this, "entries": [(_entry_bbox(g), g) for g in all_this],
-        },
-        "bucket_previous": {
-            "show": show_previous, "entries": [(_entry_bbox(g), g) for g in all_previous],
-        },
-        "bucket_pending": {
-            "show": show_pending, "entries": [(_entry_bbox(p), p) for p in all_pending],
-        },
-    }
-    for state in categories.values():
-        state["index"] = _SpatialIndex(state["entries"])
-        state["drawn"] = {}  # id(payload) -> canvas item id
-        state["generation"] = {"value": 0}
-
-    epoch = ctx.epoch_box["value"]
-
-    def _draw_chunk(category: str, items: list, generation: dict, gen: int, start: int) -> None:
-        if ctx.epoch_box["value"] != epoch or generation["value"] != gen:
-            return  # superseded by a newer render/recull -- stop quietly
-        drawn = categories[category]["drawn"]
-        end = min(start + _RECULL_CHUNK_SIZE, len(items))
-        for payload in items[start:end]:
-            item_id = _draw_filter_bucket_payload(ctx, category, payload)
-            if item_id is not None:
-                drawn[id(payload)] = item_id
-        if end < len(items):
-            ctx.canvas.after_idle(lambda: _draw_chunk(category, items, generation, gen, end))
-
-    def _recull(category: str) -> None:
-        state = categories[category]
-        generation = state["generation"]
-        generation["value"] += 1
-        gen = generation["value"]
-        drawn: dict = state["drawn"]
-
-        if not state["show"]["value"]:
-            for item_id in drawn.values():
-                ctx.canvas.delete(item_id)
-            drawn.clear()
-            return
-
-        rect = _visible_page_rect(ctx)
-        wanted = state["index"].query(rect)
-        wanted_ids = {id(payload) for payload in wanted}
-
-        for payload_id in list(drawn.keys()):
-            if payload_id not in wanted_ids:
-                ctx.canvas.delete(drawn.pop(payload_id))
-
-        to_draw = [payload for payload in wanted if id(payload) not in drawn]
-        if to_draw:
-            _draw_chunk(category, to_draw, generation, gen, 0)
-
-    def _recull_all() -> None:
-        for category in categories:
-            _recull(category)
-
-    ctx.filters["_recull_all"] = _recull_all
-
-    this_var = tk.BooleanVar(value=show_this["value"])
-    _add_category_checkbox(
-        ctx.side_panel, ctx.canvas, f"Classified as Drawing this round ({len(all_this)})",
-        this_var, "bucket_this",
-        persist=lambda v: (show_this.__setitem__("value", v), _recull("bucket_this")),
-    )
-    previous_var = tk.BooleanVar(value=show_previous["value"])
-    _add_category_checkbox(
-        ctx.side_panel, ctx.canvas, f"Previously classified as Drawing ({len(all_previous)})",
-        previous_var, "bucket_previous",
-        persist=lambda v: (show_previous.__setitem__("value", v), _recull("bucket_previous")),
-    )
-    pending_var = tk.BooleanVar(value=show_pending["value"])
-    _add_category_checkbox(
-        ctx.side_panel, ctx.canvas, f"Not yet classified ({len(all_pending)})", pending_var,
-        "bucket_pending",
-        persist=lambda v: (show_pending.__setitem__("value", v), _recull("bucket_pending")),
-    )
-
-    _recull_all()
-    _bind_bucket_hover(ctx, (all_this, show_this), (all_previous, show_previous))
+def _params_cache_key(params: dict[str, dict[str, float]]) -> tuple:
+    """Hashable representation of a clustering_params dict, for use as
+    (part of) a DebugAppState.stage_cache key -- dicts aren't hashable, and
+    two calls with equal-but-freshly-built dicts (as redraw_overlay's
+    RenderContext construction does) must still hit the same cache slot."""
+    return tuple(sorted((step, tuple(sorted(kv.items()))) for step, kv in params.items()))
 
 
 def _cluster_size_stats_text(clusters: list[list[VectorPath]]) -> str:
@@ -680,110 +617,214 @@ def _cluster_size_stats_text(clusters: list[list[VectorPath]]) -> str:
 
 
 _CLUSTER_STEP_LABELS: dict[str, str] = {
+    "filter_layout_panels": "Filter: Layout Panels",
+    "filter_large_bbox": "Filter: Large Bbox",
     "cluster_spatial": "Spatial",
     "cluster_spatial_union_find": "Spatial (UF)",
     "cluster_by_seq": "Sequence",
     "group_overlapping": "Overlap",
     "cluster_groups_by_dimension": "Dimension",
+    "cluster_by_item_path_count": "Item Path Count",
+    "cluster_by_item_bbox": "Item Bbox Size",
+    "filter_large_group_bbox": "Filter: Large Group Bbox",
+    "filter_aspect_ratio": "Filter: Aspect Ratio",
     "none": "None",
 }
-_CLUSTER_STEP_COLORS = ["#2563eb", "#7c3aed", "#ea580c", "#0d9488", "#6b7280"]
-_ORDINAL_LABELS = ("1st", "2nd", "3rd", "4th")
+_CLUSTER_STEP_COLORS = [
+    "#2563eb", "#7c3aed", "#ea580c", "#0d9488",
+    "#6b7280", "#c026d3", "#65a30d", "#0284c7",
+]
+_ORDINAL_LABELS = ("1st", "2nd", "3rd", "4th", "5th", "6th", "7th", "8th")
+
+# step key -> [(param_name, label, kind)] -- the tunable parameters shown as
+# rows right below that step's dropdown in _render_clustering_stage.
+# "float"/"int" render a text entry, parsed by _parse_param_text;
+# "choice:opt1,opt2" renders a readonly dropdown of those exact string
+# values instead (see group_overlapping's bbox_scope); "none"/filter_
+# layout_panels have no tunable params.
+_CLUSTER_STEP_PARAMS: dict[str, list[tuple[str, str, str]]] = {
+    "filter_layout_panels": [],
+    "filter_large_bbox": [("max_area_fraction", "Max area frac", "float")],
+    "cluster_spatial": [("threshold", "Threshold", "float")],
+    "cluster_spatial_union_find": [("threshold", "Threshold", "float")],
+    "cluster_by_seq": [("max_gap", "Max gap", "int")],
+    "group_overlapping": [
+        ("tolerance", "Tolerance", "float"),
+        ("bbox_scope", "Bbox scope", "choice:path,cluster"),
+    ],
+    "cluster_groups_by_dimension": [("tolerance", "Tolerance", "float")],
+    "cluster_by_item_path_count": [("max_gap", "Max gap", "int")],
+    "cluster_by_item_bbox": [("tolerance", "Tolerance", "float")],
+    "filter_large_group_bbox": [("max_area_fraction", "Max area frac", "float")],
+    "filter_aspect_ratio": [("max_aspect_ratio", "Max aspect", "float")],
+    "none": [],
+}
+
+
+def _cluster_step_param_default(step: str, param: str, page: Page) -> float | str:
+    """The value a param row pre-fills/falls back to when the user hasn't
+    overridden it -- mirrors each Vector method's own instance-attribute
+    default exactly (group_overlapping's tolerance is the one page-
+    dependent one, via Vector.default_overlap_tolerance; its bbox_scope
+    isn't an instance attribute at all, just Vector.group_overlapping's own
+    default argument value)."""
+    vector = Vector()
+    if step in ("cluster_spatial", "cluster_spatial_union_find"):
+        return vector.spatial_threshold
+    if step == "cluster_by_seq":
+        return vector.seq_max_gap
+    if step == "group_overlapping":
+        if param == "bbox_scope":
+            return "path"
+        return Vector.default_overlap_tolerance(page)
+    if step == "cluster_groups_by_dimension":
+        return vector.group_dimension_tolerance
+    if step == "cluster_by_item_path_count":
+        return vector.item_count_max_gap
+    if step == "cluster_by_item_bbox":
+        return vector.item_bbox_tolerance
+    if step in ("filter_large_bbox", "filter_large_group_bbox"):
+        return vector.large_bbox_area_fraction
+    if step == "filter_aspect_ratio":
+        return vector.max_aspect_ratio
+    raise ValueError(f"no default param for step {step!r}")
+
+
+def _parse_param_text(text: str, kind: str) -> float | None:
+    try:
+        return int(text) if kind == "int" else float(text)
+    except ValueError:
+        return None
 
 
 def _render_clustering_stage(ctx: RenderContext) -> None:
-    """The single configurable clustering/grouping stage: cluster_spatial,
-    cluster_by_seq, group_overlapping, cluster_groups_by_dimension, or
-    "none" (skip that ordinal position) run here, in whatever order the 4
-    dropdowns pick (default: Vector.CLUSTER_STEPS's order -- just one layer
-    of spatial clustering, the other 3 positions "none"). Changing a
-    dropdown swaps it with whichever other dropdown currently
-    holds that value (keeping the 4 dropdowns a valid permutation) and
-    calls ctx.set_clustering_order, which persists the new order and
-    triggers a full pipeline recompute for it (clustering's result depends
-    on the whole chain up to this point, so there's no cheaper partial
-    re-run).
+    """The single configurable pipeline stage: up to 8 ordinal positions,
+    each independently picking any of the 4 filter steps (filter_
+    layout_panels, filter_large_bbox, filter_large_group_bbox,
+    filter_aspect_ratio) or 7 clustering/grouping operations
+    (cluster_spatial, cluster_spatial_union_find, cluster_by_seq,
+    group_overlapping, cluster_groups_by_dimension,
+    cluster_by_item_path_count, cluster_by_item_bbox), or "none" to skip
+    that position (default: Vector.PIPELINE_STEPS's order). Every dropdown
+    is fully independent -- a step may be selected at more than one
+    position (e.g. running cluster_spatial twice). Changing a dropdown or a
+    param calls ctx.set_clustering_order/set_clustering_params, which
+    persists the change and triggers a full pipeline recompute (every
+    step's result depends on the whole chain up to that point, so there's
+    no cheaper partial re-run).
 
-    On the right: one checkbox per step showing that step's resulting
-    clusters (bbox + centroid, in a distinct color per step so multiple
-    can be compared at once) plus a live min/median/mean/max cluster-size
-    summary (_cluster_size_stats_text, updated every time the order
-    changes since each step's actual output changes), and a "previously
-    classified as Drawing" checkbox for content the two filter stages
-    before this one already dropped. Same viewport-culling + chunked-
-    drawing approach as the filter stages, generalized from 2-3 categories
-    to (4 steps + previous) here."""
+    On the right, below all 8 dropdown+params blocks: two checkboxes per
+    step -- "kept after step i" (that step's surviving groups: bbox +
+    centroid, in a distinct color per step) and "dropped by step i" (only
+    non-empty for a filter step -- what it removed, classified as Drawing,
+    grey, no centroid) -- plus a live min/median/mean/max cluster-size
+    summary for the kept side. Same viewport-culling + chunked-drawing
+    approach as before, generalized to up to 16 categories (kept + dropped
+    per each of 8 steps)."""
     results_by_group: dict[tuple, ClusteringStageResult] = ctx.output.data or {}
-    order = list(ctx.clustering_order) if ctx.clustering_order else list(Vector.CLUSTER_STEPS)
+    order = list(ctx.clustering_order) if ctx.clustering_order else list(Vector.PIPELINE_STEPS)
 
     ttk.Label(ctx.side_panel, text=ctx.output.label).pack(anchor="w", padx=4, pady=(4, 6))
 
-    # --- order dropdowns ---
+    # --- order dropdowns (fully independent -- repeats allowed) ---
     label_to_key = {label: key for key, label in _CLUSTER_STEP_LABELS.items()}
     combo_vars: list[tk.StringVar] = []
 
-    def _apply_order_change(changed_index: int) -> None:
+    def _apply_order_change(_changed_index: int) -> None:
         new_order = [label_to_key[var.get()] for var in combo_vars]
-        chosen_key = new_order[changed_index]
-        # "none" (skip this ordinal position) isn't part of the swap
-        # permutation -- any number of dropdowns can be "none" at once, only
-        # the 4 real steps need to stay unique.
-        if chosen_key != "none":
-            for j, key in enumerate(new_order):
-                if j != changed_index and key == chosen_key:
-                    # keep it a permutation: whatever was just displaced goes
-                    # into the slot that used to hold the newly-chosen value.
-                    new_order[j] = order[changed_index]
-                    combo_vars[j].set(_CLUSTER_STEP_LABELS[order[changed_index]])
-                    break
         if ctx.set_clustering_order is not None:
             ctx.set_clustering_order(new_order)
 
-    for i, ordinal in enumerate(_ORDINAL_LABELS):
+    def _commit_param(step: str, param: str, kind: str, text_var: tk.StringVar) -> None:
+        value = _parse_param_text(text_var.get(), kind)
+        if value is None:
+            return
+        _commit_param_value(step, param, value)
+
+    def _commit_param_value(step: str, param: str, value) -> None:
+        if ctx.set_clustering_params is None:
+            return
+        new_params = {k: dict(v) for k, v in ctx.clustering_params.items()}
+        new_params.setdefault(step, {})[param] = value
+        ctx.set_clustering_params(new_params)
+
+    def _render_param_rows(container: ttk.Frame, step: str) -> None:
+        for param, label, kind in _CLUSTER_STEP_PARAMS.get(step, []):
+            prow = ttk.Frame(container)
+            prow.pack(anchor="w", fill="x", padx=(24, 4), pady=1)
+            ttk.Label(prow, text=f"{label}:", width=12).pack(side="left")
+            override = ctx.clustering_params.get(step, {}).get(param)
+            default = override if override is not None else _cluster_step_param_default(
+                step, param, ctx.page
+            )
+            if kind.startswith("choice:"):
+                options = kind.split(":", 1)[1].split(",")
+                choice_var = tk.StringVar(value=str(default))
+                combo = ttk.Combobox(
+                    prow, textvariable=choice_var, state="readonly", width=8, values=options,
+                )
+                combo.pack(side="left")
+                combo.bind(
+                    "<<ComboboxSelected>>",
+                    lambda _event, s=step, p=param, v=choice_var: _commit_param_value(s, p, v.get()),
+                )
+            else:
+                text_var = tk.StringVar(value=str(default))
+                entry = ttk.Entry(prow, textvariable=text_var, width=8)
+                entry.pack(side="left")
+                entry.bind(
+                    "<Return>",
+                    lambda _event, s=step, p=param, k=kind, v=text_var: _commit_param(s, p, k, v),
+                )
+                entry.bind(
+                    "<FocusOut>",
+                    lambda _event, s=step, p=param, k=kind, v=text_var: _commit_param(s, p, k, v),
+                )
+
+    for i, ordinal in enumerate(_ORDINAL_LABELS[: len(order)]):
         row = ttk.Frame(ctx.side_panel)
         row.pack(anchor="w", fill="x", padx=4, pady=1)
         ttk.Label(row, text=f"{ordinal}:", width=5).pack(side="left")
         var = tk.StringVar(value=_CLUSTER_STEP_LABELS[order[i]])
         combo = ttk.Combobox(
-            row, textvariable=var, state="readonly", width=14,
+            row, textvariable=var, state="readonly", width=20,
             values=list(_CLUSTER_STEP_LABELS.values()),
         )
         combo.pack(side="left")
         combo_vars.append(var)
         combo.bind("<<ComboboxSelected>>", lambda _event, i=i: _apply_order_change(i))
 
+        params_container = ttk.Frame(ctx.side_panel)
+        params_container.pack(anchor="w", fill="x")
+        _render_param_rows(params_container, order[i])
+
     ttk.Separator(ctx.side_panel, orient="horizontal").pack(fill="x", padx=4, pady=6)
 
-    # --- per-step + previous categories ---
-    all_previous = [g for result in results_by_group.values() for g in result.previous if g]
-    step_groups: list[list[list[VectorPath]]] = [
-        [
-            g
-            for result in results_by_group.values()
-            for g in (result.steps[i] if i < len(result.steps) else [])
-            if g
-        ]
+    # --- per-step kept/dropped categories ---
+    kept_groups: list[list[list[VectorPath]]] = [
+        [g for result in results_by_group.values() for g in (result.steps[i] if i < len(result.steps) else []) if g]
+        for i in range(len(order))
+    ]
+    dropped_groups: list[list[list[VectorPath]]] = [
+        [g for result in results_by_group.values() for g in (result.dropped[i] if i < len(result.dropped) else []) if g]
         for i in range(len(order))
     ]
 
-    categories: dict[str, dict] = {
-        "previous": {
-            "show": ctx.filters.setdefault("show_previous", {"value": False}),
-            "entries": [(geometry.union_bbox([p.bbox for p in g]), g) for g in all_previous],
-            "color": _PREVIOUS_COLOR,
-            "width": 1,
-            "centroid": False,
-        },
-    }
+    categories: dict[str, dict] = {}
     for i in range(len(order)):
-        categories[f"step_{i}"] = {
-            "show": ctx.filters.setdefault(
-                f"show_step_{i}", {"value": i == len(order) - 1}
-            ),
-            "entries": [(geometry.union_bbox([p.bbox for p in g]), g) for g in step_groups[i]],
+        categories[f"kept_{i}"] = {
+            "show": ctx.filters.setdefault(f"show_kept_{i}", {"value": i == len(order) - 1}),
+            "entries": [(geometry.union_bbox([p.bbox for p in g]), g) for g in kept_groups[i]],
             "color": _CLUSTER_STEP_COLORS[i % len(_CLUSTER_STEP_COLORS)],
             "width": 2,
             "centroid": True,
+        }
+        categories[f"dropped_{i}"] = {
+            "show": ctx.filters.setdefault(f"show_dropped_{i}", {"value": False}),
+            "entries": [(geometry.union_bbox([p.bbox for p in g]), g) for g in dropped_groups[i]],
+            "color": _DROPPED_COLOR,
+            "width": 1,
+            "centroid": False,
         }
     for state in categories.values():
         state["index"] = _SpatialIndex(state["entries"])
@@ -857,36 +898,52 @@ def _render_clustering_stage(ctx: RenderContext) -> None:
     ctx.filters["_recull_all"] = _recull_all
 
     for i, ordinal in enumerate(_ORDINAL_LABELS[: len(order)]):
-        key = f"step_{i}"
-        state = categories[key]
-        label = f"{ordinal}: {_CLUSTER_STEP_LABELS[order[i]]} ({len(step_groups[i])})"
-        var = tk.BooleanVar(value=state["show"]["value"])
+        kept_key, dropped_key = f"kept_{i}", f"dropped_{i}"
+        step_label = _CLUSTER_STEP_LABELS[order[i]]
+
+        kept_var = tk.BooleanVar(value=categories[kept_key]["show"]["value"])
         _add_category_checkbox(
-            ctx.side_panel, ctx.canvas, label, var, key,
-            persist=lambda v, k=key: (categories[k]["show"].__setitem__("value", v), _recull(k)),
+            ctx.side_panel, ctx.canvas,
+            f"{ordinal}: {step_label} kept ({len(kept_groups[i])})", kept_var, kept_key,
+            persist=lambda v, k=kept_key: (categories[k]["show"].__setitem__("value", v), _recull(k)),
         )
         ttk.Label(
-            ctx.side_panel, text=_cluster_size_stats_text(step_groups[i]), justify="left",
-        ).pack(anchor="w", padx=18, pady=(0, 6))
+            ctx.side_panel, text=_cluster_size_stats_text(kept_groups[i]), justify="left",
+        ).pack(anchor="w", padx=18, pady=(0, 2))
 
-    previous_state = categories["previous"]
-    previous_var = tk.BooleanVar(value=previous_state["show"]["value"])
-    _add_category_checkbox(
-        ctx.side_panel, ctx.canvas, f"Previously classified as Drawing ({len(all_previous)})",
-        previous_var, "previous",
-        persist=lambda v: (categories["previous"]["show"].__setitem__("value", v), _recull("previous")),
-    )
+        dropped_var = tk.BooleanVar(value=categories[dropped_key]["show"]["value"])
+        _add_category_checkbox(
+            ctx.side_panel, ctx.canvas,
+            f"{ordinal}: {step_label} dropped ({len(dropped_groups[i])})", dropped_var, dropped_key,
+            persist=lambda v, k=dropped_key: (categories[k]["show"].__setitem__("value", v), _recull(k)),
+        )
+        ttk.Frame(ctx.side_panel, height=6).pack()
 
     _recull_all()
     _bind_bucket_hover(
         ctx,
-        *[(step_groups[i], categories[f"step_{i}"]["show"]) for i in range(len(order))],
-        (all_previous, categories["previous"]["show"]),
+        *[
+            (kept_groups[i], categories[f"kept_{i}"]["show"])
+            for i in range(len(order))
+        ],
+        *[
+            (dropped_groups[i], categories[f"dropped_{i}"]["show"])
+            for i in range(len(order))
+        ],
     )
 
 
 def _render_drawing_vectors_stage(ctx: RenderContext) -> None:
     drawing_vectors: list[DrawingVector] = ctx.output.data or []
+
+    if ctx.page is not None and _add_reconstruction_toggle(
+        ctx, lambda: _RENDERER.render_reconstructed_page(
+            ctx.page.meta, drawing_vectors=drawing_vectors,
+            zoom=geometry.matrix_scale(ctx.matrix)[0],
+        ),
+    ):
+        return
+
     filters = ctx.filters
     show_dashed = filters.setdefault("show_dashed", {"value": True})
     show_solid = filters.setdefault("show_solid", {"value": True})
@@ -973,6 +1030,13 @@ def _render_ocr_text_clusters_stage(ctx: RenderContext) -> None:
     ttk.Label(ctx.side_panel, text=f"{len(results)} OCR'd text cluster(s)").pack(
         anchor="w", padx=4, pady=(4, 6)
     )
+
+    if ctx.page is not None and _add_reconstruction_toggle(
+        ctx, lambda: _RENDERER.render_reconstructed_page(
+            ctx.page.meta, ocr_results=passed, zoom=geometry.matrix_scale(ctx.matrix)[0],
+        ),
+    ):
+        return
 
     show_passed = ctx.filters.setdefault("show_passed", {"value": True})
     show_failed = ctx.filters.setdefault("show_failed", {"value": True})
@@ -1099,11 +1163,7 @@ _STAGE_RENDERERS = {
     "vector_extract": _render_vector_extract_stage,
     "layer_separation": _render_layer_separation_stage,
     "color_separation": _render_color_separation_stage,
-    "filter_layout_panels": _render_filter_stage_buckets,
-    "filter_large_bbox": _render_filter_stage_buckets,
     "clustering": _render_clustering_stage,
-    "filter_large_group_bbox": _render_filter_stage_buckets,
-    "filter_aspect_ratio": _render_filter_stage_buckets,
     "drawing_vectors": _render_drawing_vectors_stage,
     "ocr_text_clusters": _render_ocr_text_clusters_stage,
 }
@@ -1206,11 +1266,53 @@ class DebugApp:
         canvas_frame.rowconfigure(0, weight=1)
         canvas_frame.columnconfigure(0, weight=1)
 
-        side_panel_container = ttk.Frame(body, width=220)
+        # Scrollable side panel: the clustering stage alone can pack in up
+        # to 8 dropdown+params blocks plus 16 kept/dropped checkboxes,
+        # comfortably exceeding the panel's fixed height -- ttk.Frame has
+        # no native scrolling, so the panel is really a Canvas holding one
+        # inner ttk.Frame (self.side_panel, which every stage renderer
+        # still packs directly into, unaware this wrapping exists).
+        side_panel_container = ttk.Frame(body, width=260)
         side_panel_container.pack(fill="y", side="right")
         side_panel_container.pack_propagate(False)
-        self.side_panel = ttk.Frame(side_panel_container)
-        self.side_panel.pack(fill="both", expand=True)
+
+        self.side_panel_canvas = tk.Canvas(side_panel_container, highlightthickness=0)
+        side_panel_scrollbar = ttk.Scrollbar(
+            side_panel_container, orient="vertical", command=self.side_panel_canvas.yview,
+        )
+        self.side_panel_canvas.configure(yscrollcommand=side_panel_scrollbar.set)
+        self.side_panel_canvas.pack(side="left", fill="both", expand=True)
+        side_panel_scrollbar.pack(side="right", fill="y")
+
+        self.side_panel = ttk.Frame(self.side_panel_canvas)
+        self._side_panel_window = self.side_panel_canvas.create_window(
+            (0, 0), window=self.side_panel, anchor="nw"
+        )
+
+        def _on_side_panel_configure(_event=None) -> None:
+            self.side_panel_canvas.configure(scrollregion=self.side_panel_canvas.bbox("all"))
+
+        self.side_panel.bind("<Configure>", _on_side_panel_configure)
+
+        def _on_side_panel_canvas_configure(event) -> None:
+            # Keep the inner frame exactly as wide as the visible canvas so
+            # its child widgets can wrap/fill horizontally; only the height
+            # is ever meant to scroll.
+            self.side_panel_canvas.itemconfigure(self._side_panel_window, width=event.width)
+
+        self.side_panel_canvas.bind("<Configure>", _on_side_panel_canvas_configure)
+
+        def _on_mousewheel(event) -> None:
+            self.side_panel_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        # Only bind the wheel globally while the cursor is actually over the
+        # side panel, so scrolling the main canvas elsewhere isn't hijacked.
+        self.side_panel_canvas.bind(
+            "<Enter>", lambda _e: self.side_panel_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        )
+        self.side_panel_canvas.bind(
+            "<Leave>", lambda _e: self.side_panel_canvas.unbind_all("<MouseWheel>")
+        )
 
         self.tooltip = Tooltip(self.canvas)
 
@@ -1230,7 +1332,10 @@ class DebugApp:
         registered one) to redraw just the delta for the new visible
         region, without rebuilding the whole stage (checkboxes, spatial
         indices, etc.)."""
-        cache_key = (self.state.page_index, tuple(self.state.clustering_order))
+        cache_key = (
+            self.state.page_index, tuple(self.state.clustering_order),
+            _params_cache_key(self.state.clustering_params),
+        )
         outputs = self.state.stage_cache.get(cache_key)
         if not outputs:
             return
@@ -1282,13 +1387,18 @@ class DebugApp:
 
     def _get_stage_outputs(self) -> list[StageOutput]:
         page_index = self.state.page_index
-        cache_key = (page_index, tuple(self.state.clustering_order))
+        cache_key = (
+            page_index, tuple(self.state.clustering_order),
+            _params_cache_key(self.state.clustering_params),
+        )
         cached = self.state.stage_cache.get(cache_key)
         if cached is not None:
             return cached
         outputs = self.pipeline.run_page(
             self.reader, page_index,
-            clustering_order=self.state.clustering_order, final_stage=self.final_stage,
+            clustering_order=self.state.clustering_order,
+            clustering_params=self.state.clustering_params,
+            final_stage=self.final_stage,
         )
         self.state.stage_cache[cache_key] = outputs
         return outputs
@@ -1299,6 +1409,13 @@ class DebugApp:
         pipeline recompute (via _get_stage_outputs's new cache key) rather
         than a cheaper partial re-run."""
         self.state.clustering_order = order
+        self.redraw_overlay()
+
+    def _set_clustering_params(self, params: dict[str, dict[str, float]]) -> None:
+        """Changing a clustering method's threshold/parameter override is,
+        like changing the operation order, a full pipeline recompute (see
+        _set_clustering_order)."""
+        self.state.clustering_params = params
         self.redraw_overlay()
 
     def render(self) -> None:
@@ -1340,6 +1457,7 @@ class DebugApp:
             self.tooltip.hide()
         for child in self.side_panel.winfo_children():
             child.destroy()
+        self.side_panel_canvas.yview_moveto(0.0)  # reset scroll for the new stage's content
 
         outputs = self._get_stage_outputs()
         stage_count = len(outputs)
@@ -1375,6 +1493,8 @@ class DebugApp:
             epoch_box=self._render_epoch_box,
             clustering_order=list(self.state.clustering_order),
             set_clustering_order=self._set_clustering_order,
+            clustering_params={k: dict(v) for k, v in self.state.clustering_params.items()},
+            set_clustering_params=self._set_clustering_params,
             page=page,
             ocr_detail_cache=self.state.ocr_detail_cache,
         )

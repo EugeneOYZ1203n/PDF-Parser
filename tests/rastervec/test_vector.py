@@ -16,6 +16,8 @@ def _make_path(
     bbox=(0, 0, 1, 1),
     stroke_color=None,
     fill_color=None,
+    stroke_opacity=None,
+    fill_opacity=None,
     stroke_width=None,
     dashes=None,
     closed=None,
@@ -31,6 +33,8 @@ def _make_path(
         bbox=bbox,
         stroke_color=stroke_color,
         fill_color=fill_color,
+        stroke_opacity=stroke_opacity,
+        fill_opacity=fill_opacity,
         stroke_width=stroke_width,
         dashes=dashes,
         closed=closed,
@@ -102,18 +106,21 @@ def test_separate_by_layer_groups_by_layer_field():
     assert len(groups[""]) == 1
 
 
-def test_separate_by_color_prefers_stroke_over_fill():
+def test_separate_by_color_groups_by_stroke_fill_and_opacity():
     paths = [
         _make_path(stroke_color=(1, 0, 0), fill_color=(0, 1, 0)),
         _make_path(stroke_color=None, fill_color=(0, 1, 0)),
         _make_path(stroke_color=None, fill_color=None),
+        # same stroke/fill as paths[0] but different opacity -> its own group.
+        _make_path(stroke_color=(1, 0, 0), fill_color=(0, 1, 0), stroke_opacity=0.5),
     ]
 
     groups = Vector().separate_by_color(paths)
 
-    assert groups[(1, 0, 0)] == [paths[0]]
-    assert groups[(0, 1, 0)] == [paths[1]]
-    assert groups[None] == [paths[2]]
+    assert groups[(1, 0, 0), (0, 1, 0), None, None] == [paths[0]]
+    assert groups[None, (0, 1, 0), None, None] == [paths[1]]
+    assert groups[None, None, None, None] == [paths[2]]
+    assert groups[(1, 0, 0), (0, 1, 0), 0.5, None] == [paths[3]]
 
 
 def test_filter_layout_panels_drops_single_item_re():
@@ -248,6 +255,77 @@ def test_group_overlapping_tolerance_scales_with_page_size():
     assert len(groups[0]) == 2
 
 
+def test_group_overlapping_explicit_tolerance_overrides_page_default():
+    # page is 200x200 -> default tolerance would be 3px, too small for this
+    # 10px gap; an explicit override should still let it merge.
+    a = _make_path(bbox=(0, 0, 10, 10))
+    b = _make_path(bbox=(20, 0, 30, 10))
+
+    default_groups = Vector().group_overlapping([[a, b]], _Page())
+    assert len(default_groups) == 2  # default 3px tolerance: stays separate
+
+    overridden_groups = Vector().group_overlapping([[a, b]], _Page(), tolerance=15.0)
+    assert len(overridden_groups) == 1  # explicit 15px tolerance: merges
+
+
+def test_default_overlap_tolerance_matches_group_overlapping_default():
+    assert Vector.default_overlap_tolerance(_Page()) == 3.0  # max(0.5% * 200, 3px)
+
+
+def test_cluster_spatial_explicit_threshold_overrides_instance_default():
+    a = _make_path(bbox=(0, 0, 2, 2))
+    b = _make_path(bbox=(20, 0, 22, 2))  # gap=18px, past default threshold=8.0
+
+    default_result = Vector().cluster_spatial([a, b])
+    assert len(default_result) == 2
+
+    overridden_result = Vector().cluster_spatial([a, b], threshold=20.0)
+    assert len(overridden_result) == 1
+
+
+def test_cluster_by_seq_explicit_max_gap_overrides_instance_default():
+    a = _make_path(seq=0, bbox=(0, 0, 2, 2))
+    b = _make_path(seq=10, bbox=(0, 0, 2, 2))  # seq gap=10, past default max_gap=3
+
+    default_result = Vector().cluster_by_seq([[a, b]])
+    assert len(default_result) == 2
+
+    overridden_result = Vector().cluster_by_seq([[a, b]], max_gap=20)
+    assert len(overridden_result) == 1
+
+
+def test_cluster_groups_by_dimension_explicit_tolerance_overrides_instance_default():
+    g1 = [_make_path(bbox=(0, 0, 10, 10))]
+    g2 = [_make_path(bbox=(0, 0, 13, 13))]  # 30% bigger, past default tolerance=0.35... just within
+
+    default_result = Vector().cluster_groups_by_dimension([g1, g2])
+    assert len(default_result) == 1  # 0.3 relative diff <= default 0.35 -> merges
+
+    overridden_result = Vector().cluster_groups_by_dimension([g1, g2], tolerance=0.1)
+    assert len(overridden_result) == 2  # tighter tolerance: stays separate
+
+
+def test_cluster_step_params_are_keyed_by_step_not_ordinal_position():
+    # cluster_spatial and cluster_spatial_union_find both default to the
+    # same spatial_threshold instance attribute, but per-call step_params
+    # overrides must stay independent between them.
+    a = _make_path(bbox=(0, 0, 2, 2))
+    b = _make_path(bbox=(15, 0, 17, 2))  # gap=13px
+
+    order = ["cluster_spatial", "cluster_spatial_union_find", "none", "none"]
+    step_params = {
+        "cluster_spatial": {"threshold": 20.0},  # merges at step 1
+        "cluster_spatial_union_find": {"threshold": 1.0},  # would split if it re-derived, but it can't re-split
+    }
+    snapshots, _dropped = Vector().cluster([a, b], _Page(), order, step_params=step_params)
+
+    assert len(snapshots[0]) == 1  # cluster_spatial(threshold=20) merged them
+    # cluster_spatial_union_find never re-splits an existing group (see its
+    # own docstring/tests), so the already-merged group survives step 2
+    # even with a tiny threshold override.
+    assert len(snapshots[1]) == 1
+
+
 def test_filter_large_group_bbox_drops_oversized_group():
     big_group = [_make_path(bbox=(0, 0, 190, 190))]  # 90% of 200x200 page
     small_group = [_make_path(bbox=(10, 10, 20, 20))]
@@ -309,28 +387,27 @@ def test_cluster_groups_by_dimension_merges_similar_sized_groups():
     assert sizes == [1, 2]
 
 
-def test_cluster_default_order_is_spatial_only():
+def _sorted_ids(groups):
+    return sorted(tuple(sorted(id(p) for p in g)) for g in groups)
+
+
+def test_cluster_default_order_matches_pipeline_steps_and_classify():
     a = _make_path(seq=0, bbox=(10, 10, 13, 16), fill_color=(0, 0, 0))
     b = _make_path(seq=0, item_index=1, bbox=(15, 10, 18, 16), fill_color=(0, 0, 0))
     c = _make_path(seq=100, kind="l", bbox=(100, 100, 180, 180), stroke_color=(0, 0, 0))
     paths = [a, b, c]
 
-    assert list(Vector.CLUSTER_STEPS) == ["cluster_spatial", "none", "none", "none"]
+    assert list(Vector.PIPELINE_STEPS) == [
+        "filter_layout_panels", "filter_large_bbox", "cluster_spatial",
+        "none", "none", "none", "filter_large_group_bbox", "filter_aspect_ratio",
+    ]
 
-    snapshots = Vector().cluster(paths, _Page())
-    assert len(snapshots) == 4
+    kept_snapshots, dropped_snapshots = Vector().cluster(paths, _Page())
+    assert len(kept_snapshots) == len(dropped_snapshots) == 8
 
-    vector = Vector()
-    spatial = vector.cluster_spatial(paths)
-
-    def _sorted_ids(groups):
-        return sorted(tuple(sorted(id(p) for p in g)) for g in groups)
-
-    # The default order is one layer of spatial clustering only -- the
-    # other 3 ordinal positions are "none" (identity), so every later
-    # snapshot is just the untouched spatial-clustering result.
-    assert _sorted_ids(snapshots[0]) == _sorted_ids(spatial)
-    assert snapshots[0] == snapshots[1] == snapshots[2] == snapshots[3]
+    # classify() is a thin wrapper around cluster()'s default order --
+    # its result must be exactly cluster()'s final kept snapshot.
+    assert _sorted_ids(kept_snapshots[-1]) == _sorted_ids(Vector().classify(paths, _Page()))
 
 
 def test_cluster_order_changes_result():
@@ -341,18 +418,62 @@ def test_cluster_order_changes_result():
     b = _make_path(bbox=(50, 50, 60, 60))
     paths = [a, b]
 
-    default_final = Vector().cluster(paths, _Page())[-1]
-    assert len(default_final) == 2  # default order is spatial-only -- far apart, stays split
+    default_final = Vector().cluster(paths, _Page())[0][-1]
+    assert len(default_final) == 2  # far apart -- stays split through the default pipeline
 
     full_order = ["cluster_spatial", "cluster_by_seq", "group_overlapping", "cluster_groups_by_dimension"]
-    full_final = Vector().cluster(paths, _Page(), full_order)[-1]
+    full_final = Vector().cluster(paths, _Page(), full_order)[0][-1]
     assert len(full_final) == 1  # dimension-clustering (last) merges same-size groups regardless of position
 
     reordered = ["cluster_groups_by_dimension", "cluster_spatial", "cluster_by_seq", "group_overlapping"]
-    reordered_final = Vector().cluster(paths, _Page(), reordered)[-1]
+    reordered_final = Vector().cluster(paths, _Page(), reordered)[0][-1]
     # dimension merges them first, but spatial (now 2nd) re-flattens and
     # re-clusters from scratch -- far apart, so it splits them back up.
     assert len(reordered_final) == 2
+
+
+def test_cluster_group_overlapping_merges_from_scratch_as_sole_step():
+    # Regression test: group_overlapping used to be a no-op when it's the
+    # only active step, because Clustering.group_by_overlap only ever
+    # splits within an *existing* incoming group and cluster()'s initial
+    # state is one singleton group per path -- a group of size 1 can never
+    # be split, so nothing merged and the tolerance param had no effect.
+    # _apply_pipeline_step now flattens into a single incoming group first,
+    # matching cluster_spatial's from-scratch behavior.
+    a = _make_path(bbox=(0, 0, 5, 5))
+    b = _make_path(bbox=(5.5, 0, 10, 5))  # 0.5 gap -- within default tolerance
+    paths = [a, b]
+
+    order = ["group_overlapping", "none", "none", "none"]
+    merged = Vector().cluster(paths, _Page(), order)[0][-1]
+    assert len(merged) == 1
+
+    tight = Vector().cluster(
+        paths, _Page(), order, step_params={"group_overlapping": {"tolerance": 0.1}}
+    )[0][-1]
+    assert len(tight) == 2  # 0.5 gap > 0.1 tolerance -- stays split
+
+
+def test_cluster_group_overlapping_cluster_scope_never_splits_incoming_group():
+    # bbox_scope="cluster" treats each incoming group as one atomic unit
+    # (like cluster_spatial_union_find), so two already-grouped paths never
+    # get split apart even though they're far from each other individually.
+    a = _make_path(bbox=(0, 0, 5, 5))
+    b = _make_path(bbox=(100, 100, 105, 105))
+    c = _make_path(bbox=(100.5, 100, 105.5, 105))  # close to b only
+
+    # First cluster_spatial groups b+c together (close) and leaves a alone;
+    # then group_overlapping in "cluster" scope must never split b+c apart,
+    # regardless of a's distance from that group.
+    order = ["cluster_spatial", "group_overlapping", "none", "none"]
+    result = Vector().cluster(
+        [a, b, c], _Page(), order,
+        step_params={"group_overlapping": {"bbox_scope": "cluster"}},
+    )[0][-1]
+
+    bc_group = [g for g in result if any(p in g for p in (b, c))]
+    assert len(bc_group) == 1
+    assert set(id(p) for p in bc_group[0]) == {id(b), id(c)}
 
 
 def test_cluster_none_step_is_identity():
@@ -361,13 +482,13 @@ def test_cluster_none_step_is_identity():
     paths = [a, b]
 
     order = ["none", "cluster_spatial", "none", "none"]
-    snapshots = Vector().cluster(paths, _Page(), order)
+    kept_snapshots, _dropped_snapshots = Vector().cluster(paths, _Page(), order)
 
     # "none" makes no change: step 0's output is just each path alone,
     # same as the initial singleton groups cluster() starts from.
-    assert sorted(len(g) for g in snapshots[0]) == [1, 1]
+    assert sorted(len(g) for g in kept_snapshots[0]) == [1, 1]
     # steps 2 and 3 ("none" again) leave step 1's (cluster_spatial's) result untouched.
-    assert snapshots[1] == snapshots[2] == snapshots[3]
+    assert kept_snapshots[1] == kept_snapshots[2] == kept_snapshots[3]
 
 
 def test_build_drawing_vectors_aggregates_by_seq():

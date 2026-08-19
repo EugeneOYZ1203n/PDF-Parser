@@ -106,6 +106,8 @@ class VectorPath:
     bbox: tuple[float, float, float, float]
     stroke_color: tuple[float, ...] | None
     fill_color: tuple[float, ...] | None
+    stroke_opacity: float | None
+    fill_opacity: float | None
     stroke_width: float | None
     dashes: str | None
     closed: bool | None

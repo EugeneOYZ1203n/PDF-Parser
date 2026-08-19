@@ -5,9 +5,13 @@ for OCR input. render_vector_cluster is implemented (isolates a cluster
 of VectorPaths onto their own small PyMuPDF page and rasterizes it, so
 OCR gets the PDF's own vector rendering rather than a hand-rolled
 rasterizer); render_raster_region is still a stub since the Raster stage
-itself isn't implemented yet. Reconstructing pipeline output back into a
-PDF for evaluation is a separate concern -- see evaluation.py, the
-pipeline's actual final stage.
+itself isn't implemented yet. render_reconstructed_page is a debug-app-only
+convenience (not OCR input, not evaluation.py's real reconstruction stage)
+that redraws whatever a given stage has captured so far -- native words,
+drawing vectors, OCR'd text -- onto a page-sized blank canvas, so the debug
+app can show "does this look like the original" for one stage's output at
+a time. Reconstructing pipeline output back into a real evaluation PDF is a
+separate concern -- see evaluation.py, the pipeline's actual final stage.
 """
 from __future__ import annotations
 
@@ -17,13 +21,67 @@ import pymupdf as fitz
 from PIL import Image
 
 from rastervec.geometry import union_bbox
-from rastervec.models import Page, RasterImage, VectorPath
+from rastervec.models import DrawingVector, Page, PageMeta, RasterImage, TextVectorResult, TextWord, VectorPath
 
 _DEFAULT_PATH_COLOR = "#111827"
 
 # Minimum padding (in PDF points) added around a cluster's bbox before
 # rendering, so thin strokes right at the bbox edge aren't clipped.
 _MIN_CLUSTER_PADDING = 4.0
+
+
+def _draw_vector_path(shape: "fitz.Shape", path: VectorPath, dx: float = 0.0, dy: float = 0.0) -> None:
+    """Draws one VectorPath onto `shape` with its own real stroke/fill/
+    width/dashes, offset by (dx, dy) -- shared by render_vector_cluster
+    (which translates into an isolated small canvas) and
+    render_reconstructed_page (dx=dy=0, paths are already in the
+    reconstruction's absolute page-space coordinates)."""
+    if path.stroke_color is None and path.fill_color is None:
+        # Shape.finish() always emits a stroke operator when `fill` is
+        # None, even with `color=None` too -- it falls back to the
+        # current (default black) graphics-state color rather than
+        # staying invisible. A path with neither color set was never
+        # meant to render at all, so skip it outright instead of relying
+        # on finish() to no-op.
+        return
+    pts = [(x + dx, y + dy) for x, y in path.points]
+    if path.kind == "l":
+        shape.draw_line(pts[0], pts[1])
+    elif path.kind == "re":
+        shape.draw_rect(fitz.Rect(*pts[0], *pts[1]))
+    elif path.kind == "qu":
+        shape.draw_quad(fitz.Quad(pts))
+    elif path.kind == "c":
+        shape.draw_bezier(pts[0], pts[1], pts[2], pts[3])
+    else:
+        return
+    shape.finish(
+        color=path.stroke_color,
+        fill=path.fill_color,
+        width=path.stroke_width or 1.0,
+        dashes=path.dashes,
+        closePath=True if path.closed is None else bool(path.closed),
+    )
+
+
+def _nearest_quarter_rotation(angle: float) -> int:
+    """page.insert_text's `rotate` only accepts multiples of 90 -- rounds
+    an arbitrary text angle to the nearest one, best-effort (exact
+    arbitrary-angle text reconstruction would need Shape.insert_text with
+    a morph matrix instead, not worth it for a debug-only preview)."""
+    return round(angle / 90.0) % 4 * 90
+
+
+def _text_color(color: int | None) -> tuple[float, float, float]:
+    """Unpacks a PyMuPDF span-style packed sRGB int (as TextWord.color
+    carries) into an (r, g, b) 0..1 tuple for insert_text's color param."""
+    if color is None:
+        return (0.0, 0.0, 0.0)
+    return (
+        ((color >> 16) & 255) / 255,
+        ((color >> 8) & 255) / 255,
+        (color & 255) / 255,
+    )
 
 
 class Renderer:
@@ -73,33 +131,7 @@ class Renderer:
             cluster_page = doc.new_page(width=width, height=height)
             shape = cluster_page.new_shape()
             for path in paths:
-                if path.stroke_color is None and path.fill_color is None:
-                    # Shape.finish() always emits a stroke operator when
-                    # `fill` is None, even with `color=None` too -- it
-                    # falls back to the current (default black) graphics
-                    # state color rather than staying invisible. A path
-                    # with neither color set was never meant to render at
-                    # all, so skip it outright instead of relying on
-                    # finish() to no-op.
-                    continue
-                pts = [(x + dx, y + dy) for x, y in path.points]
-                if path.kind == "l":
-                    shape.draw_line(pts[0], pts[1])
-                elif path.kind == "re":
-                    shape.draw_rect(fitz.Rect(*pts[0], *pts[1]))
-                elif path.kind == "qu":
-                    shape.draw_quad(fitz.Quad(pts))
-                elif path.kind == "c":
-                    shape.draw_bezier(pts[0], pts[1], pts[2], pts[3])
-                else:
-                    continue
-                shape.finish(
-                    color=path.stroke_color,
-                    fill=path.fill_color,
-                    width=path.stroke_width or 1.0,
-                    dashes=path.dashes,
-                    closePath=True if path.closed is None else bool(path.closed),
-                )
+                _draw_vector_path(shape, path, dx=dx, dy=dy)
             shape.commit()
 
             zoom = dpi / 72.0
@@ -118,3 +150,68 @@ class Renderer:
         """High-resolution render of a raster image region, used as OCR
         input."""
         raise NotImplementedError
+
+    def render_reconstructed_page(
+        self,
+        page_meta: PageMeta,
+        *,
+        native_words: list[TextWord] | None = None,
+        drawing_vectors: list[DrawingVector] | None = None,
+        ocr_results: list[TextVectorResult] | None = None,
+        zoom: float = 1.0,
+    ) -> "Image.Image":
+        """Debug-app-only preview: redraws whatever has actually been
+        captured so far -- one or more of native text words, drawing
+        vectors (each drawn from its own real member VectorPaths, not
+        just its aggregate bbox), OCR'd vector-text results -- onto a
+        fresh blank page sized/rotated to match `page_meta`, then
+        rasterizes at `zoom` the same way DebugApp.render() rasterizes the
+        real page (so the two images are pixel-comparable at the same
+        zoom level). Text reconstruction is necessarily approximate: font
+        family isn't preserved (always the PyMuPDF base14 "helv"), and
+        rotation snaps to the nearest multiple of 90 (page.insert_text
+        doesn't support arbitrary angles) -- this is a "does this look
+        roughly right" preview, not a byte-accurate reconstruction (that's
+        evaluation.py's job once built)."""
+        doc = fitz.open()
+        try:
+            page = doc.new_page(width=page_meta.width, height=page_meta.height)
+            page.set_rotation(page_meta.rotation)
+
+            if drawing_vectors:
+                shape = page.new_shape()
+                for dv in drawing_vectors:
+                    for path in dv.paths:
+                        _draw_vector_path(shape, path)
+                shape.commit()
+
+            if native_words:
+                for word in native_words:
+                    if not word.text.strip():
+                        continue
+                    origin = word.origin or (word.bbox[0], word.bbox[3])
+                    page.insert_text(
+                        origin, word.text,
+                        fontsize=max(word.font_size, 1.0),
+                        color=_text_color(word.color),
+                        rotate=_nearest_quarter_rotation(word.angle),
+                    )
+
+            if ocr_results:
+                for result in ocr_results:
+                    if not result.text.strip():
+                        continue
+                    x0, _y0, _x1, y1 = result.bbox
+                    fontsize = max(result.bbox[3] - result.bbox[1], 4.0)
+                    page.insert_text(
+                        (x0, y1), result.text,
+                        fontsize=fontsize,
+                        rotate=_nearest_quarter_rotation(result.rotation_used),
+                    )
+
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+            image = Image.open(io.BytesIO(pixmap.tobytes("png")))
+            image.load()
+            return image
+        finally:
+            doc.close()

@@ -15,21 +15,9 @@ _EXPECTED_STAGE_KEYS = [
     "vector_extract",
     "layer_separation",
     "color_separation",
-    "filter_layout_panels",
-    "filter_large_bbox",
     "clustering",
-    "filter_large_group_bbox",
-    "filter_aspect_ratio",
     "drawing_vectors",
     "ocr_text_clusters",
-]
-
-_VECTOR_CLASSIFICATION_STAGE_KEYS = [
-    "filter_layout_panels",
-    "filter_large_bbox",
-    "clustering",
-    "filter_large_group_bbox",
-    "filter_aspect_ratio",
 ]
 
 
@@ -56,8 +44,7 @@ def test_run_page_reader_and_native_ok(synthetic_pdf_factory, tmp_pdf_path):
     assert isinstance(by_key["vector_extract"].data, list)
     assert isinstance(by_key["layer_separation"].data, dict)
     assert isinstance(by_key["color_separation"].data, dict)
-    for key in _VECTOR_CLASSIFICATION_STAGE_KEYS:
-        assert isinstance(by_key[key].data, dict)
+    assert isinstance(by_key["clustering"].data, dict)
     assert isinstance(by_key["drawing_vectors"].data, list)
     assert by_key["ocr_text_clusters"].data == []  # no text-as-vector clusters on this page
 
@@ -116,32 +103,27 @@ def test_run_page_vector_stages_on_drawing_pdf(tmp_pdf_path):
     paths: list[VectorPath] = by_key["vector_extract"].data
     assert len(paths) > 0
 
-    layout_buckets: dict = by_key["filter_layout_panels"].data
-    dropped_panels = [
-        group
-        for buckets in layout_buckets.values()
-        for group in buckets.this_stage
-        if group[0].kind == "re"
-    ]
-    assert len(dropped_panels) == 1
-
     clustering_results: dict = by_key["clustering"].data
-    all_first_step_clusters = [
-        cluster for result in clustering_results.values() for cluster in result.steps[0]
-    ]
-    assert any(any(p.kind == "l" for p in cluster) for cluster in all_first_step_clusters)
-    # the dropped panel carries forward into "previous" for every group.
-    assert all(
-        any(g[0].kind == "re" for g in result.previous)
-        for result in clustering_results.values()
-        if result.previous
-    )
     for result in clustering_results.values():
         assert isinstance(result, ClusteringStageResult)
-        assert len(result.steps) == len(result.order) == 4
+        assert len(result.steps) == len(result.dropped) == len(result.order) == 8
+
+    # filter_layout_panels is the 1st default step -- the lone panel "re"
+    # is dropped there; the line survives into later steps.
+    dropped_at_step_0 = [
+        g for result in clustering_results.values() for g in result.dropped[0]
+    ]
+    assert any(g[0].kind == "re" for g in dropped_at_step_0)
+
+    all_final_kept = [
+        p for result in clustering_results.values() for g in result.steps[-1] for p in g
+    ]
+    assert any(p.kind == "l" for p in all_final_kept)
 
     drawing_vectors: list[DrawingVector] = by_key["drawing_vectors"].data
     assert isinstance(drawing_vectors, list)
+    # the dropped panel ends up folded into drawing_vectors.
+    assert any(dv.paths[0].kind == "re" for dv in drawing_vectors)
 
 
 def test_run_page_stage_error_is_caught(synthetic_pdf_factory, tmp_pdf_path):

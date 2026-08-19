@@ -40,40 +40,21 @@ GroupKey = tuple[str, tuple]
 
 
 @dataclass
-class VectorStageBuckets:
-    """One (layer, color) group's paths, split into what this exact stage
-    decided vs. what an earlier stage in the filter/cluster pipeline already
-    decided vs. what's still waiting to be decided by a later stage.
-
-    `this_stage`/`previous` entries are always groups (`list[VectorPath]`):
-    a filter stage that decides path-by-path wraps each dropped path in a
-    singleton group (`[path]`); a filter stage that decides group-by-group
-    (filter_aspect_ratio) contributes each dropped group as-is; a cluster
-    stage's entries are its actual cluster groupings. Every filter stage's
-    drops are "classified as Drawing this round" (nothing is ever discarded
-    -- see _run_drawing_vectors). `pending` holds whatever the next stage
-    still needs to consume: a flat list[VectorPath] for path-level filter
-    stages, or a list[list[VectorPath]] (groups) once clustering has run.
-    """
-
-    this_stage: list[list[VectorPath]]
-    previous: list[list[VectorPath]]
-    pending: list[VectorPath] | list[list[VectorPath]]
-
-
-@dataclass
 class ClusteringStageResult:
     """One (layer, color) group's result from the single configurable
-    clustering stage: the `order` the 4 Vector.CLUSTER_STEPS operations ran
-    in, `steps[i]` = the groups snapshot after applying `order[i]` (so
-    `steps[-1]` is the final clustering result fed to the two filter stages
-    after this one), and `previous` = every group the two filter stages
-    before this one already dropped (classified as Drawing -- carried
-    through so drawing_vectors can still fold it in)."""
+    clustering stage: the `order` the (up to 8) Vector.PIPELINE_STEPS
+    operations ran in, `steps[i]` = the surviving-groups snapshot after
+    applying `order[i]` (so `steps[-1]` is the final result, handed to
+    drawing_vectors/ocr_text_clusters), and `dropped[i]` = only what step
+    `i` itself dropped (empty for a pure clustering step or "none" -- only
+    the 4 filter steps ever drop anything). Every dropped group was
+    "classified as Drawing" the moment it was dropped (see
+    _run_drawing_vectors) -- a caller wanting the cumulative drop total up
+    to step i sums `dropped[0:i+1]`."""
 
     order: list[str]
     steps: list[list[list[VectorPath]]]
-    previous: list[list[VectorPath]]
+    dropped: list[list[list[VectorPath]]]
 
 
 @dataclass
@@ -87,19 +68,22 @@ class PipelineContext:
     vector_paths: list[VectorPath] | None = None
     paths_by_layer: dict[str, list[VectorPath]] | None = None
     paths_by_layer_color: dict[str, dict[tuple, list[VectorPath]]] | None = None
-    filter_layout_panels: dict[GroupKey, VectorStageBuckets] | None = None
-    filter_large_bbox: dict[GroupKey, VectorStageBuckets] | None = None
-    # None means "use Vector.CLUSTER_STEPS's default order" -- settable by
+    # None means "use Vector.PIPELINE_STEPS's default order" -- settable by
     # the debug app before calling Pipeline.run_page to interactively
-    # reorder the clustering stage's 4 operations.
+    # reorder the clustering stage's (up to 8) operations. A step may
+    # repeat at more than one ordinal position.
     clustering_order: list[str] | None = None
+    # Step key -> {param_name: value} overrides for that pipeline method
+    # (see Vector.cluster's step_params) -- e.g. {"cluster_spatial":
+    # {"threshold": 12.0}}. None/missing entries fall back to that method's
+    # own instance-attribute default. Settable by the debug app alongside
+    # clustering_order to interactively tune each operation's thresholds.
+    clustering_params: dict[str, dict[str, float]] | None = None
     clustering: dict[GroupKey, ClusteringStageResult] | None = None
-    filter_large_group_bbox: dict[GroupKey, VectorStageBuckets] | None = None
-    filter_aspect_ratio: dict[GroupKey, VectorStageBuckets] | None = None
     drawing_vectors: list[DrawingVector] | None = None
-    # Populated alongside drawing_vectors -- whatever filter_aspect_ratio's
-    # final round left pending (every filter/cluster stage's drops go to
-    # drawing_vectors instead, never here). Consumed by ocr_text_clusters.
+    # Populated alongside drawing_vectors -- whatever the clustering
+    # stage's final step left kept (every filter/cluster step's drops go
+    # to drawing_vectors instead, never here). Consumed by ocr_text_clusters.
     text_clusters: list[list[VectorPath]] | None = None
     ocr_text_clusters: list[TextVectorResult] | None = None
     # Future stages add fields here as they're implemented (raster_images,
@@ -161,118 +145,42 @@ def _iter_groups(
     ]
 
 
-def _split_dropped(
-    paths: list[VectorPath], kept: list[VectorPath]
-) -> list[VectorPath]:
-    kept_ids = {id(p) for p in kept}
-    return [p for p in paths if id(p) not in kept_ids]
-
-
-def _run_filter_layout_panels(ctx: PipelineContext) -> dict[GroupKey, VectorStageBuckets]:
-    vector = Vector()
-    result: dict[GroupKey, VectorStageBuckets] = {}
-
-    for key, paths in _iter_groups(ctx.paths_by_layer_color):
-        kept = vector.filter_layout_panels(paths)
-        dropped = _split_dropped(paths, kept)
-        result[key] = VectorStageBuckets(
-            this_stage=[[p] for p in dropped], previous=[], pending=kept
-        )
-
-    ctx.filter_layout_panels = result
-    return result
-
-
-def _run_filter_large_bbox(ctx: PipelineContext) -> dict[GroupKey, VectorStageBuckets]:
-    vector = Vector()
-    result: dict[GroupKey, VectorStageBuckets] = {}
-
-    for key, buckets in ctx.filter_layout_panels.items():
-        kept = vector.filter_large_bbox(buckets.pending, ctx.page)
-        dropped = _split_dropped(buckets.pending, kept)
-        result[key] = VectorStageBuckets(
-            this_stage=[[p] for p in dropped],
-            previous=list(buckets.this_stage),
-            pending=kept,
-        )
-
-    ctx.filter_large_bbox = result
-    return result
-
-
 def _run_clustering(ctx: PipelineContext) -> dict[GroupKey, ClusteringStageResult]:
     vector = Vector()
-    order = ctx.clustering_order or list(vector.CLUSTER_STEPS)
+    order = ctx.clustering_order or list(vector.PIPELINE_STEPS)
     result: dict[GroupKey, ClusteringStageResult] = {}
 
-    for key, buckets in ctx.filter_large_bbox.items():
-        snapshots = vector.cluster(buckets.pending, ctx.page, order)
+    for key, paths in _iter_groups(ctx.paths_by_layer_color):
+        kept_snapshots, dropped_snapshots = vector.cluster(
+            paths, ctx.page, order, step_params=ctx.clustering_params,
+        )
         result[key] = ClusteringStageResult(
-            order=order,
-            steps=snapshots,
-            previous=list(buckets.previous) + list(buckets.this_stage),
+            order=order, steps=kept_snapshots, dropped=dropped_snapshots,
         )
 
     ctx.clustering = result
     return result
 
 
-def _run_filter_large_group_bbox(ctx: PipelineContext) -> dict[GroupKey, VectorStageBuckets]:
-    vector = Vector()
-    result: dict[GroupKey, VectorStageBuckets] = {}
-
-    for key, cluster_result in ctx.clustering.items():
-        groups = cluster_result.steps[-1]
-        kept = vector.filter_large_group_bbox(groups, ctx.page)
-        kept_ids = {id(g) for g in kept}
-        dropped = [g for g in groups if id(g) not in kept_ids]
-        result[key] = VectorStageBuckets(
-            this_stage=dropped,
-            previous=list(cluster_result.previous),
-            pending=kept,
-        )
-
-    ctx.filter_large_group_bbox = result
-    return result
-
-
-def _run_filter_aspect_ratio(ctx: PipelineContext) -> dict[GroupKey, VectorStageBuckets]:
-    vector = Vector()
-    result: dict[GroupKey, VectorStageBuckets] = {}
-
-    for key, buckets in ctx.filter_large_group_bbox.items():
-        kept = vector.filter_aspect_ratio(buckets.pending)
-        kept_ids = {id(g) for g in kept}
-        dropped = [g for g in buckets.pending if id(g) not in kept_ids]
-        result[key] = VectorStageBuckets(
-            this_stage=dropped,
-            previous=list(buckets.previous) + list(buckets.this_stage),
-            pending=kept,
-        )
-
-    ctx.filter_aspect_ratio = result
-    return result
-
-
 def _run_drawing_vectors(ctx: PipelineContext) -> list[DrawingVector]:
-    """Final aggregation: every group any filter stage dropped along the
-    way was already "classified as Drawing" the moment it was dropped (see
-    VectorStageBuckets's docstring), so it's folded in here unconditionally.
-    Whatever filter_aspect_ratio's final round still has pending is *not*
-    drawing content -- there's no further drawing-vs-text heuristic applied
-    to it (Vector no longer has one); it's stashed on ctx.text_clusters
-    as-is for ocr_text_clusters to actually OCR, the only content that
-    doesn't end up in drawing_vectors."""
+    """Final aggregation: every group any filter step in the clustering
+    chain dropped along the way was already "classified as Drawing" the
+    moment it was dropped (see ClusteringStageResult's docstring), so it's
+    folded in here unconditionally. Whatever the chain's final step still
+    kept is *not* drawing content -- there's no further drawing-vs-text
+    heuristic applied to it (Vector no longer has one); it's stashed on
+    ctx.text_clusters as-is for ocr_text_clusters to actually OCR, the only
+    content that doesn't end up in drawing_vectors."""
     vector = Vector()
     all_drawing_paths: list[VectorPath] = []
     all_text_clusters: list[list[VectorPath]] = []
 
-    for buckets in ctx.filter_aspect_ratio.values():
-        for group in buckets.previous:
-            all_drawing_paths.extend(group)
-        for group in buckets.this_stage:
-            all_drawing_paths.extend(group)
-        all_text_clusters.extend(buckets.pending)
+    for cluster_result in ctx.clustering.values():
+        for dropped_this_step in cluster_result.dropped:
+            for group in dropped_this_step:
+                all_drawing_paths.extend(group)
+        if cluster_result.steps:
+            all_text_clusters.extend(cluster_result.steps[-1])
 
     ctx.text_clusters = all_text_clusters
     ctx.drawing_vectors = vector.build_drawing_vectors(all_drawing_paths)
@@ -315,27 +223,7 @@ class Pipeline:
         StageSpec(key="vector_extract", label="Vector Extraction", run=_run_vector_extract),
         StageSpec(key="layer_separation", label="Layer Separation", run=_run_layer_separation),
         StageSpec(key="color_separation", label="Color Separation", run=_run_color_separation),
-        StageSpec(
-            key="filter_layout_panels",
-            label="Filter: Layout Panels",
-            run=_run_filter_layout_panels,
-        ),
-        StageSpec(
-            key="filter_large_bbox",
-            label="Filter: Large Bbox",
-            run=_run_filter_large_bbox,
-        ),
         StageSpec(key="clustering", label="Clustering", run=_run_clustering),
-        StageSpec(
-            key="filter_large_group_bbox",
-            label="Filter: Large Group Bbox",
-            run=_run_filter_large_group_bbox,
-        ),
-        StageSpec(
-            key="filter_aspect_ratio",
-            label="Filter: Aspect Ratio",
-            run=_run_filter_aspect_ratio,
-        ),
         StageSpec(key="drawing_vectors", label="Drawing Vectors", run=_run_drawing_vectors),
         StageSpec(
             key="ocr_text_clusters",
@@ -353,6 +241,7 @@ class Pipeline:
         reader: Reader,
         page_index: int,
         clustering_order: list[str] | None = None,
+        clustering_params: dict[str, dict[str, float]] | None = None,
         final_stage: str | None = None,
     ) -> list[StageOutput]:
         """Runs Pipeline.STAGES in order, stopping after `final_stage`
@@ -361,7 +250,11 @@ class Pipeline:
         entirely, never even constructing a RenderOCR/PaddleOCR engine, so
         it's a real way to skip the OCR round-trip while iterating on
         earlier stages, not just a display-time filter. `None` (default)
-        runs every stage, unchanged from before this parameter existed."""
+        runs every stage, unchanged from before this parameter existed.
+        `clustering_params` is threaded onto `ctx` for `_run_clustering` to
+        pass as `Vector.cluster`'s `step_params` -- per-method threshold/
+        parameter overrides, keyed by step (see PipelineContext.
+        clustering_params)."""
         if final_stage is not None and final_stage not in self.stage_keys():
             raise ValueError(
                 f"unknown final_stage {final_stage!r}; must be one of {self.stage_keys()}"
@@ -369,6 +262,7 @@ class Pipeline:
 
         ctx = PipelineContext(
             reader=reader, page_index=page_index, clustering_order=clustering_order,
+            clustering_params=clustering_params,
         )
         outputs: list[StageOutput] = []
 

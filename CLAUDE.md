@@ -122,81 +122,116 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   tagged with its parent drawing's `seq` (drawing index) plus stroke/fill color, width, dashes,
   closed, layer, and item-level `bbox`/`points`. `separate_by_layer`/`separate_by_color` group paths
   by `layer` (`""` for none) / by `stroke_color` if set else `fill_color` else `None`.
-  `classify(paths, page, cluster_order=None) -> list[list[VectorPath]]` chains the full
-  classification pipeline (the pipeline (`pipeline.py`) instead calls each piece individually, one
-  per debug-app stage):
-  1. `filter_layout_panels` drops single-item `re`/`qu` drawings (page borders/title-block panels,
-     which never share a `seq` with anything else — a real CAD text-as-vector-paths drawing is one
-     `seq` with *many* glyph items, so this never touches real text).
-  2. `filter_large_bbox` drops paths whose own bbox covers more than `large_bbox_area_fraction`
-     (default 0.2) of the page — border/frame geometry caught by size instead of item-count.
-  3. `cluster(paths, page, order=None)` runs up to 4 clustering/grouping operations —
-     `cluster_spatial`, `cluster_spatial_union_find`, `cluster_by_seq`, `group_overlapping`,
-     `cluster_groups_by_dimension`, or `"none"` to skip an ordinal position — in `order` (default
-     `Vector.CLUSTER_STEPS`, i.e. just one layer of `cluster_spatial`, the other 3 ordinal positions
-     `"none"`), returning one groups-list **snapshot per step** (`snapshots[i]` = the result after
-     applying `order[i]`), not just the final result — this is what lets the debug app's single
-     "Clustering" stage show/compare every step's output, and let the user reorder the operations
-     interactively (see `debug_app.py` below). Internally, `_apply_cluster_step` dispatches each
-     step key to its underlying method:
-     - `cluster_spatial` — high-tolerance (`spatial_threshold`, default 8.0) single-linkage
-       grouping by bbox gap, via `Clustering.cluster_spatial`. Since this method's signature takes
-       a *flat* path list (not groups), `_apply_cluster_step` re-flattens whatever grouping exists
-       so far before re-clustering — it's always a from-scratch spatial pass, never a groups-in/
-       groups-out refinement of its input, so reordering it away from 1st genuinely re-clusters
-       everything spatially at that later point.
-     - `cluster_spatial_union_find` — same distance rule as `cluster_spatial` (bbox gap ≤
-       `spatial_threshold`, same grid-bucketed union-find), but applied to the *incoming groups
-       themselves* (by each group's aggregate bbox via `geometry.union_bbox`) rather than the raw
-       paths — reuses `Clustering.cluster_spatial` at the group level the same way
-       `cluster_groups_by_dimension` reuses `Clustering.cluster_by_dimension`. Unlike
-       `cluster_spatial`, this never flattens/re-derives from scratch: each incoming group is one
-       atomic unit, so groups an earlier operation already formed only ever get merged together
-       here, never re-split.
-     - `cluster_by_seq` — tighter pass within each incoming group, splitting by drawing
-       sequence-number proximity (`seq_max_gap`), via `Clustering.cluster_by_seq`.
-     - `group_overlapping` merges paths whose bboxes overlap OR are within a small gap tolerance of
-       each other (`max(0.5% of the page's smaller dimension, 3px)` — real glyph/symbol strokes are
-       often a pixel or two apart, not truly touching); a path fully contained in (or equal to)
-       another's bbox is left separate regardless of tolerance — via `Clustering.group_by_overlap`.
-       Scoping stays per-cluster: only paths already in the same incoming group are ever compared,
-       since `group_by_overlap` applies its pairwise merge independently to each incoming group.
-     - `cluster_groups_by_dimension` merges groups whose *overall* bbox width/height are close
-       (`group_dimension_tolerance`) — reuses `Clustering.cluster_by_dimension` at the group level
-       (each incoming group, not each path, is one item to compare; `geometry.union_bbox` gives
-       each group's aggregate bbox), then flattens each resulting super-group back to a flat path
-       list.
-  4. `filter_large_group_bbox` drops whole groups whose *aggregate* bbox covers more than
-     `large_bbox_area_fraction` of the page — the same per-path rule `filter_large_bbox` applies
-     earlier, reapplied per-group now that clustering has run (a group can end up oversized even
-     when no single member path was).
-  5. `filter_aspect_ratio` drops whole groups shaped like a long thin line/ruler (aggregate bbox
-     aspect ratio > `max_aspect_ratio`, default 10.0) — real drawing content, never a text
-     candidate. This is the *last* classification step — `classify()` returns whatever survives
-     it, unmodified.
 
-  There is deliberately **no drawing-vs-text heuristic** at the end of `classify()` — an earlier
-  version had one (`classify_clusters`/`_looks_like_text`, judging a cluster "text" by member count
-  + size + fill fraction) but it was removed: every path/group any filter step (1/2/4/5, plus
-  whatever clustering step lands where within the chosen order) drops along the way is drawing
+  Classification is a single configurable chain of up to **8 pipeline steps**, run via `cluster()`.
+  Every ordinal position independently picks any one of 4 **filter** steps or 7
+  **clustering/grouping** steps, or `"none"` to skip that position — and any step may repeat at more
+  than one position (there's no uniqueness constraint):
+  - `filter_layout_panels` drops single-item `re`/`qu` drawings (page borders/title-block panels,
+    which never share a `seq` with anything else — a real CAD text-as-vector-paths drawing is one
+    `seq` with *many* glyph items, so this never touches real text). Recomputed dynamically from
+    whatever paths are still present when this step actually runs in the chain, not the original
+    full population.
+  - `filter_large_bbox` drops paths whose own bbox covers more than `max_area_fraction` (override
+    param; default `large_bbox_area_fraction`, 0.2) of the page — border/frame geometry caught by
+    size instead of item-count. Same dynamic-recompute behavior as `filter_layout_panels`.
+  - `filter_large_group_bbox` / `filter_aspect_ratio` — the group-level counterparts, dropping whole
+    groups whose *aggregate* bbox is oversized (`max_area_fraction`, same param name/default as
+    `filter_large_bbox`) or shaped like a long thin line/ruler (`max_aspect_ratio`, default 10.0) —
+    real drawing content, never a text candidate.
+  - `cluster_spatial` — high-tolerance (`threshold` override; default `spatial_threshold`, 8.0)
+    single-linkage grouping by bbox gap, via `Clustering.cluster_spatial`. Since this method's
+    signature takes a *flat* path list (not groups), `_apply_pipeline_step` re-flattens whatever
+    grouping exists so far before re-clustering — always a from-scratch spatial pass at whatever
+    ordinal position it runs.
+  - `cluster_spatial_union_find` — same distance rule as `cluster_spatial` (bbox gap ≤ `threshold`,
+    same grid-bucketed union-find), but applied to the *incoming groups themselves* (by each group's
+    aggregate bbox via `geometry.union_bbox`) rather than the raw paths — reuses
+    `Clustering.cluster_spatial` at the group level the same way `cluster_groups_by_dimension`
+    reuses `Clustering.cluster_by_dimension`. Unlike `cluster_spatial`, this never
+    flattens/re-derives from scratch: each incoming group is one atomic unit, so groups an earlier
+    step already formed only ever get merged together here, never re-split.
+  - `cluster_by_seq` — tighter pass within each incoming group, splitting by drawing
+    sequence-number proximity (`max_gap` override; default `seq_max_gap`), via
+    `Clustering.cluster_by_seq`.
+  - `group_overlapping` merges members whose bboxes overlap OR are within a small gap `tolerance`
+    override (default `max(0.5% of the page's smaller dimension, 3px)`, via
+    `Vector.default_overlap_tolerance`) of each other; a member fully contained in (or equal to)
+    another's bbox is left separate regardless of tolerance — via `Clustering.group_by_overlap`. A
+    second param, `bbox_scope` (`"path"` default or `"cluster"`), picks what's actually compared:
+    `"path"` flattens every path across all incoming groups into one pool first and compares by each
+    path's own bbox (a genuine from-scratch merge, e.g. the strokes making up one glyph, often a
+    pixel or two apart rather than truly touching — not scoped to whatever grouping already
+    existed); `"cluster"` instead treats each incoming group as one atomic unit compared by its own
+    aggregate bbox, mirroring `cluster_spatial_union_find`'s group-atomic approach but with the
+    overlap/tolerance/containment rule instead of a flat gap threshold. `Clustering.group_by_overlap`
+    itself only ever *splits* within whatever single group it's handed — it's `Vector.
+    group_overlapping`'s `bbox_scope` branching that decides what that one group actually contains
+    (`[flat_paths]` for `"path"`, `[groups]` for `"cluster"`) before calling it; without the `"path"`
+    flattening, `group_overlapping` used to be a silent no-op whenever it ran on the initial
+    per-path singleton groups (e.g. as the sole/first active step), since a group of size 1 can
+    never be split further and the tolerance param had no visible effect.
+  - `cluster_groups_by_dimension` merges groups whose *overall* bbox width/height are close
+    (`tolerance` override; default `group_dimension_tolerance`, 0.35) — reuses
+    `Clustering.cluster_by_dimension` at the group level (each incoming group, not each path, is one
+    item to compare; `geometry.union_bbox` gives each group's aggregate bbox; the whole incoming
+    `groups` list is wrapped as one outer group, `[groups]`, so this is a genuine merge across
+    everything currently pending, same "wrap as one group" trick `group_overlapping`'s `"cluster"`
+    scope reuses), then flattens each resulting super-group back to a flat path list.
+  - `cluster_by_item_path_count` / `cluster_by_item_bbox` cluster by a path's **original item**
+    (its `seq`, i.e. the drawing it was extracted from) rather than anything about its current
+    cluster: `_compute_item_stats(paths)` computes, once per `cluster()` call from the full incoming
+    path population (before any step runs, so it never depends on what an earlier step already did
+    to the grouping), each `seq`'s path count and aggregate bbox. `cluster_by_item_path_count`
+    flattens to one pool and splits by absolute gaps in sorted item-path-count (`max_gap` override;
+    default `item_count_max_gap`, 2 — an absolute integer difference, more intuitive than a relative
+    one for small counts) via `Clustering.cluster_by_seq` reused generically (its `get_seq` callable
+    just needs to return an `int`, not a real sequence number). `cluster_by_item_bbox` flattens to
+    one pool and merges by relative item-bbox width/height closeness (`tolerance` override; default
+    `item_bbox_tolerance`, 0.35) via `Clustering.cluster_by_dimension`, same generic reuse.
+
+  There is deliberately **no drawing-vs-text heuristic** anywhere in this chain — an earlier version
+  had one (`classify_clusters`/`_looks_like_text`, judging a cluster "text" by member count + size +
+  fill fraction) but it was removed: every group any filter step drops along the way is drawing
   content (`pipeline.py`'s per-stage wiring folds those drops into `drawing_vectors`, not `Vector`
-  itself — see `pipeline.py` below), and everything that survives every filter is handed to OCR
+  itself — see `pipeline.py` below), and everything that survives the whole chain is handed to OCR
   (`pipeline.py`'s `ocr_text_clusters` stage) as-is — OCR success/failure (did it read any text) is
-  the actual signal for whether a cluster was text, not a pre-filter guess. `build_drawing_vectors
-  (paths) -> list[DrawingVector]` re-aggregates same-`seq` paths back into one `DrawingVector` per
-  original drawing (bbox union + first path's style), i.e. the unit a downstream renderer would
-  draw. All thresholds (`spatial_threshold`, `seq_max_gap`, `large_bbox_area_fraction`,
-  `max_aspect_ratio`, `group_dimension_tolerance`) are `Vector.__init__` params — tune per-PDF if a
-  specific page's default classification looks wrong; there's no per-PDF auto-tuning (the
-  `group_overlapping` gap tolerance is the one threshold that's computed from the page's own
-  dimensions instead, not a `Vector.__init__` param).
+  the actual signal for whether a cluster was text, not a pre-filter guess.
+
+  `cluster(paths, page, order=None, step_params=None) -> tuple[kept_snapshots, dropped_snapshots]`
+  runs the chain: `order` defaults to `PIPELINE_STEPS` — `("filter_layout_panels",
+  "filter_large_bbox", "cluster_spatial", "none", "none", "none", "filter_large_group_bbox",
+  "filter_aspect_ratio")`, reproducing the original fixed 5-step pipeline. Both returned lists have
+  one entry per step: `kept_snapshots[i]` is the surviving groups after step `i`,
+  `dropped_snapshots[i]` is only what step `i` itself dropped (always empty for a pure
+  clustering/grouping step or `"none"` — only the 4 filter steps ever drop; a caller wanting the
+  cumulative drop total up to step `i` sums `dropped_snapshots[0:i+1]`). `step_params`, if given,
+  maps a step key to a dict of that step's own keyword overrides, keyed by step name (not ordinal
+  position) so a step repeated at more than one position still shares one set of overrides across
+  every position it appears at. Internally, `_apply_pipeline_step` dispatches each step key to its
+  underlying method, returning `(kept, dropped)` — the 2 path-level filters use `_filter_step`
+  (flattens current groups, calls the filter method on that flat list, reconstitutes kept groups
+  with their still-kept members while each dropped path becomes its own singleton group) and the 2
+  group-level filters use `_group_filter_step` (identity-compares the filter method's already-kept
+  group objects against the incoming list to recover what was dropped) — both shared helpers, not
+  duplicated per filter. `classify(paths, page, cluster_order=None) -> list[list[VectorPath]]` is a
+  thin convenience wrapper returning just `cluster()`'s final kept snapshot, for callers that don't
+  need the drop bookkeeping — `pipeline.py`'s own stage wiring calls `cluster()` directly instead, to
+  keep every step's drops for the debug app and `drawing_vectors`. `build_drawing_vectors(paths) ->
+  list[DrawingVector]` re-aggregates same-`seq` paths back into one `DrawingVector` per original
+  drawing (bbox union + first path's style), i.e. the unit a downstream renderer would draw. All
+  thresholds (`spatial_threshold`, `seq_max_gap`, `large_bbox_area_fraction`, `max_aspect_ratio`,
+  `group_dimension_tolerance`, `item_count_max_gap`, `item_bbox_tolerance`) are `Vector.__init__`
+  params — tune per-PDF if a specific page's default classification looks wrong; there's no per-PDF
+  auto-tuning (the `group_overlapping` gap tolerance is the one threshold computed from the page's
+  own dimensions instead, not a `Vector.__init__` param).
 
   **Clustering/filtering always operates within one `(layer, color)` bucket, never across buckets**:
-  `pipeline.py`'s `_iter_groups`/`_run_clustering` key every filter/cluster stage's work by
-  `GroupKey = (layer, color)` (from `color_separation`'s output), and `Vector.cluster()`/the filter
-  methods are only ever called with one bucket's paths/groups at a time — two paths in different
-  layers, or with different stroke/fill colors, are never spatially merged, sequence-merged,
-  overlap-merged, or dimension-merged together, regardless of how close they are on the page.
+  `pipeline.py`'s `_iter_groups`/`_run_clustering` key the whole chain's work by `GroupKey = (layer,
+  color)` (from `color_separation`'s output), and `Vector.cluster()` is only ever called with one
+  bucket's paths at a time — two paths in different layers, or with different stroke/fill colors,
+  are never spatially merged, sequence-merged, overlap-merged, dimension-merged, or item-merged
+  together, regardless of how close they are on the page.
 - **`helpers/clustering.py` — `Clustering`** *(cluster_spatial/cluster_by_dimension/cluster_by_seq/
   group_by_overlap implemented, `cluster_hsv` still a stub)*: pure-Python (no scipy/sklearn) spatial
   hash grid + union-find for `cluster_spatial` (buckets items into grid cells sized by `threshold`,
@@ -236,6 +271,25 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   are already absolute page-space coordinates) — kept for interface parity with
   `render_raster_region` and because `RenderOCR.ocr_cluster` calls both through the same shape.
   `render_raster_region` (raster-image OCR input) is still a stub.
+  `render_reconstructed_page(page_meta, *, native_words=None, drawing_vectors=None,
+  ocr_results=None, zoom=1.0)` *(implemented, debug-app-only preview — not OCR input, not
+  `evaluation.py`'s real reconstruction stage)*: redraws whatever elements are passed onto a fresh
+  blank page sized/rotated to match `page_meta`, then rasterizes at `zoom` the same way
+  `DebugApp.render()` rasterizes the real page pixmap, so the two are pixel-comparable at the same
+  zoom. `drawing_vectors` are redrawn from each `DrawingVector`'s own real member `VectorPath`s
+  (reusing the module-level `_draw_vector_path` helper `render_vector_cluster` also uses, factored
+  out so both share the same stroke/fill/skip-blank-path logic — `render_vector_cluster` calls it
+  with a translation offset into its isolated small canvas, this calls it with `dx=dy=0` since
+  paths are already in the reconstruction's absolute page-space coordinates), never just their
+  aggregate bbox. `native_words`/`ocr_results` are inserted as real text via `page.insert_text` —
+  necessarily approximate: font family isn't preserved (always PyMuPDF's base14 `"helv"`), and
+  rotation snaps to the nearest multiple of 90 via `_nearest_quarter_rotation` (`insert_text`'s
+  `rotate` param doesn't accept arbitrary angles) — a "does this look roughly right" preview, not a
+  byte-accurate reconstruction. `native_words` position at each `TextWord.origin` if set, else the
+  bbox's bottom-left corner as a baseline approximation; color unpacked from the packed-int
+  `TextWord.color` via `_text_color`. `ocr_results` position at each `TextVectorResult.bbox`'s
+  bottom-left with `fontsize` derived from the bbox height. A blank/whitespace-only `text` is
+  skipped outright (never handed to `insert_text`, which can be finicky with empty strings).
 - **`helpers/render_ocr.py` — `RenderOCR`** *(implemented)*: multi-rotation render + OCR +
   confidence-voting, shared by the Vector stage (OCR'ing rendered vector-text clusters, the only
   case actually reachable today) and, once built, the Raster stage (OCR'ing raster image regions —
@@ -262,20 +316,23 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   evaluation — not yet registered in `Pipeline.STAGES` since not implemented.
 - **`pipeline.py`** — shared stage-running machinery, used by both the CLI (`main()` in this file)
   and `debug_app.py`. `PipelineContext` accumulates state across stages for one page run (`page`,
-  `native_words`, `vector_paths`, `paths_by_layer`, `paths_by_layer_color`, `filter_layout_panels`,
-  `filter_large_bbox`, `clustering_order` (the chosen 4-step order, `None` = `Vector.CLUSTER_STEPS`
-  default), `clustering`, `filter_large_group_bbox`, `filter_aspect_ratio`, `drawing_vectors`,
-  `text_clusters`, `ocr_text_clusters`, and a field per future stage's output);
-  `StageSpec(key, label, run)` is one stage; `Pipeline.STAGES` is the ordered list: `reader`,
-  `native`, `vector_extract`, `layer_separation`, `color_separation`, `filter_layout_panels`,
-  `filter_large_bbox`, `clustering`, `filter_large_group_bbox`, `filter_aspect_ratio`,
-  `drawing_vectors`, `ocr_text_clusters` (12 stages total, mirroring `Vector.classify()`'s steps
-  above plus the OCR step after it — the single `clustering` stage replaces what used to be 4
-  separate cluster/group `StageSpec` entries, and there is no stage between the two filters and
-  `drawing_vectors`, since `cluster_groups_by_dimension` is now just one of the 4 operations
-  selectable *within* `clustering`, not a stage of its own).
-  `Pipeline.run_page(reader, page_index, clustering_order=None, final_stage=None)` runs every stage
-  in order, threading `clustering_order` onto `ctx` before `_run_clustering` executes, and wraps
+  `native_words`, `vector_paths`, `paths_by_layer`, `paths_by_layer_color`, `clustering_order` (the
+  chosen up-to-8-step order, `None` = `Vector.PIPELINE_STEPS` default; a step may repeat),
+  `clustering_params` (`dict[str, dict[str, float | str]]` of per-step param overrides, keyed by
+  step name not ordinal position — `None`/missing entries fall back to each `Vector` method's own
+  instance default; almost always numeric, except `group_overlapping`'s `bbox_scope`, a string),
+  `clustering`, `drawing_vectors`, `text_clusters`, `ocr_text_clusters`, and a field per future
+  stage's output); `StageSpec(key, label, run)` is one stage; `Pipeline.STAGES` is the ordered list:
+  `reader`, `native`, `vector_extract`, `layer_separation`, `color_separation`, `clustering`,
+  `drawing_vectors`, `ocr_text_clusters` (8 stages total -- the single `clustering` stage now
+  encompasses the entire filter/cluster chain, including what used to be 4 separate
+  `filter_layout_panels`/`filter_large_bbox`/`filter_large_group_bbox`/`filter_aspect_ratio`
+  `StageSpec` entries -- there's nothing between `color_separation` and `clustering`, or between
+  `clustering` and `drawing_vectors`, since every filter/cluster step is now just one of the up to 8
+  operations selectable within `clustering`).
+  `Pipeline.run_page(reader, page_index, clustering_order=None, clustering_params=None,
+  final_stage=None)` runs every stage in order, threading `clustering_order`/`clustering_params`
+  onto `ctx` before `_run_clustering` executes, and wraps
   each stage in `try/except` so one stage failing/not-yet-being-implemented is recorded as a
   `StageOutput(status="error", error=...)` rather than crashing the run or any caller — this is what
   lets the debug app show "this stage failed" instead of dying. `final_stage`, if given, must be one
@@ -285,31 +342,23 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `debug_app.py` (`--final-stage`, threaded through as `DebugApp.final_stage`, fixed for the app's
   whole lifetime rather than living in `DebugAppState`) let you skip `ocr_text_clusters` — and the
   PaddleOCR engine it would otherwise build — entirely while iterating on earlier stages.
-  `filter_layout_panels`/`filter_large_bbox`/`filter_large_group_bbox`/`filter_aspect_ratio` each
-  produce a `dict[GroupKey, VectorStageBuckets]` (`GroupKey = (layer, color)`); `VectorStageBuckets`
-  splits that group's paths into `this_stage` (what *this* stage decided — singleton `[path]` groups
-  for a path-level filter's drops, whole dropped groups for a group-level filter), `previous`
-  (decided by an earlier stage in this same sequence — accumulated stage to stage), and `pending`
-  (still undecided, flows into the next stage — a flat `list[VectorPath]` for the two path-level
-  filters, a `list[list[VectorPath]]` of kept groups for the two group-level filters).
-  `clustering` produces a `dict[GroupKey, ClusteringStageResult]` instead —
-  `ClusteringStageResult(order, steps, previous)`, where `order` is the 4-step order actually used
-  for that group, `steps` is `Vector.cluster()`'s list of per-step group-snapshots (`steps[i]` = the
-  groups after applying `order[i]`), and `previous` carries forward every path dropped by
-  `filter_layout_panels`/`filter_large_bbox` before clustering ran (so the debug app can still show
-  "previously classified as Drawing" during the clustering stage). `_run_clustering` builds this by
-  calling `vector.cluster(buckets.pending, ctx.page, ctx.clustering_order)` per `(layer, color)`
-  group, reading `buckets.pending`/`.previous` off `ctx.filter_large_bbox`.
-  `_run_filter_large_group_bbox`/`_run_filter_aspect_ratio` then read from `ctx.clustering[key].
-  steps[-1]` (the final clustering snapshot) as their input groups, and `ctx.clustering[key].
-  previous` as their starting `previous` bucket. `_run_drawing_vectors` is the one place that
-  reconciles the "filtering out = classified as Drawing" rule: for every group, it folds the *entire*
-  `previous` chain (every filter's drops, accumulated through `filter_layout_panels` →
-  `filter_large_bbox` → clustering's carried-forward `previous` → `filter_large_group_bbox` →
-  `filter_aspect_ratio`) into one `drawing_paths` list before calling `Vector.build_drawing_vectors`
-  — whatever `filter_aspect_ratio`'s final round still has `pending` is *not* folded in here (there's
+  `clustering` produces a `dict[GroupKey, ClusteringStageResult]` (`GroupKey = (layer, color)`) --
+  `ClusteringStageResult(order, steps, dropped)`, where `order` is the (up to 8-step) order actually
+  used for that group, `steps` is `Vector.cluster()`'s `kept_snapshots` (`steps[i]` = the surviving
+  groups after applying `order[i]`, so `steps[-1]` is the final result), and `dropped` is `Vector.
+  cluster()`'s `dropped_snapshots` (`dropped[i]` = only what step `i` itself dropped -- always empty
+  for a pure clustering step or `"none"`, since every dropped group was "classified as Drawing" the
+  moment a filter step dropped it; a caller wanting the cumulative drop total up to step `i` sums
+  `dropped[0:i+1]`). `_run_clustering` builds this by calling `vector.cluster(paths, ctx.page,
+  order, step_params=ctx.clustering_params)` directly per `(layer, color)` group from
+  `_iter_groups(ctx.paths_by_layer_color)` -- there's no intermediate filter-stage bucket to read
+  from any more, since filtering is just steps inside this one call now. `_run_drawing_vectors` is
+  the one place that reconciles the "filtering out = classified as Drawing" rule: for every group's
+  `ClusteringStageResult`, it folds every entry of `dropped` (all 8 steps' drops, whichever were
+  actually filters) into one `drawing_paths` list before calling `Vector.build_drawing_vectors` --
+  whatever `steps[-1]` (the chain's final kept groups) still holds is *not* folded in here (there's
   no drawing-vs-text heuristic left in `Vector` to decide that): it's stashed as-is on
-  `ctx.text_clusters` instead, for `ocr_text_clusters` to consume — every survivor becomes a text
+  `ctx.text_clusters` instead, for `ocr_text_clusters` to consume -- every survivor becomes a text
   candidate, and OCR success/failure is what actually determines whether it was text.
   `_run_ocr_text_clusters` OCRs each of `ctx.text_clusters` via a fresh `Renderer()` + `RenderOCR()`
   (cheap to construct per run — the expensive part, PaddleOCR's engine, is cached at module scope in
@@ -323,64 +372,102 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `inspector/app.py`), and a stage-nav bar (`< Prev Stage | Stage i/N: Label | Next Stage >`) that
   cycles **only over `Pipeline.STAGES`** — i.e. only stages that are actually implemented, not the
   full 17-stage pipeline spec. Per-page `StageOutput` results are cached in `DebugAppState.
-  stage_cache`, keyed by `(page_index, tuple(clustering_order))` rather than just `page_index` — a
-  different chosen clustering order is a different pipeline run, so it gets its own cache slot
-  (nothing is invalidated; flipping back to a previously-visited order is free after its first
-  compute). Each stage's overlay is drawn by a small function registered in `_STAGE_RENDERERS`,
-  keyed by `StageSpec.key`, taking a `RenderContext` (`canvas`, `matrix`, `output`, `tooltip`,
-  `side_panel`, `filters`, `on_change`, `epoch_box`, plus `clustering_order`/`set_clustering_order`
-  for the one stage that needs them). Vector paths are always drawn in their **real PDF stroke/fill
-  color** (`_path_color_hex`) — any black/white simplification a classification step might use
-  internally is never substituted into the overlay itself; synthetic colors (`_THIS_STAGE_COLOR`
-  blue, `_PREVIOUS_COLOR` grey, `_PENDING_GROUP_COLOR` green, `_CENTROID_COLOR` red, plus one color
-  per clustering step in `_CLUSTER_STEP_COLORS`) are only ever used for bbox/centroid *outlines*,
-  never in place of a path's real color. Stages with filterable sub-groups (`vector_extract` by path
-  kind, `layer_separation` by layer, `color_separation` by layer+color, `drawing_vectors` by
-  dashed/solid) build `ttk.Checkbutton`s per sub-group into `ctx.side_panel`.
+  stage_cache`, keyed by `(page_index, tuple(clustering_order), _params_cache_key(clustering_params))`
+  rather than just `page_index` — a different chosen clustering order or a different param override
+  is a different pipeline run, so each gets its own cache slot (nothing is invalidated; flipping
+  back to a previously-visited order/params combo is free after its first compute).
+  `_params_cache_key(params)` flattens the nested dict into a sorted, hashable tuple of
+  `(step, tuple(sorted(kv.items())))` pairs so it can be a dict key. Each stage's overlay is drawn by
+  a small function registered in `_STAGE_RENDERERS`, keyed by `StageSpec.key`, taking a
+  `RenderContext` (`canvas`, `matrix`, `output`, `tooltip`, `side_panel`, `filters`, `on_change`,
+  `epoch_box`, `page`, plus `clustering_order`/`set_clustering_order` and `clustering_params`/
+  `set_clustering_params` for the one stage that needs them). Vector paths are always drawn in their
+  **real PDF stroke/fill
+  color** (`_path_color_hex`) -- any black/white simplification a classification step might use
+  internally is never substituted into the overlay itself; synthetic colors (`_DROPPED_COLOR` grey,
+  `_CENTROID_COLOR` red, plus one color per clustering step in `_CLUSTER_STEP_COLORS`) are only ever
+  used for bbox/centroid *outlines*, never in place of a path's real color. Stages with filterable
+  sub-groups (`vector_extract` by path kind, `layer_separation` by layer, `color_separation` by
+  layer+color, `drawing_vectors` by dashed/solid) build `ttk.Checkbutton`s per sub-group into
+  `ctx.side_panel`.
 
-  The 4 remaining **filter** stages (`filter_layout_panels`, `filter_large_bbox`,
-  `filter_large_group_bbox`, `filter_aspect_ratio`) share `_render_filter_stage_buckets`, driven by
-  three checkboxes — "Classified as Drawing this round (N)", "Previously classified as Drawing (N)",
-  "Not yet classified (N)" — toggling visibility of `VectorStageBuckets.this_stage`/`previous`/
-  `pending` (never one checkbox per dropped item; a filter's drops are always drawing content, never
-  text, hence the wording).
+  The 4 filter steps no longer have separate stages of their own -- `clustering` is a single stage
+  rendered by `_render_clustering_stage`, built around **8** `ttk.Combobox` dropdowns in
+  `ctx.side_panel`, one per ordinal position (`_ORDINAL_LABELS`: "1st" ... "8th") -- each listing
+  all 12 entries of `_CLUSTER_STEP_LABELS`: the 4 filter steps (`filter_layout_panels`,
+  `filter_large_bbox`, `filter_large_group_bbox`, `filter_aspect_ratio`), the 7 clustering/grouping
+  operations (`cluster_spatial`, `cluster_spatial_union_find`, `cluster_by_seq`, `group_overlapping`,
+  `cluster_groups_by_dimension`, `cluster_by_item_path_count`, `cluster_by_item_bbox`), plus
+  `"none"` to skip that ordinal position (`Vector.PIPELINE_STEPS`, the *default* order, reproduces
+  the original fixed pipeline: both filters, one layer of `cluster_spatial`, then both group
+  filters). Every dropdown is **fully independent** -- unlike the earlier 4-dropdown design, there
+  is no swap-on-conflict/uniqueness constraint any more: a step may be selected at more than one
+  ordinal position (e.g. running `cluster_spatial` twice), so `_apply_order_change` just reads all 8
+  dropdowns' current values straight into the new order and calls `ctx.set_clustering_order`, which
+  persists it and re-triggers `_get_stage_outputs()` under the new cache key, then `redraw_overlay()`.
 
-  The old separate cluster/group stages are gone; `clustering` is a single stage rendered by
-  `_render_clustering_stage`, built around 4 `ttk.Combobox` dropdowns in `ctx.side_panel` — one per
-  ordinal position (`_ORDINAL_LABELS`: "1st" … "4th") — each listing all 6 entries of
-  `_CLUSTER_STEP_LABELS` (the 5 real operations — `cluster_spatial`, `cluster_spatial_union_find`,
-  `cluster_by_seq`, `group_overlapping`, `cluster_groups_by_dimension` — plus `"none"`, to skip that
-  ordinal position; `Vector.CLUSTER_STEPS`, the *default* order, is just one layer of
-  `cluster_spatial` with the other 3 positions `"none"`). The 4 dropdowns always represent a valid
-  permutation *of the real steps actually chosen*: reassigning one dropdown to a real step another
-  dropdown already holds swaps the two dropdowns' values, but `"none"` is exempt from that swap (any
-  number of dropdowns can be `"none"` at once, and any number of dropdowns can differ — only a real
-  step already in use elsewhere triggers a swap). On any change,
-  `DebugApp._set_clustering_order(order)` updates `DebugAppState.
-  clustering_order` and re-triggers `_get_stage_outputs()` under the new cache key, then
-  `redraw_overlay()`. Below the dropdowns, one collapsible section per ordinal position shows: a
-  checkbox ("Clusters after Nth operation (count)") toggling that step's `ClusteringStageResult.
-  steps[i]` groups on/off, a live stats line from `_cluster_size_stats_text` (count and
-  min/median/mean/max member count, recomputed from `steps[i]` — so reordering the dropdowns updates
-  every later step's stats immediately, since `steps[i]` for `i > 0` depends on the operations before
-  it), and each visible group is drawn as a bbox outline plus centroid dot in that step's assigned
-  `_CLUSTER_STEP_COLORS` entry. A final checkbox, "Previously classified as Drawing (N)", toggles
-  `ClusteringStageResult.previous` (paths already dropped by `filter_layout_panels`/
-  `filter_large_bbox`), same as the equivalent checkbox in the filter-stage renderer.
+  Directly below each dropdown, `_render_param_rows` builds one row per tunable param that step
+  accepts, from the `_CLUSTER_STEP_PARAMS` registry (`(param_name, display_label, kind)` tuples,
+  keyed by step -- `"none"`/`filter_layout_panels` have none). `kind` is `"float"`/`"int"` for a
+  plain `ttk.Entry` (parsed on commit via `_parse_param_text`; an unparseable value is silently
+  ignored -- the entry just keeps showing what the user typed, uncommitted, rather than raising or
+  reverting) or `"choice:opt1,opt2"` for a readonly `ttk.Combobox` of those exact string values
+  instead (used only for `group_overlapping`'s `bbox_scope`, committed immediately on selection, no
+  parsing needed). Each row pre-fills with the current override from `DebugAppState.
+  clustering_params` if set, else the step's real default via `_cluster_step_param_default` (mirrors
+  each `Vector` method's own instance-attribute default exactly -- `group_overlapping`'s tolerance is
+  the one page-dependent default, via `Vector.default_overlap_tolerance`; its `bbox_scope` default is
+  just `Vector.group_overlapping`'s own default argument value, `"path"`, not an instance attribute).
+  A valid commit updates `DebugAppState.clustering_params[step][param]` via `DebugApp.
+  _set_clustering_params` and triggers a full `redraw_overlay()`, which rebuilds the whole side panel
+  from scratch and re-runs `_get_stage_outputs()` -- cached per `(page_index, clustering_order,
+  clustering_params)` via `_params_cache_key` (keyed by step name, not ordinal position, so
+  `cluster_spatial` and `cluster_spatial_union_find` -- which share `Vector.spatial_threshold` as
+  their un-overridden default -- can still hold independent overrides if both appear in the same
+  order, and a step repeated at more than one position shares one set of overrides across every
+  position it appears at). This flows all the way down to `Vector.cluster(..., step_params=...)` ->
+  `_apply_pipeline_step(..., params=...)`, which passes each override as a keyword arg to the
+  underlying `Vector` method.
+
+  Below all 8 dropdown+params blocks, a separator, then **two** checkboxes per ordinal position: "N:
+  Step kept (count)" toggles that step's `ClusteringStageResult.steps[i]` (its surviving groups, bbox
+  + centroid, in that step's assigned `_CLUSTER_STEP_COLORS` entry) plus a live stats line from
+  `_cluster_size_stats_text` (count and min/median/mean/max member count, recomputed from `steps[i]`
+  -- so reordering the dropdowns updates every later step's stats immediately, since `steps[i]` for
+  `i > 0` depends on the operations before it), and "N: Step dropped (count)" toggles that step's
+  `ClusteringStageResult.dropped[i]` (only ever non-empty for a filter step -- always 0 for a pure
+  clustering step or `"none"` -- drawn grey, `_DROPPED_COLOR`, no centroid). There's no longer a
+  single cumulative "previously classified as Drawing" checkbox -- each step's own drops are shown
+  separately now that filters can sit anywhere in the chain; toggling more than one step's "dropped"
+  checkbox at once reconstructs whatever cumulative view is needed.
+
+  The side panel itself is now **scrollable**: `ctx.side_panel` (a plain `ttk.Frame`, unchanged from
+  every renderer's point of view) lives inside a `tk.Canvas` + `ttk.Scrollbar` wrapper built once in
+  `DebugApp._build_layout` (`self.side_panel_canvas`, holding `self.side_panel` via `create_window`)
+  -- necessary once the clustering stage alone can pack in 8 dropdown+params blocks plus up to 16
+  kept/dropped checkboxes, comfortably exceeding the panel's fixed height. The inner frame's
+  `<Configure>` updates the canvas's `scrollregion`; the canvas's own `<Configure>` keeps the inner
+  frame exactly as wide as the visible canvas so its children can still fill/wrap horizontally, only
+  the height scrolls. Mouse-wheel scrolling is bound globally only while the cursor is actually over
+  the side panel (bound in `<Enter>`, unbound in `<Leave>`) so it doesn't hijack scrolling elsewhere
+  in the app. `redraw_overlay()` resets the scroll position to the top (`yview_moveto(0.0)`)
+  whenever it rebuilds the panel for a newly-visited stage, so switching stages never leaves you
+  scrolled partway down unrelated content.
 
   Hover precision: a group only counts as hovered when the cursor is over an actual *member path's*
   own bbox, not merely anywhere inside the group's aggregate bbox (`_bind_bucket_hover`'s
   `_group_hit` does the cheap aggregate-bbox reject first, then confirms against each member's bbox),
   padded by a small screen-pixel tolerance (`_HOVER_TOLERANCE_PX = 5.0`, converted to page-space via
   `geometry.matrix_scale(ctx.matrix)`) so near-misses right at a bbox edge still register.
-  `_bind_bucket_hover` takes a variadic `*category_groups: tuple[list[list[VectorPath]], dict]` —
-  one `(groups, filter_state)` pair per visible category — so the same function serves both the
-  2-category filter-stage renderer and the 5-category (4 clustering steps + previous) clustering-
-  stage renderer without duplicating hit-testing logic.
+  `_bind_bucket_hover` takes a variadic `*category_groups: tuple[list[list[VectorPath]], dict]` --
+  one `(groups, filter_state)` pair per visible category -- so the same function serves the
+  clustering stage's up to 16 categories (kept + dropped per each of up to 8 steps) without
+  duplicating hit-testing logic.
 
-  Both renderer families share the same viewport-culling + chunked-drawing machinery: these stages can have
-  tens of thousands of clusters/paths, which was laggy even with tag-based visibility toggling
-  (thousands of live canvas items). `_SpatialIndex` (a uniform grid over `(bbox, payload)` entries)
+  This renderer shares the same viewport-culling + chunked-drawing machinery other high-volume
+  stages use: these stages can have tens of thousands of clusters/paths, which was laggy even with
+  tag-based visibility toggling (thousands of live canvas items). `_SpatialIndex` (a uniform grid
+  over `(bbox, payload)` entries)
   is built once per category per stage-visit; only the subset whose bbox overlaps the current
   viewport (`_visible_page_rect`, page-space via the inverse display matrix, padded 20%) is ever
   drawn, redrawing the delta on scroll/resize (`_recull`, wired through `DebugApp.
@@ -395,6 +482,31 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   group bboxes regardless of what's currently drawn, capped at `_MAX_HOVER_HIGHLIGHT_PATHS` member
   paths highlighted and cleared via tag-based `canvas.delete("overlay_hover")`. Checkbox/toggle state
   is persisted per-stage in `DebugAppState.filter_state` (keyed by `StageSpec.key`).
+
+  **Reconstructed-PDF toggle**: `native`, `drawing_vectors`, and `ocr_text_clusters` each open their
+  renderer with a call to the shared `_add_reconstruction_toggle(ctx, build_image_fn)`, which packs
+  a "Show Reconstructed PDF"/"Show Original PDF" `ttk.Button` at the top of `ctx.side_panel` (state
+  persisted per-stage in `ctx.filters["show_reconstructed"]`, same mechanism as every other
+  checkbox here, so leaving and returning to a stage remembers whether it was showing). Clicking it
+  flips the state and calls `ctx.on_change()` (a full `redraw_overlay()`); when the state is on,
+  `_add_reconstruction_toggle` calls the caller-supplied zero-arg `build_image_fn()` (each stage's
+  own small wrapper around `Renderer.render_reconstructed_page`, passing just that stage's own
+  captured elements — `native_words` for `native`, `drawing_vectors` for `drawing_vectors`,
+  `ocr_results=passed` — only the OCR'd-successfully results, via `_ocr_passed` — for
+  `ocr_text_clusters`; `zoom` is recovered from `geometry.matrix_scale(ctx.matrix)[0]`, since the
+  reconstruction's own `page.get_pixmap()` call handles its own rotation internally and only needs
+  the plain zoom magnitude, not the combined rotation+zoom `ctx.matrix`) and draws the resulting PIL
+  image as one `tk.PhotoImage`-backed canvas item tagged `"overlay"` — drawn *on top of* the real
+  page pixmap (never hidden or replaced) rather than swapped in for it, since the reconstruction
+  covers the exact same rect at the exact same zoom and so fully occludes the original without
+  risking the base `"page_image"` canvas item's separate lifecycle (that item is only ever
+  (re)created by `DebugApp.render()` on page/zoom changes, not on every stage switch — deleting/
+  replacing it from a stage renderer would leave the canvas blank after leaving that stage).
+  `_add_reconstruction_toggle` returns whether reconstruction is currently showing; each of the 3
+  stage renderers checks this immediately after building the toggle and `return`s early when it's
+  `True`, skipping their normal overlay entirely — the toggle replaces the overlay, it doesn't layer
+  under it, so the reconstructed image is the only thing drawn. The toggle is skipped altogether
+  (no button appears) if `ctx.page` is `None`, since reconstruction needs `ctx.page.meta`.
 
   `ocr_text_clusters` gets its own renderer, `_render_ocr_text_clusters_stage` — text clusters per
   page are few compared to raw path counts, so it skips the viewport-culling/spatial-index

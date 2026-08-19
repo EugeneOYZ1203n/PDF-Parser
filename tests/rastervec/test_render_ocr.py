@@ -112,7 +112,8 @@ def test_ocr_cluster_end_to_end_on_vector_glyphs(tmp_pdf_path):
             VectorPath(
                 seq=0, item_index=0, kind="re", fill_rule="f",
                 points=[(0, 0), (30, 30)], bbox=(0, 0, 30, 30),
-                stroke_color=None, fill_color=(0, 0, 0), stroke_width=None,
+                stroke_color=None, fill_color=(0, 0, 0),
+                stroke_opacity=None, fill_opacity=None, stroke_width=None,
                 dashes=None, closed=True, layer=None, page_index=0,
             )
         ]
