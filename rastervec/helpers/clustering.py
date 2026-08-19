@@ -242,6 +242,37 @@ class Clustering:
         )
         return result
 
+    def cluster_by_pairwise_distance(
+        self,
+        groups: list[list],
+        distance_fn: Callable[[Any, Any], float],
+        *,
+        threshold: float,
+    ) -> list[list]:
+        """Generic pairwise merge: within each incoming group, items with
+        `distance_fn(a, b) <= threshold` end up together (single-linkage,
+        via the same O(k^2) union-find pass as cluster_by_dimension/
+        group_by_overlap -- see _split_group_pairwise). Those two methods
+        are themselves expressible as this with a specific distance_fn, but
+        keep their own hardcoded bbox-similarity/overlap logic unchanged
+        (own tests, own callers); this is the metric-driven classification
+        engine's (rastervec/vector_classification/) single generic entry
+        point instead of duplicating _split_group_pairwise's wiring a third
+        time."""
+
+        def close(a, b) -> bool:
+            return distance_fn(a, b) <= threshold
+
+        result: list[list] = []
+        for group in groups:
+            result.extend(self._split_group_pairwise(group, close))
+
+        _LOG.debug(
+            "cluster_by_pairwise_distance: %d group(s) -> %d cluster(s) (threshold=%s)",
+            len(groups), len(result), threshold,
+        )
+        return result
+
     def group_by_overlap(
         self,
         groups: list[list],

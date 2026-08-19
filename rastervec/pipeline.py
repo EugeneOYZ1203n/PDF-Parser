@@ -15,9 +15,12 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from tqdm import tqdm
+
+if TYPE_CHECKING:
+    from rastervec.output_types import NativePDFElements
 
 if __name__ == "__main__" and __package__ is None:
     # Allow running this file directly (`python rastervec/pipeline.py`),
@@ -32,6 +35,7 @@ from rastervec.native import Native
 from rastervec.reader import Reader
 from rastervec.renderer import Renderer
 from rastervec.vector import Vector
+from rastervec.vector_classification import DEFAULT_PIPELINE, StepConfig
 
 _LOG = get_logger("pipeline")
 
@@ -42,17 +46,17 @@ GroupKey = tuple[str, tuple]
 @dataclass
 class ClusteringStageResult:
     """One (layer, color) group's result from the single configurable
-    clustering stage: the `order` the (up to 8) Vector.PIPELINE_STEPS
-    operations ran in, `steps[i]` = the surviving-groups snapshot after
-    applying `order[i]` (so `steps[-1]` is the final result, handed to
+    classification pipeline: `steps_config` is the `list[StepConfig]` that
+    ran, `steps[i]` = the surviving-groups snapshot after applying
+    `steps_config[i]` (so `steps[-1]` is the final result, handed to
     drawing_vectors/ocr_text_clusters), and `dropped[i]` = only what step
-    `i` itself dropped (empty for a pure clustering step or "none" -- only
-    the 4 filter steps ever drop anything). Every dropped group was
-    "classified as Drawing" the moment it was dropped (see
-    _run_drawing_vectors) -- a caller wanting the cumulative drop total up
-    to step i sums `dropped[0:i+1]`."""
+    `i` itself dropped (empty for cluster/group steps -- only filter steps
+    ever drop anything). Every dropped group was "classified as Drawing"
+    the moment it was dropped (see _run_drawing_vectors) -- a caller
+    wanting the cumulative drop total up to step i sums
+    `dropped[0:i+1]`."""
 
-    order: list[str]
+    steps_config: list[StepConfig]
     steps: list[list[list[VectorPath]]]
     dropped: list[list[list[VectorPath]]]
 
@@ -68,17 +72,13 @@ class PipelineContext:
     vector_paths: list[VectorPath] | None = None
     paths_by_layer: dict[str, list[VectorPath]] | None = None
     paths_by_layer_color: dict[str, dict[tuple, list[VectorPath]]] | None = None
-    # None means "use Vector.PIPELINE_STEPS's default order" -- settable by
-    # the debug app before calling Pipeline.run_page to interactively
-    # reorder the clustering stage's (up to 8) operations. A step may
-    # repeat at more than one ordinal position.
-    clustering_order: list[str] | None = None
-    # Step key -> {param_name: value} overrides for that pipeline method
-    # (see Vector.cluster's step_params) -- e.g. {"cluster_spatial":
-    # {"threshold": 12.0}}. None/missing entries fall back to that method's
-    # own instance-attribute default. Settable by the debug app alongside
-    # clustering_order to interactively tune each operation's thresholds.
-    clustering_params: dict[str, dict[str, float]] | None = None
+    # None means "use vector_classification.DEFAULT_PIPELINE" -- settable
+    # by the debug app before calling Pipeline.run_page to interactively
+    # edit the classification pipeline's step list (add/remove/reorder
+    # StepConfig instances). Each StepConfig is self-contained (its own
+    # metric/condition/scope/params), so two instances of the same kind at
+    # different positions never share state.
+    classification_steps: list[StepConfig] | None = None
     clustering: dict[GroupKey, ClusteringStageResult] | None = None
     drawing_vectors: list[DrawingVector] | None = None
     # Populated alongside drawing_vectors -- whatever the clustering
@@ -88,6 +88,20 @@ class PipelineContext:
     ocr_text_clusters: list[TextVectorResult] | None = None
     # Future stages add fields here as they're implemented (raster_images,
     # etc.) so later stages can read earlier stages' output.
+
+    def to_native_pdf_elements(self) -> "NativePDFElements":
+        """Serialization/export boundary: standardized output_types.py DTOs
+        built from whatever this run's native_words/drawing_vectors ended
+        up as. A plain method, not a pipeline stage -- the internal
+        dataclasses stay canonical throughout the pipeline; this is only
+        for callers that want the pymupdf-mirroring output shape (e.g. a
+        future --dump-json CLI flag, or evaluation.py's serialization
+        boundary)."""
+        from rastervec.output_types import NativePDFElements
+
+        return NativePDFElements.from_extract(
+            words=self.native_words or [], drawings=self.drawing_vectors or [],
+        )
 
 
 @dataclass
@@ -147,15 +161,13 @@ def _iter_groups(
 
 def _run_clustering(ctx: PipelineContext) -> dict[GroupKey, ClusteringStageResult]:
     vector = Vector()
-    order = ctx.clustering_order or list(vector.PIPELINE_STEPS)
+    steps_config = ctx.classification_steps or list(DEFAULT_PIPELINE)
     result: dict[GroupKey, ClusteringStageResult] = {}
 
     for key, paths in _iter_groups(ctx.paths_by_layer_color):
-        kept_snapshots, dropped_snapshots = vector.cluster(
-            paths, ctx.page, order, step_params=ctx.clustering_params,
-        )
+        kept_snapshots, dropped_snapshots = vector.cluster(paths, ctx.page, steps_config)
         result[key] = ClusteringStageResult(
-            order=order, steps=kept_snapshots, dropped=dropped_snapshots,
+            steps_config=steps_config, steps=kept_snapshots, dropped=dropped_snapshots,
         )
 
     ctx.clustering = result
@@ -181,6 +193,14 @@ def _run_drawing_vectors(ctx: PipelineContext) -> list[DrawingVector]:
                 all_drawing_paths.extend(group)
         if cluster_result.steps:
             all_text_clusters.extend(cluster_result.steps[-1])
+
+    # ctx.clustering is keyed by (layer, color) -- iterating its buckets
+    # loses each path's original PDF stacking order across layer/color
+    # boundaries. Sort back to (seq, item_index) -- the original
+    # get_drawings() draw order -- before aggregating into DrawingVectors,
+    # so render order matches the source PDF regardless of which bucket a
+    # path was classified into during clustering.
+    all_drawing_paths.sort(key=lambda p: (p.seq, p.item_index))
 
     ctx.text_clusters = all_text_clusters
     ctx.drawing_vectors = vector.build_drawing_vectors(all_drawing_paths)
@@ -240,8 +260,7 @@ class Pipeline:
         self,
         reader: Reader,
         page_index: int,
-        clustering_order: list[str] | None = None,
-        clustering_params: dict[str, dict[str, float]] | None = None,
+        classification_steps: list[StepConfig] | None = None,
         final_stage: str | None = None,
     ) -> list[StageOutput]:
         """Runs Pipeline.STAGES in order, stopping after `final_stage`
@@ -251,18 +270,15 @@ class Pipeline:
         it's a real way to skip the OCR round-trip while iterating on
         earlier stages, not just a display-time filter. `None` (default)
         runs every stage, unchanged from before this parameter existed.
-        `clustering_params` is threaded onto `ctx` for `_run_clustering` to
-        pass as `Vector.cluster`'s `step_params` -- per-method threshold/
-        parameter overrides, keyed by step (see PipelineContext.
-        clustering_params)."""
+        `classification_steps` is threaded onto `ctx` for `_run_clustering`
+        to pass to `Vector.cluster` -- `None` uses `DEFAULT_PIPELINE`."""
         if final_stage is not None and final_stage not in self.stage_keys():
             raise ValueError(
                 f"unknown final_stage {final_stage!r}; must be one of {self.stage_keys()}"
             )
 
         ctx = PipelineContext(
-            reader=reader, page_index=page_index, clustering_order=clustering_order,
-            clustering_params=clustering_params,
+            reader=reader, page_index=page_index, classification_steps=classification_steps,
         )
         outputs: list[StageOutput] = []
 

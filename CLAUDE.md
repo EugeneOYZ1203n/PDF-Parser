@@ -282,9 +282,11 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   with a translation offset into its isolated small canvas, this calls it with `dx=dy=0` since
   paths are already in the reconstruction's absolute page-space coordinates), never just their
   aggregate bbox. `native_words`/`ocr_results` are inserted as real text via `page.insert_text` —
-  necessarily approximate: font family isn't preserved (always PyMuPDF's base14 `"helv"`), and
-  rotation snaps to the nearest multiple of 90 via `_nearest_quarter_rotation` (`insert_text`'s
-  `rotate` param doesn't accept arbitrary angles) — a "does this look roughly right" preview, not a
+  necessarily approximate: font family isn't preserved (always PyMuPDF's base14 `"helv"`). Rotation
+  is exact at any angle: since `insert_text`'s own `rotate` param only accepts multiples of 90,
+  rotation is applied instead via its `morph=(fixpoint, matrix)` param — `(origin, fitz.Matrix(1,
+  1).prerotate(angle))`, PyMuPDF's mechanism for arbitrary-angle text (a `cm` transform applied
+  before drawing) — a "does this look roughly right" preview, not a
   byte-accurate reconstruction. `native_words` position at each `TextWord.origin` if set, else the
   bbox's bottom-left corner as a baseline approximation; color unpacked from the packed-int
   `TextWord.color` via `_text_color`. `ocr_results` position at each `TextVectorResult.bbox`'s

@@ -123,6 +123,20 @@ def test_render_reconstructed_page_draws_ocr_results():
     assert darkest < 255
 
 
+def test_render_reconstructed_page_arbitrary_angle_text_does_not_raise():
+    # Previously rotation was snapped to the nearest multiple of 90 (the
+    # only angle insert_text's `rotate` param accepts); now it's applied
+    # via a morph matrix instead, so a non-quarter angle like 37deg must
+    # render without raising.
+    meta = PageMeta(index=0, number=1, mediabox=(0, 0, 200, 100), rotation=0, width=200, height=100)
+    word = _make_word(angle=37.0)
+
+    image = Renderer().render_reconstructed_page(meta, native_words=[word], zoom=2.0)
+
+    darkest, _lightest = image.convert("L").getextrema()
+    assert darkest < 255
+
+
 def test_render_reconstructed_page_skips_blank_text():
     meta = PageMeta(index=0, number=1, mediabox=(0, 0, 200, 100), rotation=0, width=200, height=100)
     blank_word = _make_word(text="   ")

@@ -4,7 +4,7 @@ directly from the PDF's own text objects (no OCR/rendering involved).
 from __future__ import annotations
 
 from itertools import groupby
-from math import atan2, degrees
+from math import atan2, degrees, hypot
 
 import pymupdf as fitz
 
@@ -139,6 +139,41 @@ class Native:
     ) -> "fitz.Quad":
         return make_oriented_quad(bbox, dx, dy)
 
+    def _word_origin(
+        self, bbox: "fitz.Rect", span_origin: tuple[float, float] | None,
+        dx: float, dy: float,
+    ) -> tuple[float, float] | None:
+        """A per-word insertion point on the span's baseline.
+
+        get_text('dict')'s span-level `origin` is the baseline start of the
+        *whole* span (which can hold several words) -- using it verbatim as
+        every one of that span's words' origin (the previous behavior) gave
+        every word in a line the exact same insertion point, which is why
+        Renderer.render_reconstructed_page drew every word on a line
+        stacked at the same spot instead of spread out. This instead keeps
+        the span's baseline (its perpendicular offset from the direction
+        line, `normal_offset`) but moves along the direction to this word's
+        own leading edge (`along_min`, from its own bbox) -- reusing the
+        same along/normal projection geometry.make_oriented_quad uses, so
+        it's correct for rotated/vertical text too, not just horizontal."""
+        if span_origin is None:
+            return None
+        length = hypot(dx, dy)
+        if length < 1e-9:
+            dx, dy = 1.0, 0.0
+            length = 1.0
+        dx, dy = dx / length, dy / length
+        nx, ny = -dy, dx
+
+        corners = [
+            (bbox.x0, bbox.y0), (bbox.x1, bbox.y0),
+            (bbox.x1, bbox.y1), (bbox.x0, bbox.y1),
+        ]
+        along_min = min(x * dx + y * dy for x, y in corners)
+        normal_offset = span_origin[0] * nx + span_origin[1] * ny
+
+        return (along_min * dx + normal_offset * nx, along_min * dy + normal_offset * ny)
+
     def _to_text_word(
         self,
         word: tuple,
@@ -191,7 +226,7 @@ class Native:
             font_size=span["size"],
             color=span["color"],
             flags=span["flags"],
-            origin=span["origin"],
+            origin=self._word_origin(bbox, span["origin"], dx, dy),
             ascender=span["ascender"],
             descender=span["descender"],
             orientation_source="text-span",

@@ -64,14 +64,6 @@ def _draw_vector_path(shape: "fitz.Shape", path: VectorPath, dx: float = 0.0, dy
     )
 
 
-def _nearest_quarter_rotation(angle: float) -> int:
-    """page.insert_text's `rotate` only accepts multiples of 90 -- rounds
-    an arbitrary text angle to the nearest one, best-effort (exact
-    arbitrary-angle text reconstruction would need Shape.insert_text with
-    a morph matrix instead, not worth it for a debug-only preview)."""
-    return round(angle / 90.0) % 4 * 90
-
-
 def _text_color(color: int | None) -> tuple[float, float, float]:
     """Unpacks a PyMuPDF span-style packed sRGB int (as TextWord.color
     carries) into an (r, g, b) 0..1 tuple for insert_text's color param."""
@@ -168,11 +160,14 @@ class Renderer:
         rasterizes at `zoom` the same way DebugApp.render() rasterizes the
         real page (so the two images are pixel-comparable at the same
         zoom level). Text reconstruction is necessarily approximate: font
-        family isn't preserved (always the PyMuPDF base14 "helv"), and
-        rotation snaps to the nearest multiple of 90 (page.insert_text
-        doesn't support arbitrary angles) -- this is a "does this look
-        roughly right" preview, not a byte-accurate reconstruction (that's
-        evaluation.py's job once built)."""
+        family isn't preserved (always the PyMuPDF base14 "helv"). Rotation
+        is exact, at any angle -- page.insert_text's own `rotate` param only
+        accepts multiples of 90, so text is rotated instead via a `morph`
+        transform (a (fixpoint, rotation-matrix) pair applied as a `cm` op
+        before drawing, PyMuPDF's own mechanism for arbitrary-angle text)
+        -- this is still a "does this look roughly right" preview, not a
+        byte-accurate reconstruction (that's evaluation.py's job once
+        built)."""
         doc = fitz.open()
         try:
             page = doc.new_page(width=page_meta.width, height=page_meta.height)
@@ -194,7 +189,8 @@ class Renderer:
                         origin, word.text,
                         fontsize=max(word.font_size, 1.0),
                         color=_text_color(word.color),
-                        rotate=_nearest_quarter_rotation(word.angle),
+                        rotate=0,
+                        morph=(fitz.Point(origin), fitz.Matrix(1, 1).prerotate(word.angle)),
                     )
 
             if ocr_results:
@@ -203,10 +199,15 @@ class Renderer:
                         continue
                     x0, _y0, _x1, y1 = result.bbox
                     fontsize = max(result.bbox[3] - result.bbox[1], 4.0)
+                    origin = (x0, y1)
                     page.insert_text(
-                        (x0, y1), result.text,
+                        origin, result.text,
                         fontsize=fontsize,
-                        rotate=_nearest_quarter_rotation(result.rotation_used),
+                        rotate=0,
+                        morph=(
+                            fitz.Point(origin),
+                            fitz.Matrix(1, 1).prerotate(result.rotation_used),
+                        ),
                     )
 
             pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)

@@ -25,6 +25,32 @@ def test_extract_text_basic_horizontal(synthetic_pdf_factory, tmp_pdf_path):
     assert word.bbox[0] == pytest.approx(10, abs=1)
 
 
+def test_extract_text_multi_word_span_gives_each_word_its_own_origin(
+    synthetic_pdf_factory, tmp_pdf_path,
+):
+    # Two words on the same line/span used to both get the *span's* origin
+    # (the whole span's baseline-start point), so every word beyond the
+    # first rendered at the same insertion point -- see Renderer.
+    # render_reconstructed_page, which draws at word.origin. Each word must
+    # get its own origin, on the same baseline but at its own leading edge.
+    doc = synthetic_pdf_factory(
+        [{"texts": [{"point": (10, 20), "text": "Hello World"}]}]
+    )
+    path = tmp_pdf_path(doc)
+
+    with Reader(path) as reader:
+        page = reader.get_page(0)
+        words = Native().extract_text(page)
+
+    assert [w.text for w in words] == ["Hello", "World"]
+    hello, world = words
+    assert hello.origin is not None and world.origin is not None
+    assert hello.origin != world.origin
+    assert hello.origin[1] == pytest.approx(world.origin[1], abs=1e-6)  # same baseline
+    assert hello.origin[0] < world.origin[0]  # World starts further right
+    assert world.origin[0] == pytest.approx(world.bbox[0], abs=1.0)
+
+
 def test_extract_text_rotated(synthetic_pdf_factory, tmp_pdf_path):
     doc = synthetic_pdf_factory(
         [

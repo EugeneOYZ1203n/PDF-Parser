@@ -90,6 +90,29 @@ def test_cluster_by_seq_single_item_group_passthrough():
     assert clusters == [group]
 
 
+def test_cluster_by_pairwise_distance_matches_cluster_by_dimension():
+    clustering = Clustering()
+    groups = [[_item(0, 0, 10, 10), _item(0, 0, 13, 13), _item(0, 0, 100, 5)]]
+
+    def dimension_distance(a, b):
+        ax0, ay0, ax1, ay1 = _bbox(a)
+        bx0, by0, bx1, by1 = _bbox(b)
+        aw, ah = ax1 - ax0, ay1 - ay0
+        bw, bh = bx1 - bx0, by1 - by0
+        return max(abs(aw - bw) / max(aw, bw, 1e-6), abs(ah - bh) / max(ah, bh, 1e-6))
+
+    expected = clustering.cluster_by_dimension(groups, _bbox, tolerance=0.35)
+    actual = clustering.cluster_by_pairwise_distance(groups, dimension_distance, threshold=0.35)
+
+    assert sorted(map(len, actual)) == sorted(map(len, expected))
+    assert len(actual) == 2  # the two ~similar boxes merge; the thin one stays separate
+
+
+def test_cluster_by_pairwise_distance_empty_group_list():
+    clustering = Clustering()
+    assert clustering.cluster_by_pairwise_distance([], lambda a, b: 0.0, threshold=1.0) == []
+
+
 def test_group_by_overlap_merges_partial_overlap():
     a = _item(0, 0, 10, 10)
     b = _item(5, 5, 15, 15)  # partial overlap with a

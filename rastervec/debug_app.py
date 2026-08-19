@@ -34,7 +34,14 @@ from rastervec.models import DrawingVector, Page, TextVectorResult, TextWord, Ve
 from rastervec.pipeline import ClusteringStageResult, Pipeline, StageOutput
 from rastervec.reader import Reader
 from rastervec.renderer import Renderer
-from rastervec.vector import Vector
+from rastervec.vector_classification import (
+    DEFAULT_PIPELINE,
+    PAIRWISE_METRICS,
+    SCALAR_METRICS,
+    StepConfig,
+    load_from_file,
+    save_to_file,
+)
 
 REFERENCES_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -89,37 +96,44 @@ class DebugAppState:
     page_index: int = 0
     zoom: float = 1.5
     stage_index: int = 0
-    # Keyed by (page_index, clustering_order, clustering_params) -- changing
-    # the clustering stage's operation order or any method's parameter
-    # override is a full pipeline recompute (see DebugApp.
-    # _set_clustering_order/_set_clustering_params), so each combination
-    # gets its own cache slot rather than invalidating/replacing the page's
-    # other-order/other-params results (letting the user flip back and
-    # forth without recomputing).
+    # Keyed by (page_index, steps_cache_key) -- changing the classification
+    # step list (add/remove/reorder/edit any step) is a full pipeline
+    # recompute (see DebugApp._set_classification_steps), so each distinct
+    # step list gets its own cache slot rather than invalidating/replacing
+    # the page's other-steps results (letting the user flip back and forth
+    # without recomputing).
     stage_cache: dict[tuple, list[StageOutput]] = field(default_factory=dict)
     # stage key -> arbitrary dict of checkbox state, kept across redraws of
     # that stage (reset per page since it's cached with stage_cache anyway).
     filter_state: dict[str, dict] = field(default_factory=dict)
-    # The clustering stage's (up to 8-operation, repeats allowed) order --
-    # lives here (not in filter_state) since changing it drives which cache
-    # slot above is used.
-    clustering_order: list[str] = field(default_factory=lambda: list(Vector.PIPELINE_STEPS))
-    # Step key -> {param_name: value} overrides for that pipeline method
-    # (see Vector.cluster's step_params / PipelineContext.clustering_params)
-    # -- lives here rather than filter_state for the same reason as
-    # clustering_order: it drives the stage_cache key. Empty/missing means
-    # "use that method's own default" (see _cluster_step_param_default).
-    # Values are usually float/int but group_overlapping's "bbox_scope" is
-    # a string ("path"/"cluster").
-    clustering_params: dict[str, dict[str, float | str]] = field(default_factory=dict)
-    # ocr_text_clusters inspector: (page_index, clustering_order, cluster
+    # The clustering stage's step list -- lives here (not in filter_state)
+    # since changing it drives which cache slot above is used.
+    classification_steps: list[StepConfig] = field(
+        default_factory=lambda: [StepConfig(**vars(s)) for s in DEFAULT_PIPELINE]
+    )
+    # Staged (not-yet-applied) edits for the clustering stage's step-list
+    # editor -- decoupled from classification_steps so editing several rows
+    # doesn't trigger a recompute after each one; only clicking "Apply
+    # Changes" copies these over (see DebugApp._apply_pending_classification_
+    # changes). Reset to mirror the committed value every time the
+    # clustering stage is (re)entered.
+    pending_classification_steps: list[StepConfig] = field(
+        default_factory=lambda: [StepConfig(**vars(s)) for s in DEFAULT_PIPELINE]
+    )
+    # ocr_text_clusters inspector: (page_index, steps_cache_key, cluster
     # index) -> {"image", "bbox_corners"} (see _ocr_cluster_preview).
     # Deliberately its own dict, not filter_state -- filter_state is keyed
     # only by stage key (shared across every page/order visit of that
     # stage, fine for cheap UI toggles), but this holds real recomputed
-    # render+OCR data that's only valid for the exact page/order/cluster it
+    # render+OCR data that's only valid for the exact page/steps/cluster it
     # was built from.
     ocr_detail_cache: dict[tuple, dict] = field(default_factory=dict)
+    # Last stage key redraw_overlay() actually rendered -- used to reset
+    # pending_classification_steps only when the clustering stage is newly
+    # (re)entered, not on every redraw (a row edit in the clustering stage
+    # also calls redraw_overlay() to rebuild the editor's widgets; without
+    # this guard that redraw would immediately stomp the just-made edit).
+    last_stage_key: str | None = None
 
 
 _DEFAULT_PATH_COLOR = "#111827"
@@ -156,16 +170,19 @@ class RenderContext:
     # the canvas, so switching stage/page/zoom away mid-draw can't leave
     # ghost items drawn by a now-superseded render.
     epoch_box: dict = field(default_factory=lambda: {"value": 0})
-    # Only used by the clustering stage: the current (up to 8-operation)
-    # order, and a callback to persist a new order + trigger the full
-    # pipeline recompute it requires (see DebugApp._set_clustering_order).
-    clustering_order: list[str] = field(default_factory=list)
-    set_clustering_order: "Callable[[list[str]], None] | None" = None
-    # Only used by the clustering stage: the current per-method parameter
-    # overrides, and a callback to persist a change + trigger the full
-    # pipeline recompute it requires (see DebugApp._set_clustering_params).
-    clustering_params: dict[str, dict[str, float | str]] = field(default_factory=dict)
-    set_clustering_params: "Callable[[dict[str, dict[str, float | str]]], None] | None" = None
+    # Only used by the clustering stage: the current committed step list,
+    # and a callback to persist a new list + trigger the full pipeline
+    # recompute it requires (see DebugApp._set_classification_steps).
+    classification_steps: list[StepConfig] = field(default_factory=list)
+    set_classification_steps: "Callable[[list[StepConfig]], None] | None" = None
+    # Staged (uncommitted) step list the clustering stage's row editor
+    # actually reads/writes -- see DebugAppState.pending_classification_
+    # steps. Writing to this never triggers a redraw; only
+    # apply_pending_classification_changes() (wired to the "Apply Changes"
+    # button) copies it into classification_steps above and recomputes.
+    pending_classification_steps: list[StepConfig] = field(default_factory=list)
+    set_pending_classification_steps: "Callable[[list[StepConfig]], None] | None" = None
+    apply_pending_classification_changes: "Callable[[], None] | None" = None
     # The live Page for the page currently being viewed -- only
     # ocr_text_clusters needs it today (to re-render a cluster on demand
     # for its inspector panel; see _ocr_cluster_preview), but it's cheap and
@@ -595,12 +612,25 @@ def _render_color_separation_stage(ctx: RenderContext) -> None:
 _RECULL_CHUNK_SIZE = 400
 
 
-def _params_cache_key(params: dict[str, dict[str, float]]) -> tuple:
-    """Hashable representation of a clustering_params dict, for use as
-    (part of) a DebugAppState.stage_cache key -- dicts aren't hashable, and
-    two calls with equal-but-freshly-built dicts (as redraw_overlay's
-    RenderContext construction does) must still hit the same cache slot."""
-    return tuple(sorted((step, tuple(sorted(kv.items()))) for step, kv in params.items()))
+def _steps_cache_key(steps: list[StepConfig]) -> tuple:
+    """Hashable representation of a classification_steps list, for use as
+    (part of) a DebugAppState.stage_cache key -- dataclasses/lists aren't
+    hashable, and two calls with equal-but-freshly-built lists (as
+    redraw_overlay's RenderContext construction does) must still hit the
+    same cache slot."""
+    def _hashable_params(params: dict) -> tuple:
+        return tuple(sorted(params.items()))
+
+    def _hashable_threshold(threshold) -> tuple | float | None:
+        return tuple(threshold) if isinstance(threshold, list) else threshold
+
+    return tuple(
+        (
+            s.kind, s.metric, s.condition, _hashable_threshold(s.threshold), s.scope,
+            s.method, s.aggregate, s.aggregate_scope, _hashable_params(s.params), s.label,
+        )
+        for s in steps
+    )
 
 
 def _cluster_size_stats_text(clusters: list[list[VectorPath]]) -> str:
@@ -616,204 +646,415 @@ def _cluster_size_stats_text(clusters: list[list[VectorPath]]) -> str:
     )
 
 
-_CLUSTER_STEP_LABELS: dict[str, str] = {
-    "filter_layout_panels": "Filter: Layout Panels",
-    "filter_large_bbox": "Filter: Large Bbox",
-    "cluster_spatial": "Spatial",
-    "cluster_spatial_union_find": "Spatial (UF)",
-    "cluster_by_seq": "Sequence",
-    "group_overlapping": "Overlap",
-    "cluster_groups_by_dimension": "Dimension",
-    "cluster_by_item_path_count": "Item Path Count",
-    "cluster_by_item_bbox": "Item Bbox Size",
-    "filter_large_group_bbox": "Filter: Large Group Bbox",
-    "filter_aspect_ratio": "Filter: Aspect Ratio",
-    "none": "None",
-}
 _CLUSTER_STEP_COLORS = [
     "#2563eb", "#7c3aed", "#ea580c", "#0d9488",
     "#6b7280", "#c026d3", "#65a30d", "#0284c7",
 ]
-_ORDINAL_LABELS = ("1st", "2nd", "3rd", "4th", "5th", "6th", "7th", "8th")
 
-# step key -> [(param_name, label, kind)] -- the tunable parameters shown as
-# rows right below that step's dropdown in _render_clustering_stage.
-# "float"/"int" render a text entry, parsed by _parse_param_text;
-# "choice:opt1,opt2" renders a readonly dropdown of those exact string
-# values instead (see group_overlapping's bbox_scope); "none"/filter_
-# layout_panels have no tunable params.
-_CLUSTER_STEP_PARAMS: dict[str, list[tuple[str, str, str]]] = {
-    "filter_layout_panels": [],
-    "filter_large_bbox": [("max_area_fraction", "Max area frac", "float")],
-    "cluster_spatial": [("threshold", "Threshold", "float")],
-    "cluster_spatial_union_find": [("threshold", "Threshold", "float")],
-    "cluster_by_seq": [("max_gap", "Max gap", "int")],
-    "group_overlapping": [
-        ("tolerance", "Tolerance", "float"),
-        ("bbox_scope", "Bbox scope", "choice:path,cluster"),
-    ],
-    "cluster_groups_by_dimension": [("tolerance", "Tolerance", "float")],
-    "cluster_by_item_path_count": [("max_gap", "Max gap", "int")],
-    "cluster_by_item_bbox": [("tolerance", "Tolerance", "float")],
-    "filter_large_group_bbox": [("max_area_fraction", "Max area frac", "float")],
-    "filter_aspect_ratio": [("max_aspect_ratio", "Max aspect", "float")],
-    "none": [],
-}
+# Row-editor dropdown option lists -- mirrors step_config.py's own
+# validation constants (kept private there, so duplicated here as plain
+# tuples rather than imported).
+_KINDS = ("filter", "cluster", "group")
+_CONDITIONS = (">", ">=", "<", "<=", "==", "!=", "within", "outside")
+_FILTER_SCOPES = ("item", "cluster", "items_in_cluster", "cluster_all_items")
+_CLUSTER_METHODS = ("pairwise", "global")
+_CLUSTER_SCOPES = ("within_group", "global_flatten")
+_GROUP_SCOPES = ("path", "cluster")
+_AGGREGATES = ("none", "mean", "median")
+_AGGREGATE_SCOPES = ("global", "group")
+_EXTRA_PARAM_CHOICES = {"bbox_source": ("path", "item")}
 
 
-def _cluster_step_param_default(step: str, param: str, page: Page) -> float | str:
-    """The value a param row pre-fills/falls back to when the user hasn't
-    overridden it -- mirrors each Vector method's own instance-attribute
-    default exactly (group_overlapping's tolerance is the one page-
-    dependent one, via Vector.default_overlap_tolerance; its bbox_scope
-    isn't an instance attribute at all, just Vector.group_overlapping's own
-    default argument value)."""
-    vector = Vector()
-    if step in ("cluster_spatial", "cluster_spatial_union_find"):
-        return vector.spatial_threshold
-    if step == "cluster_by_seq":
-        return vector.seq_max_gap
-    if step == "group_overlapping":
-        if param == "bbox_scope":
-            return "path"
-        return Vector.default_overlap_tolerance(page)
-    if step == "cluster_groups_by_dimension":
-        return vector.group_dimension_tolerance
-    if step == "cluster_by_item_path_count":
-        return vector.item_count_max_gap
-    if step == "cluster_by_item_bbox":
-        return vector.item_bbox_tolerance
-    if step in ("filter_large_bbox", "filter_large_group_bbox"):
-        return vector.large_bbox_area_fraction
-    if step == "filter_aspect_ratio":
-        return vector.max_aspect_ratio
-    raise ValueError(f"no default param for step {step!r}")
+def _default_step_for_kind(kind: str) -> StepConfig:
+    if kind == "filter":
+        return StepConfig(kind="filter", metric="bbox_area_fraction", condition="<=", threshold=0.2, scope="item")
+    if kind == "cluster":
+        return StepConfig(kind="cluster", metric="spatial_gap", method="global", threshold=8.0)
+    return StepConfig(kind="group", metric="spatial_gap", scope="cluster", threshold=8.0)
 
 
-def _parse_param_text(text: str, kind: str) -> float | None:
+def _metric_options_for_step(step: StepConfig) -> dict:
+    if step.kind == "cluster":
+        return SCALAR_METRICS if step.method == "pairwise" else PAIRWISE_METRICS
+    if step.kind == "group":
+        return PAIRWISE_METRICS
+    return SCALAR_METRICS
+
+
+def _parse_threshold_text(text: str) -> float | None:
     try:
-        return int(text) if kind == "int" else float(text)
+        return float(text)
     except ValueError:
         return None
 
 
 def _render_clustering_stage(ctx: RenderContext) -> None:
-    """The single configurable pipeline stage: up to 8 ordinal positions,
-    each independently picking any of the 4 filter steps (filter_
-    layout_panels, filter_large_bbox, filter_large_group_bbox,
-    filter_aspect_ratio) or 7 clustering/grouping operations
-    (cluster_spatial, cluster_spatial_union_find, cluster_by_seq,
-    group_overlapping, cluster_groups_by_dimension,
-    cluster_by_item_path_count, cluster_by_item_bbox), or "none" to skip
-    that position (default: Vector.PIPELINE_STEPS's order). Every dropdown
-    is fully independent -- a step may be selected at more than one
-    position (e.g. running cluster_spatial twice). Changing a dropdown or a
-    param calls ctx.set_clustering_order/set_clustering_params, which
-    persists the change and triggers a full pipeline recompute (every
-    step's result depends on the whole chain up to that point, so there's
-    no cheaper partial re-run).
+    """The single configurable pipeline stage: a dynamic list of
+    StepConfig entries (rastervec/vector_classification/step_config.py),
+    each independently a filter/cluster/group step driven by a named
+    metric from SCALAR_METRICS/PAIRWISE_METRICS (rastervec/
+    vector_classification/metrics.py). Every StepConfig is self-contained
+    -- no shared name-keyed param dict -- so two occurrences of the same
+    metric at different positions hold fully independent thresholds/params
+    (default: DEFAULT_PIPELINE, reproducing the original fixed 5-step
+    pipeline).
 
-    On the right, below all 8 dropdown+params blocks: two checkboxes per
-    step -- "kept after step i" (that step's surviving groups: bbox +
-    centroid, in a distinct color per step) and "dropped by step i" (only
-    non-empty for a filter step -- what it removed, classified as Drawing,
-    grey, no centroid) -- plus a live min/median/mean/max cluster-size
-    summary for the kept side. Same viewport-culling + chunked-drawing
-    approach as before, generalized to up to 16 categories (kept + dropped
-    per each of 8 steps)."""
+    Editing is staged, not live: the row editor below reads/writes only
+    ctx.pending_classification_steps (see DebugAppState's field of the
+    same name) -- no recompute happens until the "Apply Changes" button
+    calls ctx.apply_pending_classification_changes, which copies pending
+    -> committed and triggers the full pipeline recompute (every step's
+    result depends on the whole chain up to that point, so there's no
+    cheaper partial re-run). Row edits do call ctx.on_change() to rebuild
+    the editor's widgets (e.g. switching a row's kind changes which fields
+    apply), but that's a cache hit against the *committed* steps (the
+    stage-entry pending-reset in DebugApp.redraw_overlay only fires once
+    per stage visit, not on every redraw -- see DebugAppState.
+    last_stage_key), so it never triggers a real pipeline recompute.
+    Because of this, two distinct step lists exist below: `pending_steps`
+    drives the row editor (what the user is currently editing), while
+    `committed_steps` drives the kept/dropped results section (what the
+    last Apply actually ran) -- they can diverge until Apply is clicked.
+
+    Save Config / Load Config persist/restore `pending_steps` as JSON
+    (rastervec/vector_classification/step_config.py's to_json/from_json) --
+    loading still requires clicking Apply to take effect, same as any
+    other edit.
+
+    Below the editor: two checkboxes per step -- "kept after step i" (that
+    step's surviving groups: bbox + centroid, in a distinct color per
+    step) and "dropped by step i" (only non-empty for a filter step --
+    what it removed, classified as Drawing, grey, no centroid) -- plus a
+    live min/median/mean/max cluster-size summary for the kept side. Same
+    viewport-culling + chunked-drawing approach as other high-volume
+    stages, generalized to 2 categories per step."""
     results_by_group: dict[tuple, ClusteringStageResult] = ctx.output.data or {}
-    order = list(ctx.clustering_order) if ctx.clustering_order else list(Vector.PIPELINE_STEPS)
+    committed_steps = list(ctx.classification_steps) if ctx.classification_steps else [
+        StepConfig(**vars(s)) for s in DEFAULT_PIPELINE
+    ]
+    pending_steps = list(ctx.pending_classification_steps) if ctx.pending_classification_steps else list(committed_steps)
 
     ttk.Label(ctx.side_panel, text=ctx.output.label).pack(anchor="w", padx=4, pady=(4, 6))
 
-    # --- order dropdowns (fully independent -- repeats allowed) ---
-    label_to_key = {label: key for key, label in _CLUSTER_STEP_LABELS.items()}
-    combo_vars: list[tk.StringVar] = []
+    def _apply_changes() -> None:
+        if ctx.apply_pending_classification_changes is not None:
+            ctx.apply_pending_classification_changes()
 
-    def _apply_order_change(_changed_index: int) -> None:
-        new_order = [label_to_key[var.get()] for var in combo_vars]
-        if ctx.set_clustering_order is not None:
-            ctx.set_clustering_order(new_order)
+    button_row = ttk.Frame(ctx.side_panel)
+    button_row.pack(anchor="w", fill="x", padx=4, pady=(0, 4))
+    ttk.Button(button_row, text="Apply Changes", command=_apply_changes).pack(side="left")
 
-    def _commit_param(step: str, param: str, kind: str, text_var: tk.StringVar) -> None:
-        value = _parse_param_text(text_var.get(), kind)
-        if value is None:
-            return
-        _commit_param_value(step, param, value)
+    def _set_pending(new_steps: list[StepConfig]) -> None:
+        if ctx.set_pending_classification_steps is not None:
+            ctx.set_pending_classification_steps(new_steps)
+        ctx.on_change()  # rebuild this stage's panel with the new rows -- no recompute (see docstring)
 
-    def _commit_param_value(step: str, param: str, value) -> None:
-        if ctx.set_clustering_params is None:
-            return
-        new_params = {k: dict(v) for k, v in ctx.clustering_params.items()}
-        new_params.setdefault(step, {})[param] = value
-        ctx.set_clustering_params(new_params)
-
-    def _render_param_rows(container: ttk.Frame, step: str) -> None:
-        for param, label, kind in _CLUSTER_STEP_PARAMS.get(step, []):
-            prow = ttk.Frame(container)
-            prow.pack(anchor="w", fill="x", padx=(24, 4), pady=1)
-            ttk.Label(prow, text=f"{label}:", width=12).pack(side="left")
-            override = ctx.clustering_params.get(step, {}).get(param)
-            default = override if override is not None else _cluster_step_param_default(
-                step, param, ctx.page
-            )
-            if kind.startswith("choice:"):
-                options = kind.split(":", 1)[1].split(",")
-                choice_var = tk.StringVar(value=str(default))
-                combo = ttk.Combobox(
-                    prow, textvariable=choice_var, state="readonly", width=8, values=options,
-                )
-                combo.pack(side="left")
-                combo.bind(
-                    "<<ComboboxSelected>>",
-                    lambda _event, s=step, p=param, v=choice_var: _commit_param_value(s, p, v.get()),
-                )
-            else:
-                text_var = tk.StringVar(value=str(default))
-                entry = ttk.Entry(prow, textvariable=text_var, width=8)
-                entry.pack(side="left")
-                entry.bind(
-                    "<Return>",
-                    lambda _event, s=step, p=param, k=kind, v=text_var: _commit_param(s, p, k, v),
-                )
-                entry.bind(
-                    "<FocusOut>",
-                    lambda _event, s=step, p=param, k=kind, v=text_var: _commit_param(s, p, k, v),
-                )
-
-    for i, ordinal in enumerate(_ORDINAL_LABELS[: len(order)]):
-        row = ttk.Frame(ctx.side_panel)
-        row.pack(anchor="w", fill="x", padx=4, pady=1)
-        ttk.Label(row, text=f"{ordinal}:", width=5).pack(side="left")
-        var = tk.StringVar(value=_CLUSTER_STEP_LABELS[order[i]])
-        combo = ttk.Combobox(
-            row, textvariable=var, state="readonly", width=20,
-            values=list(_CLUSTER_STEP_LABELS.values()),
+    def _save_config() -> None:
+        path = filedialog.asksaveasfilename(
+            title="Save classification config", defaultextension=".json",
+            filetypes=[("JSON files", "*.json")],
         )
-        combo.pack(side="left")
-        combo_vars.append(var)
-        combo.bind("<<ComboboxSelected>>", lambda _event, i=i: _apply_order_change(i))
+        if not path:
+            return
+        try:
+            save_to_file(pending_steps, path)
+        except Exception as exc:
+            messagebox.showerror("Unable to save config", str(exc))
 
-        params_container = ttk.Frame(ctx.side_panel)
-        params_container.pack(anchor="w", fill="x")
-        _render_param_rows(params_container, order[i])
+    def _load_config() -> None:
+        path = filedialog.askopenfilename(
+            title="Load classification config", filetypes=[("JSON files", "*.json")],
+        )
+        if not path:
+            return
+        try:
+            loaded = load_from_file(path)
+        except Exception as exc:
+            messagebox.showerror("Unable to load config", str(exc))
+            return
+        _set_pending(loaded)
+
+    ttk.Button(button_row, text="Save Config", command=_save_config).pack(side="left", padx=(4, 0))
+    ttk.Button(button_row, text="Load Config", command=_load_config).pack(side="left", padx=(4, 0))
+
+    # --- dynamic step-list editor ---
+    def _update_step(index: int, **changes) -> None:
+        new_steps = [StepConfig(**vars(s)) for s in pending_steps]
+        step = new_steps[index]
+        for key, value in changes.items():
+            setattr(step, key, value)
+        _set_pending(new_steps)
+
+    def _replace_step(index: int, new_step: StepConfig) -> None:
+        new_steps = [StepConfig(**vars(s)) for s in pending_steps]
+        new_steps[index] = new_step
+        _set_pending(new_steps)
+
+    def _move_step(index: int, delta: int) -> None:
+        target = index + delta
+        if not (0 <= target < len(pending_steps)):
+            return
+        new_steps = [StepConfig(**vars(s)) for s in pending_steps]
+        new_steps[index], new_steps[target] = new_steps[target], new_steps[index]
+        _set_pending(new_steps)
+
+    def _delete_step(index: int) -> None:
+        new_steps = [StepConfig(**vars(s)) for s in pending_steps]
+        del new_steps[index]
+        _set_pending(new_steps)
+
+    def _add_step() -> None:
+        _set_pending([StepConfig(**vars(s)) for s in pending_steps] + [_default_step_for_kind("filter")])
+
+    editor = ttk.Frame(ctx.side_panel)
+    editor.pack(anchor="w", fill="x")
+
+    for i, step in enumerate(pending_steps):
+        row_frame = ttk.LabelFrame(editor, text=f"Step {i + 1}")
+        row_frame.pack(anchor="w", fill="x", padx=4, pady=3)
+
+        top_row = ttk.Frame(row_frame)
+        top_row.pack(anchor="w", fill="x", padx=4, pady=2)
+
+        ttk.Label(top_row, text="Kind:", width=6).pack(side="left")
+        kind_var = tk.StringVar(value=step.kind)
+        kind_combo = ttk.Combobox(
+            top_row, textvariable=kind_var, state="readonly", width=8, values=_KINDS,
+        )
+        kind_combo.pack(side="left")
+        kind_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _e, i=i, v=kind_var: _replace_step(i, _default_step_for_kind(v.get())),
+        )
+
+        ttk.Button(top_row, text="^", width=2, command=lambda i=i: _move_step(i, -1)).pack(side="left", padx=(6, 0))
+        ttk.Button(top_row, text="v", width=2, command=lambda i=i: _move_step(i, 1)).pack(side="left")
+        ttk.Button(top_row, text="X", width=2, command=lambda i=i: _delete_step(i)).pack(side="left")
+
+        metric_row = ttk.Frame(row_frame)
+        metric_row.pack(anchor="w", fill="x", padx=4, pady=2)
+        ttk.Label(metric_row, text="Metric:", width=6).pack(side="left")
+        metric_options = _metric_options_for_step(step)
+        metric_labels = [spec.label for spec in metric_options.values()]
+        label_to_metric = {spec.label: key for key, spec in metric_options.items()}
+        current_metric_label = metric_options[step.metric].label if step.metric in metric_options else (
+            metric_labels[0] if metric_labels else ""
+        )
+        metric_var = tk.StringVar(value=current_metric_label)
+        metric_combo = ttk.Combobox(
+            metric_row, textvariable=metric_var, state="readonly", width=26, values=metric_labels,
+        )
+        metric_combo.pack(side="left")
+        metric_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _e, i=i, v=metric_var, m=label_to_metric: _update_step(i, metric=m[v.get()]),
+        )
+
+        if step.kind == "cluster":
+            method_row = ttk.Frame(row_frame)
+            method_row.pack(anchor="w", fill="x", padx=4, pady=2)
+            ttk.Label(method_row, text="Method:", width=6).pack(side="left")
+            method_var = tk.StringVar(value=step.method or "global")
+            method_combo = ttk.Combobox(
+                method_row, textvariable=method_var, state="readonly", width=10, values=_CLUSTER_METHODS,
+            )
+            method_combo.pack(side="left")
+
+            def _on_method_change(_e, i=i, v=method_var):
+                new_method = v.get()
+                default_metric = "spatial_gap" if new_method == "global" else next(iter(SCALAR_METRICS))
+                _update_step(i, method=new_method, metric=default_metric)
+
+            method_combo.bind("<<ComboboxSelected>>", _on_method_change)
+
+            if step.method == "pairwise":
+                scope_row = ttk.Frame(row_frame)
+                scope_row.pack(anchor="w", fill="x", padx=4, pady=2)
+                ttk.Label(scope_row, text="Scope:", width=6).pack(side="left")
+                scope_var = tk.StringVar(value=step.scope if step.scope in _CLUSTER_SCOPES else _CLUSTER_SCOPES[0])
+                scope_combo = ttk.Combobox(
+                    scope_row, textvariable=scope_var, state="readonly", width=14, values=_CLUSTER_SCOPES,
+                )
+                scope_combo.pack(side="left")
+                scope_combo.bind(
+                    "<<ComboboxSelected>>",
+                    lambda _e, i=i, v=scope_var: _update_step(i, scope=v.get()),
+                )
+
+        elif step.kind == "filter":
+            scope_row = ttk.Frame(row_frame)
+            scope_row.pack(anchor="w", fill="x", padx=4, pady=2)
+            ttk.Label(scope_row, text="Scope:", width=6).pack(side="left")
+            scope_var = tk.StringVar(value=step.scope if step.scope in _FILTER_SCOPES else _FILTER_SCOPES[0])
+            scope_combo = ttk.Combobox(
+                scope_row, textvariable=scope_var, state="readonly", width=16, values=_FILTER_SCOPES,
+            )
+            scope_combo.pack(side="left")
+            scope_combo.bind(
+                "<<ComboboxSelected>>",
+                lambda _e, i=i, v=scope_var: _update_step(i, scope=v.get()),
+            )
+
+            cond_row = ttk.Frame(row_frame)
+            cond_row.pack(anchor="w", fill="x", padx=4, pady=2)
+            ttk.Label(cond_row, text="Cond:", width=6).pack(side="left")
+            cond_var = tk.StringVar(value=step.condition or _CONDITIONS[0])
+            cond_combo = ttk.Combobox(
+                cond_row, textvariable=cond_var, state="readonly", width=8, values=_CONDITIONS,
+            )
+            cond_combo.pack(side="left")
+            cond_combo.bind(
+                "<<ComboboxSelected>>",
+                lambda _e, i=i, v=cond_var: _update_step(
+                    i, condition=v.get(),
+                    threshold=[0.0, 1.0] if v.get() in ("within", "outside") else 1.0,
+                ),
+            )
+
+            agg_row = ttk.Frame(row_frame)
+            agg_row.pack(anchor="w", fill="x", padx=4, pady=2)
+            ttk.Label(agg_row, text="Aggr:", width=6).pack(side="left")
+            agg_var = tk.StringVar(value=step.aggregate or "none")
+            agg_combo = ttk.Combobox(
+                agg_row, textvariable=agg_var, state="readonly", width=8, values=_AGGREGATES,
+            )
+            agg_combo.pack(side="left")
+            agg_combo.bind(
+                "<<ComboboxSelected>>",
+                lambda _e, i=i, v=agg_var: _update_step(
+                    i, aggregate=None if v.get() == "none" else v.get(),
+                ),
+            )
+            if step.aggregate:
+                agg_scope_var = tk.StringVar(
+                    value=step.aggregate_scope if step.aggregate_scope in _AGGREGATE_SCOPES else _AGGREGATE_SCOPES[0]
+                )
+                agg_scope_combo = ttk.Combobox(
+                    agg_row, textvariable=agg_scope_var, state="readonly", width=8, values=_AGGREGATE_SCOPES,
+                )
+                agg_scope_combo.pack(side="left", padx=(4, 0))
+                agg_scope_combo.bind(
+                    "<<ComboboxSelected>>",
+                    lambda _e, i=i, v=agg_scope_var: _update_step(i, aggregate_scope=v.get()),
+                )
+
+        else:  # group
+            scope_row = ttk.Frame(row_frame)
+            scope_row.pack(anchor="w", fill="x", padx=4, pady=2)
+            ttk.Label(scope_row, text="Scope:", width=6).pack(side="left")
+            scope_var = tk.StringVar(value=step.scope if step.scope in _GROUP_SCOPES else _GROUP_SCOPES[0])
+            scope_combo = ttk.Combobox(
+                scope_row, textvariable=scope_var, state="readonly", width=10, values=_GROUP_SCOPES,
+            )
+            scope_combo.pack(side="left")
+            scope_combo.bind(
+                "<<ComboboxSelected>>",
+                lambda _e, i=i, v=scope_var: _update_step(i, scope=v.get()),
+            )
+
+        thr_row = ttk.Frame(row_frame)
+        thr_row.pack(anchor="w", fill="x", padx=4, pady=2)
+        ttk.Label(thr_row, text="Threshold:", width=9).pack(side="left")
+        if step.kind == "filter" and step.condition in ("within", "outside"):
+            lo, hi = (step.threshold if isinstance(step.threshold, list) else [0.0, 1.0])
+            lo_var = tk.StringVar(value=str(lo))
+            hi_var = tk.StringVar(value=str(hi))
+
+            def _commit_range(i=i, lo_var=lo_var, hi_var=hi_var):
+                lo_val = _parse_threshold_text(lo_var.get())
+                hi_val = _parse_threshold_text(hi_var.get())
+                if lo_val is None or hi_val is None:
+                    return
+                _update_step(i, threshold=[lo_val, hi_val])
+
+            lo_entry = ttk.Entry(thr_row, textvariable=lo_var, width=6)
+            lo_entry.pack(side="left")
+            ttk.Label(thr_row, text="-").pack(side="left")
+            hi_entry = ttk.Entry(thr_row, textvariable=hi_var, width=6)
+            hi_entry.pack(side="left")
+            lo_entry.bind("<Return>", lambda _e, c=_commit_range: c())
+            lo_entry.bind("<FocusOut>", lambda _e, c=_commit_range: c())
+            hi_entry.bind("<Return>", lambda _e, c=_commit_range: c())
+            hi_entry.bind("<FocusOut>", lambda _e, c=_commit_range: c())
+        else:
+            thr_var = tk.StringVar(value=str(step.threshold if step.threshold is not None else 1.0))
+
+            def _commit_threshold(i=i, v=thr_var):
+                value = _parse_threshold_text(v.get())
+                if value is None:
+                    return
+                _update_step(i, threshold=value)
+
+            thr_entry = ttk.Entry(thr_row, textvariable=thr_var, width=8)
+            thr_entry.pack(side="left")
+            thr_entry.bind("<Return>", lambda _e, c=_commit_threshold: c())
+            thr_entry.bind("<FocusOut>", lambda _e, c=_commit_threshold: c())
+
+        metric_spec = metric_options.get(step.metric)
+        if metric_spec is not None and metric_spec.extra_params:
+            extra_row = ttk.Frame(row_frame)
+            extra_row.pack(anchor="w", fill="x", padx=4, pady=2)
+            for extra_param in metric_spec.extra_params:
+                choices = _EXTRA_PARAM_CHOICES.get(extra_param, ())
+                ttk.Label(extra_row, text=f"{extra_param}:", width=9).pack(side="left")
+                current = step.params.get(extra_param, choices[0] if choices else "")
+                extra_var = tk.StringVar(value=str(current))
+                if choices:
+                    extra_combo = ttk.Combobox(
+                        extra_row, textvariable=extra_var, state="readonly", width=8, values=choices,
+                    )
+                    extra_combo.pack(side="left")
+
+                    def _commit_extra(_e, i=i, p=extra_param, v=extra_var):
+                        new_steps = [StepConfig(**vars(s)) for s in pending_steps]
+                        new_steps[i].params = {**new_steps[i].params, p: v.get()}
+                        _set_pending(new_steps)
+
+                    extra_combo.bind("<<ComboboxSelected>>", _commit_extra)
+                else:
+                    extra_entry = ttk.Entry(extra_row, textvariable=extra_var, width=8)
+                    extra_entry.pack(side="left")
+
+                    def _commit_extra_text(_e, i=i, p=extra_param, v=extra_var):
+                        new_steps = [StepConfig(**vars(s)) for s in pending_steps]
+                        new_steps[i].params = {**new_steps[i].params, p: v.get()}
+                        _set_pending(new_steps)
+
+                    extra_entry.bind("<Return>", _commit_extra_text)
+                    extra_entry.bind("<FocusOut>", _commit_extra_text)
+
+        label_row = ttk.Frame(row_frame)
+        label_row.pack(anchor="w", fill="x", padx=4, pady=2)
+        ttk.Label(label_row, text="Label:", width=6).pack(side="left")
+        label_var = tk.StringVar(value=step.label)
+
+        def _commit_label(i=i, v=label_var):
+            _update_step(i, label=v.get())
+
+        label_entry = ttk.Entry(label_row, textvariable=label_var, width=20)
+        label_entry.pack(side="left")
+        label_entry.bind("<Return>", lambda _e, c=_commit_label: c())
+        label_entry.bind("<FocusOut>", lambda _e, c=_commit_label: c())
+
+    ttk.Button(editor, text="+ Add Step", command=_add_step).pack(anchor="w", fill="x", padx=4, pady=(2, 8))
 
     ttk.Separator(ctx.side_panel, orient="horizontal").pack(fill="x", padx=4, pady=6)
 
-    # --- per-step kept/dropped categories ---
+    # --- per-step kept/dropped categories (reflect the last *applied* run) ---
+    steps = committed_steps
     kept_groups: list[list[list[VectorPath]]] = [
         [g for result in results_by_group.values() for g in (result.steps[i] if i < len(result.steps) else []) if g]
-        for i in range(len(order))
+        for i in range(len(steps))
     ]
     dropped_groups: list[list[list[VectorPath]]] = [
         [g for result in results_by_group.values() for g in (result.dropped[i] if i < len(result.dropped) else []) if g]
-        for i in range(len(order))
+        for i in range(len(steps))
     ]
 
     categories: dict[str, dict] = {}
-    for i in range(len(order)):
+    for i in range(len(steps)):
         categories[f"kept_{i}"] = {
-            "show": ctx.filters.setdefault(f"show_kept_{i}", {"value": i == len(order) - 1}),
+            "show": ctx.filters.setdefault(f"show_kept_{i}", {"value": i == len(steps) - 1}),
             "entries": [(geometry.union_bbox([p.bbox for p in g]), g) for g in kept_groups[i]],
             "color": _CLUSTER_STEP_COLORS[i % len(_CLUSTER_STEP_COLORS)],
             "width": 2,
@@ -897,14 +1138,14 @@ def _render_clustering_stage(ctx: RenderContext) -> None:
 
     ctx.filters["_recull_all"] = _recull_all
 
-    for i, ordinal in enumerate(_ORDINAL_LABELS[: len(order)]):
+    for i, step in enumerate(steps):
         kept_key, dropped_key = f"kept_{i}", f"dropped_{i}"
-        step_label = _CLUSTER_STEP_LABELS[order[i]]
+        step_label = step.label or f"{step.kind}:{step.metric}"
 
         kept_var = tk.BooleanVar(value=categories[kept_key]["show"]["value"])
         _add_category_checkbox(
             ctx.side_panel, ctx.canvas,
-            f"{ordinal}: {step_label} kept ({len(kept_groups[i])})", kept_var, kept_key,
+            f"{i + 1}: {step_label} kept ({len(kept_groups[i])})", kept_var, kept_key,
             persist=lambda v, k=kept_key: (categories[k]["show"].__setitem__("value", v), _recull(k)),
         )
         ttk.Label(
@@ -914,7 +1155,7 @@ def _render_clustering_stage(ctx: RenderContext) -> None:
         dropped_var = tk.BooleanVar(value=categories[dropped_key]["show"]["value"])
         _add_category_checkbox(
             ctx.side_panel, ctx.canvas,
-            f"{ordinal}: {step_label} dropped ({len(dropped_groups[i])})", dropped_var, dropped_key,
+            f"{i + 1}: {step_label} dropped ({len(dropped_groups[i])})", dropped_var, dropped_key,
             persist=lambda v, k=dropped_key: (categories[k]["show"].__setitem__("value", v), _recull(k)),
         )
         ttk.Frame(ctx.side_panel, height=6).pack()
@@ -924,11 +1165,11 @@ def _render_clustering_stage(ctx: RenderContext) -> None:
         ctx,
         *[
             (kept_groups[i], categories[f"kept_{i}"]["show"])
-            for i in range(len(order))
+            for i in range(len(steps))
         ],
         *[
             (dropped_groups[i], categories[f"dropped_{i}"]["show"])
-            for i in range(len(order))
+            for i in range(len(steps))
         ],
     )
 
@@ -1107,7 +1348,7 @@ def _render_ocr_text_clusters_stage(ctx: RenderContext) -> None:
         ctx.canvas.bind("<Left>", lambda _e: _step_cluster(-1))
         ctx.canvas.bind("<Right>", lambda _e: _step_cluster(1))
 
-        cache_key = (ctx.page.meta.index, tuple(ctx.clustering_order), index)
+        cache_key = (ctx.page.meta.index, _steps_cache_key(ctx.classification_steps), index)
         if cache_key not in ctx.ocr_detail_cache:
             ctx.ocr_detail_cache[cache_key] = _ocr_cluster_preview(result, ctx.page)
         preview = ctx.ocr_detail_cache[cache_key]
@@ -1332,10 +1573,7 @@ class DebugApp:
         registered one) to redraw just the delta for the new visible
         region, without rebuilding the whole stage (checkboxes, spatial
         indices, etc.)."""
-        cache_key = (
-            self.state.page_index, tuple(self.state.clustering_order),
-            _params_cache_key(self.state.clustering_params),
-        )
+        cache_key = (self.state.page_index, _steps_cache_key(self.state.classification_steps))
         outputs = self.state.stage_cache.get(cache_key)
         if not outputs:
             return
@@ -1387,35 +1625,37 @@ class DebugApp:
 
     def _get_stage_outputs(self) -> list[StageOutput]:
         page_index = self.state.page_index
-        cache_key = (
-            page_index, tuple(self.state.clustering_order),
-            _params_cache_key(self.state.clustering_params),
-        )
+        cache_key = (page_index, _steps_cache_key(self.state.classification_steps))
         cached = self.state.stage_cache.get(cache_key)
         if cached is not None:
             return cached
         outputs = self.pipeline.run_page(
             self.reader, page_index,
-            clustering_order=self.state.clustering_order,
-            clustering_params=self.state.clustering_params,
+            classification_steps=self.state.classification_steps,
             final_stage=self.final_stage,
         )
         self.state.stage_cache[cache_key] = outputs
         return outputs
 
-    def _set_clustering_order(self, order: list[str]) -> None:
-        """Changing the clustering stage's operation order changes what
-        every group downstream of it looks like, so this is a full
-        pipeline recompute (via _get_stage_outputs's new cache key) rather
-        than a cheaper partial re-run."""
-        self.state.clustering_order = order
+    def _set_classification_steps(self, steps: list[StepConfig]) -> None:
+        """Changing the clustering stage's step list changes what every
+        group downstream of it looks like, so this is a full pipeline
+        recompute (via _get_stage_outputs's new cache key) rather than a
+        cheaper partial re-run."""
+        self.state.classification_steps = steps
         self.redraw_overlay()
 
-    def _set_clustering_params(self, params: dict[str, dict[str, float]]) -> None:
-        """Changing a clustering method's threshold/parameter override is,
-        like changing the operation order, a full pipeline recompute (see
-        _set_clustering_order)."""
-        self.state.clustering_params = params
+    def _set_pending_classification_steps(self, steps: list[StepConfig]) -> None:
+        """Stages a step-list edit without recomputing -- see
+        _apply_pending_classification_changes."""
+        self.state.pending_classification_steps = steps
+
+    def _apply_pending_classification_changes(self) -> None:
+        """"Apply Changes" button: commits the staged step-list edits and
+        triggers the full pipeline recompute they require."""
+        self.state.classification_steps = [
+            StepConfig(**vars(s)) for s in self.state.pending_classification_steps
+        ]
         self.redraw_overlay()
 
     def render(self) -> None:
@@ -1481,6 +1721,17 @@ class DebugApp:
         if renderer is None:
             return
 
+        if output.key == "clustering" and self.state.last_stage_key != "clustering":
+            # Only reset pending edits back to the committed steps when the
+            # clustering stage is newly (re)entered -- not on every redraw,
+            # since a row edit inside that stage also calls redraw_overlay()
+            # (via on_change) to rebuild the editor's widgets, and that call
+            # must not clobber the edit it's rendering.
+            self.state.pending_classification_steps = [
+                StepConfig(**vars(s)) for s in self.state.classification_steps
+            ]
+        self.state.last_stage_key = output.key
+
         filters = self.state.filter_state.setdefault(output.key, {})
         ctx = RenderContext(
             canvas=self.canvas,
@@ -1491,10 +1742,13 @@ class DebugApp:
             filters=filters,
             on_change=self.redraw_overlay,
             epoch_box=self._render_epoch_box,
-            clustering_order=list(self.state.clustering_order),
-            set_clustering_order=self._set_clustering_order,
-            clustering_params={k: dict(v) for k, v in self.state.clustering_params.items()},
-            set_clustering_params=self._set_clustering_params,
+            classification_steps=[StepConfig(**vars(s)) for s in self.state.classification_steps],
+            set_classification_steps=self._set_classification_steps,
+            pending_classification_steps=[
+                StepConfig(**vars(s)) for s in self.state.pending_classification_steps
+            ],
+            set_pending_classification_steps=self._set_pending_classification_steps,
+            apply_pending_classification_changes=self._apply_pending_classification_changes,
             page=page,
             ocr_detail_cache=self.state.ocr_detail_cache,
         )

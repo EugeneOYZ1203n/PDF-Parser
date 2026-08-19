@@ -6,8 +6,15 @@ import pymupdf as fitz
 import pytest
 
 from rastervec.models import DrawingVector, Page, TextWord, VectorPath
-from rastervec.pipeline import ClusteringStageResult, Pipeline, PipelineContext, StageSpec
+from rastervec.pipeline import (
+    ClusteringStageResult,
+    Pipeline,
+    PipelineContext,
+    StageSpec,
+    _run_drawing_vectors,
+)
 from rastervec.reader import Reader
+from rastervec.vector_classification import DEFAULT_PIPELINE, StepConfig
 
 _EXPECTED_STAGE_KEYS = [
     "reader",
@@ -106,9 +113,9 @@ def test_run_page_vector_stages_on_drawing_pdf(tmp_pdf_path):
     clustering_results: dict = by_key["clustering"].data
     for result in clustering_results.values():
         assert isinstance(result, ClusteringStageResult)
-        assert len(result.steps) == len(result.dropped) == len(result.order) == 8
+        assert len(result.steps) == len(result.dropped) == len(result.steps_config) == len(DEFAULT_PIPELINE)
 
-    # filter_layout_panels is the 1st default step -- the lone panel "re"
+    # the layout-panel filter is the 1st default step -- the lone panel "re"
     # is dropped there; the line survives into later steps.
     dropped_at_step_0 = [
         g for result in clustering_results.values() for g in result.dropped[0]
@@ -124,6 +131,40 @@ def test_run_page_vector_stages_on_drawing_pdf(tmp_pdf_path):
     assert isinstance(drawing_vectors, list)
     # the dropped panel ends up folded into drawing_vectors.
     assert any(dv.paths[0].kind == "re" for dv in drawing_vectors)
+
+
+def _make_path(seq: int) -> VectorPath:
+    return VectorPath(
+        seq=seq, item_index=0, kind="l", fill_rule="s", points=[(0, 0), (1, 1)],
+        bbox=(0, 0, 1, 1), stroke_color=(0, 0, 0), fill_color=None,
+        stroke_opacity=None, fill_opacity=None, stroke_width=1.0, dashes=None,
+        closed=False, layer=None, page_index=0,
+    )
+
+
+def test_run_drawing_vectors_restores_original_seq_order_across_groups():
+    # Two (layer, color) buckets, keyed so dict iteration visits "a" fully
+    # before "b" -- without the (seq, item_index) sort, this would produce
+    # drawing_vectors in [0, 2, 1, 3] order (all of "a" then all of "b")
+    # instead of the original PDF stacking order [0, 1, 2, 3].
+    ctx = PipelineContext(reader=None, page_index=0)
+    panel_filter = StepConfig(kind="filter", metric="layout_panel_singleton", condition="==", threshold=0.0)
+    ctx.clustering = {
+        ("", ()): ClusteringStageResult(
+            steps_config=[panel_filter],
+            steps=[[]],
+            dropped=[[[_make_path(0)], [_make_path(2)]]],
+        ),
+        ("", (1,)): ClusteringStageResult(
+            steps_config=[panel_filter],
+            steps=[[]],
+            dropped=[[[_make_path(1)], [_make_path(3)]]],
+        ),
+    }
+
+    drawing_vectors = _run_drawing_vectors(ctx)
+
+    assert [dv.paths[0].seq for dv in drawing_vectors] == [0, 1, 2, 3]
 
 
 def test_run_page_stage_error_is_caught(synthetic_pdf_factory, tmp_pdf_path):
