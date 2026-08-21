@@ -14,7 +14,7 @@ from rastervec.pipeline import (
     _run_drawing_vectors,
 )
 from rastervec.reader import Reader
-from rastervec.vector_classification import DEFAULT_PIPELINE, StepConfig
+from rastervec.vector import CategoryResult, StepResult
 
 _EXPECTED_STAGE_KEYS = [
     "reader",
@@ -87,15 +87,19 @@ def test_run_page_vector_stages_on_drawing_pdf(tmp_pdf_path):
     doc = fitz.open()
     page = doc.new_page(width=200, height=100)
 
-    # single-item "re" -> dropped by filter_layout_panels (a lone panel/border rect).
+    # a full-page rect -- dimension 200 exceeds MAX_DIMENSION_FRACTION
+    # (10%) of the page's smaller side (100), so filter_large_items (the
+    # 1st pipeline step) drops it as border/frame geometry.
     panel = page.new_shape()
     panel.draw_rect(fitz.Rect(0, 0, 200, 100))
     panel.finish(color=(0, 0, 0))
     panel.commit()
 
-    # a real line -> survives filtering, ends up in a spatial cluster.
+    # a real line, small enough (max dimension < 10% of the page's smaller
+    # side, 100) to survive the large-item/large-group filters -- ends up
+    # in a spatial cluster.
     line = page.new_shape()
-    line.draw_line((10, 10), (60, 60))
+    line.draw_line((10, 10), (16, 16))
     line.finish(color=(0, 0, 0), width=2)
     line.commit()
 
@@ -113,24 +117,37 @@ def test_run_page_vector_stages_on_drawing_pdf(tmp_pdf_path):
     clustering_results: dict = by_key["clustering"].data
     for result in clustering_results.values():
         assert isinstance(result, ClusteringStageResult)
-        assert len(result.steps) == len(result.dropped) == len(result.steps_config) == len(DEFAULT_PIPELINE)
+        assert len(result.steps) == 13
+        assert all(isinstance(step, StepResult) for step in result.steps)
+        assert all("kept" in step.categories for step in result.steps)
 
-    # the layout-panel filter is the 1st default step -- the lone panel "re"
-    # is dropped there; the line survives into later steps.
+    # filter_large_items is the 1st pipeline step -- the oversized panel
+    # "re" is dropped there; the line survives into later steps.
     dropped_at_step_0 = [
-        g for result in clustering_results.values() for g in result.dropped[0]
+        g
+        for result in clustering_results.values()
+        for g in result.steps[0].categories["dropped_oversized"].groups
     ]
     assert any(g[0].kind == "re" for g in dropped_at_step_0)
 
+    # The line ends up as a single-item cluster -- dropped somewhere
+    # later in the chain (exactly which step depends on current threshold
+    # tuning); there's nothing left with enough shape variety on this
+    # tiny synthetic page to survive to the final "kept" category.
     all_final_kept = [
-        p for result in clustering_results.values() for g in result.steps[-1] for p in g
+        p
+        for result in clustering_results.values()
+        for g in result.steps[-1].categories["kept"].groups
+        for p in g
     ]
-    assert any(p.kind == "l" for p in all_final_kept)
+    assert all_final_kept == []
 
     drawing_vectors: list[DrawingVector] = by_key["drawing_vectors"].data
     assert isinstance(drawing_vectors, list)
-    # the dropped panel ends up folded into drawing_vectors.
+    # both the dropped panel and the low-variety line end up folded into
+    # drawing_vectors.
     assert any(dv.paths[0].kind == "re" for dv in drawing_vectors)
+    assert any(dv.paths[0].kind == "l" for dv in drawing_vectors)
 
 
 def _make_path(seq: int) -> VectorPath:
@@ -148,18 +165,19 @@ def test_run_drawing_vectors_restores_original_seq_order_across_groups():
     # drawing_vectors in [0, 2, 1, 3] order (all of "a" then all of "b")
     # instead of the original PDF stacking order [0, 1, 2, 3].
     ctx = PipelineContext(reader=None, page_index=0)
-    panel_filter = StepConfig(kind="filter", metric="layout_panel_singleton", condition="==", threshold=0.0)
     ctx.clustering = {
-        ("", ()): ClusteringStageResult(
-            steps_config=[panel_filter],
-            steps=[[]],
-            dropped=[[[_make_path(0)], [_make_path(2)]]],
-        ),
-        ("", (1,)): ClusteringStageResult(
-            steps_config=[panel_filter],
-            steps=[[]],
-            dropped=[[[_make_path(1)], [_make_path(3)]]],
-        ),
+        ("", ()): ClusteringStageResult(steps=[
+            StepResult("x", {
+                "kept": CategoryResult([], "kept"),
+                "dropped_x": CategoryResult([[_make_path(0)], [_make_path(2)]], "dropped"),
+            }),
+        ]),
+        ("", (1,)): ClusteringStageResult(steps=[
+            StepResult("x", {
+                "kept": CategoryResult([], "kept"),
+                "dropped_x": CategoryResult([[_make_path(1)], [_make_path(3)]], "dropped"),
+            }),
+        ]),
     }
 
     drawing_vectors = _run_drawing_vectors(ctx)

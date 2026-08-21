@@ -1,14 +1,14 @@
 """Clustering helper.
 
-cluster_spatial/cluster_by_dimension/cluster_by_seq/group_by_overlap are
-used by Vector's classification pipeline (spatial closeness -> seq-number
-proximity -> overlap grouping -> dimension similarity, applied twice: once
-per-path early on via cluster_by_dimension's generic T support -- no
-longer used that way by Vector directly, kept for reuse -- and once
-per-group late in the pipeline). cluster_hsv (Raster.separate_by_color's
-HSV pixel clustering) is not implemented yet -- that's a Raster-phase
-concern, deferred along with numpy/image-library imports until Raster is
-actually built.
+cluster_spatial is used by Vector's fixed classification pipeline (see
+rastervec/helpers/vector_classification.py's cluster_spatial_groups) for
+its spatial-clustering step. cluster_by_dimension/cluster_by_seq/
+group_by_overlap/cluster_by_pairwise_distance are generic reusable
+utilities not currently called by that pipeline, kept for reuse (own
+tests, own callers). cluster_hsv (Raster.separate_by_color's HSV pixel
+clustering) is not implemented yet -- that's a Raster-phase concern,
+deferred along with numpy/image-library imports until Raster is actually
+built.
 
 No scikit-learn/scipy dependency: cluster_spatial uses a plain spatial
 hash grid + union-find, which stays fast even on pages with tens of
@@ -105,11 +105,17 @@ class Clustering:
         get_bbox: Callable[[Any], tuple],
         *,
         threshold: float = 3.0,
+        extra_close: Callable[[Any, Any], bool] | None = None,
     ) -> list[list]:
         """Connected-components clustering by bbox gap: items whose boxes
         are within `threshold` of some other item in the same cluster end
         up together (single-linkage). Uses a spatial hash grid so this
-        stays close to linear time on large item counts."""
+        stays close to linear time on large item counts. `extra_close`, if
+        given, is an additional required condition (e.g. "similar max side
+        length") checked on top of the bbox-gap rule -- two items only
+        union when both the gap and `extra_close` pass; omitting it
+        reproduces plain gap-only clustering (used by Vector's debug-only
+        unconstrained spatial-cluster comparison)."""
         if not items:
             return []
 
@@ -142,7 +148,8 @@ class Clustering:
                 if other <= index:
                     continue
                 if rect_gap(bboxes[index], bboxes[other]) <= threshold:
-                    uf.union(index, other)
+                    if extra_close is None or extra_close(items[index], items[other]):
+                        uf.union(index, other)
 
         clusters = _group_by_root(items, uf)
         _LOG.debug(
@@ -152,6 +159,70 @@ class Clustering:
             threshold,
         )
         return clusters
+
+    def cluster_spatial_with_tags(
+        self,
+        items: list,
+        get_bbox: Callable[[Any], tuple],
+        *,
+        threshold: float,
+        match_fn: Callable[[Any, Any], Any],
+    ) -> tuple[list[list], list[tuple[int, int, Any]]]:
+        """Same connected-components spatial clustering as `cluster_spatial`
+        (same grid + union-find approach), but driven by `match_fn(a, b) ->
+        tag-or-None` instead of a plain bool `extra_close`: two items only
+        union if `match_fn` returns a non-`None` tag for that pair (within
+        the same bbox-gap `threshold`), and every such union is recorded as
+        `(index_a, index_b, tag)` in the returned edges list -- indices are
+        into `items`, in input order. This lets a caller reconstruct
+        exactly which matching value caused each merge (Vector.
+        cluster_spatial_groups's dominant-length-tag split relies on this)
+        -- `cluster_spatial` itself doesn't need this and keeps its plain
+        bool `extra_close` unchanged."""
+        if not items:
+            return [], []
+
+        cell = max(threshold, 1e-6)
+        bboxes = [tuple(get_bbox(item)) for item in items]
+        uf = _UnionFind(len(items))
+        grid: dict[tuple[int, int], list[int]] = defaultdict(list)
+        cell_spans: list[tuple[int, int, int, int]] = []
+
+        for index, (x0, y0, x1, y1) in enumerate(bboxes):
+            cx0, cy0 = int(x0 // cell), int(y0 // cell)
+            cx1, cy1 = int(x1 // cell), int(y1 // cell)
+            span = (cx1 - cx0 + 1) * (cy1 - cy0 + 1)
+            if span > _MAX_CELLS_PER_ITEM:
+                cx = int(((x0 + x1) / 2.0) // cell)
+                cy = int(((y0 + y1) / 2.0) // cell)
+                cx0 = cx1 = cx
+                cy0 = cy1 = cy
+            cell_spans.append((cx0, cy0, cx1, cy1))
+            for gx in range(cx0, cx1 + 1):
+                for gy in range(cy0, cy1 + 1):
+                    grid[(gx, gy)].append(index)
+
+        edges: list[tuple[int, int, Any]] = []
+        for index, (cx0, cy0, cx1, cy1) in enumerate(cell_spans):
+            neighbor_indices: set[int] = set()
+            for gx in range(cx0 - 1, cx1 + 2):
+                for gy in range(cy0 - 1, cy1 + 2):
+                    neighbor_indices.update(grid.get((gx, gy), ()))
+            for other in neighbor_indices:
+                if other <= index:
+                    continue
+                if rect_gap(bboxes[index], bboxes[other]) <= threshold:
+                    tag = match_fn(items[index], items[other])
+                    if tag is not None:
+                        uf.union(index, other)
+                        edges.append((index, other, tag))
+
+        clusters = _group_by_root(items, uf)
+        _LOG.debug(
+            "cluster_spatial_with_tags: %d item(s) -> %d cluster(s), %d edge(s) (threshold=%s)",
+            len(items), len(clusters), len(edges), threshold,
+        )
+        return clusters, edges
 
     def _split_group_pairwise(
         self,
@@ -255,10 +326,8 @@ class Clustering:
         group_by_overlap -- see _split_group_pairwise). Those two methods
         are themselves expressible as this with a specific distance_fn, but
         keep their own hardcoded bbox-similarity/overlap logic unchanged
-        (own tests, own callers); this is the metric-driven classification
-        engine's (rastervec/vector_classification/) single generic entry
-        point instead of duplicating _split_group_pairwise's wiring a third
-        time."""
+        (own tests, own callers) rather than being rewritten on top of this
+        one generic entry point."""
 
         def close(a, b) -> bool:
             return distance_fn(a, b) <= threshold

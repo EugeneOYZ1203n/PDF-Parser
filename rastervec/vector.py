@@ -1,39 +1,119 @@
 """Vector stage: extracts and classifies vector drawing paths from a page.
 
 extract_paths/separate_by_layer/separate_by_color/build_drawing_vectors are
-implemented, plus the classification pipeline: a caller-configurable
-`list[StepConfig]` (rastervec/vector_classification/step_config.py) run in
-order via cluster(). Each StepConfig is one of 3 kinds -- "filter" (checks
-a metric against a condition; units failing become drawing, units passing
-stay unclassified), "cluster" (splits existing groups into smaller ones by
-a metric), "group" (merges nearby/similar existing groups by a metric) --
-driven by a named metric from rastervec/vector_classification/metrics.py's
-SCALAR_METRICS/PAIRWISE_METRICS registries. Every StepConfig instance is
-self-contained (no shared name-keyed param dict), so two occurrences of the
-same metric at different positions in the list are simply two independent
-entries, each with its own threshold/params. DEFAULT_PIPELINE is the
-default order, reproducing the original fixed 5-step pipeline (both
-filters, one spatial clustering pass, both group filters). Every group
-that survives the whole chain is a text candidate handed to OCR
-(pipeline.py's ocr_text_clusters stage) -- there's no separate
-drawing-vs-text heuristic; everything any filter step drops along the way
-is drawing content, and OCR success/failure itself is the signal for
-whether a given cluster was actually text. See cluster()'s docstring for
-the full step semantics.
+implemented, plus classification: a single fixed, non-configurable
+pipeline run in order by cluster(), each step a plain function in
+rastervec/helpers/vector_classification.py (see that module's docstring
+for the full description of each step):
+
+1. filter_large_items                        -- drop oversized items.
+2. compute_vector_signatures                  -- informational shape-signature counter.
+3. remove_duplicate_runs + combine_overlapping_seq -- sort by seq, drop long
+                                                  runs of exact-duplicate shapes, then chain-merge overlaps.
+4. filter_tiny_groups                         -- drop groups smaller than MIN_GROUP_SIZE_PX.
+5. filter_large_groups                        -- drop oversized groups.
+6. cluster_spatial_groups                     -- spatial merge, constrained to groups sharing any
+                                                  similar-length, parallel side, then split into the
+                                                  dominant matched-length sub-cluster and the rest;
+                                                  also reports two debug-only unconstrained variants.
+7. filter_mixed_fill_rule_clusters            -- drop clusters mixing fill/stroke paint styles.
+8. compute_group_stats                        -- informational per-group stats (member/signature counts).
+9. filter_perimeter_only_clusters             -- drop border/ring-only clusters.
+10. filter_density_clusters                   -- drop clusters too sparse across their own bbox
+                                                  grid (5-40px cells, dropped past 40% empty).
+11. filter_high_frequency_clusters            -- drop clusters made only of top-20%-frequency shapes.
+12. filter_constant_spacing_clusters          -- drop clusters where >=70% of members belong to a
+                                                  near-perfectly-regular repeated same-shape sub-group.
+13. filter_low_variety_clusters               -- drop clusters below a member-count-scaled
+                                                  minimum distinct-shape-type count.
+
+All thresholds are module-level constants below -- tune the pipeline by
+editing them here, not at runtime. There is no caller-configurable step
+list any more. Each step's result is wrapped into a `StepResult` holding
+one or more named `CategoryResult`s -- exactly one per step has
+`role="kept"` and feeds the next step; every other category is a
+side-channel for the debug UI (a `role="dropped"` category is folded into
+`drawing_vectors` by pipeline.py, same as every other drop). Every path
+that survives the whole chain (the last step's `"kept"` category) is a
+text candidate handed to OCR (pipeline.py's ocr_text_clusters stage) --
+there's no separate drawing-vs-text heuristic; everything any filter step
+drops along the way is drawing content, and OCR success/failure itself is
+the signal for whether a given cluster was actually text.
 """
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
+from typing import Literal
 
 import pymupdf as fitz
 
-from rastervec.geometry import round_color, union_bbox
+from rastervec.geometry import round_color
+from rastervec.helpers import vector_classification as vc
 from rastervec.helpers.clustering import Clustering
 from rastervec.logging_setup import get_logger
 from rastervec.models import DrawingVector, Page, VectorPath
-from rastervec.vector_classification import DEFAULT_PIPELINE, MetricContext, StepConfig, run_step
 
 _LOG = get_logger("vector")
+
+# Classification pipeline thresholds -- edit these to tune classification;
+# there is no runtime/UI way to change them.
+MAX_DIMENSION_FRACTION = 0.10  # steps 1 & 4: max item/group dimension, as a fraction of the page's smaller side
+SIGNATURE_ROUND_PX = 0.5  # step 2: grid size shape signatures are rounded to
+DUPLICATE_RUN_MIN_LENGTH = 5  # step 3a: min consecutive identical-signature run length to drop
+SEQ_OVERLAP_TOLERANCE_PX = 1.0  # step 3b: bbox gap tolerance when chain-merging by seq order
+MIN_GROUP_SIZE_PX = 3.0  # step 3c: drop a group whose bbox's max dimension is under this many px
+SPATIAL_CLUSTER_THRESHOLD = 10.0  # step 5: bbox gap tolerance for spatial clustering
+SPATIAL_SIZE_TOLERANCE = 0.30  # step 5: max relative difference between a valid pair of parallel sides for two groups to spatially merge
+SPATIAL_MIN_SIDE_FRACTION = 0.00  # step 5: a group's short side only counts as a valid comparand if it's at least this fraction of that group's own long side
+SPATIAL_TAG_ROUND_PX = 20.0  # step 5: grid size the matched side-length that caused each merge is rounded to, before tallying which length was most common
+PERIMETER_MARGIN_FRACTION = 0.1  # step 8: drop a cluster if no member reaches past this fraction of its bbox edges
+DENSITY_DEFAULT_GRID_SIZE = 4  # step 9: default cells per axis, clamped to keep DENSITY_MIN_CELL_PX <= cell side <= DENSITY_MAX_CELL_PX
+DENSITY_MIN_CELL_PX = 5.0  # step 9: each grid cell's side is at least this many px (fewer cells used if needed)
+DENSITY_MAX_CELL_PX = 40.0  # step 9: each grid cell's side is at most this many px (more cells used if needed)
+DENSITY_MAX_EMPTY_FRACTION = 0.70  # step 9: drop a cluster if more than this fraction of grid cells are untouched
+HIGH_FREQUENCY_TOP_FRACTION = 0.00  # step 10: drop a cluster only if every member's signature is in this top fraction by occurrence
+PATTERN_SPACING_TOLERANCE = 0.20  # step 11: max relative deviation between consecutive same-shape gaps
+PATTERN_MIN_REPEAT_COUNT = 3  # step 11: min same-signature members needed to judge spacing consistency
+PATTERN_FRACTION_THRESHOLD = 0.70  # step 11: drop a cluster if at least this fraction of its members belong to a patterned sub-group
+LOW_VARIETY_MIN_MEMBER_COUNT = 5  # step 12: at or under this many members, only LOW_VARIETY_MIN_REQUIRED distinct signatures are required
+LOW_VARIETY_MIN_REQUIRED = 1  # step 12: required distinct signature count for clusters at/under LOW_VARIETY_MIN_MEMBER_COUNT members
+LOW_VARIETY_MAX_MEMBER_COUNT = 300  # step 12: at or over this many members, LOW_VARIETY_MAX_REQUIRED distinct signatures are required
+LOW_VARIETY_MAX_REQUIRED = 10  # step 12: required distinct signature count for clusters at/over LOW_VARIETY_MAX_MEMBER_COUNT members
+
+CategoryRole = Literal["kept", "dropped", "info"]
+
+
+@dataclass
+class CategoryResult:
+    """One named category within a pipeline step's result -- a list of
+    groups plus its role. Exactly one category per step is `role="kept"`
+    (feeds the next step); a `role="dropped"` category is folded into
+    `drawing_vectors` by pipeline.py's `_run_drawing_vectors`; `role=
+    "info"` is never folded anywhere (used only by step 2's pass-through
+    counter category)."""
+
+    groups: list[list[VectorPath]]
+    role: CategoryRole
+
+
+@dataclass
+class StepResult:
+    """One pipeline step's full result: a display label plus every named
+    category it produced (`"kept"` always present, plus any number of
+    side categories for the debug UI). `signature_counts`, if set (only on
+    step 2's result), is the per-`VectorSignature` occurrence count built
+    by `compute_vector_signatures`, reused by later steps and the debug
+    app's "color by vector type" view. `group_stats`, if set (only on the
+    "Group stats" step's result), is the per-group `GroupStats` built by
+    `compute_group_stats`, keyed by `id(group)`, reused by
+    `filter_low_variety_clusters` and available for any future downstream
+    consumer."""
+
+    label: str
+    categories: dict[str, CategoryResult]
+    signature_counts: dict[vc.VectorSignature, int] | None = None
+    group_stats: dict[int, vc.GroupStats] | None = None
 
 
 def _is_dashed(dashes: str | None) -> bool:
@@ -200,68 +280,127 @@ class Vector:
     # Classification
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _compute_item_stats(
-        paths: list[VectorPath],
-    ) -> tuple[dict[int, int], dict[int, tuple[float, float, float, float]]]:
-        """Per-`seq` (i.e. per original drawing/item) stats, computed once
-        from the full path population entering cluster() -- stays stable
-        for the whole chain regardless of how paths get regrouped along the
-        way, so item-scoped metrics (item_path_count, item_bbox_*) always
-        measure a path's *original* item, never whatever cluster it
-        currently happens to sit in. Returns (path counts, aggregate
-        bboxes), both keyed by seq."""
-        by_seq: dict[int, list[VectorPath]] = defaultdict(list)
-        for path in paths:
-            by_seq[path.seq].append(path)
-        counts = {seq: len(group) for seq, group in by_seq.items()}
-        bboxes = {seq: union_bbox([p.bbox for p in group]) for seq, group in by_seq.items()}
-        return counts, bboxes
-
-    def cluster(
-        self, paths: list[VectorPath], page: Page, steps: list[StepConfig] | None = None,
-    ) -> tuple[list[list[list[VectorPath]]], list[list[list[VectorPath]]]]:
-        """Runs `steps` (default DEFAULT_PIPELINE -- both filters, one
-        spatial clustering pass, both group filters) in order, each step's
-        input being the previous step's *kept* output. Every StepConfig
-        instance is fully self-contained, so two instances of the same
-        kind/metric at different positions never share state. Returns
-        `(kept_snapshots, dropped_snapshots)`: one groups-list snapshot per
-        step for each, in the same order as `steps` (`kept_snapshots[-1]`
-        is the final surviving groups; `dropped_snapshots[i]` is only what
-        step `i` itself dropped, not cumulative -- callers wanting the
-        running total sum `dropped_snapshots[0:i+1]`), so callers (the
-        debug app) can show/compare state after each individual step.
-
-        Item-scoped metrics (item_path_count, item_bbox_min_side/
-        item_bbox_max_side) measure each path's *original* item (see
-        _compute_item_stats), computed once here from the full incoming
-        `paths` before any step runs -- so their result never depends on
-        what an earlier step already did to the grouping."""
-        steps = list(steps) if steps else list(DEFAULT_PIPELINE)
-        for step in steps:
-            step.validate()
-        item_counts, item_bboxes = self._compute_item_stats(paths)
-        ctx = MetricContext(page=page, item_counts=item_counts, item_bboxes=item_bboxes)
+    def cluster(self, paths: list[VectorPath], page: Page) -> list[StepResult]:
+        """Runs the fixed pipeline (see this module's docstring) in order,
+        each step's input being the previous step's `"kept"` category.
+        Returns one `StepResult` per step, each holding every named
+        category that step produced -- `steps[-1].categories["kept"]`
+        is the final surviving groups, handed to drawing_vectors/
+        ocr_text_clusters (see pipeline.py's `_run_drawing_vectors`)."""
         groups: list[list[VectorPath]] = [[p] for p in paths]
-        kept_snapshots: list[list[list[VectorPath]]] = []
-        dropped_snapshots: list[list[list[VectorPath]]] = []
-        for step in steps:
-            groups, dropped = run_step(step, groups, ctx, self._clustering)
-            kept_snapshots.append(groups)
-            dropped_snapshots.append(dropped)
-        return kept_snapshots, dropped_snapshots
+        steps: list[StepResult] = []
 
-    def classify(
-        self, paths: list[VectorPath], page: Page, steps: list[StepConfig] | None = None,
-    ) -> list[list[VectorPath]]:
-        """Runs cluster() with its default (or given) steps and returns
-        just the final surviving groups -- a convenience wrapper for
-        callers that don't need the drop bookkeeping (pipeline.py's own
-        stage wiring calls cluster() directly instead, to keep every
-        step's drops for the debug app and drawing_vectors)."""
-        kept_snapshots, _dropped_snapshots = self.cluster(paths, page, steps)
-        return kept_snapshots[-1] if kept_snapshots else []
+        groups, dropped = vc.filter_large_items(groups, page, MAX_DIMENSION_FRACTION)
+        steps.append(StepResult("Large items", {
+            "kept": CategoryResult(groups, "kept"),
+            "dropped_oversized": CategoryResult(dropped, "dropped"),
+        }))
+
+        groups, signature_counts = vc.compute_vector_signatures(groups, SIGNATURE_ROUND_PX)
+        steps.append(StepResult(
+            "Vector signatures", {"kept": CategoryResult(groups, "kept")},
+            signature_counts=signature_counts,
+        ))
+
+        groups, duplicate_runs = vc.remove_duplicate_runs(
+            groups, SIGNATURE_ROUND_PX, DUPLICATE_RUN_MIN_LENGTH
+        )
+        groups, _ = vc.combine_overlapping_seq(groups, SEQ_OVERLAP_TOLERANCE_PX)
+        steps.append(StepResult("Seq dedupe + overlap merge", {
+            "kept": CategoryResult(groups, "kept"),
+            "duplicate_runs": CategoryResult(duplicate_runs, "dropped"),
+        }))
+
+        groups, dropped = vc.filter_tiny_groups(groups, MIN_GROUP_SIZE_PX)
+        steps.append(StepResult("Tiny groups", {
+            "kept": CategoryResult(groups, "kept"),
+            "dropped_tiny": CategoryResult(dropped, "dropped"),
+        }))
+
+        groups, dropped = vc.filter_large_groups(groups, page, MAX_DIMENSION_FRACTION)
+        steps.append(StepResult("Large groups", {
+            "kept": CategoryResult(groups, "kept"),
+            "dropped_oversized": CategoryResult(dropped, "dropped"),
+        }))
+
+        groups, dominant_tag_groups, minority_tag_groups, debug_unconstrained, debug_no_parallel = (
+            vc.cluster_spatial_groups(
+                groups, self._clustering, SPATIAL_CLUSTER_THRESHOLD, SPATIAL_SIZE_TOLERANCE,
+                SPATIAL_MIN_SIDE_FRACTION, SPATIAL_TAG_ROUND_PX,
+            )
+        )
+        steps.append(StepResult("Spatial cluster", {
+            "kept": CategoryResult(groups, "kept"),
+            "dominant_tag_split": CategoryResult(dominant_tag_groups, "info"),
+            "minority_tag_split": CategoryResult(minority_tag_groups, "info"),
+            "debug_unconstrained": CategoryResult(debug_unconstrained, "info"),
+            "debug_no_parallel": CategoryResult(debug_no_parallel, "info"),
+        }))
+
+        groups, dropped = vc.filter_mixed_fill_rule_clusters(groups)
+        steps.append(StepResult("Mixed fill-rule clusters", {
+            "kept": CategoryResult(groups, "kept"),
+            "dropped_mixed_fill_rule": CategoryResult(dropped, "dropped"),
+        }))
+
+        groups, group_stats = vc.compute_group_stats(groups, signature_counts, SIGNATURE_ROUND_PX)
+        steps.append(StepResult(
+            "Group stats", {"kept": CategoryResult(groups, "kept")},
+            group_stats=group_stats,
+        ))
+
+        groups, dropped = vc.filter_perimeter_only_clusters(groups, PERIMETER_MARGIN_FRACTION)
+        steps.append(StepResult("Perimeter-only clusters", {
+            "kept": CategoryResult(groups, "kept"),
+            "dropped_perimeter": CategoryResult(dropped, "dropped"),
+        }))
+
+        groups, dropped = vc.filter_density_clusters(
+            groups, DENSITY_DEFAULT_GRID_SIZE, DENSITY_MIN_CELL_PX, DENSITY_MAX_CELL_PX,
+            DENSITY_MAX_EMPTY_FRACTION,
+        )
+        steps.append(StepResult("Density clusters", {
+            "kept": CategoryResult(groups, "kept"),
+            "dropped_low_density": CategoryResult(dropped, "dropped"),
+        }))
+
+        groups, dropped = vc.filter_high_frequency_clusters(
+            groups, signature_counts, SIGNATURE_ROUND_PX, HIGH_FREQUENCY_TOP_FRACTION
+        )
+        steps.append(StepResult("High-frequency clusters", {
+            "kept": CategoryResult(groups, "kept"),
+            "dropped_high_frequency": CategoryResult(dropped, "dropped"),
+        }))
+
+        groups, dropped = vc.filter_constant_spacing_clusters(
+            groups, SIGNATURE_ROUND_PX, PATTERN_SPACING_TOLERANCE, PATTERN_MIN_REPEAT_COUNT,
+            PATTERN_FRACTION_THRESHOLD,
+        )
+        steps.append(StepResult("Constant-spacing clusters", {
+            "kept": CategoryResult(groups, "kept"),
+            "dropped_constant_spacing": CategoryResult(dropped, "dropped"),
+        }))
+
+        groups, dropped = vc.filter_low_variety_clusters(
+            groups, group_stats,
+            LOW_VARIETY_MIN_MEMBER_COUNT, LOW_VARIETY_MIN_REQUIRED,
+            LOW_VARIETY_MAX_MEMBER_COUNT, LOW_VARIETY_MAX_REQUIRED,
+        )
+        steps.append(StepResult("Low-variety clusters", {
+            "kept": CategoryResult(groups, "kept"),
+            "dropped_low_variety": CategoryResult(dropped, "dropped"),
+        }))
+
+        return steps
+
+    def classify(self, paths: list[VectorPath], page: Page) -> list[list[VectorPath]]:
+        """Runs cluster() and returns just the final surviving groups -- a
+        convenience wrapper for callers that don't need the per-step/
+        per-category bookkeeping (pipeline.py's own stage wiring calls
+        cluster() directly instead, to keep every step's categories for the
+        debug app and drawing_vectors)."""
+        steps = self.cluster(paths, page)
+        return steps[-1].categories["kept"].groups if steps else []
 
     # ------------------------------------------------------------------
     # Drawing vectors

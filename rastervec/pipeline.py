@@ -34,8 +34,7 @@ from rastervec.models import DrawingVector, Page, TextVectorResult, TextWord, Ve
 from rastervec.native import Native
 from rastervec.reader import Reader
 from rastervec.renderer import Renderer
-from rastervec.vector import Vector
-from rastervec.vector_classification import DEFAULT_PIPELINE, StepConfig
+from rastervec.vector import StepResult, Vector
 
 _LOG = get_logger("pipeline")
 
@@ -45,20 +44,16 @@ GroupKey = tuple[str, tuple]
 
 @dataclass
 class ClusteringStageResult:
-    """One (layer, color) group's result from the single configurable
-    classification pipeline: `steps_config` is the `list[StepConfig]` that
-    ran, `steps[i]` = the surviving-groups snapshot after applying
-    `steps_config[i]` (so `steps[-1]` is the final result, handed to
-    drawing_vectors/ocr_text_clusters), and `dropped[i]` = only what step
-    `i` itself dropped (empty for cluster/group steps -- only filter steps
-    ever drop anything). Every dropped group was "classified as Drawing"
-    the moment it was dropped (see _run_drawing_vectors) -- a caller
-    wanting the cumulative drop total up to step i sums
-    `dropped[0:i+1]`."""
+    """One (layer, color) group's result from Vector's fixed
+    classification pipeline (see vector.py's module docstring): `steps` is
+    exactly `Vector.cluster()`'s return value -- one `StepResult` per step,
+    each holding every named `CategoryResult` that step produced.
+    `steps[-1].categories["kept"]` is the final surviving groups, handed
+    to drawing_vectors/ocr_text_clusters. Every non-`"kept"` `role=
+    "dropped"` category across every step was "classified as Drawing" the
+    moment it was produced (see _run_drawing_vectors)."""
 
-    steps_config: list[StepConfig]
-    steps: list[list[list[VectorPath]]]
-    dropped: list[list[list[VectorPath]]]
+    steps: list[StepResult]
 
 
 @dataclass
@@ -72,13 +67,6 @@ class PipelineContext:
     vector_paths: list[VectorPath] | None = None
     paths_by_layer: dict[str, list[VectorPath]] | None = None
     paths_by_layer_color: dict[str, dict[tuple, list[VectorPath]]] | None = None
-    # None means "use vector_classification.DEFAULT_PIPELINE" -- settable
-    # by the debug app before calling Pipeline.run_page to interactively
-    # edit the classification pipeline's step list (add/remove/reorder
-    # StepConfig instances). Each StepConfig is self-contained (its own
-    # metric/condition/scope/params), so two instances of the same kind at
-    # different positions never share state.
-    classification_steps: list[StepConfig] | None = None
     clustering: dict[GroupKey, ClusteringStageResult] | None = None
     drawing_vectors: list[DrawingVector] | None = None
     # Populated alongside drawing_vectors -- whatever the clustering
@@ -161,38 +149,37 @@ def _iter_groups(
 
 def _run_clustering(ctx: PipelineContext) -> dict[GroupKey, ClusteringStageResult]:
     vector = Vector()
-    steps_config = ctx.classification_steps or list(DEFAULT_PIPELINE)
     result: dict[GroupKey, ClusteringStageResult] = {}
 
     for key, paths in _iter_groups(ctx.paths_by_layer_color):
-        kept_snapshots, dropped_snapshots = vector.cluster(paths, ctx.page, steps_config)
-        result[key] = ClusteringStageResult(
-            steps_config=steps_config, steps=kept_snapshots, dropped=dropped_snapshots,
-        )
+        result[key] = ClusteringStageResult(steps=vector.cluster(paths, ctx.page))
 
     ctx.clustering = result
     return result
 
 
 def _run_drawing_vectors(ctx: PipelineContext) -> list[DrawingVector]:
-    """Final aggregation: every group any filter step in the clustering
-    chain dropped along the way was already "classified as Drawing" the
-    moment it was dropped (see ClusteringStageResult's docstring), so it's
-    folded in here unconditionally. Whatever the chain's final step still
-    kept is *not* drawing content -- there's no further drawing-vs-text
-    heuristic applied to it (Vector no longer has one); it's stashed on
-    ctx.text_clusters as-is for ocr_text_clusters to actually OCR, the only
-    content that doesn't end up in drawing_vectors."""
+    """Final aggregation: every category any step in the clustering chain
+    marked `role="dropped"` was already "classified as Drawing" the
+    moment it was produced (see ClusteringStageResult's docstring), so
+    it's folded in here unconditionally. Whatever the chain's final step's
+    `"kept"` category still holds is *not* drawing content -- there's no
+    further drawing-vs-text heuristic applied to it (Vector no longer has
+    one); it's stashed on ctx.text_clusters as-is for ocr_text_clusters to
+    actually OCR, the only content that doesn't end up in
+    drawing_vectors."""
     vector = Vector()
     all_drawing_paths: list[VectorPath] = []
     all_text_clusters: list[list[VectorPath]] = []
 
     for cluster_result in ctx.clustering.values():
-        for dropped_this_step in cluster_result.dropped:
-            for group in dropped_this_step:
-                all_drawing_paths.extend(group)
+        for step in cluster_result.steps:
+            for category in step.categories.values():
+                if category.role == "dropped":
+                    for group in category.groups:
+                        all_drawing_paths.extend(group)
         if cluster_result.steps:
-            all_text_clusters.extend(cluster_result.steps[-1])
+            all_text_clusters.extend(cluster_result.steps[-1].categories["kept"].groups)
 
     # ctx.clustering is keyed by (layer, color) -- iterating its buckets
     # loses each path's original PDF stacking order across layer/color
@@ -260,7 +247,6 @@ class Pipeline:
         self,
         reader: Reader,
         page_index: int,
-        classification_steps: list[StepConfig] | None = None,
         final_stage: str | None = None,
     ) -> list[StageOutput]:
         """Runs Pipeline.STAGES in order, stopping after `final_stage`
@@ -269,17 +255,13 @@ class Pipeline:
         entirely, never even constructing a RenderOCR/PaddleOCR engine, so
         it's a real way to skip the OCR round-trip while iterating on
         earlier stages, not just a display-time filter. `None` (default)
-        runs every stage, unchanged from before this parameter existed.
-        `classification_steps` is threaded onto `ctx` for `_run_clustering`
-        to pass to `Vector.cluster` -- `None` uses `DEFAULT_PIPELINE`."""
+        runs every stage, unchanged from before this parameter existed."""
         if final_stage is not None and final_stage not in self.stage_keys():
             raise ValueError(
                 f"unknown final_stage {final_stage!r}; must be one of {self.stage_keys()}"
             )
 
-        ctx = PipelineContext(
-            reader=reader, page_index=page_index, classification_steps=classification_steps,
-        )
+        ctx = PipelineContext(reader=reader, page_index=page_index)
         outputs: list[StageOutput] = []
 
         for spec in self.STAGES:
