@@ -169,7 +169,6 @@ def test_cluster_step_count_and_labels():
         "Group stats",
         "Perimeter-only clusters",
         "Density clusters",
-        "High-frequency clusters",
         "Constant-spacing clusters",
         "Low-variety clusters",
     ]
@@ -182,16 +181,18 @@ def test_classify_is_cluster_final_kept_category():
     assert steps[-1].categories["kept"].groups == Vector().classify([lone], _Page())
 
 
-def test_classify_drops_trivial_lone_cluster():
-    # A single-path cluster is dropped somewhere along the chain (which
-    # exact step depends on the current threshold tuning -- e.g. low
-    # variety no longer unconditionally rejects it, since the required
-    # unique-signature count now scales down for small clusters too).
+def test_classify_keeps_lone_cluster_with_no_high_frequency_filter():
+    # A single-path cluster used to be dropped by filter_high_frequency_
+    # clusters (its one-and-only shape signature was trivially "the top
+    # 0%" of a 1-signature population) -- now that step is gone, nothing
+    # else in the chain rejects a lone, otherwise-unremarkable cluster:
+    # low variety only requires 1 distinct signature at this member count,
+    # and it's not perimeter-only/too-sparse/patterned on its own.
     lone = _make_path(kind="l", bbox=(0, 0, 3, 6), fill_color=(0, 0, 0))
 
     clusters = Vector().classify([lone], _Page())
 
-    assert clusters == []
+    assert clusters == [[lone]]
 
 
 def test_cluster_drops_oversized_item_and_group():
@@ -286,14 +287,6 @@ def test_cluster_spatial_step_reports_debug_categories():
     assert spatial_step.categories["kept"].role == "kept"
     assert len(kept_groups) == 2  # kept separate: matching sides aren't parallel
 
-    # Neither a nor b merged with anything, so each is its own trivial
-    # "dominant" piece (nothing to split against) -- the split step is a
-    # no-op here, not a drop.
-    dominant_cat = spatial_step.categories["dominant_tag_split"]
-    assert dominant_cat.role == "info"
-    assert {id(p) for g in dominant_cat.groups for p in g} == {id(a), id(b)}
-    assert spatial_step.categories["minority_tag_split"].groups == []
-
     unconstrained_cat = spatial_step.categories["debug_unconstrained"]
     assert unconstrained_cat.role == "info"
     assert len(unconstrained_cat.groups) == 1
@@ -379,9 +372,8 @@ def test_cluster_spatial_groups_merges_when_matching_sides_are_parallel():
     # parallel side with either A or B -- left separate.
     c = [_make_path(seq=2, kind="l", bbox=(22, 40, 82, 100), stroke_color=(0, 0, 0))]
 
-    kept, _, _, debug_unconstrained, debug_no_parallel = vc.cluster_spatial_groups(
-        [a, b, c], Clustering(), threshold=16.0, size_tolerance=0.10, min_side_fraction=0.10,
-        tag_round_px=1.0,
+    kept, debug_unconstrained, debug_no_parallel, _lineage = vc.cluster_spatial_groups(
+        [a, b, c], Clustering(), threshold=16.0, size_tolerance=0.10,
     )
 
     kept_sets = {frozenset(id(p) for p in g) for g in kept}
@@ -417,9 +409,8 @@ def test_cluster_spatial_groups_parallel_constraint_blocks_cross_axis_match():
     a = [_make_path(seq=0, kind="l", bbox=(0, 0, 25, 5), stroke_color=(0, 0, 0))]
     b = [_make_path(seq=1, kind="l", bbox=(30, 0, 35, 25), stroke_color=(0, 0, 0))]
 
-    kept, _, _, _, debug_no_parallel = vc.cluster_spatial_groups(
-        [a, b], Clustering(), threshold=16.0, size_tolerance=0.10, min_side_fraction=0.10,
-        tag_round_px=1.0,
+    kept, _debug_unconstrained, debug_no_parallel, _lineage = vc.cluster_spatial_groups(
+        [a, b], Clustering(), threshold=16.0, size_tolerance=0.10,
     )
 
     kept_sets = {frozenset(id(p) for p in g) for g in kept}
@@ -430,64 +421,49 @@ def test_cluster_spatial_groups_parallel_constraint_blocks_cross_axis_match():
     assert {id(p) for g in debug_no_parallel for p in g} == {id(p) for p in a + b}
 
 
-def test_cluster_spatial_groups_splits_cluster_by_dominant_tag():
-    # B is a bridge: it matches A and E on its length (10) -- that tag
-    # ends up used by 2 edges (A-B, B-E) -- and matches D on its width
-    # (2) -- used by only 1 edge (B-D). All four end up in one spatially
-    # merged cluster; the split then separates it into the dominant piece
-    # (A, B, E -- connected via the more common length-10 tag) and the
-    # minority piece (D alone -- only ever touched via the less common
-    # width-2 tag).
+def test_cluster_spatial_groups_merges_bridged_groups_into_one_cluster():
+    # B is a bridge: it matches A and E on its length (10), and matches D
+    # on its width (2). All four end up in one spatially merged cluster --
+    # there's no dominant/minority split any more, so all of them stay
+    # together as a single piece.
     a = [_make_path(seq=0, kind="l", bbox=(-15, 0, -5, 2), stroke_color=(0, 0, 0))]
     b = [_make_path(seq=1, kind="l", bbox=(0, 0, 10, 2), stroke_color=(0, 0, 0))]
     e = [_make_path(seq=2, kind="l", bbox=(15, 0, 25, 2), stroke_color=(0, 0, 0))]
     d = [_make_path(seq=3, kind="l", bbox=(-1, -8, 11, -6), stroke_color=(0, 0, 0))]
 
-    kept, dominant_groups, minority_groups, _, _ = vc.cluster_spatial_groups(
+    kept, _debug_unconstrained, _debug_no_parallel, lineage = vc.cluster_spatial_groups(
         [a, b, e, d], Clustering(), threshold=6.0, size_tolerance=0.10,
-        min_side_fraction=0.10, tag_round_px=1.0,
     )
 
-    assert len(dominant_groups) == 1
-    assert {id(p) for p in dominant_groups[0]} == {id(p) for g in (a, b, e) for p in g}
+    assert len(kept) == 1
+    merged = kept[0]
+    assert {id(p) for p in merged} == {id(p) for g in (a, b, e, d) for p in g}
 
-    assert len(minority_groups) == 1
-    assert {id(p) for p in minority_groups[0]} == {id(p) for p in d}
-
-    # kept is dominant+minority pieces flattened together -- nothing dropped.
-    kept_sets = {frozenset(id(p) for p in g) for g in kept}
-    assert frozenset(id(p) for g in (a, b, e) for p in g) in kept_sets
-    assert frozenset(id(p) for p in d) in kept_sets
-    assert sum(len(g) for g in kept) == sum(len(g) for g in (a, b, e, d))
+    # lineage recovers which original (pre-spatial) groups compose the piece.
+    assert _sorted_ids(lineage[id(merged)]) == _sorted_ids([a, b, e, d])
 
 
-def test_cluster_spatial_groups_no_split_when_cluster_has_one_tag():
-    # A and B merge via a single edge/tag -- nothing to split against, so
-    # the whole merged cluster is the dominant piece and there's no
-    # minority piece for it.
+def test_cluster_spatial_groups_lineage_for_single_merge():
     a = [_make_path(seq=0, kind="l", bbox=(0, 0, 5, 5), stroke_color=(0, 0, 0))]
     b = [_make_path(seq=1, kind="l", bbox=(6, 0, 11, 5), stroke_color=(0, 0, 0))]
 
-    kept, dominant_groups, minority_groups, _, _ = vc.cluster_spatial_groups(
+    kept, _debug_unconstrained, _debug_no_parallel, lineage = vc.cluster_spatial_groups(
         [a, b], Clustering(), threshold=6.0, size_tolerance=0.10,
-        min_side_fraction=0.10, tag_round_px=1.0,
     )
 
-    assert len(dominant_groups) == 1
-    assert {id(p) for p in dominant_groups[0]} == {id(p) for g in (a, b) for p in g}
-    assert minority_groups == []
     assert len(kept) == 1
+    assert {id(p) for p in kept[0]} == {id(p) for g in (a, b) for p in g}
+    assert _sorted_ids(lineage[id(kept[0])]) == _sorted_ids([a, b])
 
 
-def test_group_sides_excludes_short_side_below_min_fraction():
-    # A thin stroke: 100 long, 2 wide -- width/length = 2%, below the 10%
-    # validity floor, so the short side is excluded entirely.
+def test_group_sides_includes_both_sides_regardless_of_ratio():
+    # A thin stroke: 100 long, 2 wide -- the short side no longer has a
+    # min-fraction floor, so both sides are always valid comparands.
     thin_stroke_bbox = (0.0, 0.0, 100.0, 2.0)
-    assert vc._group_sides(thin_stroke_bbox, min_side_fraction=0.10) == [(100.0, "x")]
+    assert vc._group_sides(thin_stroke_bbox) == [(100.0, "x"), (2.0, "y")]
 
-    # 100 long, 15 wide -- 15% >= the floor, so both sides are valid.
     normal_bbox = (0.0, 0.0, 100.0, 15.0)
-    assert vc._group_sides(normal_bbox, min_side_fraction=0.10) == [(100.0, "x"), (15.0, "y")]
+    assert vc._group_sides(normal_bbox) == [(100.0, "x"), (15.0, "y")]
 
 
 def test_any_side_close_respects_narrower_tolerance():
@@ -495,8 +471,8 @@ def test_any_side_close_respects_narrower_tolerance():
     b = [_make_path(seq=1, kind="l", bbox=(0, 0, 23, 23), stroke_color=(0, 0, 0))]
     # relative diff = 3/23 ~= 13% -- passes the old 20% tolerance but
     # fails the new, narrower 10%.
-    assert vc._any_side_close(a, b, size_tolerance=0.20, min_side_fraction=0.10, require_parallel=True) is True
-    assert vc._any_side_close(a, b, size_tolerance=0.10, min_side_fraction=0.10, require_parallel=True) is False
+    assert vc._any_side_close(a, b, size_tolerance=0.20, require_parallel=True) is True
+    assert vc._any_side_close(a, b, size_tolerance=0.10, require_parallel=True) is False
 
 
 def test_compute_group_stats_counts_members_and_unique_signatures():
@@ -505,40 +481,11 @@ def test_compute_group_stats_counts_members_and_unique_signatures():
         _make_path(seq=1, kind="re", bbox=(10, 0, 13, 6), fill_color=(0, 0, 0)),  # same shape as g1[0]
         _make_path(seq=2, kind="l", bbox=(20, 0, 24, 8), stroke_color=(0, 0, 0)),  # different shape
     ]
-    _, signature_counts = vc.compute_vector_signatures([g1], round_px=0.5)
-
-    _, stats = vc.compute_group_stats([g1], signature_counts, round_px=0.5)
+    _, stats = vc.compute_group_stats([g1], round_px=0.5)
 
     s = stats[id(g1)]
     assert s.member_count == 3
     assert s.unique_signature_count == 2
-
-
-def test_filter_high_frequency_clusters_drops_top_fraction_only():
-    # 7 distinct signatures total; one occurs 20 times (a repeated filler
-    # shape), the rest occur once each. With top_fraction=0.05 the cutoff
-    # lands on the single highest-count signature (20), so only a cluster
-    # made entirely of that shape is dropped.
-    filler_paths = [
-        _make_path(seq=i, kind="re", bbox=(0, 0, 3, 6), fill_color=(0, 0, 0))
-        for i in range(20)
-    ]
-    unique_paths = [
-        _make_path(seq=100 + i, kind="l", bbox=(0, 0, 4 + i, 4 + i), stroke_color=(0, 0, 0))
-        for i in range(6)
-    ]
-    all_groups = [[p] for p in filler_paths + unique_paths]
-    _, signature_counts = vc.compute_vector_signatures(all_groups, round_px=0.5)
-
-    filler_group = [filler_paths]
-    unique_groups = [[p] for p in unique_paths]
-
-    kept, dropped = vc.filter_high_frequency_clusters(
-        filler_group + unique_groups, signature_counts, round_px=0.5, top_fraction=0.05,
-    )
-
-    assert dropped == [filler_paths]
-    assert _sorted_ids(kept) == _sorted_ids(unique_groups)
 
 
 def test_filter_mixed_fill_rule_clusters_drops_mixed_group():
@@ -577,8 +524,10 @@ def test_filter_density_clusters_drops_sparse_cluster():
         for r in range(4) for c in range(4)
     ]
 
+    _, group_stats = vc.compute_group_stats([sparse, dense], round_px=0.5)
     kept, dropped = vc.filter_density_clusters(
-        [sparse, dense], default_grid_size=4, min_cell_px=5.0, max_cell_px=40.0, max_empty_fraction=0.40,
+        [sparse, dense], group_stats,
+        default_grid_size=4, min_cell_px=5.0, max_cell_px=40.0, max_empty_fraction=0.40,
     )
 
     assert dropped == [sparse]
@@ -680,8 +629,7 @@ def test_filter_low_variety_clusters_drops_below_scaled_minimum():
     ]
 
     groups = [varied, uniform]
-    _, signature_counts = vc.compute_vector_signatures(groups, round_px=0.5)
-    _, group_stats = vc.compute_group_stats(groups, signature_counts, round_px=0.5)
+    _, group_stats = vc.compute_group_stats(groups, round_px=0.5)
 
     kept, dropped = vc.filter_low_variety_clusters(
         groups, group_stats, min_member_count=5, min_required=1,

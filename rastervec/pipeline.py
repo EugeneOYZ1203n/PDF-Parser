@@ -14,12 +14,17 @@ import argparse
 import logging
 import os
 import sys
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Callable
 
+import numpy as np
+import pymupdf as fitz
 from tqdm import tqdm
 
 if TYPE_CHECKING:
+    from PIL import Image
+
     from rastervec.output_types import NativePDFElements
 
 if __name__ == "__main__" and __package__ is None:
@@ -28,18 +33,53 @@ if __name__ == "__main__" and __package__ is None:
     # the repo root -- the parent of this package -- on sys.path.
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from rastervec.geometry import rect_gap, union_bbox
+from rastervec.helpers.clustering import Clustering
+from rastervec.helpers.fast_detect import FastDetector
 from rastervec.helpers.render_ocr import RenderOCR
 from rastervec.logging_setup import configure_logging, get_logger
-from rastervec.models import DrawingVector, Page, TextVectorResult, TextWord, VectorPath
+from rastervec.models import (
+    ClusterOcrResult,
+    DrawingVector,
+    Page,
+    TextVectorResult,
+    TextWord,
+    VectorPath,
+)
 from rastervec.native import Native
 from rastervec.reader import Reader
 from rastervec.renderer import Renderer
 from rastervec.vector import StepResult, Vector
 
+# fast_text_detect stage: pass threshold applied to each cluster's
+# candidates-render score, after min-ing it across each cluster's own
+# similarity group (see _run_fast_text_detect).
+FAST_COMBINED_KEEP_THRESHOLD = 0.2
+
+# rotation_verify stage: how much closer (relative-error improvement) the
+# 90-deg-rotated bbox/text-aspect match must be than the as-is match before
+# rotation_used gets corrected -- avoids flipping on a near-tie.
+ROTATION_VERIFY_IMPROVEMENT_MARGIN = 0.15
+
+# spatial_regroup stage: per-path overlap tolerance (PDF points) for
+# re-merging FAST-passed clusters into fresh spatial groups before OCR --
+# two clusters only merge if some individual member path of one overlaps,
+# touches, or is within this many points of some individual member path of
+# the other (see _clusters_overlap/_run_spatial_regroup), regardless of
+# which (layer, color) bucket originally produced them or which similarity
+# group FAST scored them under.
+SPATIAL_REGROUP_TOLERANCE_PX = 1.0
+
 _LOG = get_logger("pipeline")
 
 # (layer, color) -- one Vector.separate_by_color() bucket.
 GroupKey = tuple[str, tuple]
+
+# DPI the whole-page FAST render is rasterized at (fast_text_detect stage),
+# before FastDetector.detect_tiled's own further upscale (see
+# helpers/fast_detect.py's TILED_SCALE_FACTOR) -- not full OCR resolution
+# (RenderOCR's own per-cluster/per-group renders use 300 DPI).
+FAST_PAGE_RENDER_DPI = 150
 
 
 @dataclass
@@ -48,12 +88,63 @@ class ClusteringStageResult:
     classification pipeline (see vector.py's module docstring): `steps` is
     exactly `Vector.cluster()`'s return value -- one `StepResult` per step,
     each holding every named `CategoryResult` that step produced.
-    `steps[-1].categories["kept"]` is the final surviving groups, handed
-    to drawing_vectors/ocr_text_clusters. Every non-`"kept"` `role=
-    "dropped"` category across every step was "classified as Drawing" the
-    moment it was produced (see _run_drawing_vectors)."""
+    `steps[-1].categories["kept"]` is the final surviving clusters, handed
+    to text_candidates. Every non-`"kept"` `role="dropped"` category
+    across every step was "classified as Drawing" the moment it was
+    produced (see _run_drawing_vectors)."""
 
     steps: list[StepResult]
+
+
+@dataclass
+class FastPageResult:
+    """fast_text_detect's whole-page result: `page_image`/`page_mask` (via
+    Renderer.render_page_paths + FastDetector.detect_tiled, over every
+    extracted vector path on the page -- drawing content included, not
+    just text candidates), plus `scores`: for every text-candidate cluster
+    (keyed by `id(cluster)`), its own page-mask score after taking the min
+    across each cluster's own similarity group (see _run_fast_text_detect).
+    `passed`/`dropped` split `scores` against FAST_COMBINED_KEEP_THRESHOLD
+    (same lists as ctx.fast_passed/ctx.fast_dropped, duplicated here so the
+    debug app's stage renderer is self-contained, like every other stage's
+    StageOutput.data). `page_image`/`page_mask` are `None` when there were
+    zero vector paths on the page (FastDetector's underlying torch model is
+    never even constructed in that case). `detect_seconds` is how long the
+    `FastDetector.detect_tiled()` call took, `None` if it never ran --
+    surfaced by the debug app as a timing readout."""
+
+    page_image: "Image.Image | None"
+    page_mask: "np.ndarray | None"
+    detect_seconds: float | None
+    scores: dict[int, float]
+    passed: list[list[VectorPath]]
+    dropped: list[list[VectorPath]]
+
+
+@dataclass
+class RotationCheck:
+    """One rotation_verify stage result, for one ocr_compare comparison's
+    `resolved` reading (see _run_rotation_verify): compares the OCR'd
+    text's own natural width/height aspect ratio (font-metric based, any
+    fontsize -- see _text_aspect_ratio) against `bbox`'s aspect ratio
+    as-is, and again against that same bbox rotated 90 deg (width/height
+    swapped). If the rotated comparison is a meaningfully closer match
+    (`error_unrotated - error_rotated > ROTATION_VERIFY_IMPROVEMENT_
+    MARGIN`), `resolved` is a *new* `TextVectorResult` (via `dataclasses.replace`, not a mutation
+    of ocr_compare's own object) with `rotation_used` corrected by +90 deg (`applied=True`).
+    ocr_compare's own `resolved` reading is left untouched -- consumers wanting the corrected
+    orientation (this stage's own reconstruction view, drawing_vectors) read `RotationCheck.
+    resolved` instead."""
+
+    cluster: list[VectorPath]
+    text: str
+    bbox: tuple[float, float, float, float]
+    before_rotation: int
+    after_rotation: int
+    applied: bool
+    error_unrotated: float
+    error_rotated: float
+    resolved: TextVectorResult
 
 
 @dataclass
@@ -68,12 +159,55 @@ class PipelineContext:
     paths_by_layer: dict[str, list[VectorPath]] | None = None
     paths_by_layer_color: dict[str, dict[tuple, list[VectorPath]]] | None = None
     clustering: dict[GroupKey, ClusteringStageResult] | None = None
-    drawing_vectors: list[DrawingVector] | None = None
-    # Populated alongside drawing_vectors -- whatever the clustering
-    # stage's final step left kept (every filter/cluster step's drops go
-    # to drawing_vectors instead, never here). Consumed by ocr_text_clusters.
+    # text_candidates: every clustering bucket's final surviving "kept"
+    # clusters, flattened together (every filter/cluster step's drops go to
+    # drawing_vectors instead, never here).
     text_clusters: list[list[VectorPath]] | None = None
-    ocr_text_clusters: list[TextVectorResult] | None = None
+    # text_candidates: id(cluster) -> the pre-spatial-clustering "groups"
+    # that cluster is composed of (see vector.py's module docstring for the
+    # group/cluster distinction) -- merged across every (layer, color)
+    # bucket's own StepResult.cluster_groups.
+    cluster_groups: dict[int, list[list[VectorPath]]] | None = None
+    # unique_clusters: text_clusters grouped by whole-page geometric
+    # similarity (see Vector.group_similar_clusters); cluster_similarity_id
+    # is id(cluster) -> index into similarity_groups, for O(1) lookup.
+    similarity_groups: list[list[list[VectorPath]]] | None = None
+    cluster_similarity_id: dict[int, int] | None = None
+    # fast_text_detect: the whole-page renders/masks + per-cluster scores.
+    fast_result: FastPageResult | None = None
+    # fast_text_detect: text_clusters split by the combined FAST score
+    # (see FastPageResult) against FAST_COMBINED_KEEP_THRESHOLD.
+    fast_passed: list[list[VectorPath]] | None = None
+    fast_dropped: list[list[VectorPath]] | None = None
+    # spatial_regroup: fast_passed re-merged by real per-path overlap alone
+    # (SPATIAL_REGROUP_TOLERANCE_PX), ignoring which (layer, color) bucket or
+    # similarity group each cluster came from -- see _run_spatial_regroup.
+    # This, not fast_passed, is what ocr_compare actually OCRs.
+    regrouped_clusters: list[list[VectorPath]] | None = None
+    # ocr_compare: one ClusterOcrResult per regrouped_clusters cluster --
+    # a single direct OCR call over the whole cluster, no fallback tiers.
+    cluster_ocr_results: list[ClusterOcrResult] | None = None
+    # ocr_compare: just the resolved reading out of cluster_ocr_results,
+    # kept as its own flat list for to_native_pdf_elements/reconstruction.
+    # This is ocr_compare's own output and is never mutated by
+    # rotation_verify -- see rotation_checks below for the corrected
+    # counterpart.
+    ocr_results: list[TextVectorResult] | None = None
+    # ocr_compare: full path lists of every cluster whose OCR reading came
+    # back blank (see _run_ocr_compare) -- folded into drawing_vectors,
+    # same as every other rejection in this pipeline.
+    ocr_failed: list[list[VectorPath]] | None = None
+    # rotation_verify: one RotationCheck per cluster_ocr_results entry with
+    # real resolved text -- see _run_rotation_verify. Each RotationCheck's
+    # own `resolved` field is a *new* TextVectorResult with the corrected
+    # rotation_used when `applied` -- ocr_compare's own ocr_results/
+    # cluster_ocr_results objects are never mutated, so re-viewing the
+    # ocr_compare stage always shows exactly what that stage produced.
+    rotation_checks: list["RotationCheck"] | None = None
+    # drawing_vectors now runs last -- folds in the clustering chain's own
+    # drops, fast_dropped (FAST found no text in these), and ocr_failed
+    # (OCR resolution failed for these).
+    drawing_vectors: list[DrawingVector] | None = None
     # Future stages add fields here as they're implemented (raster_images,
     # etc.) so later stages can read earlier stages' output.
 
@@ -158,19 +292,295 @@ def _run_clustering(ctx: PipelineContext) -> dict[GroupKey, ClusteringStageResul
     return result
 
 
+def _run_text_candidates(ctx: PipelineContext) -> list[list[VectorPath]]:
+    """Gathers every clustering bucket's final surviving "kept" clusters
+    (every filter/cluster step's drops went to drawing_vectors instead,
+    never here) into ctx.text_clusters, and merges every bucket's own
+    StepResult.cluster_groups (id(cluster) -> its composing pre-spatial
+    "groups") into one ctx.cluster_groups dict -- consumed by
+    ocr_compare's group-vs-cluster comparison."""
+    text_clusters: list[list[VectorPath]] = []
+    cluster_groups: dict[int, list[list[VectorPath]]] = {}
+    for cluster_result in ctx.clustering.values():
+        if not cluster_result.steps:
+            continue
+        last = cluster_result.steps[-1]
+        text_clusters.extend(last.categories["kept"].groups)
+        if last.cluster_groups:
+            cluster_groups.update(last.cluster_groups)
+
+    ctx.text_clusters = text_clusters
+    ctx.cluster_groups = cluster_groups
+    return text_clusters
+
+
+def _run_unique_clusters(ctx: PipelineContext) -> list[list[list[VectorPath]]]:
+    """Whole-page geometric similarity grouping of text_clusters (see
+    Vector.group_similar_clusters/Glossary.md's "similarity group" entry)
+    -- run before fast_text_detect so its scoring can be min'd across each
+    similarity group."""
+    groups = Vector().group_similar_clusters(ctx.text_clusters or [])
+    ctx.similarity_groups = groups
+    ctx.cluster_similarity_id = {
+        id(cluster): gi for gi, group in enumerate(groups) for cluster in group
+    }
+    return groups
+
+
+def _sample_mask(mask: "np.ndarray | None", cluster: list[VectorPath], zoom: float) -> float:
+    """Mean mask probability over each of `cluster`'s own member paths'
+    individual bbox regions (pixel-count-weighted across paths), mapped
+    from page-space into `mask`'s pixel space at `zoom`) -- not the
+    cluster's aggregate bbox, which would dilute (or inflate) the score
+    with interior whitespace the vectors themselves never actually touch.
+    0.0 if `mask` is None or no member path has any pixel area."""
+    if mask is None:
+        return 0.0
+    mask_h, mask_w = mask.shape
+    total_pixels = 0
+    total_score = 0.0
+    for p in cluster:
+        x0, y0, x1, y1 = p.bbox
+        px0 = max(0, min(mask_w, int(x0 * zoom)))
+        py0 = max(0, min(mask_h, int(y0 * zoom)))
+        px1 = max(px0, min(mask_w, int(np.ceil(x1 * zoom))))
+        py1 = max(py0, min(mask_h, int(np.ceil(y1 * zoom))))
+        region = mask[py0:py1, px0:px1]
+        if region.size:
+            total_pixels += region.size
+            total_score += float(region.sum())
+    return total_score / total_pixels if total_pixels else 0.0
+
+
+def _run_fast_text_detect(ctx: PipelineContext) -> FastPageResult:
+    """Renders one whole-page image of every extracted vector path on the
+    page (ctx.vector_paths -- drawing content included, not just surviving
+    text-candidate clusters) via Renderer.render_page_paths, and runs
+    FastDetector.detect_tiled once over it -- `detect_tiled` upscales the
+    render and tiles/rotates it (see helpers/fast_detect.py) for a more
+    robust per-region score than one downsized whole-page pass would give.
+    Each text-candidate cluster's own score is `_sample_mask` over the
+    resulting mask (sampled at its own bbox region, whether or not that
+    region happened to include non-candidate paths too), then -- per
+    unique_clusters' similarity group -- the final score is the min of that
+    score across every member of that group (so if any similar-looking
+    cluster on the page scored low, every cluster judged the "same" shares
+    that low score). A cluster passes (ctx.fast_passed) if its final score
+    exceeds FAST_COMBINED_KEEP_THRESHOLD; the rest are reclassified as
+    drawing content (ctx.fast_dropped, folded into drawing_vectors). A page
+    with zero vector paths renders/detects nothing, so FastDetector's
+    underlying torch model is never even constructed (see
+    helpers/fast_detect.py)."""
+    clusters = ctx.text_clusters or []
+    all_paths = ctx.vector_paths or []
+
+    page_image = page_mask = None
+    detect_seconds = None
+
+    if all_paths:
+        renderer = Renderer()
+        detector = FastDetector()
+        page_image = renderer.render_page_paths(
+            all_paths, ctx.page.meta, FAST_PAGE_RENDER_DPI,
+        )
+        start = time.perf_counter()
+        page_mask = detector.detect_tiled(page_image, desc="FAST text detection")
+        detect_seconds = time.perf_counter() - start
+
+    zoom = FAST_PAGE_RENDER_DPI / 72.0
+    score_by_cluster: dict[int, float] = {
+        id(cluster): _sample_mask(page_mask, cluster, zoom) for cluster in clusters
+    }
+
+    similarity_groups = ctx.similarity_groups or [[cluster] for cluster in clusters]
+    scores: dict[int, float] = {}
+    for group in similarity_groups:
+        group_scores = [score_by_cluster.get(id(cluster), 0.0) for cluster in group]
+        final_score = min(group_scores) if group_scores else 0.0
+        for cluster in group:
+            scores[id(cluster)] = final_score
+
+    passed: list[list[VectorPath]] = []
+    dropped: list[list[VectorPath]] = []
+    for cluster in clusters:
+        (passed if scores.get(id(cluster), 0.0) > FAST_COMBINED_KEEP_THRESHOLD else dropped).append(cluster)
+
+    result = FastPageResult(
+        page_image=page_image, page_mask=page_mask,
+        detect_seconds=detect_seconds,
+        scores=scores, passed=passed, dropped=dropped,
+    )
+    ctx.fast_result = result
+    ctx.fast_passed = passed
+    ctx.fast_dropped = dropped
+    return result
+
+
+def _clusters_overlap(a: list[VectorPath], b: list[VectorPath], tolerance: float) -> bool:
+    """True if any member path of `a` overlaps, touches, or is within
+    `tolerance` of any member path of `b` -- rastervec.geometry.rect_gap is
+    0.0 for overlapping/touching boxes, so one gap check covers both. Used
+    as spatial_regroup's real merge condition: aggregate-bbox proximity
+    alone isn't a real signal that two clusters are the same piece of
+    text, but an actual path-to-path overlap is."""
+    return any(rect_gap(pa.bbox, pb.bbox) <= tolerance for pa in a for pb in b)
+
+
+def _run_spatial_regroup(ctx: PipelineContext) -> list[list[VectorPath]]:
+    """Re-merges every FAST-passed cluster whose member paths actually
+    overlap (or touch within SPATIAL_REGROUP_TOLERANCE_PX) some other
+    cluster's member paths (_clusters_overlap) -- deliberately ignores
+    which (layer, color) bucket or unique_clusters similarity group a
+    cluster originally came from, unlike every earlier clustering step in
+    this pipeline (see vector.py's module docstring: normal classification
+    never merges across (layer, color) buckets). Two nearby FAST-passed
+    clusters that classification/FAST happened to keep as separate pieces
+    (e.g. different colors, or split across similarity groups) are
+    stitched back into one piece here before OCR sees them, since OCR
+    reads better over one merged text region than several adjacent
+    fragments.
+
+    Clustering.cluster_spatial's own `threshold` (used for its grid-based
+    candidate pruning over each cluster's *aggregate* bbox) is set to the
+    same SPATIAL_REGROUP_TOLERANCE_PX as the real per-path check: since a
+    cluster's aggregate bbox is a superset of every member path's bbox,
+    `rect_gap(unionA, unionB) <= rect_gap(subA, subB)` for any member pair
+    -- so any real per-path match is guaranteed to also pass the grid's
+    own aggregate-bbox candidacy check at this same threshold, meaning no
+    true merge can be pruned away by the outer grid pass.
+
+    Nothing else is tracked onto the merged piece -- ocr_compare OCRs each
+    merged piece directly, with no fallback tier to carry composing-group
+    lineage for."""
+    passed = ctx.fast_passed or []
+
+    merged = Clustering().cluster_spatial(
+        passed, get_bbox=lambda c: union_bbox([p.bbox for p in c]),
+        threshold=SPATIAL_REGROUP_TOLERANCE_PX,
+        extra_close=lambda a, b: _clusters_overlap(a, b, SPATIAL_REGROUP_TOLERANCE_PX),
+    )
+
+    regrouped = [[p for piece in pieces for p in piece] for pieces in merged]
+    ctx.regrouped_clusters = regrouped
+    return regrouped
+
+
+def _run_ocr_compare(ctx: PipelineContext) -> list[ClusterOcrResult]:
+    """Cluster OCR only: one direct RenderOCR.ocr_cluster call per
+    spatial_regroup cluster, no fallback tiers, no similarity-group reuse.
+    A cluster's reading counts as failed if its text comes back blank --
+    its full path list is collected into ctx.ocr_failed (folded into
+    drawing_vectors, same as every other rejection in this pipeline), in
+    addition to being kept (blank) in ctx.ocr_results."""
+    renderer = Renderer()
+    render_ocr = RenderOCR()
+    clusters = ctx.regrouped_clusters or []
+
+    results: list[ClusterOcrResult] = []
+    ocr_results: list[TextVectorResult] = []
+    ocr_failed: list[list[VectorPath]] = []
+
+    for cluster in tqdm(clusters, desc="OCR compare", unit="cluster"):
+        start = time.perf_counter()
+        resolved = render_ocr.ocr_cluster(cluster, ctx.page, renderer)
+        ocr_seconds = time.perf_counter() - start
+
+        results.append(ClusterOcrResult(cluster=cluster, resolved=resolved, ocr_seconds=ocr_seconds))
+        ocr_results.append(resolved)
+        if not resolved.text.strip():
+            ocr_failed.append(cluster)
+
+    ctx.cluster_ocr_results = results
+    ctx.ocr_results = ocr_results
+    ctx.ocr_failed = ocr_failed
+    return results
+
+
+def _text_aspect_ratio(text: str) -> float | None:
+    """Natural width/height ratio of `text` laid out on one line, via the
+    same base14 "helv" font metrics Renderer.render_reconstructed_page
+    uses for placement -- fontsize-invariant (both width and height scale
+    with fontsize together), so this needs no bbox/fontsize input at all.
+    `None` for blank text."""
+    if not text.strip():
+        return None
+    font = fitz.Font("helv")
+    span = font.ascender - font.descender
+    if span <= 0:
+        return None
+    return font.text_length(text, fontsize=1.0) / span
+
+
+def _relative_error(a: float, b: float) -> float:
+    return abs(a - b) / max(abs(a), abs(b), 1e-6)
+
+
+def _run_rotation_verify(ctx: PipelineContext) -> list[RotationCheck]:
+    """New layer between ocr_compare and drawing_vectors: for every
+    ocr_compare cluster result with real resolved text, compares the
+    text's own natural aspect ratio (_text_aspect_ratio) against its
+    `resolved.bbox`'s aspect ratio as-is, and again against that same bbox
+    rotated 90 deg (width/height swapped, i.e. 1/bbox_ratio) -- if the
+    rotated comparison is a meaningfully closer match (see ROTATION_VERIFY_
+    IMPROVEMENT_MARGIN), `RotationCheck.resolved` is a *new* TextVectorResult
+    (`dataclasses.replace`) with `rotation_used` corrected by +90 deg.
+    ocr_compare's own `resolved` object (held by ctx.cluster_ocr_results/
+    ctx.ocr_results, and by the debug app's cached ocr_compare StageOutput)
+    is never mutated -- re-viewing the ocr_compare stage always shows
+    exactly what that stage produced, not a later stage's correction.
+    Consumers that want the corrected orientation (this stage's own
+    reconstruction view, drawing_vectors) read RotationCheck.resolved
+    instead. Clusters with blank/failed resolved text, or a degenerate
+    (zero-area) bbox, are skipped -- nothing to check, and no RotationCheck
+    is recorded for them."""
+    cluster_results = ctx.cluster_ocr_results or []
+    checks: list[RotationCheck] = []
+
+    for cluster_result in cluster_results:
+        resolved = cluster_result.resolved
+        text_ratio = _text_aspect_ratio(resolved.text)
+        if text_ratio is None:
+            continue
+
+        x0, y0, x1, y1 = resolved.bbox
+        width, height = x1 - x0, y1 - y0
+        if width <= 0 or height <= 0:
+            continue
+        bbox_ratio = width / height
+
+        error_unrotated = _relative_error(text_ratio, bbox_ratio)
+        error_rotated = _relative_error(text_ratio, 1.0 / bbox_ratio)
+
+        before = resolved.rotation_used
+        applied = (error_unrotated - error_rotated) > ROTATION_VERIFY_IMPROVEMENT_MARGIN
+        after = (before + 90) % 360 if applied else before
+        fixed = replace(resolved, rotation_used=after) if applied else resolved
+
+        checks.append(
+            RotationCheck(
+                cluster=resolved.paths, text=resolved.text, bbox=resolved.bbox,
+                before_rotation=before, after_rotation=after,
+                applied=applied, error_unrotated=error_unrotated, error_rotated=error_rotated,
+                resolved=fixed,
+            )
+        )
+
+    ctx.rotation_checks = checks
+    return checks
+
+
 def _run_drawing_vectors(ctx: PipelineContext) -> list[DrawingVector]:
-    """Final aggregation: every category any step in the clustering chain
-    marked `role="dropped"` was already "classified as Drawing" the
-    moment it was produced (see ClusteringStageResult's docstring), so
-    it's folded in here unconditionally. Whatever the chain's final step's
-    `"kept"` category still holds is *not* drawing content -- there's no
-    further drawing-vs-text heuristic applied to it (Vector no longer has
-    one); it's stashed on ctx.text_clusters as-is for ocr_text_clusters to
-    actually OCR, the only content that doesn't end up in
-    drawing_vectors."""
+    """Final aggregation, run last: every category any step in the
+    clustering chain marked `role="dropped"` was already "classified as
+    Drawing" the moment it was produced (see ClusteringStageResult's
+    docstring), so it's folded in here unconditionally -- plus every path
+    belonging to a cluster FAST found no text in (ctx.fast_dropped) and
+    every path belonging to a cluster whose OCR resolution failed (ctx.
+    ocr_failed), both reclassified as drawing content for the same reason.
+    Whatever ocr_results still holds text for is the only content that
+    doesn't end up in drawing_vectors."""
     vector = Vector()
     all_drawing_paths: list[VectorPath] = []
-    all_text_clusters: list[list[VectorPath]] = []
 
     for cluster_result in ctx.clustering.values():
         for step in cluster_result.steps:
@@ -178,8 +588,12 @@ def _run_drawing_vectors(ctx: PipelineContext) -> list[DrawingVector]:
                 if category.role == "dropped":
                     for group in category.groups:
                         all_drawing_paths.extend(group)
-        if cluster_result.steps:
-            all_text_clusters.extend(cluster_result.steps[-1].categories["kept"].groups)
+
+    for cluster in ctx.fast_dropped or []:
+        all_drawing_paths.extend(cluster)
+
+    for cluster in ctx.ocr_failed or []:
+        all_drawing_paths.extend(cluster)
 
     # ctx.clustering is keyed by (layer, color) -- iterating its buckets
     # loses each path's original PDF stacking order across layer/color
@@ -189,34 +603,8 @@ def _run_drawing_vectors(ctx: PipelineContext) -> list[DrawingVector]:
     # path was classified into during clustering.
     all_drawing_paths.sort(key=lambda p: (p.seq, p.item_index))
 
-    ctx.text_clusters = all_text_clusters
     ctx.drawing_vectors = vector.build_drawing_vectors(all_drawing_paths)
     return ctx.drawing_vectors
-
-
-def _run_ocr_text_clusters(ctx: PipelineContext) -> list[TextVectorResult]:
-    """OCRs each text-classified vector cluster from drawing_vectors's
-    split (ctx.text_clusters) via Renderer.render_vector_cluster +
-    RenderOCR.ocr_cluster -- one high-res isolated render per cluster,
-    OCR'd across several rotations and confidence-voted (see
-    RenderOCR.combine_rotation_results). RenderOCR's underlying PaddleOCR
-    engine is cached at module scope (see helpers/render_ocr.py), so
-    constructing a fresh RenderOCR() here per run is cheap after the
-    first call. Each cluster is a real (if engine-warm-cheap) multi-
-    rotation OCR round-trip, so a page with many text clusters can take a
-    visible moment -- the CLI and the debug app (which runs the pipeline
-    synchronously before its window becomes interactive) both just call
-    Pipeline.run_page() directly, so a tqdm bar here is the only progress
-    feedback available while this stage runs."""
-    renderer = Renderer()
-    render_ocr = RenderOCR()
-    clusters = ctx.text_clusters or []
-    results = [
-        render_ocr.ocr_cluster(cluster, ctx.page, renderer)
-        for cluster in tqdm(clusters, desc="OCR text clusters", unit="cluster")
-    ]
-    ctx.ocr_text_clusters = results
-    return results
 
 
 class Pipeline:
@@ -231,12 +619,13 @@ class Pipeline:
         StageSpec(key="layer_separation", label="Layer Separation", run=_run_layer_separation),
         StageSpec(key="color_separation", label="Color Separation", run=_run_color_separation),
         StageSpec(key="clustering", label="Clustering", run=_run_clustering),
+        StageSpec(key="text_candidates", label="Text Candidates", run=_run_text_candidates),
+        StageSpec(key="unique_clusters", label="Unique Clusters", run=_run_unique_clusters),
+        StageSpec(key="fast_text_detect", label="FAST: Text Detect", run=_run_fast_text_detect),
+        StageSpec(key="spatial_regroup", label="Spatial Regroup", run=_run_spatial_regroup),
+        StageSpec(key="ocr_compare", label="OCR Compare", run=_run_ocr_compare),
+        StageSpec(key="rotation_verify", label="Rotation Verify", run=_run_rotation_verify),
         StageSpec(key="drawing_vectors", label="Drawing Vectors", run=_run_drawing_vectors),
-        StageSpec(
-            key="ocr_text_clusters",
-            label="OCR: Text Clusters",
-            run=_run_ocr_text_clusters,
-        ),
     ]
 
     @classmethod
@@ -251,7 +640,7 @@ class Pipeline:
     ) -> list[StageOutput]:
         """Runs Pipeline.STAGES in order, stopping after `final_stage`
         (inclusive) instead of running every stage -- e.g. `final_stage=
-        "drawing_vectors"` skips ocr_text_clusters (and any later stage)
+        "fast_text_detect"` skips ocr_compare (and any later stage)
         entirely, never even constructing a RenderOCR/PaddleOCR engine, so
         it's a real way to skip the OCR round-trip while iterating on
         earlier stages, not just a display-time filter. `None` (default)
@@ -295,7 +684,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=Pipeline.stage_keys(),
         default=None,
         help="Stop after this stage instead of running the whole pipeline -- e.g. "
-        "--final-stage drawing_vectors skips ocr_text_clusters (and the PaddleOCR "
+        "--final-stage fast_text_detect skips ocr_compare (and the PaddleOCR "
         "engine it would otherwise build) entirely. Default: run every stage.",
     )
     verbosity = parser.add_mutually_exclusive_group()

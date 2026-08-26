@@ -14,7 +14,7 @@ import sys
 import tkinter as tk
 from dataclasses import dataclass, field
 from tkinter import filedialog, messagebox, ttk
-from typing import Callable
+from typing import Any, Callable
 
 import io
 
@@ -30,15 +30,32 @@ if __name__ == "__main__" and __package__ is None:
 import colorsys
 import hashlib
 
+import numpy as np
+
 from rastervec import geometry
 from rastervec.helpers import vector_classification as vc
 from rastervec.helpers.render_ocr import RenderOCR
 from rastervec.logging_setup import configure_logging
-from rastervec.models import DrawingVector, Page, TextVectorResult, TextWord, VectorPath
-from rastervec.pipeline import ClusteringStageResult, Pipeline, StageOutput
+from rastervec.models import (
+    ClusterOcrResult,
+    DrawingVector,
+    Page,
+    TextVectorResult,
+    TextWord,
+    VectorPath,
+)
+from rastervec.pipeline import (
+    FAST_PAGE_RENDER_DPI,
+    SPATIAL_REGROUP_TOLERANCE_PX,
+    ClusteringStageResult,
+    FastPageResult,
+    Pipeline,
+    RotationCheck,
+    StageOutput,
+)
 from rastervec.reader import Reader
 from rastervec.renderer import Renderer
-from rastervec.vector import SIGNATURE_ROUND_PX, StepResult
+from rastervec.vector import SIGNATURE_ROUND_PX
 
 REFERENCES_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -99,7 +116,7 @@ class DebugAppState:
     # stage key -> arbitrary dict of checkbox state, kept across redraws of
     # that stage (reset per page since it's cached with stage_cache anyway).
     filter_state: dict[str, dict] = field(default_factory=dict)
-    # ocr_text_clusters inspector: (page_index, cluster index) ->
+    # ocr_compare inspector: (page_index, cluster index) ->
     # {"image", "bbox_corners"} (see _ocr_cluster_preview). Deliberately
     # its own dict, not filter_state -- filter_state is keyed only by stage
     # key (shared across every page visit of that stage, fine for cheap UI
@@ -143,14 +160,19 @@ class RenderContext:
     # ghost items drawn by a now-superseded render.
     epoch_box: dict = field(default_factory=lambda: {"value": 0})
     # The live Page for the page currently being viewed -- only
-    # ocr_text_clusters needs it today (to re-render a cluster on demand
-    # for its inspector panel; see _ocr_cluster_preview), but it's cheap and
+    # ocr_compare needs it today (to re-render a cluster on demand for its
+    # inspector panel; see _ocr_cluster_preview), but it's cheap and
     # generally useful, so it's populated for every stage, not just that one.
     page: Page | None = None
     # DebugAppState.ocr_detail_cache, threaded through so
-    # _render_ocr_text_clusters_stage can key/read/write it without needing
+    # _render_ocr_compare_stage can key/read/write it without needing
     # a back-reference to DebugApp itself.
     ocr_detail_cache: dict[tuple, dict] | None = None
+    # Every StageOutput for the current page, in Pipeline.STAGES order --
+    # lets a stage renderer look up an *earlier* stage's own data (see
+    # _stage_output_data), used by the reconstruction toggle's "Combined"
+    # scope to draw more than just the current stage's own elements.
+    all_outputs: list[StageOutput] | None = None
 
 
 def _set_tag_visible(canvas: tk.Canvas, tag: str, visible: bool) -> None:
@@ -409,48 +431,129 @@ def _get_display_matrix(fitz_page: "fitz.Page", zoom: float) -> "fitz.Matrix":
     return fitz_page.rotation_matrix * fitz.Matrix(zoom, zoom)
 
 
-def _add_reconstruction_toggle(ctx: RenderContext, build_image_fn) -> bool:
-    """Adds a "Show Reconstructed PDF"/"Show Original PDF" toggle button to
-    the top of ctx.side_panel, for the (few) stages that support it --
-    native, drawing_vectors, ocr_text_clusters. Persisted per-stage in
-    ctx.filters (survives redraws of that stage the same way every other
-    checkbox here does), so switching stages away and back remembers
-    whether reconstruction was showing.
+def _stage_output_data(ctx: RenderContext, key: str) -> Any | None:
+    """Looks up another stage's own StageOutput.data by key from
+    ctx.all_outputs -- None if that stage hasn't run yet, errored, or
+    ctx.all_outputs itself wasn't populated. Lets a stage renderer read an
+    *earlier* stage's captured elements for the reconstruction toggle's
+    "Combined" scope (see _add_reconstruction_toggle)."""
+    for output in ctx.all_outputs or []:
+        if output.key == key:
+            return output.data if output.status == "ok" else None
+    return None
 
-    When active, this draws the reconstructed page (built lazily by
-    calling `build_image_fn()`, a zero-arg callable the caller supplies so
-    the actual Renderer.render_reconstructed_page call -- and whatever
-    page_meta/element-list plumbing it needs -- stays local to each
-    stage's own renderer) as one big canvas item, tagged "overlay" so the
-    next redraw_overlay()'s canvas.delete("overlay") cleans it up
-    automatically. It's drawn *on top of* the real page pixmap (which is
-    never touched/hidden) rather than replacing it -- since the
-    reconstruction covers the exact same rect at the exact same zoom, this
-    fully occludes the original without risking the base "page_image"
-    item's separate lifecycle (that item is only ever (re)created by
-    DebugApp.render() on page/zoom changes, not on every stage switch).
 
-    Returns whether reconstruction is currently showing -- callers should
-    skip drawing their normal overlay entirely when this is True, since
-    the toggle replaces the overlay rather than layering under it."""
+def _add_reconstruction_toggle(ctx: RenderContext, build_own_fn, build_combined_fn) -> bool:
+    """Adds a "Show Reconstructed Compare"/"Hide Reconstructed Compare"
+    toggle button to the top of ctx.side_panel, for the (few) stages that
+    support it -- native, ocr_compare, rotation_verify, drawing_vectors.
+    Persisted per-stage in ctx.filters (survives redraws of that stage the
+    same way every other checkbox here does), so switching stages away and
+    back remembers whether it was showing.
+
+    When active, a "This layer" / "Combined" radio pair also appears
+    (state in ctx.filters["reconstruction_scope"], default "own"), picking
+    which of `build_own_fn()` (just this stage's own captured elements) or
+    `build_combined_fn()` (this stage's elements plus every earlier
+    stage's, via _stage_output_data) is drawn -- both zero-arg callables
+    the caller supplies so the actual Renderer.render_reconstructed_page
+    call -- and whatever page_meta/element-list plumbing it needs -- stays
+    local to each stage's own renderer.
+
+    The built image is shown as a **drag-anywhere compare slider**: left
+    of the divider is the reconstruction, right of it is the real original
+    page pixmap (already the base canvas layer beneath, untouched -- the
+    slider just crops how much of the reconstruction covers it). Divider
+    position is state in ctx.filters["reconstruction_slider"] (a 0..1
+    fraction, default 0.5). Dragging re-crops the *already-built* image
+    (cheap PIL crop) and repositions the divider line directly via
+    canvas.itemconfig/coords -- no re-render, no full stage redraw -- so
+    the drag stays smooth even though building the reconstruction itself
+    can be relatively expensive. Bindings are cleaned up centrally in
+    DebugApp.redraw_overlay's unbind block on every stage switch.
+
+    Returns whether the compare view is currently showing -- callers
+    should skip drawing their normal overlay entirely when this is True,
+    since the compare view replaces the overlay rather than layering
+    under it."""
     state = ctx.filters.setdefault("show_reconstructed", {"value": False})
 
     def _toggle() -> None:
         state["value"] = not state["value"]
         ctx.on_change()
 
-    label = "Show Original PDF" if state["value"] else "Show Reconstructed PDF"
+    label = "Hide Reconstructed Compare" if state["value"] else "Show Reconstructed Compare"
     ttk.Button(ctx.side_panel, text=label, command=_toggle).pack(
         anchor="w", fill="x", padx=4, pady=(4, 8)
     )
 
-    if state["value"]:
-        image = build_image_fn()
-        photo = ImageTk.PhotoImage(image)
-        ctx.filters["_reconstructed_photo_ref"] = photo  # keep alive -- Tk won't retain it otherwise
-        ctx.canvas.create_image(0, 0, anchor="nw", image=photo, tags=("overlay",))
+    if not state["value"]:
+        return False
 
-    return state["value"]
+    scope = ctx.filters.setdefault("reconstruction_scope", {"value": "own"})
+    scope_var = tk.StringVar(value=scope["value"])
+
+    def _set_scope() -> None:
+        scope["value"] = scope_var.get()
+        ctx.on_change()
+
+    row = ttk.Frame(ctx.side_panel)
+    row.pack(anchor="w", padx=4, pady=(0, 4))
+    for text, value in (("This layer", "own"), ("Combined", "combined")):
+        ttk.Radiobutton(
+            row, text=text, value=value, variable=scope_var, command=_set_scope,
+        ).pack(side="left", padx=(0, 8))
+
+    ttk.Label(
+        ctx.side_panel, text="Drag: left = reconstructed, right = original",
+    ).pack(anchor="w", padx=4, pady=(0, 8))
+
+    image = build_combined_fn() if scope["value"] == "combined" else build_own_fn()
+    slider = ctx.filters.setdefault("reconstruction_slider", {"value": 0.5})
+
+    def _cropped_photo(frac: float) -> "ImageTk.PhotoImage":
+        width = max(1, min(image.width, round(image.width * frac)))
+        return ImageTk.PhotoImage(image.crop((0, 0, width, image.height)))
+
+    photo = _cropped_photo(slider["value"])
+    ctx.filters["_reconstructed_photo_ref"] = photo  # keep alive -- Tk won't retain it otherwise
+    image_item = ctx.canvas.create_image(0, 0, anchor="nw", image=photo, tags=("overlay",))
+    line_x = image.width * slider["value"]
+    line_item = ctx.canvas.create_line(
+        line_x, 0, line_x, image.height, fill="#2563eb", width=2, tags=("overlay",),
+    )
+
+    def _apply_slider(frac: float) -> None:
+        frac = max(0.0, min(1.0, frac))
+        slider["value"] = frac
+        new_photo = _cropped_photo(frac)
+        ctx.filters["_reconstructed_photo_ref"] = new_photo  # keep alive
+        ctx.canvas.itemconfig(image_item, image=new_photo)
+        new_x = image.width * frac
+        ctx.canvas.coords(line_item, new_x, 0, new_x, image.height)
+
+    def _frac_from_event(event) -> float:
+        cx = ctx.canvas.canvasx(event.x)
+        return (cx / image.width) if image.width else 0.0
+
+    dragging = {"value": False}
+
+    def _on_press(event) -> None:
+        dragging["value"] = True
+        _apply_slider(_frac_from_event(event))
+
+    def _on_drag(event) -> None:
+        if dragging["value"]:
+            _apply_slider(_frac_from_event(event))
+
+    def _on_release(_event) -> None:
+        dragging["value"] = False
+
+    ctx.canvas.bind("<ButtonPress-1>", _on_press)
+    ctx.canvas.bind("<B1-Motion>", _on_drag)
+    ctx.canvas.bind("<ButtonRelease-1>", _on_release)
+
+    return True
 
 
 def _render_reader_stage(ctx: RenderContext) -> None:
@@ -461,11 +564,14 @@ def _render_reader_stage(ctx: RenderContext) -> None:
 def _render_native_stage(ctx: RenderContext) -> None:
     words: list[TextWord] = ctx.output.data or []
 
-    if ctx.page is not None and _add_reconstruction_toggle(
-        ctx, lambda: _RENDERER.render_reconstructed_page(
+    def _build() -> "Image.Image":
+        return _RENDERER.render_reconstructed_page(
             ctx.page.meta, native_words=words, zoom=geometry.matrix_scale(ctx.matrix)[0],
-        ),
-    ):
+        )
+
+    # native is the first stage with this toggle -- nothing precedes it,
+    # so "This layer" and "Combined" are the same render here.
+    if ctx.page is not None and _add_reconstruction_toggle(ctx, _build, _build):
         return
 
     for word in words:
@@ -719,6 +825,15 @@ def _render_clustering_stage(ctx: RenderContext) -> None:
             category_groups[key] = groups
             category_role[key] = role
 
+    # Precomputed once (not per category key) -- each step's own dropped-
+    # category keys, in display order, so a color index lookup below is
+    # O(1) instead of rebuilding this same per-step filter+list().index()
+    # on every non-kept category.
+    dropped_keys_by_step: dict[int, list[str]] = {}
+    for key in category_names:
+        if category_role[key] != "kept":
+            dropped_keys_by_step.setdefault(category_step_index[key], []).append(key)
+
     categories: dict[str, dict] = {}
     for key in category_names:
         i = category_step_index[key]
@@ -727,7 +842,7 @@ def _render_clustering_stage(ctx: RenderContext) -> None:
         if is_kept:
             color = _CLUSTER_STEP_COLORS[i % len(_CLUSTER_STEP_COLORS)]
         else:
-            side_index = [k for k in category_names if category_step_index[k] == i].index(key)
+            side_index = dropped_keys_by_step[i].index(key)
             color = _SIDE_CATEGORY_COLORS[side_index % len(_SIDE_CATEGORY_COLORS)]
         groups = category_groups[key]
         categories[key] = {
@@ -839,12 +954,27 @@ def _render_clustering_stage(ctx: RenderContext) -> None:
 def _render_drawing_vectors_stage(ctx: RenderContext) -> None:
     drawing_vectors: list[DrawingVector] = ctx.output.data or []
 
-    if ctx.page is not None and _add_reconstruction_toggle(
-        ctx, lambda: _RENDERER.render_reconstructed_page(
+    def _build_own() -> "Image.Image":
+        return _RENDERER.render_reconstructed_page(
             ctx.page.meta, drawing_vectors=drawing_vectors,
             zoom=geometry.matrix_scale(ctx.matrix)[0],
-        ),
-    ):
+        )
+
+    def _build_combined() -> "Image.Image":
+        # rotation_verify runs after ocr_compare and reports its own
+        # corrected-rotation copies via RotationCheck.resolved (see
+        # pipeline.py's _run_rotation_verify) -- read those, not
+        # ocr_compare's own (never-corrected) resolved readings, so this
+        # combined view reflects the final orientation.
+        native_words = _stage_output_data(ctx, "native") or []
+        checks: list[RotationCheck] = _stage_output_data(ctx, "rotation_verify") or []
+        ocr_results = [c.resolved for c in checks if _ocr_passed(c.resolved)]
+        return _RENDERER.render_reconstructed_page(
+            ctx.page.meta, native_words=native_words, ocr_results=ocr_results,
+            drawing_vectors=drawing_vectors, zoom=geometry.matrix_scale(ctx.matrix)[0],
+        )
+
+    if ctx.page is not None and _add_reconstruction_toggle(ctx, _build_own, _build_combined):
         return
 
     filters = ctx.filters
@@ -884,6 +1014,7 @@ _OCR_FAILED_COLOR = "#dc2626"
 _OCR_SELECTED_WIDTH = 3
 _OCR_PREVIEW_MAX_SIDE = 200
 _OCR_BBOX_OVERLAY_COLOR = (220, 38, 38)
+_OCR_BBOX_OVERLAY_COLOR_HEX = "#dc2626"
 
 
 def _ocr_passed(result: TextVectorResult) -> bool:
@@ -891,21 +1022,18 @@ def _ocr_passed(result: TextVectorResult) -> bool:
 
 
 def _ocr_cluster_preview(result: TextVectorResult, page: Page) -> dict:
-    """Renders one OCR'd text cluster at the single rotation it was
-    actually read at (result.rotation_used) and re-OCRs just that one
-    rotation, purely to recover the detected-text bbox in that rendered
-    image's own pixel space for the inspector's overlay -- the production
-    TextVectorResult keeps `text`/`confidence` (used directly below, not
-    re-derived here) but not that bbox. One render + one OCR call per
-    cluster -- callers only care which cluster this is, not the other 7
-    rotations RenderOCR.ocr_cluster tried and discarded, so unlike an
-    earlier version of this panel, this never replays all 8."""
-    image = _RENDERER.render_vector_cluster(result.cluster_paths, page, dpi=300).convert("RGB")
-    angle = result.rotation_used % 360
-    if angle:
-        image = image.rotate(
-            -angle, expand=True, fillcolor=(255, 255, 255), resample=Image.BICUBIC,
-        )
+    """Renders one OCR'd text cluster upright (the same render `ocr_cluster`
+    itself used) and re-OCRs it, purely to recover the detected-text bbox
+    in that rendered image's own pixel space for the inspector's overlay --
+    the production TextVectorResult keeps `text`/`confidence` (used
+    directly below, not re-derived here) but not that bbox. No manual
+    pre-rotation here: `RenderOCR.ocr()` (via `_boxes_from_page`'s
+    `_undo_doc_rotation` correction) already maps PaddleOCR's own detected
+    corners back into this upright render's own pixel space regardless of
+    whatever internal doc-orientation rotation Paddle applied, so
+    `result.rotation_used` is display-only here, not something this preview
+    needs to pre-apply itself."""
+    image = _RENDERER.render_vector_cluster(result.paths, dpi=300).convert("RGB")
     _text, _confidence, bbox_corners = _RENDER_OCR.ocr(image)
     return {"image": image, "bbox_corners": bbox_corners}
 
@@ -925,30 +1053,282 @@ def _ocr_preview_photo(preview: dict) -> "ImageTk.PhotoImage":
     return ImageTk.PhotoImage(image)
 
 
-def _render_ocr_text_clusters_stage(ctx: RenderContext) -> None:
-    results: list[TextVectorResult] = ctx.output.data or []
-    passed = [r for r in results if _ocr_passed(r)]
-    failed = [r for r in results if not _ocr_passed(r)]
+def _render_text_candidates_stage(ctx: RenderContext) -> None:
+    """Every text-candidate cluster surviving the whole vector
+    classification chain (across every (layer, color) bucket), before FAST
+    has looked at any of them -- a plain bbox-per-cluster view, hover shows
+    member-path count."""
+    clusters: list[list[VectorPath]] = ctx.output.data or []
 
-    ttk.Label(ctx.side_panel, text=f"{len(results)} OCR'd text cluster(s)").pack(
+    ttk.Label(
+        ctx.side_panel, text=f"{len(clusters)} text candidate cluster(s)",
+    ).pack(anchor="w", padx=4, pady=(4, 6))
+
+    show = ctx.filters.setdefault("show", {"value": True})
+    var = tk.BooleanVar(value=show["value"])
+    _add_category_checkbox(
+        ctx.side_panel, ctx.canvas, "Show", var, "tc_all",
+        persist=lambda v: show.__setitem__("value", v),
+    )
+
+    for cluster in clusters:
+        if not cluster:
+            continue
+        bbox = geometry.union_bbox([p.bbox for p in cluster])
+        item_id = _draw_bbox(
+            ctx.canvas, ctx.matrix, bbox, _CLUSTER_STEP_COLORS[0], width=1,
+            tags=("overlay", "tc_all"), visible=show["value"],
+        )
+        ctx.canvas.tag_bind(
+            item_id, "<Enter>",
+            lambda _event, c=cluster: ctx.tooltip.show(
+                ctx.canvas.winfo_pointerx(), ctx.canvas.winfo_pointery(),
+                f"{len(c)} path(s)",
+            ),
+        )
+        ctx.canvas.tag_bind(item_id, "<Leave>", lambda _event: ctx.tooltip.hide())
+
+
+_SIMILARITY_GROUP_COLORS = (
+    "#059669", "#2563eb", "#dc2626", "#d97706", "#7c3aed", "#0891b2", "#be185d", "#65a30d",
+)
+
+
+def _render_unique_clusters_stage(ctx: RenderContext) -> None:
+    """Whole-page geometric similarity grouping of text-candidate clusters
+    (Vector.group_similar_clusters) -- clusters judged the "same" shape
+    (translation/rotation-tolerant) share a color and a FAST verdict (see
+    fast_text_detect). Purely a visualization stage; hover shows which
+    similarity group a cluster belongs to and its member count."""
+    groups: list[list[list[VectorPath]]] = ctx.output.data or []
+
+    ttk.Label(
+        ctx.side_panel, text=f"{len(groups)} similarity group(s)",
+    ).pack(anchor="w", padx=4, pady=(4, 6))
+
+    show = ctx.filters.setdefault("show", {"value": True})
+    var = tk.BooleanVar(value=show["value"])
+    _add_category_checkbox(
+        ctx.side_panel, ctx.canvas, "Show", var, "uc_all",
+        persist=lambda v: show.__setitem__("value", v),
+    )
+
+    for gi, group in enumerate(groups):
+        color = _SIMILARITY_GROUP_COLORS[gi % len(_SIMILARITY_GROUP_COLORS)]
+        for cluster in group:
+            if not cluster:
+                continue
+            bbox = geometry.union_bbox([p.bbox for p in cluster])
+            item_id = _draw_bbox(
+                ctx.canvas, ctx.matrix, bbox, color, width=1,
+                tags=("overlay", "uc_all"), visible=show["value"],
+            )
+            ctx.canvas.tag_bind(
+                item_id, "<Enter>",
+                lambda _event, gi=gi, n=len(group): ctx.tooltip.show(
+                    ctx.canvas.winfo_pointerx(), ctx.canvas.winfo_pointery(),
+                    f"similarity group {gi + 1}\n{n} member cluster(s)",
+                ),
+            )
+            ctx.canvas.tag_bind(item_id, "<Leave>", lambda _event: ctx.tooltip.hide())
+
+
+def _fast_mask_overlay_image(base_image: "Image.Image", mask: "np.ndarray") -> "Image.Image":
+    heat = (np.clip(mask, 0.0, 1.0) * 255).astype("uint8")
+    zeros = Image.new("L", base_image.size, 0)
+    heat_img = Image.merge("RGB", (Image.fromarray(heat), zeros, zeros))
+    return Image.blend(base_image.convert("RGB"), heat_img, alpha=0.5)
+
+
+def _render_fast_text_detect_stage(ctx: RenderContext) -> None:
+    """FAST runs once per page, over a render of every extracted vector
+    path on the page -- drawing content included, not just surviving
+    text-candidate clusters (pipeline.py's FastPageResult) -- "Render"/
+    "Detection heatmap" toggles control what's shown. Each candidate
+    cluster's own bbox is drawn as a hover rect (green if it passed
+    FAST_COMBINED_KEEP_THRESHOLD, red if dropped), resized/positioned at
+    the current debug-app zoom (not a fixed DPI/72 factor) so it stays
+    pixel-aligned with the page pixmap underneath and lives inside the
+    same scrollregion."""
+    result: FastPageResult = ctx.output.data
+
+    ttk.Label(
+        ctx.side_panel,
+        text=f"{len(result.passed)} passed / {len(result.dropped)} dropped candidate cluster(s)",
+    ).pack(anchor="w", padx=4, pady=(4, 6))
+
+    def _fmt_seconds(value: float | None) -> str:
+        return f"{value:.2f}s" if value is not None else "n/a"
+
+    ttk.Label(
+        ctx.side_panel,
+        text=f"FAST detect time: {_fmt_seconds(result.detect_seconds)}",
+    ).pack(anchor="w", padx=4, pady=(0, 6))
+
+    show_render = ctx.filters.setdefault("show_render", {"value": True})
+    show_detection = ctx.filters.setdefault("show_detection", {"value": True})
+
+    def _toggle(state: dict, var: tk.BooleanVar) -> None:
+        state["value"] = var.get()
+        ctx.on_change()
+
+    for label, state in (("Render", show_render), ("Detection heatmap", show_detection)):
+        var = tk.BooleanVar(value=state["value"])
+        ttk.Checkbutton(
+            ctx.side_panel, text=label, variable=var,
+            command=lambda v=var, s=state: _toggle(s, v),
+        ).pack(anchor="w", padx=4, pady=1)
+
+    image = result.page_image
+    mask = result.page_mask
+
+    if image is None:
+        ttk.Label(ctx.side_panel, text="(no vector paths on this page)").pack(
+            anchor="w", padx=4, pady=(8, 4)
+        )
+        return
+
+    base = image.convert("RGB") if show_render["value"] else Image.new("RGB", image.size, (255, 255, 255))
+    if show_detection["value"] and mask is not None:
+        base = _fast_mask_overlay_image(base, mask)
+
+    # Resize to match the page pixmap's own on-canvas size at the current
+    # debug-app zoom, so it's pixel-aligned and lives inside the same
+    # scrollregion (rather than a fixed FAST_PAGE_RENDER_DPI/72 factor
+    # unrelated to the app's own zoom control).
+    zoom = geometry.matrix_scale(ctx.matrix)[0]
+    render_zoom = FAST_PAGE_RENDER_DPI / 72.0
+    target_size = (
+        max(1, round(base.width * zoom / render_zoom)),
+        max(1, round(base.height * zoom / render_zoom)),
+    )
+    if target_size != base.size:
+        base = base.resize(target_size, Image.NEAREST)
+
+    # Drawn on the main canvas (left) rather than the side panel (right) --
+    # this stage has no use for the original page picture underneath, so
+    # the render occludes it the same way _add_reconstruction_toggle's
+    # image does, tagged "overlay" so the next redraw cleans it up.
+    photo = ImageTk.PhotoImage(base)
+    ctx.filters["_photo_ref"] = photo  # keep a reference so Tk doesn't GC it
+    ctx.canvas.create_image(0, 0, anchor="nw", image=photo, tags=("overlay",))
+
+    for cluster, passed in (
+        *((c, True) for c in result.passed),
+        *((c, False) for c in result.dropped),
+    ):
+        if not cluster:
+            continue
+        bx0, by0, bx1, by1 = geometry.union_bbox([p.bbox for p in cluster])
+        p0 = fitz.Point(bx0, by0) * ctx.matrix
+        p1 = fitz.Point(bx1, by1) * ctx.matrix
+        final_score = result.scores.get(id(cluster), 0.0)
+        item_id = ctx.canvas.create_rectangle(
+            p0.x, p0.y, p1.x, p1.y,
+            outline=_OCR_PASSED_COLOR if passed else _OCR_FAILED_COLOR,
+            width=1, tags=("overlay",),
+        )
+        ctx.canvas.tag_bind(
+            item_id, "<Enter>",
+            lambda _event, fs=final_score, p=passed: ctx.tooltip.show(
+                ctx.canvas.winfo_pointerx(), ctx.canvas.winfo_pointery(),
+                f"final (min over similarity group): {fs * 100:.1f}%\n"
+                f"{'passed' if p else 'dropped'}",
+            ),
+        )
+        ctx.canvas.tag_bind(item_id, "<Leave>", lambda _event: ctx.tooltip.hide())
+
+
+def _render_spatial_regroup_stage(ctx: RenderContext) -> None:
+    """spatial_regroup re-merges every FAST-passed cluster whose member
+    paths actually overlap (SPATIAL_REGROUP_TOLERANCE_PX, ignoring the
+    (layer, color) bucket and unique_clusters similarity group each
+    cluster came from -- see pipeline.py's _run_spatial_regroup) before
+    ocr_compare OCRs them. Draws each merged cluster's bbox; hover shows
+    its member path count."""
+    clusters: list[list[VectorPath]] = ctx.output.data or []
+    fast_result: FastPageResult | None = _stage_output_data(ctx, "fast_text_detect")
+    passed_count = len(fast_result.passed) if fast_result else len(clusters)
+
+    ttk.Label(
+        ctx.side_panel,
+        text=f"{passed_count} FAST-passed cluster(s) -> {len(clusters)} regrouped "
+        f"cluster(s) (tolerance={SPATIAL_REGROUP_TOLERANCE_PX:g}px)",
+    ).pack(anchor="w", padx=4, pady=(4, 6))
+
+    for cluster in clusters:
+        if not cluster:
+            continue
+        bx0, by0, bx1, by1 = geometry.union_bbox([p.bbox for p in cluster])
+        p0 = fitz.Point(bx0, by0) * ctx.matrix
+        p1 = fitz.Point(bx1, by1) * ctx.matrix
+        item_id = ctx.canvas.create_rectangle(
+            p0.x, p0.y, p1.x, p1.y, outline="#8b5cf6", width=1, tags=("overlay",),
+        )
+        ctx.canvas.tag_bind(
+            item_id, "<Enter>",
+            lambda _event, n=len(cluster): ctx.tooltip.show(
+                ctx.canvas.winfo_pointerx(), ctx.canvas.winfo_pointery(),
+                f"{n} path(s) in merged cluster",
+            ),
+        )
+        ctx.canvas.tag_bind(item_id, "<Leave>", lambda _event: ctx.tooltip.hide())
+
+
+
+
+def _render_ocr_compare_stage(ctx: RenderContext) -> None:
+    """Renders the ocr_compare stage: click a cluster's bbox to inspect
+    it. Everything -- main canvas bbox/tooltip/pass-fail color,
+    reconstruction toggle -- keys off `cluster_result.resolved` (see
+    pipeline.py's _run_ocr_compare: one direct OCR call per
+    spatial_regroup cluster, no fallback tiers)."""
+    cluster_results: list[ClusterOcrResult] = ctx.output.data or []
+    passed = [c for c in cluster_results if _ocr_passed(c.resolved)]
+    failed = [c for c in cluster_results if not _ocr_passed(c.resolved)]
+
+    ttk.Label(ctx.side_panel, text=f"{len(cluster_results)} OCR'd cluster(s)").pack(
         anchor="w", padx=4, pady=(4, 6)
     )
 
-    if ctx.page is not None and _add_reconstruction_toggle(
-        ctx, lambda: _RENDERER.render_reconstructed_page(
-            ctx.page.meta, ocr_results=passed, zoom=geometry.matrix_scale(ctx.matrix)[0],
-        ),
-    ):
+    def _fmt_seconds(value: float) -> str:
+        return f"{value:.2f}s"
+
+    all_seconds = [c.ocr_seconds for c in cluster_results]
+    total = sum(all_seconds) if all_seconds else 0.0
+    average = (total / len(all_seconds)) if all_seconds else 0.0
+    ttk.Label(
+        ctx.side_panel,
+        text=f"OCR time: total {_fmt_seconds(total)}, avg {_fmt_seconds(average)} "
+        f"({len(all_seconds)} call(s))",
+    ).pack(anchor="w", padx=4, pady=(0, 6))
+
+    def _build_own() -> "Image.Image":
+        return _RENDERER.render_reconstructed_page(
+            ctx.page.meta, ocr_results=[c.resolved for c in passed],
+            zoom=geometry.matrix_scale(ctx.matrix)[0],
+        )
+
+    def _build_combined() -> "Image.Image":
+        native_words = _stage_output_data(ctx, "native") or []
+        return _RENDERER.render_reconstructed_page(
+            ctx.page.meta, native_words=native_words,
+            ocr_results=[c.resolved for c in passed],
+            zoom=geometry.matrix_scale(ctx.matrix)[0],
+        )
+
+    if ctx.page is not None and _add_reconstruction_toggle(ctx, _build_own, _build_combined):
         return
 
     show_passed = ctx.filters.setdefault("show_passed", {"value": True})
     show_failed = ctx.filters.setdefault("show_failed", {"value": True})
+    show_ocr_bbox = ctx.filters.setdefault("show_ocr_bbox", {"value": False})
     selected = ctx.filters.setdefault("selected_index", {"value": 0})
 
-    def _visible(result: TextVectorResult) -> bool:
-        return show_passed["value"] if _ocr_passed(result) else show_failed["value"]
+    def _visible(cluster_result: ClusterOcrResult) -> bool:
+        return show_passed["value"] if _ocr_passed(cluster_result.resolved) else show_failed["value"]
 
-    visible_indices = [i for i, r in enumerate(results) if _visible(r)]
+    visible_indices = [i for i, c in enumerate(cluster_results) if _visible(c)]
     if selected["value"] not in visible_indices:
         selected["value"] = visible_indices[0] if visible_indices else None
 
@@ -962,12 +1342,12 @@ def _render_ocr_text_clusters_stage(ctx: RenderContext) -> None:
         pos = visible_indices.index(selected["value"]) if selected["value"] in visible_indices else 0
         _select(visible_indices[(pos + delta) % len(visible_indices)])
 
-    # Small counts per page (text-as-vector-paths clusters are rare
-    # compared to raw path counts), so plain tag_bind hover -- like
-    # _render_native_stage -- is plenty; no need for the filter stages'
-    # viewport-culling/spatial-index machinery here.
+    # Small counts per page (FAST-passed text clusters are rare compared to
+    # raw path counts), so plain tag_bind hover -- like _render_native_stage
+    # -- is plenty; no need for the filter stages' viewport-culling/
+    # spatial-index machinery here.
     for i in visible_indices:
-        result = results[i]
+        result = cluster_results[i].resolved
         x0, y0 = fitz.Point(result.bbox[0], result.bbox[1]) * ctx.matrix
         x1, y1 = fitz.Point(result.bbox[2], result.bbox[3]) * ctx.matrix
         is_selected = i == selected["value"]
@@ -982,18 +1362,28 @@ def _render_ocr_text_clusters_stage(ctx: RenderContext) -> None:
             lambda _event, r=result: ctx.tooltip.show(
                 ctx.canvas.winfo_pointerx(),
                 ctx.canvas.winfo_pointery(),
-                f"{r.text!r}\nconfidence: {r.confidence:.2f}\n"
-                f"rotation used: {r.rotation_used}deg\n{len(r.cluster_paths)} path(s)\n"
+                f"resolved: {r.text!r}\nconfidence: {r.confidence:.2f}\n"
+                f"rotation used: {r.rotation_used}deg\n{len(r.paths)} path(s)\n"
                 "(click to inspect)",
             ),
         )
         ctx.canvas.tag_bind(item_id, "<Leave>", lambda _event: ctx.tooltip.hide())
         ctx.canvas.tag_bind(item_id, "<Button-1>", lambda _event, idx=i: _select(idx))
 
-    # --- inspector panel: rendered image (at rotation_used) + cluster nav ---
+        if show_ocr_bbox["value"] and result.ocr_bbox is not None:
+            ox0, oy0 = fitz.Point(result.ocr_bbox[0], result.ocr_bbox[1]) * ctx.matrix
+            ox1, oy1 = fitz.Point(result.ocr_bbox[2], result.ocr_bbox[3]) * ctx.matrix
+            ctx.canvas.create_rectangle(
+                ox0, oy0, ox1, oy1, outline=_OCR_BBOX_OVERLAY_COLOR_HEX,
+                width=1, dash=(3, 2), tags=("overlay",),
+            )
+
+    # --- inspector panel: rendered image (at rotation_used) + cluster nav
+    # + resolved reading ---
     if selected["value"] is not None and ctx.page is not None and ctx.ocr_detail_cache is not None:
         index = selected["value"]
-        result = results[index]
+        cluster_result = cluster_results[index]
+        result = cluster_result.resolved
         pos = visible_indices.index(index) + 1
 
         ttk.Separator(ctx.side_panel, orient="horizontal").pack(fill="x", padx=4, pady=6)
@@ -1015,23 +1405,42 @@ def _render_ocr_text_clusters_stage(ctx: RenderContext) -> None:
             ctx.ocr_detail_cache[cache_key] = _ocr_cluster_preview(result, ctx.page)
         preview = ctx.ocr_detail_cache[cache_key]
 
+        # Drawn on the main canvas (left) rather than the side panel (right)
+        # -- same as _render_fast_text_detect_stage's page render, tagged
+        # "overlay" so the next redraw cleans it up.
         photo = _ocr_preview_photo(preview)
         ctx.filters["_photo_ref"] = photo  # keep a reference so Tk doesn't GC it
-        tk.Label(ctx.side_panel, image=photo, bg="#808080").pack(padx=4, pady=(6, 4))
+        ctx.canvas.create_image(0, 0, anchor="nw", image=photo, tags=("overlay",))
 
         lines = [
-            f"text: {result.text!r}",
-            f"confidence: {result.confidence:.3f}",
-            f"rotation used: {result.rotation_used}deg",
-            f"{len(result.cluster_paths)} path(s)",
-            "passed" if _ocr_passed(result) else "failed (no text detected)",
+            "RESOLVED",
+            f"  text: {result.text!r}",
+            f"  confidence: {result.confidence:.3f}",
+            f"  rotation used: {result.rotation_used}deg",
+            f"  {len(result.paths)} path(s)",
+            "  passed" if _ocr_passed(result) else "  failed (no text detected)",
+            "",
+            f"  {_fmt_seconds(cluster_result.ocr_seconds)}",
         ]
         info = tk.Text(
-            ctx.side_panel, height=7, width=26, wrap="word", font=("TkDefaultFont", 8),
+            ctx.side_panel, height=18, width=26, wrap="word", font=("TkDefaultFont", 8),
         )
         info.insert("1.0", "\n".join(lines))
         info.configure(state="disabled")
         info.pack(fill="both", expand=True, padx=4, pady=(4, 8))
+
+    # --- bbox display checkbox ---
+    ttk.Separator(ctx.side_panel, orient="horizontal").pack(fill="x", padx=4, pady=4)
+    ocr_bbox_var = tk.BooleanVar(value=show_ocr_bbox["value"])
+
+    def _on_ocr_bbox_toggle() -> None:
+        show_ocr_bbox["value"] = ocr_bbox_var.get()
+        ctx.on_change()
+
+    ttk.Checkbutton(
+        ctx.side_panel, text="Show Paddle OCR bbox", variable=ocr_bbox_var,
+        command=_on_ocr_bbox_toggle,
+    ).pack(anchor="w", padx=4, pady=1)
 
     # --- passed/failed filter, pinned to the bottom of the panel ---
     ttk.Separator(ctx.side_panel, orient="horizontal").pack(side="bottom", fill="x", padx=4, pady=4)
@@ -1058,6 +1467,63 @@ def _render_ocr_text_clusters_stage(ctx: RenderContext) -> None:
     ).pack(side="bottom", anchor="w", padx=4, pady=1)
 
 
+def _render_rotation_verify_stage(ctx: RenderContext) -> None:
+    """New layer between ocr_compare and drawing_vectors (pipeline.py's
+    _run_rotation_verify): for every OCR'd word, compares its text's own
+    natural aspect ratio against its bbox as-is vs. rotated 90 deg -- a
+    meaningfully closer fit after rotating produces `RotationCheck.
+    resolved`, a *new* TextVectorResult with `rotation_used` flipped by
+    +90 deg (ocr_compare's own reading is never mutated -- see
+    pipeline.py's _run_rotation_verify). The reconstruction compare below
+    reads that corrected `resolved`. Each checked word's bbox is drawn as
+    a hover rect (orange + thicker outline if the fix was applied,
+    grey/thin if not)."""
+    checks: list[RotationCheck] = ctx.output.data or []
+    applied = [c for c in checks if c.applied]
+
+    def _build_own() -> "Image.Image":
+        ocr_results = [c.resolved for c in checks if _ocr_passed(c.resolved)]
+        return _RENDERER.render_reconstructed_page(
+            ctx.page.meta, ocr_results=ocr_results, zoom=geometry.matrix_scale(ctx.matrix)[0],
+        )
+
+    def _build_combined() -> "Image.Image":
+        native_words = _stage_output_data(ctx, "native") or []
+        ocr_results = [c.resolved for c in checks if _ocr_passed(c.resolved)]
+        return _RENDERER.render_reconstructed_page(
+            ctx.page.meta, native_words=native_words, ocr_results=ocr_results,
+            zoom=geometry.matrix_scale(ctx.matrix)[0],
+        )
+
+    if ctx.page is not None and _add_reconstruction_toggle(ctx, _build_own, _build_combined):
+        return
+
+    ttk.Label(
+        ctx.side_panel, text=f"{len(applied)} rotation fix(es) applied / {len(checks)} checked",
+    ).pack(anchor="w", padx=4, pady=(4, 6))
+
+    for check in checks:
+        x0, y0, x1, y1 = check.bbox
+        p0 = fitz.Point(x0, y0) * ctx.matrix
+        p1 = fitz.Point(x1, y1) * ctx.matrix
+        item_id = ctx.canvas.create_rectangle(
+            p0.x, p0.y, p1.x, p1.y,
+            outline="#f97316" if check.applied else "#94a3b8",
+            width=2 if check.applied else 1, tags=("overlay",),
+        )
+        ctx.canvas.tag_bind(
+            item_id, "<Enter>",
+            lambda _event, c=check: ctx.tooltip.show(
+                ctx.canvas.winfo_pointerx(), ctx.canvas.winfo_pointery(),
+                f"{c.text!r}\nerror as-is: {c.error_unrotated:.2f}  "
+                f"error rotated: {c.error_rotated:.2f}\n"
+                f"rotation: {c.before_rotation}deg -> {c.after_rotation}deg"
+                + (" (fixed)" if c.applied else ""),
+            ),
+        )
+        ctx.canvas.tag_bind(item_id, "<Leave>", lambda _event: ctx.tooltip.hide())
+
+
 # Stage key -> view-render function. Add one entry here alongside each new
 # StageSpec in rastervec/pipeline.py's Pipeline.STAGES.
 _STAGE_RENDERERS = {
@@ -1067,8 +1533,13 @@ _STAGE_RENDERERS = {
     "layer_separation": _render_layer_separation_stage,
     "color_separation": _render_color_separation_stage,
     "clustering": _render_clustering_stage,
+    "text_candidates": _render_text_candidates_stage,
+    "unique_clusters": _render_unique_clusters_stage,
+    "fast_text_detect": _render_fast_text_detect_stage,
+    "spatial_regroup": _render_spatial_regroup_stage,
+    "ocr_compare": _render_ocr_compare_stage,
+    "rotation_verify": _render_rotation_verify_stage,
     "drawing_vectors": _render_drawing_vectors_stage,
-    "ocr_text_clusters": _render_ocr_text_clusters_stage,
 }
 
 
@@ -1326,8 +1797,11 @@ class DebugApp:
         self.canvas.delete("overlay_hover")  # stray hover highlights from a switched-away stage
         self.canvas.unbind("<Motion>")  # only the vector-stage-buckets renderer rebinds these
         self.canvas.unbind("<Leave>")
-        self.canvas.unbind("<Left>")  # only ocr_text_clusters' inspector rebinds these
+        self.canvas.unbind("<Left>")  # only ocr_compare's inspector rebinds these
         self.canvas.unbind("<Right>")
+        self.canvas.unbind("<ButtonPress-1>")  # only the reconstruction compare slider rebinds these
+        self.canvas.unbind("<B1-Motion>")
+        self.canvas.unbind("<ButtonRelease-1>")
         if self.tooltip is not None:
             self.tooltip.hide()
         for child in self.side_panel.winfo_children():
@@ -1368,6 +1842,7 @@ class DebugApp:
             epoch_box=self._render_epoch_box,
             page=page,
             ocr_detail_cache=self.state.ocr_detail_cache,
+            all_outputs=outputs,
         )
         renderer(ctx)
 
@@ -1398,9 +1873,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=Pipeline.stage_keys(),
         default=None,
         help="Stop the pipeline after this stage instead of running every stage -- e.g. "
-        "--final-stage drawing_vectors skips ocr_text_clusters (and the PaddleOCR engine "
-        "it would otherwise build) entirely, so the stage-nav bar simply won't cycle past "
-        "it. Default: run every stage.",
+        "--final-stage fast_text_detect skips ocr_compare (and the PaddleOCR "
+        "engine it would otherwise build) entirely, so the stage-nav bar simply won't cycle "
+        "past it. Default: run every stage.",
     )
     return parser
 

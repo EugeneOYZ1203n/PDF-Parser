@@ -7,10 +7,9 @@ in order:
    exceeds a fraction of the page's smaller side.
 2. `compute_vector_signatures` -- informational, pure pass-through: builds
    a per-signature occurrence count (`vector_signature`) over the current
-   population, consumed by step 3, `compute_group_stats`,
-   `filter_high_frequency_clusters`, and `filter_constant_spacing_clusters`
-   below (and by the debug app's "color by vector type" view) -- never
-   drops anything itself.
+   population, consumed by step 3, `compute_group_stats`, and
+   `filter_constant_spacing_clusters` below (and by the debug app's "color
+   by vector type" view) -- never drops anything itself.
 3. `remove_duplicate_runs` + `combine_overlapping_seq` -- sorts by `seq`,
    drops maximal runs of `DUPLICATE_RUN_MIN_LENGTH`-or-more consecutive
    items sharing the exact same shape signature (e.g. a long strip of
@@ -26,28 +25,22 @@ in order:
    one has a "valid" side (see below) within `SPATIAL_SIZE_TOLERANCE` of a
    valid side of the other, AND those two sides are roughly parallel (lie
    along the same axis -- see below). A group's own short side ("width")
-   only counts as valid if it's at least `SPATIAL_MIN_SIDE_FRACTION` of
-   that same group's long side ("length") -- this excludes a thin
-   stroke's near-zero short side from ever being used as a comparand.
+   always counts as valid alongside its long side ("length").
    "Parallel" means: a group's length lies along whichever axis (x or y)
    its bbox's larger extent is on, and its width along the other axis;
    two sides are only compared if their axes match -- e.g. group A's
    length can match group B's width, but only if A's long side and B's
    short side both happen to lie on the same axis (both horizontal or
-   both vertical). Right after merging, every resulting cluster is split
-   by whichever matched side-length value (rounded to `SPATIAL_TAG_
-   ROUND_PX`) caused the most of its internal merges: the sub-groups that
-   merged via that dominant length become one piece, everything else
-   (merged via a less-common length, or not the cause of any merge)
-   becomes a second piece -- both continue downstream as ordinary
-   clusters, nothing dropped, just separated so a locally-repeated
-   same-length pattern doesn't stay mixed in with whatever else got
-   spatially swept into the same cluster. Also returns two debug-only
-   categories: the same input spatially clustered with *no* size
-   constraint at all (plain bbox-gap rule, unsplit), and with the
-   size/validity constraint but *no* parallel requirement (also unsplit)
-   -- for visually comparing all of these; none of the debug categories
-   are ever folded into `drawing_vectors` or fed to the next step.
+   both vertical). Every resulting cluster continues downstream as one
+   ordinary cluster, its member groups flattened together -- nothing is
+   dropped or split here. Also returns two debug-only categories: the
+   same input spatially clustered with *no* size constraint at all (plain
+   bbox-gap rule), and with the size/validity constraint but *no*
+   parallel requirement -- for visually comparing all of these; neither
+   debug category is ever folded into `drawing_vectors` or fed to the
+   next step. Also returns `lineage` -- for every merged cluster, which of
+   this step's own input groups it's composed of (see this module's
+   docstring for the group/cluster distinction).
 7. `filter_mixed_fill_rule_clusters` -- drop a whole cluster if its
    members don't all share the same `fill_rule` ("f"/"fs"/"s") -- a
    cluster mixing paint styles is drawing content, not text.
@@ -69,13 +62,7 @@ in order:
     cells for a small cluster, more for a large one); drops the whole
     cluster if more than `DENSITY_MAX_EMPTY_FRACTION` of the cells have
     no member touching them -- too sparse to be text.
-11. `filter_high_frequency_clusters` -- drop a whole cluster only if
-    *every* member's shape signature is among the top
-    `HIGH_FREQUENCY_TOP_FRACTION` highest-occurring signatures in this
-    bucket (a percentile cutoff over step 2's counts, not an absolute
-    count) -- a cluster made entirely of the page's most repeated shapes is
-    almost certainly a texture/pattern fill, not text.
-12. `filter_constant_spacing_clusters` -- splits each cluster into
+11. `filter_constant_spacing_clusters` -- splits each cluster into
     same-shape sub-groups and checks spacing *within* each sub-group
     separately (a cluster with 2 shape types gets 2 independent spacing
     checks); a sub-group counts as "patterned" if it has at least
@@ -86,7 +73,7 @@ in order:
     members -- not requiring every sub-group to be patterned, just enough
     of the cluster's actual content -- a regular repeated pattern
     (hatching, tick marks), not text.
-13. `filter_low_variety_clusters` -- drop a whole cluster if it contains
+12. `filter_low_variety_clusters` -- drop a whole cluster if it contains
     fewer distinct shape signatures (from step 8's `GroupStats`) than a
     log-scale ramp requires for its member count -- `LOW_VARIETY_MIN_
     REQUIRED` (1) for clusters at or under `LOW_VARIETY_MIN_MEMBER_COUNT`
@@ -110,7 +97,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from math import ceil, hypot, log
+from math import atan2, ceil, cos, hypot, log, sin
 
 from rastervec.geometry import rect_gap, union_bbox
 from rastervec.helpers.clustering import Clustering
@@ -129,7 +116,6 @@ class GroupStats:
     unique_signature_count: int
     bbox: tuple[float, float, float, float]
     max_dimension: float
-    dominant_signature_count: int
 
 
 def _bbox_of(group: list[VectorPath]) -> tuple[float, float, float, float]:
@@ -190,10 +176,9 @@ def compute_vector_signatures(
     """Informational pass-through: never drops or regroups anything,
     just tallies each path's `vector_signature` occurrence count over the
     current population. The returned counts dict is threaded through to
-    `remove_duplicate_runs`' run-length check, `compute_group_stats`, and
-    `filter_high_frequency_clusters`, plus the debug app's "color by
-    vector type" view -- all four read the exact same counts, computed
-    once here."""
+    `remove_duplicate_runs`' run-length check and `compute_group_stats`,
+    plus the debug app's "color by vector type" view -- all three read the
+    exact same counts, computed once here."""
     counts: Counter[VectorSignature] = Counter()
     for g in groups:
         for p in g:
@@ -298,21 +283,19 @@ def filter_large_groups(
 
 
 def _group_sides(
-    bbox: tuple[float, float, float, float], min_side_fraction: float,
+    bbox: tuple[float, float, float, float],
 ) -> list[tuple[float, str]]:
     """A group's comparable sides as `(length, axis)` pairs -- `axis` is
     "x" if that side is the bbox's horizontal extent, "y" if vertical.
-    The bbox's longer extent ("length") is always included; the shorter
-    extent ("width") is only included if it's at least `min_side_fraction`
-    of the length -- a thin stroke's near-zero short side never becomes a
-    comparand."""
+    Both the bbox's longer extent ("length") and shorter extent ("width")
+    are included whenever the group has any extent at all."""
     w, h = _dims(bbox)
     if w >= h:
         length, length_axis, width, width_axis = w, "x", h, "y"
     else:
         length, length_axis, width, width_axis = h, "y", w, "x"
     sides = [(length, length_axis)]
-    if length > 0 and width >= min_side_fraction * length:
+    if length > 0:
         sides.append((width, width_axis))
     return sides
 
@@ -321,7 +304,6 @@ def _matched_side_value(
     a: list[VectorPath],
     b: list[VectorPath],
     size_tolerance: float,
-    min_side_fraction: float,
     require_parallel: bool,
 ) -> float | None:
     """The representative length (average of the two matched sides) of the
@@ -332,11 +314,10 @@ def _matched_side_value(
     e.g. group A's length matching group B's width only merges them if
     A's long side and B's short side are actually parallel, not
     perpendicular, on the page. The returned value is what actually
-    "caused" the match -- used both as the bool-equivalent "did this
-    merge" signal (non-`None`) and, via `cluster_spatial_groups`'s
-    dominant-length-tag split, to remember *which* length caused it."""
-    sides_a = _group_sides(_bbox_of(a), min_side_fraction)
-    sides_b = _group_sides(_bbox_of(b), min_side_fraction)
+    "caused" the match -- used as the bool-equivalent "did this merge"
+    signal (non-`None`) by `_any_side_close` below."""
+    sides_a = _group_sides(_bbox_of(a))
+    sides_b = _group_sides(_bbox_of(b))
     for sa, axis_a in sides_a:
         for sb, axis_b in sides_b:
             if require_parallel and axis_a != axis_b:
@@ -354,58 +335,12 @@ def _any_side_close(
     a: list[VectorPath],
     b: list[VectorPath],
     size_tolerance: float,
-    min_side_fraction: float,
     require_parallel: bool,
 ) -> bool:
     """Bool-only view of `_matched_side_value` -- True if some valid side
     of `a` is within `size_tolerance` of some valid side of `b` (subject
     to `require_parallel`, see `_matched_side_value`)."""
-    return _matched_side_value(a, b, size_tolerance, min_side_fraction, require_parallel) is not None
-
-
-def _split_cluster_by_dominant_tag(
-    cluster: list[list[VectorPath]],
-    edges: list[tuple[int, int, float]],
-    id_to_index: dict[int, int],
-    tag_round_px: float,
-) -> tuple[list[VectorPath], list[VectorPath] | None]:
-    """Splits one spatially-merged cluster (a list of its original
-    sub-groups) into `(dominant_piece, minority_piece)` using the union
-    edges that actually formed it: every union edge's matched-side value
-    (see `_matched_side_value`) is rounded to `tag_round_px` and tallied;
-    the most frequent rounded value is the "dominant tag". Sub-groups
-    touching at least one dominant-tag edge become `dominant_piece`;
-    every other sub-group (touched only by less-frequent-tag edges, or
-    not touched by any internal edge at all) becomes `minority_piece`.
-    `minority_piece` is `None` (nothing to split) if the cluster never
-    merged (no internal edges) or every sub-group touches the dominant
-    tag."""
-    indices = {id_to_index[id(sub)] for sub in cluster}
-    internal_edges = [(i, j, tag) for i, j, tag in edges if i in indices and j in indices]
-
-    if not internal_edges:
-        return [p for sub in cluster for p in sub], None
-
-    tag_counts: dict[float, int] = defaultdict(int)
-    rounded_edges: list[tuple[int, int, float]] = []
-    for i, j, tag in internal_edges:
-        rounded = round(tag / tag_round_px) * tag_round_px if tag_round_px > 0 else tag
-        tag_counts[rounded] += 1
-        rounded_edges.append((i, j, rounded))
-    dominant_tag = max(tag_counts.items(), key=lambda kv: kv[1])[0]
-
-    dominant_indices: set[int] = set()
-    for i, j, rounded in rounded_edges:
-        if rounded == dominant_tag:
-            dominant_indices.add(i)
-            dominant_indices.add(j)
-
-    dominant_sub = [sub for sub in cluster if id_to_index[id(sub)] in dominant_indices]
-    minority_sub = [sub for sub in cluster if id_to_index[id(sub)] not in dominant_indices]
-
-    dominant_piece = [p for sub in dominant_sub for p in sub]
-    minority_piece = [p for sub in minority_sub for p in sub] if minority_sub else None
-    return dominant_piece, minority_piece
+    return _matched_side_value(a, b, size_tolerance, require_parallel) is not None
 
 
 def cluster_spatial_groups(
@@ -413,79 +348,59 @@ def cluster_spatial_groups(
     clustering: Clustering,
     threshold: float,
     size_tolerance: float,
-    min_side_fraction: float,
-    tag_round_px: float,
 ) -> tuple[
     list[list[VectorPath]], list[list[VectorPath]], list[list[VectorPath]],
-    list[list[VectorPath]], list[list[VectorPath]],
+    dict[int, list[list[VectorPath]]],
 ]:
     """Single-linkage spatial merge of the incoming groups (by each
-    group's own aggregate bbox), via `Clustering.cluster_spatial_with_
-    tags` reused at the group level, constrained by `_matched_side_value`
-    (with `require_parallel=True`): two groups only merge if the bbox-gap
-    rule passes AND some valid side of one is within `size_tolerance` of
-    some valid side of the other AND those two sides are parallel (same
-    axis). See `_group_sides`/`_matched_side_value` for exactly what
-    "valid" and "parallel" mean.
+    group's own aggregate bbox), via `Clustering.cluster_spatial` reused at
+    the group level, constrained by `_any_side_close` (with
+    `require_parallel=True`): two groups only merge if the bbox-gap rule
+    passes AND some valid side of one is within `size_tolerance` of some
+    valid side of the other AND those two sides are parallel (same axis).
+    See `_group_sides`/`_matched_side_value` for exactly what "valid" and
+    "parallel" mean. Nothing is dropped or split here -- every merged
+    cluster continues downstream as one ordinary cluster (its member paths
+    flattened together).
 
-    Right after that merge, every resulting cluster is split by
-    `_split_cluster_by_dominant_tag` into the piece that merged via the
-    cluster's single most common matched side-length (rounded to
-    `tag_round_px`) and the piece that didn't (e.g. leftover members that
-    only reached the cluster through a differently-sized match, or
-    weren't the cause of any merge at all) -- a repeated hatch/tick
-    pattern tends to concentrate on one dominant length, so separating it
-    from whatever else got spatially swept in gives later steps
-    (perimeter/density/frequency/variety) a cleaner, more homogeneous
-    population to judge. Nothing is dropped here -- both pieces continue
-    downstream as ordinary clusters.
-
-    Returns `(kept, dominant_tag_groups, minority_tag_groups, debug_
-    unconstrained, debug_no_parallel)`: `kept` is every dominant/minority
-    piece from every cluster, flattened together (feeds the next step);
-    `dominant_tag_groups`/`minority_tag_groups` are that same population
-    partitioned by which half of the split each piece is, for the debug
-    UI (every piece in `kept` appears in exactly one of the two).
+    Returns `(kept, debug_unconstrained, debug_no_parallel, lineage)`:
+    `kept` is every merged cluster, flattened, feeding the next step.
     `debug_unconstrained` is the same input clustered with the plain
-    bbox-gap rule only (no size constraint, no split); `debug_no_parallel`
-    uses the same size/validity constraint as `kept` but without the
-    parallel requirement (also unsplit). Both debug variants are purely
-    for the debug app's opt-in comparison checkboxes -- neither is ever
-    folded into `drawing_vectors` or fed downstream."""
+    bbox-gap rule only (no size constraint); `debug_no_parallel` uses the
+    same size/validity constraint as `kept` but without the parallel
+    requirement. Both debug variants are purely for the debug app's opt-in
+    comparison checkboxes -- neither is ever folded into `drawing_vectors`
+    or fed downstream. `lineage` maps `id(piece)` (for every piece in
+    `kept`) to the list of original (pre-spatial-clustering) input `groups`
+    that piece is composed of -- threaded through by `Vector.cluster()` so
+    a final surviving cluster can report which "groups" it consists of."""
 
-    def _match_parallel(a: list[VectorPath], b: list[VectorPath]) -> float | None:
-        return _matched_side_value(a, b, size_tolerance, min_side_fraction, require_parallel=True)
+    def _close_parallel(a: list[VectorPath], b: list[VectorPath]) -> bool:
+        return _any_side_close(a, b, size_tolerance, require_parallel=True)
 
-    constrained, edges = clustering.cluster_spatial_with_tags(
-        groups, get_bbox=_bbox_of, threshold=threshold, match_fn=_match_parallel,
+    constrained = clustering.cluster_spatial(
+        groups, get_bbox=_bbox_of, threshold=threshold, extra_close=_close_parallel,
     )
-    id_to_index = {id(g): i for i, g in enumerate(groups)}
 
     kept: list[list[VectorPath]] = []
-    dominant_tag_groups: list[list[VectorPath]] = []
-    minority_tag_groups: list[list[VectorPath]] = []
+    lineage: dict[int, list[list[VectorPath]]] = {}
     for cluster in constrained:
-        dominant_piece, minority_piece = _split_cluster_by_dominant_tag(
-            cluster, edges, id_to_index, tag_round_px,
-        )
-        kept.append(dominant_piece)
-        dominant_tag_groups.append(dominant_piece)
-        if minority_piece is not None:
-            kept.append(minority_piece)
-            minority_tag_groups.append(minority_piece)
+        piece = [p for sub in cluster for p in sub]
+        kept.append(piece)
+        lineage[id(piece)] = list(cluster)
 
     unconstrained = clustering.cluster_spatial(groups, get_bbox=_bbox_of, threshold=threshold)
     debug_unconstrained = [[p for sub in cluster for p in sub] for cluster in unconstrained]
 
     def _close_no_parallel(a: list[VectorPath], b: list[VectorPath]) -> bool:
-        return _any_side_close(a, b, size_tolerance, min_side_fraction, require_parallel=False)
+        return _any_side_close(a, b, size_tolerance, require_parallel=False)
 
     no_parallel = clustering.cluster_spatial(
         groups, get_bbox=_bbox_of, threshold=threshold, extra_close=_close_no_parallel,
     )
     debug_no_parallel = [[p for sub in cluster for p in sub] for cluster in no_parallel]
 
-    return kept, dominant_tag_groups, minority_tag_groups, debug_unconstrained, debug_no_parallel
+    return kept, debug_unconstrained, debug_no_parallel, lineage
 
 
 def filter_mixed_fill_rule_clusters(
@@ -506,22 +421,22 @@ def filter_mixed_fill_rule_clusters(
     return kept, dropped
 
 
+
+
 def compute_group_stats(
     groups: list[list[VectorPath]],
-    signature_counts: dict[VectorSignature, int],
     round_px: float,
 ) -> tuple[list[list[VectorPath]], dict[int, GroupStats]]:
     """Informational pass-through, like `compute_vector_signatures`: never
     drops or regroups anything. For every group (keyed by `id(group)` --
     stable through this step and every later step that keeps the same
     group objects, i.e. `filter_perimeter_only_clusters`/
-    `filter_high_frequency_clusters`/`filter_low_variety_clusters`),
+    `filter_low_variety_clusters`),
     records member count, the number of distinct shape signatures among
-    its members, its bbox/max dimension, and the highest global
-    occurrence count (from `compute_vector_signatures`) among those
-    signatures -- consumed by `filter_low_variety_clusters` and available
-    to any future downstream consumer wanting per-group shape stats
-    without recomputing them."""
+    its members, and its bbox/max dimension -- consumed by
+    `filter_low_variety_clusters`/`filter_perimeter_only_clusters`/
+    `filter_density_clusters` and available to any future downstream
+    consumer wanting per-group shape stats without recomputing them."""
     stats: dict[int, GroupStats] = {}
     for g in groups:
         sigs = {vector_signature(p, round_px) for p in g}
@@ -531,9 +446,6 @@ def compute_group_stats(
             unique_signature_count=len(sigs),
             bbox=bbox,
             max_dimension=_max_dimension(bbox),
-            dominant_signature_count=max(
-                (signature_counts.get(s, 0) for s in sigs), default=0,
-            ),
         )
     return groups, stats
 
@@ -547,18 +459,19 @@ def _bboxes_intersect(
 
 
 def filter_perimeter_only_clusters(
-    groups: list[list[VectorPath]], margin_fraction: float,
+    groups: list[list[VectorPath]], group_stats: dict[int, GroupStats], margin_fraction: float,
 ) -> tuple[list[list[VectorPath]], list[list[VectorPath]]]:
     """Drops whole clusters whose members all sit in the `margin_fraction`
-    perimeter band of the cluster's own bbox, never touching its shrunk-in
-    center region -- e.g. a rectangle/ring made of border strokes with
-    nothing drawn in the middle. Real text glyphs, even sparse ones, tend
-    to have at least one member reaching into the center; a cluster where
-    every member avoids it is drawing content, not a text candidate."""
+    perimeter band of the cluster's own bbox (reused from `group_stats`,
+    via `compute_group_stats`), never touching its shrunk-in center
+    region -- e.g. a rectangle/ring made of border strokes with nothing
+    drawn in the middle. Real text glyphs, even sparse ones, tend to have
+    at least one member reaching into the center; a cluster where every
+    member avoids it is drawing content, not a text candidate."""
     kept: list[list[VectorPath]] = []
     dropped: list[list[VectorPath]] = []
     for g in groups:
-        x0, y0, x1, y1 = _bbox_of(g)
+        x0, y0, x1, y1 = group_stats[id(g)].bbox
         width, height = x1 - x0, y1 - y0
         dx, dy = width * margin_fraction, height * margin_fraction
         center = (x0 + dx, y0 + dy, x1 - dx, y1 - dy)
@@ -592,23 +505,25 @@ def _density_axis_cell_count(
 
 def filter_density_clusters(
     groups: list[list[VectorPath]],
+    group_stats: dict[int, GroupStats],
     default_grid_size: int,
     min_cell_px: float,
     max_cell_px: float,
     max_empty_fraction: float,
 ) -> tuple[list[list[VectorPath]], list[list[VectorPath]]]:
-    """Splits each cluster's own bbox into a grid sized so each cell's
-    side is between `min_cell_px` and `max_cell_px` (independently per
-    axis, via `_density_axis_cell_count` -- `default_grid_size` cells per
-    axis for a typically-sized cluster, fewer for a small one, more for a
-    large one); if more than `max_empty_fraction` of the resulting cells
-    have no member touching them, the cluster is too sparse to be text
-    (drawing content -- e.g. a dimension line with a few isolated ticks)
-    and is dropped whole."""
+    """Splits each cluster's own bbox (reused from `group_stats`, via
+    `compute_group_stats`) into a grid sized so each cell's side is
+    between `min_cell_px` and `max_cell_px` (independently per axis, via
+    `_density_axis_cell_count` -- `default_grid_size` cells per axis for a
+    typically-sized cluster, fewer for a small one, more for a large one);
+    if more than `max_empty_fraction` of the resulting cells have no
+    member touching them, the cluster is too sparse to be text (drawing
+    content -- e.g. a dimension line with a few isolated ticks) and is
+    dropped whole."""
     kept: list[list[VectorPath]] = []
     dropped: list[list[VectorPath]] = []
     for g in groups:
-        x0, y0, x1, y1 = _bbox_of(g)
+        x0, y0, x1, y1 = group_stats[id(g)].bbox
         cols = _density_axis_cell_count(x1 - x0, default_grid_size, min_cell_px, max_cell_px)
         rows = _density_axis_cell_count(y1 - y0, default_grid_size, min_cell_px, max_cell_px)
         cell_w, cell_h = (x1 - x0) / cols, (y1 - y0) / rows
@@ -625,51 +540,6 @@ def filter_density_clusters(
                 if not any(_bboxes_intersect(p.bbox, cell) for p in g):
                     empty += 1
         (dropped if empty / (rows * cols) > max_empty_fraction else kept).append(g)
-    return kept, dropped
-
-
-def _high_frequency_threshold(
-    signature_counts: dict[VectorSignature, int], top_fraction: float,
-) -> float:
-    """The occurrence count at the `top_fraction` cutoff over the
-    distinct-signature occurrence distribution (a percentile, not an
-    absolute count) -- a signature at or above this count is "high
-    frequency". Sorts each distinct signature's own count descending and
-    picks the value `top_fraction` of the way into that list, so the
-    cutoff scales with however many distinct shapes are actually present
-    in this bucket."""
-    if not signature_counts:
-        return float("inf")
-    counts = sorted(signature_counts.values(), reverse=True)
-    n = len(counts)
-    idx = min(max(int(n * top_fraction) - 1, 0), n - 1)
-    return counts[idx]
-
-
-def filter_high_frequency_clusters(
-    groups: list[list[VectorPath]],
-    signature_counts: dict[VectorSignature, int],
-    round_px: float,
-    top_fraction: float,
-) -> tuple[list[list[VectorPath]], list[list[VectorPath]]]:
-    """Drops a whole cluster only if *every* member's shape signature is
-    among the top `top_fraction` highest-occurring signatures in
-    `signature_counts` (from `compute_vector_signatures`, computed once
-    over this bucket's whole population) -- a cluster made entirely of the
-    bucket's most repeated shapes is almost certainly a texture/pattern
-    fill, not text. A cluster with even one member outside that top slice
-    is kept."""
-    threshold = _high_frequency_threshold(signature_counts, top_fraction)
-    kept: list[list[VectorPath]] = []
-    dropped: list[list[VectorPath]] = []
-    for g in groups:
-        if all(
-            signature_counts.get(vector_signature(p, round_px), 0) >= threshold
-            for p in g
-        ):
-            dropped.append(g)
-        else:
-            kept.append(g)
     return kept, dropped
 
 
@@ -754,6 +624,88 @@ def _required_unique_signature_count(
     ratio = log(member_count / min_member_count) / log(max_member_count / min_member_count)
     value = min_required + ratio * (max_required - min_required)
     return min(max_required, max(min_required, int(value)))
+
+
+def _normalized_point_cloud(
+    paths: list[VectorPath],
+) -> tuple[list[tuple[float, float]], float]:
+    """Translation+rotation-normalized point cloud for one cluster: every
+    path's points, translated so the cluster's own centroid sits at the
+    origin, then rotated by the negative of its 2D-PCA principal-axis angle
+    so that axis aligns to x. Also returns `scale`, the cluster's own bbox
+    max dimension -- the reference size for a caller's relative tolerance.
+    Best-effort geometric heuristic (PCA has an inherent 180-degree sign
+    ambiguity -- see `_clusters_similar`, which checks both orientations),
+    not a guaranteed-correct rotation/mirror solver."""
+    pts = [pt for p in paths for pt in p.points]
+    if not pts:
+        return [], 1.0
+    cx = sum(x for x, y in pts) / len(pts)
+    cy = sum(y for x, y in pts) / len(pts)
+    centered = [(x - cx, y - cy) for x, y in pts]
+    sxx = sum(x * x for x, y in centered)
+    syy = sum(y * y for x, y in centered)
+    sxy = sum(x * y for x, y in centered)
+    theta = 0.5 * atan2(2 * sxy, sxx - syy)
+    cos_t, sin_t = cos(-theta), sin(-theta)
+    rotated = [(x * cos_t - y * sin_t, x * sin_t + y * cos_t) for x, y in centered]
+    x0, y0, x1, y1 = union_bbox([p.bbox for p in paths])
+    scale = max(x1 - x0, y1 - y0, 1e-6)
+    return sorted(rotated), scale
+
+
+def _point_clouds_close(
+    a: list[tuple[float, float]], b: list[tuple[float, float]], tolerance: float,
+) -> bool:
+    return len(a) == len(b) and all(
+        hypot(ax - bx, ay - by) <= tolerance for (ax, ay), (bx, by) in zip(a, b)
+    )
+
+
+def _clusters_similar(
+    a: list[VectorPath], b: list[VectorPath], tolerance: float,
+) -> bool:
+    """True if `a` and `b` are the same shapes (same path count and same
+    multiset of `kind`s) and, once both are translation+rotation-normalized
+    (`_normalized_point_cloud`), every corresponding point pair sits within
+    `tolerance * max(scale_a, scale_b)` of each other -- checked against
+    both the direct normalization and its 180-degree-flipped mirror, to
+    absorb PCA's inherent sign ambiguity."""
+    if len(a) != len(b) or tuple(sorted(p.kind for p in a)) != tuple(sorted(p.kind for p in b)):
+        return False
+    pts_a, scale_a = _normalized_point_cloud(a)
+    pts_b, scale_b = _normalized_point_cloud(b)
+    if len(pts_a) != len(pts_b):
+        return False
+    tol = tolerance * max(scale_a, scale_b)
+    if _point_clouds_close(pts_a, pts_b, tol):
+        return True
+    flipped_b = sorted((-x, -y) for x, y in pts_b)
+    return _point_clouds_close(pts_a, flipped_b, tol)
+
+
+def group_similar_clusters(
+    clusters: list[list[VectorPath]], tolerance: float,
+) -> list[list[list[VectorPath]]]:
+    """Whole-page, translation+rotation-tolerant grouping of geometrically
+    equivalent clusters (see Glossary.md's "similarity group" entry) --
+    e.g. repeated instances of the same label/symbol at different
+    positions/orientations on the page. Greedy O(n^2): each cluster joins
+    the first existing group whose representative (its first member) it's
+    `_clusters_similar` to, else starts a new group. `tolerance` is a
+    fraction of each compared cluster's own bbox max dimension (e.g. 0.04
+    for 4% relative translation tolerance)."""
+    groups: list[list[list[VectorPath]]] = []
+    for cluster in clusters:
+        matched = False
+        for group in groups:
+            if _clusters_similar(group[0], cluster, tolerance):
+                group.append(cluster)
+                matched = True
+                break
+        if not matched:
+            groups.append([cluster])
+    return groups
 
 
 def filter_low_variety_clusters(

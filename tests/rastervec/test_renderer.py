@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from rastervec.models import DrawingVector, PageMeta, TextVectorResult, TextWord, VectorPath
+from rastervec.models import DrawingVector, OcrWord, PageMeta, TextVectorResult, TextWord, VectorPath
 from rastervec.renderer import Renderer
 
 
@@ -36,13 +36,13 @@ def _make_path(
 
 def test_render_vector_cluster_requires_at_least_one_path():
     with pytest.raises(ValueError):
-        Renderer().render_vector_cluster([], _Page(), 150)
+        Renderer().render_vector_cluster([], 150)
 
 
 def test_render_vector_cluster_draws_something():
     # A filled black rectangle should show up as non-white pixels in the render.
     path = _make_path(kind="re", bbox=(0, 0, 20, 10), fill_color=(0, 0, 0))
-    image = Renderer().render_vector_cluster([path], _Page(), dpi=150)
+    image = Renderer().render_vector_cluster([path], dpi=150)
 
     assert image.width > 0 and image.height > 0
     darkest, _lightest = image.convert("L").getextrema()
@@ -52,7 +52,7 @@ def test_render_vector_cluster_draws_something():
 def test_render_vector_cluster_blank_stroke_and_fill_stays_blank():
     # No stroke_color and no fill_color -> nothing should render.
     path = _make_path(kind="re", bbox=(0, 0, 20, 10))
-    image = Renderer().render_vector_cluster([path], _Page(), dpi=150)
+    image = Renderer().render_vector_cluster([path], dpi=150)
 
     darkest, _lightest = image.convert("L").getextrema()
     assert darkest == 255
@@ -60,10 +60,25 @@ def test_render_vector_cluster_blank_stroke_and_fill_stays_blank():
 
 def test_render_vector_cluster_line_kind():
     path = _make_path(kind="l", bbox=(0, 0, 20, 20), stroke_color=(0, 0, 0), stroke_width=2)
-    image = Renderer().render_vector_cluster([path], _Page(), dpi=150)
+    image = Renderer().render_vector_cluster([path], dpi=150)
 
     darkest, _lightest = image.convert("L").getextrema()
     assert darkest < 255
+
+
+def test_pixel_to_page_bbox_round_trips_cluster_frame():
+    path = _make_path(kind="re", bbox=(0, 0, 20, 10), fill_color=(0, 0, 0))
+    renderer = Renderer()
+    dpi = 150
+    zoom = dpi / 72.0
+    x0, y0, padding = renderer._cluster_frame([path])
+
+    # A pixel-space point at the padded top-left corner should map back to
+    # the cluster's own bbox origin in page space.
+    page_bbox = renderer.pixel_to_page_bbox(
+        [path], dpi, [(padding * zoom, padding * zoom), ((padding + 20) * zoom, (padding + 10) * zoom)],
+    )
+    assert page_bbox == pytest.approx((x0, y0, x0 + 20, y0 + 10))
 
 
 def _make_word(*, text="Hi", origin=(10, 20), font_size=10.0, angle=0.0, color=0x000000) -> TextWord:
@@ -113,8 +128,45 @@ def test_render_reconstructed_page_draws_ocr_results():
     meta = PageMeta(index=0, number=1, mediabox=(0, 0, 200, 100), rotation=0, width=200, height=100)
     path = _make_path(kind="l", bbox=(10, 10, 60, 60), stroke_color=(0, 0, 0))
     result = TextVectorResult(
-        cluster_paths=[path], text="Hello", confidence=0.9,
-        bbox=(10, 10, 60, 30), rotation_used=0, page_index=0,
+        paths=[path], text="Hello", confidence=0.9,
+        bbox=(10, 10, 60, 30), ocr_bbox=None, rotation_used=0, page_index=0,
+    )
+
+    image = Renderer().render_reconstructed_page(meta, ocr_results=[result], zoom=2.0)
+
+    darkest, _lightest = image.convert("L").getextrema()
+    assert darkest < 255
+
+
+def test_render_reconstructed_page_shrinks_ocr_text_to_fit_narrow_bbox():
+    # A long string in a narrow bbox must not raise or overflow the page --
+    # width-fit should shrink the height-derived fontsize further.
+    meta = PageMeta(index=0, number=1, mediabox=(0, 0, 200, 100), rotation=0, width=200, height=100)
+    path = _make_path(kind="l", bbox=(10, 10, 30, 20), stroke_color=(0, 0, 0))
+    result = TextVectorResult(
+        paths=[path], text="A very long piece of OCR'd text", confidence=0.9,
+        bbox=(10, 10, 30, 20), ocr_bbox=None, rotation_used=0, page_index=0,
+    )
+
+    image = Renderer().render_reconstructed_page(meta, ocr_results=[result], zoom=2.0)
+
+    darkest, _lightest = image.convert("L").getextrema()
+    assert darkest < 255
+
+
+def test_render_reconstructed_page_places_words_at_own_bboxes():
+    # When TextVectorResult.words is populated (e.g. Tesseract word-level
+    # detection), each word must be placed/scaled into its own bbox
+    # instead of stretching result.text across the whole cluster bbox.
+    meta = PageMeta(index=0, number=1, mediabox=(0, 0, 200, 100), rotation=0, width=200, height=100)
+    path = _make_path(kind="l", bbox=(10, 10, 90, 30), stroke_color=(0, 0, 0))
+    result = TextVectorResult(
+        paths=[path], text="HELLO WORLD", confidence=0.9,
+        bbox=(10, 10, 90, 30), ocr_bbox=None, rotation_used=0, page_index=0,
+        words=[
+            OcrWord(text="HELLO", confidence=0.9, bbox=(10, 10, 45, 30)),
+            OcrWord(text="WORLD", confidence=0.9, bbox=(50, 10, 90, 30)),
+        ],
     )
 
     image = Renderer().render_reconstructed_page(meta, ocr_results=[result], zoom=2.0)

@@ -1,17 +1,20 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
+import numpy as np
 import pymupdf as fitz
 import pytest
 
-from rastervec.models import DrawingVector, Page, TextWord, VectorPath
+from rastervec.models import ClusterOcrResult, DrawingVector, Page, TextVectorResult, TextWord, VectorPath
 from rastervec.pipeline import (
     ClusteringStageResult,
     Pipeline,
     PipelineContext,
     StageSpec,
     _run_drawing_vectors,
+    _run_rotation_verify,
+    _run_spatial_regroup,
+    _sample_mask,
+    _text_aspect_ratio,
 )
 from rastervec.reader import Reader
 from rastervec.vector import CategoryResult, StepResult
@@ -23,8 +26,13 @@ _EXPECTED_STAGE_KEYS = [
     "layer_separation",
     "color_separation",
     "clustering",
+    "text_candidates",
+    "unique_clusters",
+    "fast_text_detect",
+    "spatial_regroup",
+    "ocr_compare",
+    "rotation_verify",
     "drawing_vectors",
-    "ocr_text_clusters",
 ]
 
 
@@ -52,8 +60,11 @@ def test_run_page_reader_and_native_ok(synthetic_pdf_factory, tmp_pdf_path):
     assert isinstance(by_key["layer_separation"].data, dict)
     assert isinstance(by_key["color_separation"].data, dict)
     assert isinstance(by_key["clustering"].data, dict)
+    assert by_key["text_candidates"].data == []  # no vector drawings on this text-only page
+    fast_result = by_key["fast_text_detect"].data
+    assert fast_result.page_image is None  # zero vector paths -- FastDetector never even constructed
+    assert by_key["ocr_compare"].data == []
     assert isinstance(by_key["drawing_vectors"].data, list)
-    assert by_key["ocr_text_clusters"].data == []  # no text-as-vector clusters on this page
 
 
 def test_run_page_final_stage_stops_early_and_skips_ocr_engine(
@@ -68,9 +79,12 @@ def test_run_page_final_stage_stops_early_and_skips_ocr_engine(
     monkeypatch.setattr("rastervec.pipeline.RenderOCR", _boom)
 
     with Reader(path) as reader:
-        outputs = Pipeline().run_page(reader, 0, final_stage="drawing_vectors")
+        outputs = Pipeline().run_page(reader, 0, final_stage="fast_text_detect")
 
-    assert [o.key for o in outputs] == _EXPECTED_STAGE_KEYS[:-1]  # everything but ocr_text_clusters
+    # everything up to and including fast_text_detect, but not
+    # spatial_regroup, ocr_compare (which would construct RenderOCR),
+    # rotation_verify, or drawing_vectors
+    assert [o.key for o in outputs] == _EXPECTED_STAGE_KEYS[:-4]
     assert all(o.status == "ok" for o in outputs)
 
 
@@ -117,7 +131,7 @@ def test_run_page_vector_stages_on_drawing_pdf(tmp_pdf_path):
     clustering_results: dict = by_key["clustering"].data
     for result in clustering_results.values():
         assert isinstance(result, ClusteringStageResult)
-        assert len(result.steps) == 13
+        assert len(result.steps) == 12
         assert all(isinstance(step, StepResult) for step in result.steps)
         assert all("kept" in step.categories for step in result.steps)
 
@@ -130,24 +144,25 @@ def test_run_page_vector_stages_on_drawing_pdf(tmp_pdf_path):
     ]
     assert any(g[0].kind == "re" for g in dropped_at_step_0)
 
-    # The line ends up as a single-item cluster -- dropped somewhere
-    # later in the chain (exactly which step depends on current threshold
-    # tuning); there's nothing left with enough shape variety on this
-    # tiny synthetic page to survive to the final "kept" category.
+    # The line ends up as a single-item cluster -- with the high-frequency
+    # filter removed, nothing else in the chain rejects a lone,
+    # otherwise-unremarkable cluster, so it survives to the final "kept"
+    # category as a text candidate.
     all_final_kept = [
         p
         for result in clustering_results.values()
         for g in result.steps[-1].categories["kept"].groups
         for p in g
     ]
-    assert all_final_kept == []
+    assert all_final_kept and all(p.kind == "l" for p in all_final_kept)
 
     drawing_vectors: list[DrawingVector] = by_key["drawing_vectors"].data
     assert isinstance(drawing_vectors, list)
-    # both the dropped panel and the low-variety line end up folded into
-    # drawing_vectors.
+    # the dropped panel ends up folded into drawing_vectors; the line
+    # survived clustering as a text candidate, so it's drawing_vectors only
+    # if FAST found no text signal in it -- either way it's not asserted on
+    # here.
     assert any(dv.paths[0].kind == "re" for dv in drawing_vectors)
-    assert any(dv.paths[0].kind == "l" for dv in drawing_vectors)
 
 
 def _make_path(seq: int) -> VectorPath:
@@ -183,6 +198,83 @@ def test_run_drawing_vectors_restores_original_seq_order_across_groups():
     drawing_vectors = _run_drawing_vectors(ctx)
 
     assert [dv.paths[0].seq for dv in drawing_vectors] == [0, 1, 2, 3]
+
+
+def _make_path_at(seq: int, bbox: tuple[float, float, float, float]) -> VectorPath:
+    return VectorPath(
+        seq=seq, item_index=0, kind="l", fill_rule="s",
+        points=[(bbox[0], bbox[1]), (bbox[2], bbox[3])], bbox=bbox,
+        stroke_color=(0, 0, 0), fill_color=None, stroke_opacity=None,
+        fill_opacity=None, stroke_width=1.0, dashes=None, closed=False,
+        layer=None, page_index=0,
+    )
+
+
+def test_sample_mask_weights_by_own_vector_footprint_not_aggregate_bbox():
+    # A 100x100 mask, hot (1.0) only in the top-left 10x10 corner.
+    mask = np.zeros((100, 100), dtype=np.float32)
+    mask[0:10, 0:10] = 1.0
+
+    # Two paths whose own bboxes are each fully inside one region (one
+    # fully hot, one fully cold) -- but whose aggregate bbox spans the
+    # whole 100x100 mask, mostly cold. The old aggregate-bbox-mean version
+    # would score this near 0 (~2% hot pixels of the full span); the
+    # per-path-weighted version should score exactly the average of each
+    # path's own footprint: (1.0 + 0.0) / 2 == 0.5.
+    hot_path = _make_path_at(0, (0, 0, 10, 10))
+    cold_path = _make_path_at(1, (90, 90, 100, 100))
+
+    score = _sample_mask(mask, [hot_path, cold_path], zoom=1.0)
+
+    assert score == pytest.approx(0.5)
+
+
+def test_sample_mask_returns_zero_for_none_mask():
+    assert _sample_mask(None, [_make_path_at(0, (0, 0, 10, 10))], zoom=1.0) == 0.0
+
+
+def test_run_spatial_regroup_merges_clusters_whose_paths_overlap_across_buckets():
+    # cluster_b's path touches cluster_a's path within 1px tolerance
+    # (gap of 0.5pt) -- should merge into one, regardless of which
+    # (layer, color) bucket each came from -- spatial_regroup deliberately
+    # ignores that.
+    cluster_a = [_make_path_at(0, (0, 0, 10, 10))]
+    cluster_b = [_make_path_at(1, (10.5, 0, 20, 10))]
+    ctx = PipelineContext(reader=None, page_index=0)
+    ctx.fast_passed = [cluster_a, cluster_b]
+
+    regrouped = _run_spatial_regroup(ctx)
+
+    assert len(regrouped) == 1
+    assert {p.seq for p in regrouped[0]} == {0, 1}
+    # word_split reads regrouped_clusters, not fast_passed, after this stage.
+    assert ctx.regrouped_clusters == regrouped
+
+
+def test_run_spatial_regroup_keeps_clusters_separate_when_no_path_actually_overlaps():
+    # cluster_a and cluster_b's own paths are 3pt apart -- over the 1px
+    # tolerance -- even though this would have merged under the old
+    # aggregate-bbox-gap threshold (5pt). Only real per-path overlap
+    # should merge clusters now.
+    cluster_a = [_make_path_at(0, (0, 0, 10, 10))]
+    cluster_b = [_make_path_at(1, (13, 0, 20, 10))]
+    ctx = PipelineContext(reader=None, page_index=0)
+    ctx.fast_passed = [cluster_a, cluster_b]
+
+    regrouped = _run_spatial_regroup(ctx)
+
+    assert len(regrouped) == 2
+
+
+def test_run_spatial_regroup_keeps_far_clusters_separate():
+    cluster_a = [_make_path_at(0, (0, 0, 10, 10))]
+    cluster_b = [_make_path_at(1, (100, 0, 110, 10))]
+    ctx = PipelineContext(reader=None, page_index=0)
+    ctx.fast_passed = [cluster_a, cluster_b]
+
+    regrouped = _run_spatial_regroup(ctx)
+
+    assert len(regrouped) == 2
 
 
 def test_run_page_stage_error_is_caught(synthetic_pdf_factory, tmp_pdf_path):
@@ -225,3 +317,60 @@ def test_run_page_stage_after_error_still_runs(synthetic_pdf_factory, tmp_pdf_pa
 
     assert [o.status for o in outputs] == ["error", "ok"]
     assert outputs[1].data == "fine"
+
+
+def _make_cluster_result(text: str, bbox, rotation_used: int = 0) -> ClusterOcrResult:
+    resolved = TextVectorResult(
+        paths=[], text=text, confidence=0.95, bbox=bbox, ocr_bbox=None,
+        rotation_used=rotation_used, page_index=0,
+    )
+    return ClusterOcrResult(cluster=[], resolved=resolved, ocr_seconds=0.0)
+
+
+def test_rotation_verify_flips_when_bbox_rotated_fits_better():
+    text = "HELLO WORLD"
+    ratio = _text_aspect_ratio(text)
+    assert ratio > 1  # wide text
+
+    # A tall/narrow bbox shaped like the text rotated 90 (ratio swapped)
+    # should trigger the fix.
+    bbox = (0, 0, 10, 10 * ratio)
+    ctx = PipelineContext(reader=None, page_index=0)
+    ctx.cluster_ocr_results = [_make_cluster_result(text, bbox, rotation_used=0)]
+
+    checks = _run_rotation_verify(ctx)
+
+    assert len(checks) == 1
+    assert checks[0].applied
+    assert checks[0].after_rotation == 90
+    assert checks[0].resolved.rotation_used == 90
+    # ocr_compare's own resolved reading is never mutated -- rotation_verify
+    # reports the corrected orientation as a separate RotationCheck.resolved
+    # object instead.
+    assert ctx.cluster_ocr_results[0].resolved.rotation_used == 0
+
+
+def test_rotation_verify_leaves_matching_bbox_alone():
+    text = "HELLO WORLD"
+    ratio = _text_aspect_ratio(text)
+    bbox = (0, 0, 10 * ratio, 10)  # already matches the text's own aspect
+    ctx = PipelineContext(reader=None, page_index=0)
+    ctx.cluster_ocr_results = [_make_cluster_result(text, bbox, rotation_used=0)]
+
+    checks = _run_rotation_verify(ctx)
+
+    assert len(checks) == 1
+    assert not checks[0].applied
+    assert checks[0].after_rotation == 0
+    # Not applied -- resolved is the exact same (unmutated) object.
+    assert checks[0].resolved is ctx.cluster_ocr_results[0].resolved
+    assert ctx.cluster_ocr_results[0].resolved.rotation_used == 0
+
+
+def test_rotation_verify_skips_blank_text():
+    ctx = PipelineContext(reader=None, page_index=0)
+    ctx.cluster_ocr_results = [_make_cluster_result("", (0, 0, 10, 10))]
+
+    checks = _run_rotation_verify(ctx)
+
+    assert checks == []

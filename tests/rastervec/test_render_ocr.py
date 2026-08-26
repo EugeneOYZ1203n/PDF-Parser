@@ -5,6 +5,7 @@ import os
 import pytest
 from PIL import Image
 
+from rastervec.helpers.ocr_backend import OcrBox, OcrDetection
 from rastervec.helpers.render_ocr import RenderOCR
 from rastervec.models import VectorPath
 from rastervec.renderer import Renderer
@@ -17,45 +18,112 @@ from rastervec.renderer import Renderer
 _RUN_OCR_TESTS = os.environ.get("RASTERVEC_RUN_OCR_TESTS") == "1"
 
 
-def test_render_rotations_count_and_size():
-    image = Image.new("RGB", (40, 10), "white")
-    rotations = RenderOCR().render_rotations(image, n=4)
+class _FakeBackend:
+    """A no-engine OcrBackend stand-in -- lets RenderOCR's own
+    orchestration (word-building, pixel->page mapping, join logic) be
+    unit-tested without needing Paddle or Tesseract installed."""
 
-    assert len(rotations) == 4
-    assert rotations[0].size == (40, 10)  # 0 degrees: unchanged
-    # 90 degrees: expand=True swaps width/height.
-    assert rotations[1].size == (10, 40)
+    def __init__(self, detection: OcrDetection) -> None:
+        self.detection = detection
 
-
-def test_render_rotations_rejects_non_positive_n():
-    with pytest.raises(ValueError):
-        RenderOCR().render_rotations(Image.new("RGB", (10, 10)), n=0)
+    def detect(self, image):
+        return self.detection
 
 
-def test_combine_rotation_results_empty_returns_blank():
-    assert RenderOCR().combine_rotation_results([]) == ("", 0.0)
-
-
-def test_combine_rotation_results_picks_highest_total_confidence_group():
-    # Three near-identical "AB12" readings should outweigh one confident
-    # but different single outlier reading.
-    results = [
-        ("AB12", 0.6, []),
-        ("AB12", 0.55, []),
-        ("Ab1Z", 0.5, []),  # close enough to "AB12" to group with it (case-insensitive)
-        ("XYZQ", 0.99, []),
+def _rect_cluster(bbox=(0, 0, 40, 20)) -> list[VectorPath]:
+    return [
+        VectorPath(
+            seq=0, item_index=0, kind="re", fill_rule="f",
+            points=[(bbox[0], bbox[1]), (bbox[2], bbox[3])], bbox=bbox,
+            stroke_color=None, fill_color=(0, 0, 0),
+            stroke_opacity=None, fill_opacity=None, stroke_width=None,
+            dashes=None, closed=True, layer=None, page_index=0,
+        )
     ]
-    text, confidence = RenderOCR().combine_rotation_results(results)
-
-    assert text in ("AB12", "Ab1Z")  # winning group's best-confidence reading
-    assert confidence == pytest.approx((0.6 + 0.55 + 0.5) / 3)
 
 
-def test_combine_rotation_results_skips_blank_readings():
-    results = [("", 0.9, []), ("", 0.8, []), ("hi", 0.1, [])]
-    text, confidence = RenderOCR().combine_rotation_results(results)
-    assert text == "hi"
-    assert confidence == pytest.approx(0.1)
+def test_ocr_cluster_builds_words_from_backend_boxes(tmp_pdf_path):
+    import pymupdf as fitz
+
+    from rastervec.reader import Reader
+
+    doc = fitz.open()
+    doc.new_page(width=200, height=100)
+    path = tmp_pdf_path(doc)
+
+    detection = OcrDetection(
+        boxes=[
+            OcrBox(text="HELLO", confidence=0.9, corners=[(0, 0), (10, 0), (10, 5), (0, 5)], is_word=True),
+            OcrBox(text="WORLD", confidence=0.8, corners=[(12, 0), (22, 0), (22, 5), (12, 5)], is_word=True),
+        ],
+        rotation=0,
+    )
+    render_ocr = RenderOCR(backend=_FakeBackend(detection))
+
+    with Reader(path) as reader:
+        rastervec_page = reader.get_page(0)
+        cluster = _rect_cluster()
+        result = render_ocr.ocr_cluster(cluster, rastervec_page, Renderer(), dpi=150)
+
+    assert result.text == "HELLO WORLD"
+    assert result.words is not None
+    assert [w.text for w in result.words] == ["HELLO", "WORLD"]
+    assert result.rotation_used == 0
+
+
+class _CapturingBackend:
+    """Records the image it was handed, so a test can assert on the actual
+    rendered pixel size ocr_cluster produced."""
+
+    def __init__(self, detection: OcrDetection) -> None:
+        self.detection = detection
+        self.last_image: Image.Image | None = None
+
+    def detect(self, image):
+        self.last_image = image
+        return self.detection
+
+
+def test_ocr_cluster_bumps_dpi_so_tiny_cluster_still_renders_50px(tmp_pdf_path):
+    import pymupdf as fitz
+
+    from rastervec.reader import Reader
+
+    doc = fitz.open()
+    doc.new_page(width=200, height=100)
+    path = tmp_pdf_path(doc)
+
+    # A few PDF points across -- at the requested dpi=72 (1x) this would
+    # render to well under 50px on its shorter side without the bump.
+    tiny_cluster = _rect_cluster(bbox=(0, 0, 3, 2))
+    backend = _CapturingBackend(OcrDetection(boxes=[], rotation=0))
+    render_ocr = RenderOCR(backend=backend)
+
+    with Reader(path) as reader:
+        rastervec_page = reader.get_page(0)
+        render_ocr.ocr_cluster(tiny_cluster, rastervec_page, Renderer(), dpi=72)
+
+    assert backend.last_image is not None
+    assert min(backend.last_image.size) >= 50
+
+
+def test_ocr_cluster_words_none_when_nothing_detected(tmp_pdf_path):
+    import pymupdf as fitz
+
+    from rastervec.reader import Reader
+
+    doc = fitz.open()
+    doc.new_page(width=200, height=100)
+    path = tmp_pdf_path(doc)
+
+    render_ocr = RenderOCR(backend=_FakeBackend(OcrDetection(boxes=[], rotation=0)))
+
+    with Reader(path) as reader:
+        rastervec_page = reader.get_page(0)
+        result = render_ocr.ocr_cluster(_rect_cluster(), rastervec_page, Renderer(), dpi=150)
+
+    assert result.text == ""
+    assert result.words is None
 
 
 @pytest.mark.skipif(
@@ -106,8 +174,8 @@ def test_ocr_cluster_end_to_end_on_vector_glyphs(tmp_pdf_path):
         rastervec_page = reader.get_page(0)
         # A synthetic VectorPath cluster: one big filled rect standing in
         # for a glyph, just to exercise the full ocr_cluster plumbing
-        # (render_vector_cluster -> render_rotations -> ocr ->
-        # combine_rotation_results) end to end, not OCR accuracy per se.
+        # (render_vector_cluster -> predict -> _page_rotation) end to end,
+        # not OCR accuracy per se.
         cluster = [
             VectorPath(
                 seq=0, item_index=0, kind="re", fill_rule="f",

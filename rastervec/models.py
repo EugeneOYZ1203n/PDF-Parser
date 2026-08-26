@@ -127,13 +127,51 @@ class DrawingVector:
 
 
 @dataclass
-class TextVectorResult:
-    cluster_paths: list[VectorPath]
+class OcrWord:
+    """One detected text box from an OcrBackend (helpers/ocr_backend.py),
+    mapped back into PDF page space -- word-level for a backend like
+    Tesseract, line/region-level for one like Paddle. Used by
+    Renderer.render_reconstructed_page to place/scale each entry into its
+    own bbox instead of stretching one string across a whole cluster's
+    bbox."""
+
     text: str
     confidence: float
     bbox: tuple[float, float, float, float]
+
+
+@dataclass
+class TextVectorResult:
+    """One OCR reading -- of a whole cluster, or of one of its composing
+    groups (see Glossary.md) -- from `RenderOCR.ocr_cluster`. `bbox` is the
+    vector-geometry bbox of `paths`; `ocr_bbox` is the backend-detected
+    text region for this same reading, mapped back into PDF page space via
+    `Renderer.pixel_to_page_bbox` (`None` if the backend detected nothing).
+    `words` is one `OcrWord` per individually detected box (`None` when
+    nothing was detected, or the input wasn't a vector-path cluster)."""
+
+    paths: list[VectorPath]
+    text: str
+    confidence: float
+    bbox: tuple[float, float, float, float]
+    ocr_bbox: tuple[float, float, float, float] | None
     rotation_used: int
     page_index: int
+    words: list[OcrWord] | None = None
+
+
+@dataclass
+class ClusterOcrResult:
+    """One spatial_regroup cluster's OCR resolution (see pipeline.py's
+    _run_ocr_compare): `cluster` is that cluster's own member VectorPaths,
+    `resolved` is the direct RenderOCR.ocr_cluster reading over the whole
+    cluster -- no fallback tiers, no similarity-group reuse, one OCR call
+    per cluster. `ocr_seconds` is that call's wall-clock time, surfaced by
+    the debug app as a timing readout."""
+
+    cluster: list[VectorPath]
+    resolved: TextVectorResult
+    ocr_seconds: float
 
 
 @dataclass
