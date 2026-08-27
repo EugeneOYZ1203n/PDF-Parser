@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from typing import Any, List
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
-from rastervec.models import DrawingVector, TextWord, VectorPath
+from rastervec.models import DrawingVector, TextRecord, TextWord, VectorPath, VectorRecord
 
 
 class TextDTO(BaseModel):
@@ -42,15 +42,36 @@ class TextDTO(BaseModel):
     font_size: float = 0.0
     seq: int = 0
 
+    _source: TextRecord = PrivateAttr()
+
     @classmethod
-    def from_text_word(cls, word: TextWord) -> "TextDTO":
+    def from_text_word(cls, word: TextWord, record: TextRecord | None = None) -> "TextDTO":
+        """`record`, if given, is the richer TextRecord this word was built
+        alongside (Native.extract_records) -- stashed on `_source` for
+        get_text_object(). If omitted (e.g. from_extract's own call site,
+        which only has TextWords), a TextRecord is synthesized from `word`
+        with the fields TextWord has no equivalent for (wmode/block_no/
+        line_no/word_no) defaulted to 0, so get_text_object() always
+        returns something valid."""
         x0, y0, x1, y1 = word.bbox
-        return cls(
+        dto = cls(
             x0=x0, y0=y0, x1=x1, y1=y1, word=word.text,
             rotate=round(word.angle / 90.0) % 4 * 90,
             glyph_orientation="horizontal" if abs(word.angle % 180) < 45 else "vertical",
             angle=word.angle, font=word.font, font_size=word.font_size, seq=word.seq,
         )
+        dto._source = record if record is not None else TextRecord(
+            text=word.text, bbox=word.bbox, quad=word.quad, angle=word.angle,
+            direction=word.direction, font=word.font, font_size=word.font_size,
+            color=word.color, flags=word.flags, origin=word.origin,
+            ascender=word.ascender, descender=word.descender,
+            orientation_source=word.orientation_source, page_index=word.page_index,
+            seq=word.seq, wmode=0, block_no=0, line_no=0, word_no=0,
+        )
+        return dto
+
+    def get_text_object(self) -> TextRecord:
+        return self._source
 
 
 def _vector_path_to_item_dict(path: VectorPath) -> dict[str, Any]:
@@ -90,11 +111,22 @@ class VectorDTO(BaseModel):
     layer: str | None = None
     page_index: int = 0
 
+    _source: VectorRecord = PrivateAttr()
+
     @classmethod
-    def from_drawing_vector(cls, dv: DrawingVector) -> "VectorDTO":
+    def from_drawing_vector(
+        cls, dv: DrawingVector, record: VectorRecord | None = None,
+    ) -> "VectorDTO":
+        """`record`, if given, is the richer VectorRecord this drawing was
+        built alongside -- stashed on `_source` for get_vector_object(). If
+        omitted (e.g. from_extract's own call site, which only has
+        DrawingVectors), a VectorRecord is synthesized from `dv` with the
+        drawing-level fields DrawingVector doesn't carry defaulted to
+        false/0/None, so get_vector_object() always returns something
+        valid."""
         x0, y0, x1, y1 = dv.bbox
         first = dv.paths[0] if dv.paths else None
-        return cls(
+        dto = cls(
             x0=x0, y0=y0, x1=x1, y1=y1,
             items=[_vector_path_to_item_dict(p) for p in dv.paths],
             fill=dv.fill_color, color=dv.stroke_color, width=dv.stroke_width or 0.0,
@@ -103,6 +135,17 @@ class VectorDTO(BaseModel):
             layer=first.layer if first is not None else None,
             page_index=dv.page_index,
         )
+        dto._source = record if record is not None else VectorRecord(
+            items=dv.paths, bbox=dv.bbox, stroke_color=dv.stroke_color,
+            fill_color=dv.fill_color, stroke_width=dv.stroke_width, dashed=dv.dashed,
+            page_index=dv.page_index, even_odd=False, line_cap=0, line_join=0,
+            seqno=first.seq if first is not None else 0, rect=dv.bbox, scissor=None,
+            blendmode=None, isolated=False, knockout=False, opacity=None,
+        )
+        return dto
+
+    def get_vector_object(self) -> VectorRecord:
+        return self._source
 
 
 class NativePDFElements(BaseModel):

@@ -12,7 +12,7 @@ import pymupdf as fitz
 
 from rastervec.helpers.geometry import round_color
 from rastervec.logging_setup import get_logger
-from rastervec.models import Page, VectorPath
+from rastervec.models import Page, VectorPath, VectorRecord
 from rastervec.Vector.Layer_Color_Separation.layer_color_separation import (
     separate_by_color,
     separate_by_layer,
@@ -66,6 +66,98 @@ class Vector:
 
         _LOG.debug("page %d: extracted %d vector path(s)", page_index, len(paths))
         return paths
+
+    def extract_records(self, page: Page) -> list[VectorRecord]:
+        """Richer, additive counterpart to extract_paths -- one VectorRecord
+        per raw get_drawings() drawing, carrying every drawing-level field
+        extract_paths's `common` dict drops (even_odd, line_cap, line_join,
+        real seqno, rect, scissor, blendmode, isolated, knockout, opacity).
+        `groups`/`role` stay None here -- populated later, once this
+        drawing's paths have been through Vector_Classification, by whatever
+        wires cluster lineage into VectorRecord (see classification.py).
+        Never replaces extract_paths/VectorPath for existing consumers."""
+        fitz_page = page.fitz_page
+        page_index = page.meta.index
+        records: list[VectorRecord] = []
+
+        for seq, drawing in enumerate(fitz_page.get_drawings()):
+            fill_rule = drawing.get("type", "")
+            stroke_color = round_color(drawing.get("color"))
+            fill_color = round_color(drawing.get("fill"))
+            stroke_opacity = drawing.get("stroke_opacity")
+            fill_opacity = drawing.get("fill_opacity")
+            stroke_width = drawing.get("width")
+            dashes = drawing.get("dashes")
+            closed = drawing.get("closePath")
+            layer = drawing.get("layer") or None
+
+            common = dict(
+                seq=seq,
+                fill_rule=fill_rule,
+                stroke_color=stroke_color,
+                fill_color=fill_color,
+                stroke_opacity=stroke_opacity,
+                fill_opacity=fill_opacity,
+                stroke_width=stroke_width,
+                dashes=dashes,
+                closed=closed,
+                layer=layer,
+                page_index=page_index,
+            )
+
+            items: list[VectorPath] = []
+            for item_index, item in enumerate(drawing.get("items", [])):
+                path = self._extract_item(item, item_index, common)
+                if path is not None:
+                    items.append(path)
+
+            rect = drawing.get("rect")
+            rect_tuple = (
+                (rect.x0, rect.y0, rect.x1, rect.y1)
+                if rect is not None
+                else self._union_bbox(items)
+            )
+            scissor = drawing.get("scissor")
+            scissor_tuple = (
+                (scissor.x0, scissor.y0, scissor.x1, scissor.y1)
+                if scissor is not None
+                else None
+            )
+
+            records.append(
+                VectorRecord(
+                    items=items,
+                    bbox=self._union_bbox(items) or rect_tuple,
+                    stroke_color=stroke_color,
+                    fill_color=fill_color,
+                    stroke_width=stroke_width,
+                    dashed=bool(dashes),
+                    page_index=page_index,
+                    even_odd=bool(drawing.get("even_odd", False)),
+                    line_cap=drawing.get("lineCap", 0) or 0,
+                    line_join=drawing.get("lineJoin", 0) or 0,
+                    seqno=drawing.get("seqno", seq),
+                    rect=rect_tuple,
+                    scissor=scissor_tuple,
+                    blendmode=drawing.get("blendmode"),
+                    isolated=bool(drawing.get("isolated", False)),
+                    knockout=bool(drawing.get("knockout", False)),
+                    opacity=drawing.get("opacity"),
+                )
+            )
+
+        return records
+
+    def _union_bbox(
+        self, items: list[VectorPath]
+    ) -> tuple[float, float, float, float] | None:
+        if not items:
+            return None
+        x0 = min(p.bbox[0] for p in items)
+        y0 = min(p.bbox[1] for p in items)
+        x1 = max(p.bbox[2] for p in items)
+        y1 = max(p.bbox[3] for p in items)
+        return (x0, y0, x1, y1)
 
     def _extract_item(
         self, item: tuple, item_index: int, common: dict

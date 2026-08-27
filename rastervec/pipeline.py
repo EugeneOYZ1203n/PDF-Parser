@@ -39,9 +39,11 @@ from rastervec.models import (
     ClusterOcrResult,
     DrawingVector,
     Page,
+    TextRecord,
     TextVectorResult,
     TextWord,
     VectorPath,
+    VectorRecord,
 )
 from rastervec.Native_Text.native import Native
 from rastervec.OCR.FAST_Text_Detect.fast_detect import FastDetector
@@ -130,7 +132,19 @@ class PipelineContext:
     page_index: int
     page: Page | None = None
     native_words: list[TextWord] | None = None
+    # native: richer, additive counterpart to native_words (see
+    # Native.extract_records) -- carries wmode/block_no/line_no/word_no
+    # alongside everything native_words already has.
+    native_records: list[TextRecord] | None = None
     vector_paths: list[VectorPath] | None = None
+    # vector_extract: richer, additive counterpart to vector_paths (see
+    # Vector.extract_records) -- one VectorRecord per raw get_drawings()
+    # drawing, carrying every drawing-level field vector_paths drops.
+    vector_records: list[VectorRecord] | None = None
+    # text_candidates: one VectorRecord per final surviving "kept" cluster
+    # (see VectorClassifier.build_vector_records), role="kept", groups set
+    # from that cluster's own StepResult.cluster_groups lineage.
+    text_candidate_records: list[VectorRecord] | None = None
     paths_by_layer: dict[str, list[VectorPath]] | None = None
     paths_by_layer_color: dict[str, dict[tuple, list[VectorPath]]] | None = None
     clustering: dict[GroupKey, ClusteringStageResult] | None = None
@@ -225,12 +239,16 @@ def _run_reader(ctx: PipelineContext) -> Page:
 
 
 def _run_native(ctx: PipelineContext) -> list[TextWord]:
-    ctx.native_words = Native().extract_text(ctx.page)
+    native = Native()
+    ctx.native_words = native.extract_text(ctx.page)
+    ctx.native_records = native.extract_records(ctx.page)
     return ctx.native_words
 
 
 def _run_vector_extract(ctx: PipelineContext) -> list[VectorPath]:
-    ctx.vector_paths = Vector().extract_paths(ctx.page)
+    vector = Vector()
+    ctx.vector_paths = vector.extract_paths(ctx.page)
+    ctx.vector_records = vector.extract_records(ctx.page)
     return ctx.vector_paths
 
 
@@ -278,6 +296,8 @@ def _run_text_candidates(ctx: PipelineContext) -> list[list[VectorPath]]:
     ocr_compare's group-vs-cluster comparison."""
     text_clusters: list[list[VectorPath]] = []
     cluster_groups: dict[int, list[list[VectorPath]]] = {}
+    text_candidate_records: list[VectorRecord] = []
+    classifier = VectorClassifier()
     for cluster_result in ctx.clustering.values():
         if not cluster_result.steps:
             continue
@@ -285,9 +305,11 @@ def _run_text_candidates(ctx: PipelineContext) -> list[list[VectorPath]]:
         text_clusters.extend(last.categories["kept"].groups)
         if last.cluster_groups:
             cluster_groups.update(last.cluster_groups)
+        text_candidate_records.extend(classifier.build_vector_records(cluster_result.steps))
 
     ctx.text_clusters = text_clusters
     ctx.cluster_groups = cluster_groups
+    ctx.text_candidate_records = text_candidate_records
     return text_clusters
 
 

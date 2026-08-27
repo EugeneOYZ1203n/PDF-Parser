@@ -39,7 +39,7 @@ from typing import Literal
 
 from rastervec.helpers.clustering import Clustering
 from rastervec.logging_setup import get_logger
-from rastervec.models import DrawingVector, Page, VectorPath
+from rastervec.models import DrawingVector, Page, VectorPath, VectorRecord
 from rastervec.Vector_Classification.clusters import cluster_filters as clf
 from rastervec.Vector_Classification.groups import group_filters as grf
 from rastervec.Vector_Classification.items import item_filters as itf
@@ -241,6 +241,57 @@ class VectorClassifier:
         debug app and drawing_vectors)."""
         steps = self.cluster(paths, page)
         return steps[-1].categories["kept"].groups if steps else []
+
+    def build_vector_records(self, steps: list[StepResult]) -> list[VectorRecord]:
+        """Wires the final step's `cluster_groups` lineage into one
+        `VectorRecord` per surviving (role="kept") text-candidate cluster --
+        built right here, where the lineage is already known, rather than
+        reconstructed after the fact from a flattened list. Drawing-level
+        fields VectorPath doesn't carry (even_odd/line_cap/line_join/
+        scissor/blendmode/isolated/knockout/opacity) fall back to
+        false/0/None -- a cluster can merge paths from several different
+        original drawings, so there's no single drawing left to read them
+        from; `seqno` uses the cluster's first member's synthetic `seq` as
+        a representative value instead."""
+        if not steps:
+            return []
+        last = steps[-1]
+        kept = last.categories["kept"].groups
+        lineage = last.cluster_groups or {}
+
+        records: list[VectorRecord] = []
+        for cluster in kept:
+            if not cluster:
+                continue
+            x0 = min(p.bbox[0] for p in cluster)
+            y0 = min(p.bbox[1] for p in cluster)
+            x1 = max(p.bbox[2] for p in cluster)
+            y1 = max(p.bbox[3] for p in cluster)
+            first = cluster[0]
+            records.append(
+                VectorRecord(
+                    items=cluster,
+                    bbox=(x0, y0, x1, y1),
+                    stroke_color=first.stroke_color,
+                    fill_color=first.fill_color,
+                    stroke_width=first.stroke_width,
+                    dashed=_is_dashed(first.dashes),
+                    page_index=first.page_index,
+                    even_odd=False,
+                    line_cap=0,
+                    line_join=0,
+                    seqno=first.seq,
+                    rect=(x0, y0, x1, y1),
+                    scissor=None,
+                    blendmode=None,
+                    isolated=False,
+                    knockout=False,
+                    opacity=None,
+                    groups=lineage.get(id(cluster), [cluster]),
+                    role="kept",
+                )
+            )
+        return records
 
     def build_drawing_vectors(self, paths: list[VectorPath]) -> list[DrawingVector]:
         groups: dict[int, list[VectorPath]] = defaultdict(list)

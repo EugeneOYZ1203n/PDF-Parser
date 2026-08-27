@@ -91,6 +91,21 @@ def test_extract_paths_rect_bbox_matches(tmp_pdf_path):
     assert first.fill_color == (0.0, 0.0, 0.0)
 
 
+def test_extract_records_carries_drawing_level_fields(tmp_pdf_path):
+    with _build_test_page(tmp_pdf_path) as reader:
+        page = reader.get_page(0)
+        records = Vector().extract_records(page)
+
+    assert len(records) > 0
+    assert all(isinstance(r.items, list) and r.items for r in records)
+    assert all(r.groups is None and r.role is None for r in records)
+    small_rect_records = [
+        r for r in records
+        if any(p.kind == "re" and (p.bbox[2] - p.bbox[0]) < 10 for p in r.items)
+    ]
+    assert len(small_rect_records) == 4
+
+
 def test_separate_by_layer_groups_by_layer_field():
     paths = [
         _make_path(layer="A"),

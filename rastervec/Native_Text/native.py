@@ -10,7 +10,7 @@ import pymupdf as fitz
 
 from rastervec.helpers.geometry import make_oriented_quad
 from rastervec.logging_setup import get_logger
-from rastervec.models import Page, TextWord
+from rastervec.models import Page, TextRecord, TextWord
 
 _LOG = get_logger("native")
 
@@ -34,7 +34,7 @@ class Native:
 
         result: list[TextWord] = []
         seq = 0
-        for x0, y0, x1, y1, text in words:
+        for x0, y0, x1, y1, text, _block_no, _line_no, _word_no in words:
             bbox = fitz.Rect(x0, y0, x1, y1)
             span = self._match_word_to_span(bbox, spans)
             if span is None:
@@ -53,6 +53,33 @@ class Native:
 
         return result
 
+    def extract_records(self, page: Page) -> list[TextRecord]:
+        """Richer, additive counterpart to extract_text -- one TextRecord
+        per word, carrying get_text("words")'s block_no/line_no/word_no and
+        get_text("dict")'s line-level wmode alongside everything TextWord
+        already has. Never replaces extract_text/TextWord for existing
+        consumers (pipeline.py, debug_app.py)."""
+        fitz_page = page.fitz_page
+        page_index = page.meta.index
+
+        spans = self._extract_spans(fitz_page)
+        words = self._extract_words(fitz_page)
+
+        result: list[TextRecord] = []
+        seq = 0
+        for x0, y0, x1, y1, text, block_no, line_no, word_no in words:
+            bbox = fitz.Rect(x0, y0, x1, y1)
+            span = self._match_word_to_span(bbox, spans)
+            result.append(
+                self._to_text_record(
+                    (bbox, text), span, page_index, seq,
+                    block_no, line_no, word_no,
+                )
+            )
+            seq += 1
+
+        return result
+
     def _extract_spans(self, fitz_page: "fitz.Page") -> list[dict]:
         """Flatten page.get_text('dict') into a list of span dicts."""
         spans: list[dict] = []
@@ -64,6 +91,7 @@ class Native:
 
             for line in block.get("lines", []):
                 line_dir = line.get("dir", (1.0, 0.0))
+                line_wmode = line.get("wmode", 0)
 
                 for span in line.get("spans", []):
                     text = span.get("text", "")
@@ -84,6 +112,7 @@ class Native:
                             "dir": line_dir,
                             "ascender": span.get("ascender", None),
                             "descender": span.get("descender", None),
+                            "wmode": line_wmode,
                         }
                     )
 
@@ -103,7 +132,10 @@ class Native:
         for _, group in groupby(words, key=lambda w: round(w[1])):
             for word in sorted(group, key=lambda w: w[0]):
                 ordered.append(
-                    (word[0], word[1], word[2], word[3], word[4])
+                    (
+                        word[0], word[1], word[2], word[3], word[4],
+                        word[5], word[6], word[7],
+                    )
                 )
         return ordered
 
@@ -232,4 +264,75 @@ class Native:
             orientation_source="text-span",
             page_index=page_index,
             seq=seq,
+        )
+
+    def _to_text_record(
+        self,
+        word: tuple,
+        span: dict | None,
+        page_index: int,
+        seq: int,
+        block_no: int,
+        line_no: int,
+        word_no: int,
+    ) -> TextRecord:
+        bbox, text = word
+
+        if span is None:
+            return TextRecord(
+                text=text,
+                bbox=(bbox.x0, bbox.y0, bbox.x1, bbox.y1),
+                quad=(
+                    (bbox.x0, bbox.y0),
+                    (bbox.x1, bbox.y0),
+                    (bbox.x1, bbox.y1),
+                    (bbox.x0, bbox.y1),
+                ),
+                angle=0.0,
+                direction=(1.0, 0.0),
+                font="",
+                font_size=0.0,
+                color=None,
+                flags=0,
+                origin=None,
+                ascender=None,
+                descender=None,
+                orientation_source="fallback",
+                page_index=page_index,
+                seq=seq,
+                wmode=0,
+                block_no=block_no,
+                line_no=line_no,
+                word_no=word_no,
+            )
+
+        dx, dy = span["dir"]
+        angle = degrees(atan2(dy, dx))
+        quad = self._build_oriented_quad(bbox, dx, dy)
+
+        return TextRecord(
+            text=text,
+            bbox=(bbox.x0, bbox.y0, bbox.x1, bbox.y1),
+            quad=(
+                (quad.ul.x, quad.ul.y),
+                (quad.ur.x, quad.ur.y),
+                (quad.lr.x, quad.lr.y),
+                (quad.ll.x, quad.ll.y),
+            ),
+            angle=angle,
+            direction=(dx, dy),
+            font=span["font"],
+            font_size=span["size"],
+            color=span["color"],
+            flags=span["flags"],
+            origin=self._word_origin(bbox, span["origin"], dx, dy),
+            ascender=span["ascender"],
+            descender=span["descender"],
+            orientation_source="text-span",
+            page_index=page_index,
+            seq=seq,
+            wmode=span.get("wmode", 0),
+            block_no=block_no,
+            line_no=line_no,
+            word_no=word_no,
         )

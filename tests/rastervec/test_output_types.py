@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from rastervec.models import DrawingVector, TextWord, VectorPath
+from rastervec.models import DrawingVector, TextRecord, TextWord, VectorPath, VectorRecord
 from rastervec.output_types import NativePDFElements, TextDTO, VectorDTO
 
 
@@ -84,3 +84,67 @@ def test_native_pdf_elements_from_extract_handles_empty_input():
     elements = NativePDFElements.from_extract([], [])
     assert elements.words == []
     assert elements.vectors == []
+
+
+def test_text_dto_get_text_object_round_trips_given_record():
+    word = _make_word(text="Hi", seq=3)
+    record = TextRecord(
+        text=word.text, bbox=word.bbox, quad=word.quad, angle=word.angle,
+        direction=word.direction, font=word.font, font_size=word.font_size,
+        color=word.color, flags=word.flags, origin=word.origin,
+        ascender=word.ascender, descender=word.descender,
+        orientation_source=word.orientation_source, page_index=word.page_index,
+        seq=word.seq, wmode=0, block_no=1, line_no=2, word_no=3,
+    )
+
+    dto = TextDTO.from_text_word(word, record)
+
+    assert dto.get_text_object() is record
+
+
+def test_text_dto_get_text_object_synthesized_when_no_record_given():
+    word = _make_word(text="Hi", seq=3)
+
+    dto = TextDTO.from_text_word(word)
+    source = dto.get_text_object()
+
+    assert isinstance(source, TextRecord)
+    assert source.text == "Hi"
+    assert (source.wmode, source.block_no, source.line_no, source.word_no) == (0, 0, 0, 0)
+
+
+def test_vector_dto_get_vector_object_round_trips_given_record():
+    dv = _make_drawing_vector()
+    record = VectorRecord(
+        items=dv.paths, bbox=dv.bbox, stroke_color=dv.stroke_color,
+        fill_color=dv.fill_color, stroke_width=dv.stroke_width, dashed=dv.dashed,
+        page_index=dv.page_index, even_odd=True, line_cap=1, line_join=1,
+        seqno=9, rect=dv.bbox, scissor=None, blendmode=None,
+        isolated=False, knockout=False, opacity=0.5,
+    )
+
+    dto = VectorDTO.from_drawing_vector(dv, record)
+
+    assert dto.get_vector_object() is record
+
+
+def test_vector_dto_get_vector_object_synthesized_when_no_record_given():
+    dv = _make_drawing_vector()
+
+    dto = VectorDTO.from_drawing_vector(dv)
+    source = dto.get_vector_object()
+
+    assert isinstance(source, VectorRecord)
+    assert source.items == dv.paths
+    assert source.groups is None and source.role is None
+
+
+def test_private_source_attr_excluded_from_serialization():
+    word = _make_word()
+    dto = TextDTO.from_text_word(word)
+
+    dumped = dto.model_dump()
+    dumped_json = json.loads(dto.model_dump_json())
+
+    assert "_source" not in dumped
+    assert "_source" not in dumped_json

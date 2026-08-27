@@ -178,6 +178,24 @@ def test_seq_assigns_reading_order(synthetic_pdf_factory, tmp_pdf_path):
     assert [w.text for w in words_by_seq] == ["First", "Second"]
 
 
+def test_extract_records_carries_word_and_line_metadata(synthetic_pdf_factory, tmp_pdf_path):
+    doc = synthetic_pdf_factory(
+        [{"texts": [{"point": (10, 20), "text": "Hello World"}]}]
+    )
+    path = tmp_pdf_path(doc)
+
+    with Reader(path) as reader:
+        page = reader.get_page(0)
+        records = Native().extract_records(page)
+
+    assert [r.text for r in records] == ["Hello", "World"]
+    hello, world = records
+    assert hello.wmode == 0
+    assert hello.line_no == world.line_no
+    assert hello.word_no != world.word_no
+    assert hello.font_size == pytest.approx(world.font_size)
+
+
 def test_no_matching_span_falls_back():
     native = Native()
     bbox = fitz.Rect(0, 0, 10, 10)
