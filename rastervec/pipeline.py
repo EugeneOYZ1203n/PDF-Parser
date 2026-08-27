@@ -15,11 +15,10 @@ import logging
 import os
 import sys
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
-import pymupdf as fitz
 from tqdm import tqdm
 
 if TYPE_CHECKING:
@@ -33,10 +32,8 @@ if __name__ == "__main__" and __package__ is None:
     # the repo root -- the parent of this package -- on sys.path.
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from rastervec.geometry import rect_gap, union_bbox
 from rastervec.helpers.clustering import Clustering
-from rastervec.helpers.fast_detect import FastDetector
-from rastervec.helpers.render_ocr import RenderOCR
+from rastervec.helpers.geometry import rect_gap, union_bbox
 from rastervec.logging_setup import configure_logging, get_logger
 from rastervec.models import (
     ClusterOcrResult,
@@ -46,20 +43,23 @@ from rastervec.models import (
     TextWord,
     VectorPath,
 )
-from rastervec.native import Native
-from rastervec.reader import Reader
+from rastervec.Native_Text.native import Native
+from rastervec.OCR.FAST_Text_Detect.fast_detect import FastDetector
+from rastervec.OCR.Paddle_OCR.render_ocr import RenderOCR
+from rastervec.OCR.Rotation_Correction.rotation_correction import (
+    RotationCheck,
+    _run_rotation_verify,
+    _text_aspect_ratio,
+)
+from rastervec.Reader.reader import Reader
 from rastervec.renderer import Renderer
-from rastervec.vector import StepResult, Vector
+from rastervec.Vector.vector import Vector
+from rastervec.Vector_Classification.classification import StepResult, VectorClassifier
 
 # fast_text_detect stage: pass threshold applied to each cluster's
 # candidates-render score, after min-ing it across each cluster's own
 # similarity group (see _run_fast_text_detect).
 FAST_COMBINED_KEEP_THRESHOLD = 0.2
-
-# rotation_verify stage: how much closer (relative-error improvement) the
-# 90-deg-rotated bbox/text-aspect match must be than the as-is match before
-# rotation_used gets corrected -- avoids flipping on a near-tie.
-ROTATION_VERIFY_IMPROVEMENT_MARGIN = 0.15
 
 # spatial_regroup stage: per-path overlap tolerance (PDF points) for
 # re-merging FAST-passed clusters into fresh spatial groups before OCR --
@@ -84,10 +84,11 @@ FAST_PAGE_RENDER_DPI = 150
 
 @dataclass
 class ClusteringStageResult:
-    """One (layer, color) group's result from Vector's fixed
-    classification pipeline (see vector.py's module docstring): `steps` is
-    exactly `Vector.cluster()`'s return value -- one `StepResult` per step,
-    each holding every named `CategoryResult` that step produced.
+    """One (layer, color) group's result from the Vector Classification
+    pipeline (see Vector_Classification/classification.py's module
+    docstring): `steps` is exactly `VectorClassifier.cluster()`'s return
+    value -- one `StepResult` per step, each holding every named
+    `CategoryResult` that step produced.
     `steps[-1].categories["kept"]` is the final surviving clusters, handed
     to text_candidates. Every non-`"kept"` `role="dropped"` category
     across every step was "classified as Drawing" the moment it was
@@ -122,32 +123,6 @@ class FastPageResult:
 
 
 @dataclass
-class RotationCheck:
-    """One rotation_verify stage result, for one ocr_compare comparison's
-    `resolved` reading (see _run_rotation_verify): compares the OCR'd
-    text's own natural width/height aspect ratio (font-metric based, any
-    fontsize -- see _text_aspect_ratio) against `bbox`'s aspect ratio
-    as-is, and again against that same bbox rotated 90 deg (width/height
-    swapped). If the rotated comparison is a meaningfully closer match
-    (`error_unrotated - error_rotated > ROTATION_VERIFY_IMPROVEMENT_
-    MARGIN`), `resolved` is a *new* `TextVectorResult` (via `dataclasses.replace`, not a mutation
-    of ocr_compare's own object) with `rotation_used` corrected by +90 deg (`applied=True`).
-    ocr_compare's own `resolved` reading is left untouched -- consumers wanting the corrected
-    orientation (this stage's own reconstruction view, drawing_vectors) read `RotationCheck.
-    resolved` instead."""
-
-    cluster: list[VectorPath]
-    text: str
-    bbox: tuple[float, float, float, float]
-    before_rotation: int
-    after_rotation: int
-    applied: bool
-    error_unrotated: float
-    error_rotated: float
-    resolved: TextVectorResult
-
-
-@dataclass
 class PipelineContext:
     """Accumulates state across stages for one page run."""
 
@@ -164,13 +139,15 @@ class PipelineContext:
     # drawing_vectors instead, never here).
     text_clusters: list[list[VectorPath]] | None = None
     # text_candidates: id(cluster) -> the pre-spatial-clustering "groups"
-    # that cluster is composed of (see vector.py's module docstring for the
-    # group/cluster distinction) -- merged across every (layer, color)
-    # bucket's own StepResult.cluster_groups.
+    # that cluster is composed of (see Vector_Classification/
+    # classification.py's module docstring for the group/cluster
+    # distinction) -- merged across every (layer, color) bucket's own
+    # StepResult.cluster_groups.
     cluster_groups: dict[int, list[list[VectorPath]]] | None = None
     # unique_clusters: text_clusters grouped by whole-page geometric
-    # similarity (see Vector.group_similar_clusters); cluster_similarity_id
-    # is id(cluster) -> index into similarity_groups, for O(1) lookup.
+    # similarity (see VectorClassifier.group_similar_clusters);
+    # cluster_similarity_id is id(cluster) -> index into similarity_groups,
+    # for O(1) lookup.
     similarity_groups: list[list[list[VectorPath]]] | None = None
     cluster_similarity_id: dict[int, int] | None = None
     # fast_text_detect: the whole-page renders/masks + per-cluster scores.
@@ -282,11 +259,11 @@ def _iter_groups(
 
 
 def _run_clustering(ctx: PipelineContext) -> dict[GroupKey, ClusteringStageResult]:
-    vector = Vector()
+    classifier = VectorClassifier()
     result: dict[GroupKey, ClusteringStageResult] = {}
 
     for key, paths in _iter_groups(ctx.paths_by_layer_color):
-        result[key] = ClusteringStageResult(steps=vector.cluster(paths, ctx.page))
+        result[key] = ClusteringStageResult(steps=classifier.cluster(paths, ctx.page))
 
     ctx.clustering = result
     return result
@@ -316,10 +293,10 @@ def _run_text_candidates(ctx: PipelineContext) -> list[list[VectorPath]]:
 
 def _run_unique_clusters(ctx: PipelineContext) -> list[list[list[VectorPath]]]:
     """Whole-page geometric similarity grouping of text_clusters (see
-    Vector.group_similar_clusters/Glossary.md's "similarity group" entry)
-    -- run before fast_text_detect so its scoring can be min'd across each
-    similarity group."""
-    groups = Vector().group_similar_clusters(ctx.text_clusters or [])
+    VectorClassifier.group_similar_clusters/Glossary.md's "similarity
+    group" entry) -- run before fast_text_detect so its scoring can be
+    min'd across each similarity group."""
+    groups = VectorClassifier().group_similar_clusters(ctx.text_clusters or [])
     ctx.similarity_groups = groups
     ctx.cluster_similarity_id = {
         id(cluster): gi for gi, group in enumerate(groups) for cluster in group
@@ -418,7 +395,7 @@ def _run_fast_text_detect(ctx: PipelineContext) -> FastPageResult:
 
 def _clusters_overlap(a: list[VectorPath], b: list[VectorPath], tolerance: float) -> bool:
     """True if any member path of `a` overlaps, touches, or is within
-    `tolerance` of any member path of `b` -- rastervec.geometry.rect_gap is
+    `tolerance` of any member path of `b` -- rastervec.helpers.geometry.rect_gap is
     0.0 for overlapping/touching boxes, so one gap check covers both. Used
     as spatial_regroup's real merge condition: aggregate-bbox proximity
     alone isn't a real signal that two clusters are the same piece of
@@ -432,8 +409,9 @@ def _run_spatial_regroup(ctx: PipelineContext) -> list[list[VectorPath]]:
     cluster's member paths (_clusters_overlap) -- deliberately ignores
     which (layer, color) bucket or unique_clusters similarity group a
     cluster originally came from, unlike every earlier clustering step in
-    this pipeline (see vector.py's module docstring: normal classification
-    never merges across (layer, color) buckets). Two nearby FAST-passed
+    this pipeline (see Vector_Classification/classification.py's module
+    docstring: normal classification never merges across (layer, color)
+    buckets). Two nearby FAST-passed
     clusters that classification/FAST happened to keep as separate pieces
     (e.g. different colors, or split across similarity groups) are
     stitched back into one piece here before OCR sees them, since OCR
@@ -496,79 +474,6 @@ def _run_ocr_compare(ctx: PipelineContext) -> list[ClusterOcrResult]:
     return results
 
 
-def _text_aspect_ratio(text: str) -> float | None:
-    """Natural width/height ratio of `text` laid out on one line, via the
-    same base14 "helv" font metrics Renderer.render_reconstructed_page
-    uses for placement -- fontsize-invariant (both width and height scale
-    with fontsize together), so this needs no bbox/fontsize input at all.
-    `None` for blank text."""
-    if not text.strip():
-        return None
-    font = fitz.Font("helv")
-    span = font.ascender - font.descender
-    if span <= 0:
-        return None
-    return font.text_length(text, fontsize=1.0) / span
-
-
-def _relative_error(a: float, b: float) -> float:
-    return abs(a - b) / max(abs(a), abs(b), 1e-6)
-
-
-def _run_rotation_verify(ctx: PipelineContext) -> list[RotationCheck]:
-    """New layer between ocr_compare and drawing_vectors: for every
-    ocr_compare cluster result with real resolved text, compares the
-    text's own natural aspect ratio (_text_aspect_ratio) against its
-    `resolved.bbox`'s aspect ratio as-is, and again against that same bbox
-    rotated 90 deg (width/height swapped, i.e. 1/bbox_ratio) -- if the
-    rotated comparison is a meaningfully closer match (see ROTATION_VERIFY_
-    IMPROVEMENT_MARGIN), `RotationCheck.resolved` is a *new* TextVectorResult
-    (`dataclasses.replace`) with `rotation_used` corrected by +90 deg.
-    ocr_compare's own `resolved` object (held by ctx.cluster_ocr_results/
-    ctx.ocr_results, and by the debug app's cached ocr_compare StageOutput)
-    is never mutated -- re-viewing the ocr_compare stage always shows
-    exactly what that stage produced, not a later stage's correction.
-    Consumers that want the corrected orientation (this stage's own
-    reconstruction view, drawing_vectors) read RotationCheck.resolved
-    instead. Clusters with blank/failed resolved text, or a degenerate
-    (zero-area) bbox, are skipped -- nothing to check, and no RotationCheck
-    is recorded for them."""
-    cluster_results = ctx.cluster_ocr_results or []
-    checks: list[RotationCheck] = []
-
-    for cluster_result in cluster_results:
-        resolved = cluster_result.resolved
-        text_ratio = _text_aspect_ratio(resolved.text)
-        if text_ratio is None:
-            continue
-
-        x0, y0, x1, y1 = resolved.bbox
-        width, height = x1 - x0, y1 - y0
-        if width <= 0 or height <= 0:
-            continue
-        bbox_ratio = width / height
-
-        error_unrotated = _relative_error(text_ratio, bbox_ratio)
-        error_rotated = _relative_error(text_ratio, 1.0 / bbox_ratio)
-
-        before = resolved.rotation_used
-        applied = (error_unrotated - error_rotated) > ROTATION_VERIFY_IMPROVEMENT_MARGIN
-        after = (before + 90) % 360 if applied else before
-        fixed = replace(resolved, rotation_used=after) if applied else resolved
-
-        checks.append(
-            RotationCheck(
-                cluster=resolved.paths, text=resolved.text, bbox=resolved.bbox,
-                before_rotation=before, after_rotation=after,
-                applied=applied, error_unrotated=error_unrotated, error_rotated=error_rotated,
-                resolved=fixed,
-            )
-        )
-
-    ctx.rotation_checks = checks
-    return checks
-
-
 def _run_drawing_vectors(ctx: PipelineContext) -> list[DrawingVector]:
     """Final aggregation, run last: every category any step in the
     clustering chain marked `role="dropped"` was already "classified as
@@ -579,7 +484,7 @@ def _run_drawing_vectors(ctx: PipelineContext) -> list[DrawingVector]:
     ocr_failed), both reclassified as drawing content for the same reason.
     Whatever ocr_results still holds text for is the only content that
     doesn't end up in drawing_vectors."""
-    vector = Vector()
+    classifier = VectorClassifier()
     all_drawing_paths: list[VectorPath] = []
 
     for cluster_result in ctx.clustering.values():
@@ -603,7 +508,7 @@ def _run_drawing_vectors(ctx: PipelineContext) -> list[DrawingVector]:
     # path was classified into during clustering.
     all_drawing_paths.sort(key=lambda p: (p.seq, p.item_index))
 
-    ctx.drawing_vectors = vector.build_drawing_vectors(all_drawing_paths)
+    ctx.drawing_vectors = classifier.build_drawing_vectors(all_drawing_paths)
     return ctx.drawing_vectors
 
 

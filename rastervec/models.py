@@ -85,6 +85,50 @@ class TextRun:
     page_index: int
 
 
+@dataclass
+class TextRecord:
+    """One native-text word, carrying the full PyMuPDF field surface --
+    everything `TextWord` already has, plus fields PyMuPDF's own
+    `get_text("dict")`/`get_text("words")` expose that `TextWord` doesn't:
+    `wmode` (line-level writing mode, from `get_text("dict")`) and
+    `block_no`/`line_no`/`word_no` (from `get_text("words")`'s full 8-tuple,
+    which `Native._extract_words` currently truncates to 5 fields).
+
+    Additive alongside `TextWord` -- existing extraction/consumers keep
+    using `TextWord` unchanged; `TextRecord` is the richer shape external
+    callers (via `output_types.TextDTO.get_text_object()`) get access to.
+
+    Deferred, not in scope here: `get_text("rawdict")`'s per-character
+    quads/origins -- no char-level granularity is captured anywhere in
+    this project yet.
+    """
+
+    text: str
+    bbox: tuple[float, float, float, float]
+    quad: tuple[
+        tuple[float, float],
+        tuple[float, float],
+        tuple[float, float],
+        tuple[float, float],
+    ]
+    angle: float
+    direction: tuple[float, float]
+    font: str
+    font_size: float
+    color: int | None
+    flags: int
+    origin: tuple[float, float] | None
+    ascender: float | None
+    descender: float | None
+    orientation_source: str  # "text-span" | "fallback"
+    page_index: int
+    seq: int
+    wmode: int
+    block_no: int
+    line_no: int
+    word_no: int
+
+
 # ----------------------------------------------------------------------
 # Vector stage (implemented) and Raster/Renderer phases (interface only,
 # those fields may still change once those stages are actually implemented).
@@ -124,6 +168,60 @@ class DrawingVector:
     stroke_width: float | None
     dashed: bool
     page_index: int
+
+
+@dataclass
+class VectorRecord:
+    """One raw `get_drawings()` drawing, carrying the full PyMuPDF
+    drawing-level field surface -- the record-level analog of
+    `DrawingVector`, enriched with every drawing-level field PyMuPDF
+    exposes that `DrawingVector` currently drops (`even_odd`, `line_cap`,
+    `line_join`, the real `seqno`, `rect`, `scissor`, `blendmode`,
+    `isolated`, `knockout`, `opacity`).
+
+    `seqno` is the *real* `get_drawings()` seqno -- kept distinct from
+    `VectorPath.seq`, a synthetic per-page `enumerate()` counter that
+    `Vector_Classification`'s `combine_overlapping_seq` step depends on for
+    its ordering guarantee. Don't substitute one for the other without
+    re-verifying that guarantee still holds.
+
+    `items` is this drawing's own raw path-level primitives -- never
+    collapsed away, mirroring the "keep individual items and their bboxes"
+    requirement for vector output. `groups`/`role` are populated only when
+    this record represents a classified text-candidate cluster (built from
+    one or more merged drawings) rather than one raw, unclassified drawing:
+    `groups` is the pre-spatial-clustering "groups" composing the cluster
+    (see `StepResult.cluster_groups` in `Vector_Classification/
+    classification.py`, and Glossary.md for the group/cluster distinction);
+    `role` mirrors `CategoryResult.role` ("kept"/"dropped") for whichever
+    step produced this as a final category member. Both are `None` for a
+    plain, not-yet-classified drawing.
+
+    Additive alongside `DrawingVector` -- existing extraction/consumers
+    keep using `VectorPath`/`DrawingVector` unchanged; `VectorRecord` is
+    the richer shape external callers (via `output_types.VectorDTO.
+    get_vector_object()`) get access to.
+    """
+
+    items: list[VectorPath]
+    bbox: tuple[float, float, float, float]
+    stroke_color: tuple[float, ...] | None
+    fill_color: tuple[float, ...] | None
+    stroke_width: float | None
+    dashed: bool
+    page_index: int
+    even_odd: bool
+    line_cap: int
+    line_join: int
+    seqno: int
+    rect: tuple[float, float, float, float]
+    scissor: tuple[float, float, float, float] | None
+    blendmode: str | None
+    isolated: bool
+    knockout: bool
+    opacity: float | None
+    groups: list[list[VectorPath]] | None = None
+    role: str | None = None
 
 
 @dataclass

@@ -1,6 +1,6 @@
 from rastervec.models import Page, PageMeta, TextRun, TextWord
-from rastervec.native import Native
-from rastervec.reader import Reader
+from rastervec.Native_Text.native import Native
+from rastervec.Reader.reader import Reader
 
 __all__ = [
     "Native",

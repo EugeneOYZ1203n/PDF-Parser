@@ -1,22 +1,20 @@
 """Renderer: rendering helpers, not a pipeline stage.
 
-Turns pipeline data (vector paths, clusters, raster regions) into pixels
-for OCR input. render_vector_cluster is implemented (isolates a cluster
-of VectorPaths onto their own small PyMuPDF page and rasterizes it, so
-OCR gets the PDF's own vector rendering rather than a hand-rolled
-rasterizer) -- pixel_to_page_bbox inverts that same isolated-canvas
-transform (shared via the private _cluster_frame helper) to map a
-detected-in-pixel-space bbox back into PDF page space; render_page_paths
-is the whole-page counterpart (every given path drawn onto one page-sized
-canvas, no isolation/padding), used as FAST's own detection input by
-pipeline.py's fast_text_detect stage;
-render_raster_region is still a stub since the Raster stage itself isn't
-implemented yet. render_reconstructed_page is a debug-app-only
-convenience (not OCR input, not evaluation.py's real reconstruction stage)
-that redraws whatever a given stage has captured so far -- native words,
-drawing vectors, OCR'd text -- onto a page-sized blank canvas, so the debug
-app can show "does this look like the original" for one stage's output at
-a time. Reconstructing pipeline output back into a real evaluation PDF is a
+Turns pipeline data (vector paths, clusters) into pixels for OCR input.
+render_vector_cluster isolates a cluster of VectorPaths onto their own
+small PyMuPDF page and rasterizes it, so OCR gets the PDF's own vector
+rendering rather than a hand-rolled rasterizer -- pixel_to_page_bbox
+inverts that same isolated-canvas transform (shared via the private
+_cluster_frame helper) to map a detected-in-pixel-space bbox back into PDF
+page space; render_page_paths is the whole-page counterpart (every given
+path drawn onto one page-sized canvas, no isolation/padding), used as
+FAST's own detection input by pipeline.py's fast_text_detect stage.
+render_reconstructed_page is a debug-app-only convenience (not OCR input,
+not evaluation.py's real reconstruction stage) that redraws whatever a
+given stage has captured so far -- native words, drawing vectors, OCR'd
+text -- onto a page-sized blank canvas, so the debug app can show "does
+this look like the original" for one stage's output at a time.
+Reconstructing pipeline output back into a real evaluation PDF is a
 separate concern -- see evaluation.py, the pipeline's actual final stage.
 """
 from __future__ import annotations
@@ -26,8 +24,8 @@ import io
 import pymupdf as fitz
 from PIL import Image
 
-from rastervec.geometry import union_bbox
-from rastervec.models import DrawingVector, PageMeta, RasterImage, TextVectorResult, TextWord, VectorPath
+from rastervec.helpers.geometry import union_bbox
+from rastervec.models import DrawingVector, PageMeta, TextVectorResult, TextWord, VectorPath
 
 _DEFAULT_PATH_COLOR = "#111827"
 
@@ -206,13 +204,6 @@ class Renderer:
             return image
         finally:
             doc.close()
-
-    def render_raster_region(
-        self, image: RasterImage, dpi: int
-    ) -> "Image.Image":
-        """High-resolution render of a raster image region, used as OCR
-        input."""
-        raise NotImplementedError
 
     def render_reconstructed_page(
         self,

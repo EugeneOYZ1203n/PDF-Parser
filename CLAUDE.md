@@ -5,60 +5,54 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A raster-to-vector pipeline project for architectural/engineering shop drawings
-(see `references/*.pdf`, gitignored sample PDFs). Two independent pieces live here, sharing no
-imports:
+(see `references/*.pdf`, gitignored sample PDFs). `rastervec/` is the only package here —
+the standalone PDF-layer inspector tool that used to live at the repo root now lives inside it,
+at `rastervec/Evaluation/inspector/` (see below).
 
-- **`inspector/`** — a Tkinter + PyMuPDF desktop tool for visually inspecting what's inside a PDF
-  (text, images, annotations, vector drawings, as toggleable overlays). This was step 0, built to
-  visually validate what PyMuPDF extracts before writing real extraction logic. It's done and
-  should not need further changes for `rastervec` work.
-- **`rastervec/`** — the actual extraction pipeline: native text, vector drawings (including
-  reconstructing CAD "text-as-filled-vector-paths" back into real text), and raster-image line
-  diagrams (via a CNN junction detector + line tracing), consolidated into text/line objects and
-  reassembled into a PDF for evaluation. Built stage by stage (Reader → Native → Vector → Raster);
-  currently Reader, Native, and Vector are implemented, including Vector-stage OCR
-  (`Renderer.render_vector_cluster` + `RenderOCR`, via a pluggable `OcrBackend` — PaddleOCR or
-  Tesseract, see `helpers/ocr_backend.py`) — the Raster stage and `Renderer.render_raster_region`
-  remain interface-only stubs — see "rastervec architecture" below.
+`rastervec/` is the actual extraction pipeline: native text, vector drawings (including
+reconstructing CAD "text-as-filled-vector-paths" back into real text), consolidated into text/line
+objects and reassembled into a PDF for evaluation. Built stage by stage (Reader → Native Text →
+Vector → Vector Classification → OCR); currently Reader, Native Text, Vector, and Vector
+Classification are implemented, including OCR (`Renderer.render_vector_cluster` +
+`RenderOCR`/`OcrBackend`, PaddleOCR-only — see `OCR/Paddle_OCR/ocr_backend.py`). A raster-image
+line-diagram stage (CNN junction detector + line tracing) was scoped out for now — no `Raster`
+module exists in the current tree. The `Evaluation/` package holds the pipeline's still-unbuilt
+final reconstruction stage (`evaluation.py`, interface-only) plus a benchmarking suite
+(Conversion/Labelling/Evaluate, not yet built) and the inspector tool — see "rastervec
+architecture" below. `junction_cnn/` and `hawp/` at the repo root are unrelated, independent
+experiments; nothing in `rastervec/` imports from them.
 
 ## Commands
 
 ```
-.venv/Scripts/python.exe -m pip install -r requirements.txt        # install deps
-.venv/Scripts/python.exe -m inspector.app [path/to.pdf]             # run the PDF layer inspector
-.venv/Scripts/python.exe -m rastervec.pipeline --pdf PATH --page N  # run the extraction pipeline demo (CLI)
-.venv/Scripts/python.exe -m rastervec.debug_app [path/to.pdf]       # run the pipeline debug app (GUI)
-.venv/Scripts/python.exe -m pytest tests/ -v                         # run rastervec's test suite
-.venv/Scripts/python.exe scripts/rasterize_pdf.py SRC DST --dpi 300  # flatten a PDF to pure raster
-powershell -ExecutionPolicy Bypass -File scripts/setup_tesseract.ps1  # install Tesseract OCR engine binary (Windows, via winget)
-bash scripts/setup_tesseract.sh                                      # install Tesseract OCR engine binary (Linux/WSL, via apt)
+.venv/Scripts/python.exe -m pip install -r requirements.txt                        # install deps
+.venv/Scripts/python.exe -m rastervec.Evaluation.inspector.inspector [path/to.pdf]  # run the PDF layer inspector
+.venv/Scripts/python.exe -m rastervec.pipeline --pdf PATH --page N                 # run the extraction pipeline demo (CLI)
+.venv/Scripts/python.exe -m rastervec.debug_app [path/to.pdf]                       # run the pipeline debug app (GUI)
+.venv/Scripts/python.exe -m pytest tests/ -v                                        # run rastervec's test suite
+.venv/Scripts/python.exe scripts/rasterize_pdf.py SRC DST --dpi 300                 # flatten a PDF to pure raster
 ```
 
 venv is **Python 3.12** (`py -3.12 -m venv .venv`), not 3.14 — `rastervec`'s OCR (paddleocr/
-paddlepaddle) and the still-unbuilt Raster stage (opencv-python) don't ship Windows wheels for 3.14
-yet. On this dev machine's paddlepaddle build, the default mkldnn-accelerated CPU inference path
-hits an unimplemented PIR attribute-conversion error, so `rastervec/helpers/ocr_backend.py` sets
+paddlepaddle) doesn't ship Windows wheels for 3.14 yet. On this dev machine's paddlepaddle build,
+the default mkldnn-accelerated CPU inference path hits an unimplemented PIR attribute-conversion
+error, so `rastervec/OCR/Paddle_OCR/ocr_backend.py` sets
 `PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=False` at import time (before paddleocr/paddlex read their
 flags) to force the plain "paddle" run mode instead — fine for OCR's small, pre-cropped cluster
 renders. If a future paddlepaddle release fixes this, that env-var default can be dropped.
 
-`TesseractOcrBackend` (`helpers/ocr_backend.py`, an alternative to `pipeline.py`'s active
-`RenderOCR()`/`PaddleOcrBackend()` default — pass `backend=TesseractOcrBackend()` for word-level
-instead of Paddle's line-level detection) needs the actual Tesseract OCR **engine binary** installed separately — `pytesseract` (in
-`requirements.txt`) is only a thin wrapper around a `tesseract`/`tesseract.exe` it shells out to,
-and does not ship the binary itself. `_resolve_tesseract_cmd()` finds it automatically across both
-target environments (this project's Windows dev machine and a Linux/WSL box) with no per-machine
-setup needed in the common case: `RASTERVEC_TESSERACT_CMD` env var first if set, then a `PATH`
-lookup (covers `apt install tesseract-ocr` on Linux/WSL, which already puts it on `PATH`), then a
-handful of common Windows install paths (`C:\Program Files\Tesseract-OCR\tesseract.exe` etc., for
-an installer like UB-Mannheim's that doesn't add itself to `PATH`) as a last resort. Only set
-`RASTERVEC_TESSERACT_CMD` yourself for a non-standard install location none of that finds. Without
-the binary present anywhere, constructing a `TesseractOcrBackend` and calling `.detect()` raises
-`pytesseract.TesseractNotFoundError`.
+OCR is PaddleOCR-only — `TesseractOcrBackend` was removed (along with `pytesseract` and the
+`scripts/setup_tesseract.*` install scripts) since a single backend was simpler to maintain and
+Tesseract wasn't in active use.
 
-## `inspector/` architecture
+## `rastervec/Evaluation/inspector/` architecture
 
-Five modules, one package:
+A standalone Tkinter + PyMuPDF desktop tool for visually inspecting what's inside a PDF (text,
+images, annotations, vector drawings, as toggleable overlays) — predates `rastervec`'s own
+extraction pipeline and shares no imports with it; it was built as step 0, to visually validate
+what PyMuPDF extracts before writing real extraction logic elsewhere in `rastervec`. It now lives
+inside `rastervec/` (under `Evaluation/`, alongside the not-yet-built benchmarking suite) since it
+remains a useful dev-facing inspection tool, but its own five modules are otherwise unchanged:
 
 - **`layers.py`** — the extensibility core. `OverlayItem` is the normalized shape every extractor
   returns (bbox always in PDF page coordinates; `quad`/`points` optionally for non-axis-aligned
@@ -68,7 +62,7 @@ Five modules, one package:
   drawings) to their extractor functions in `pdf_model.py`. `filter_items()` is the one shared
   filtering function all layers use (AND across sub-filter groups, OR within a group, empty
   selection = no restriction). Adding a new layer means adding one `LayerSpec` + one extractor
-  function — nothing in `app.py`, `overlay_canvas.py`, or `control_panel.py` needs to change.
+  function — nothing in `inspector.py`, `overlay_canvas.py`, or `control_panel.py` needs to change.
 - **`pdf_model.py`** — the only module that calls into `fitz` for extraction. `PdfDocument` wraps
   the open document; `extract_text_items`/`extract_image_items`/`extract_annot_items`/
   `extract_drawing_items` each return `list[OverlayItem]` for one page; `collect_drawing_colors`
@@ -77,31 +71,33 @@ Five modules, one package:
   with overlay shapes drawn on top, plus page nav/zoom controls and a hover tooltip.
 - **`control_panel.py`** — `ControlPanel`: the right-pane checkbox tree built from the `LAYERS`
   registry, with collapsible sub-filter groups (checkboxes or color swatches).
-- **`app.py`** — `InspectorApp` wires the two panels together, owns `AppState` (current page/zoom,
-  per-page extraction and color caches), and drives the redraw cycle. `REFERENCES_DIR` resolves to
-  the repo-root `references/` folder (one level above the `inspector/` package).
+- **`inspector.py`** (the package's entry point, `python -m rastervec.Evaluation.inspector.inspector
+  [pdf]` — renamed from the original standalone tool's `app.py`) — `InspectorApp` wires the two
+  panels together, owns `AppState` (current page/zoom, per-page extraction and color caches), and
+  drives the redraw cycle. `REFERENCES_DIR` resolves to the repo-root `references/` folder (three
+  levels above the `inspector/` package: `inspector` → `Evaluation` → `rastervec` → repo root).
 
-### Coordinate spaces — read this before touching geometry, in either package
+### Coordinate spaces — read this before touching geometry, anywhere in `rastervec/`
 
 PyMuPDF's extraction APIs (`get_text`, `get_drawings`, `get_image_info`, `annots()`) all return
 coordinates in the page's **unrotated MediaBox space**, regardless of the page's `/Rotate` value.
 `page.get_pixmap()` and `page.rect`, however, are already in **rotated display space** (rotation
-baked in). `inspector/app.py._get_display_matrix()` builds the single transform
+baked in). `inspector.py`'s `_get_display_matrix()` builds the single transform
 (`page.rotation_matrix * zoom_matrix`) that both the pixmap and every overlay must go through to
 land in the same canvas space — never compute a separate scale/rotation by hand, or overlays will
 drift from the underlying page image on any rotated page (several `references/*.pdf` pages are
-rotated 90/270). `rastervec` keeps unrotated MediaBox space as its canonical space through every
-stage, only converting to display space at final render/reconstruction — see `rastervec/models.py`'s
-module docstring.
+rotated 90/270). The rest of `rastervec` keeps unrotated MediaBox space as its canonical space
+through every stage, only converting to display space at final render/reconstruction — see
+`rastervec/models.py`'s module docstring.
 
 For text specifically: a word's axis-aligned bbox from `get_text("words")` only equals its
 along-direction/normal-direction extents when the text is horizontal. `make_oriented_quad`
-(`rastervec/geometry.py`, ported from `inspector/pdf_model.py._make_oriented_quad`) projects the
-bbox corners onto the text's actual direction vector (from the matching span's `dir`) to build a
-correctly oriented quad for rotated/vertical text — don't reintroduce a bbox-width/height shortcut
-there, in either package.
+(`rastervec/helpers/geometry.py`, ported from `inspector/pdf_model.py._make_oriented_quad` when
+the inspector tool was standalone) projects the bbox corners onto the text's actual direction
+vector (from the matching span's `dir`) to build a correctly oriented quad for rotated/vertical
+text — don't reintroduce a bbox-width/height shortcut there, anywhere it's used.
 
-### Extending `inspector/` with a new layer
+### Extending the inspector with a new layer
 
 1. Write an extractor `def extract_x_items(page: fitz.Page) -> list[OverlayItem]` in `pdf_model.py`.
 2. Add a `LayerSpec(key=..., extractor=pdf_model.extract_x_items, subfilters=[...])` to the list in
@@ -113,56 +109,86 @@ there, in either package.
 
 ## `rastervec/` architecture
 
-See `Glossary.md` (repo root) for standardized group/cluster/global-group/similarity-group
-terminology used throughout this section.
+See `rastervec/Glossary.md` for standardized group/cluster/global-group/similarity-group
+terminology used throughout this section. `rastervec/` is organized into one folder per pipeline
+concern (`Reader/`, `Native_Text/`, `Vector/`, `Vector_Classification/`, `OCR/`, `Evaluation/`),
+plus cross-cutting modules that don't belong to one concern (`models.py`, `output_types.py`,
+`logging_setup.py`, `pipeline.py`, `debug_app.py`, `renderer.py`) and a `helpers/` package for
+utilities shared across more than one concern (`geometry.py`, `clustering.py`). Every stage is
+testable independently of the others (every stage's *output* is a plain dataclass from
+`models.py`, no `fitz` objects, except `Page.fitz_page` which `Reader` must hand to `Native`/etc.):
 
-Stage classes, one per pipeline phase, plus shared helpers — designed so each stage is testable
-independently of the others (every stage's *output* is a plain dataclass from `models.py`, no
-`fitz` objects, except `Page.fitz_page` which `Reader` must hand to `Native`/etc.):
-
-- **`models.py`** — all shared dataclasses (`PageMeta`, `Page`, `TextWord`, `TextRun`, and
-  forward-declared `VectorPath`/`DrawingVector`/`TextVectorResult`/`RasterImage`/`JunctionPoint`/
-  `LineVector`/`ReconstructedPage` for stages not yet implemented).
-- **`geometry.py`** — pure-math helpers ported from `inspector/pdf_model.py` (`point_angle`,
-  `line_length`, `quad_angle`, `matrix_rotation`, `matrix_scale`, `make_oriented_quad`, etc.), so
-  both packages use the same already-verified math without duplicating it.
+- **`models.py`** — all shared dataclasses (`PageMeta`, `Page`, `TextWord`, `TextRun`, `VectorPath`,
+  `DrawingVector`, `OcrWord`, `TextVectorResult`, `ClusterOcrResult`, and forward-declared
+  `RasterImage`/`JunctionPoint`/`LineVector`/`ReconstructedPage` for the pipeline's still-unbuilt
+  final reconstruction stage, see `Evaluation/evaluation.py` below).
+- **`output_types.py`** — pydantic DTOs (`TextDTO`, `VectorDTO`, `NativePDFElements`) mirroring what
+  a raw PyMuPDF `get_text("words")` word / `get_drawings()` drawing look like, built from the
+  dataclasses above — the serialization/export shape for external consumers, not a replacement for
+  the dataclasses used mid-pipeline.
 - **`logging_setup.py`** — stdlib `logging` only. `configure_logging(level)` once at startup;
   `get_logger("stage_name")` returns `logging.getLogger("rastervec.stage_name")` per module.
-- **`reader.py` — `Reader`** *(implemented)*: opens a PDF, hands out `Page` objects one at a time
-  (`get_page(index)`, `iter_pages(indices=None)`), each carrying a `PageMeta` snapshot (mediabox,
-  rotation, dimensions) plus the live `fitz.Page`.
-- **`native.py` — `Native`** *(implemented)*: `extract_text(page) -> list[TextWord]`, via
-  `get_text("dict")` for span metadata (font/size/color/direction) joined to `get_text("words")`
+- **`helpers/geometry.py`** — pure-math helpers, originally ported from the inspector tool's
+  `pdf_model.py` (`point_angle`, `line_length`, `quad_angle`, `matrix_rotation`, `matrix_scale`,
+  `make_oriented_quad`, `rect_gap`, `union_bbox`, etc.), shared by `Native_Text/` and `Vector/` (and
+  the inspector) so none of them duplicate this math independently.
+- **`helpers/clustering.py` — `Clustering`** *(implemented)*: pure-Python (no scipy/sklearn) spatial
+  hash grid + union-find for `cluster_spatial` (buckets items into grid cells sized by `threshold`,
+  unions items in neighboring cells whose `geometry.rect_gap` ≤ `threshold` —
+  `Vector_Classification/clusters/cluster_filters.py`'s `cluster_spatial_groups` reuses this same
+  method at the group level, treating each group as one atomic item), then O(k²) pairwise
+  union-find within each resulting group (`_split_group_pairwise`, shared by all three of the
+  following) for `cluster_by_dimension` (relative width/height closeness), `cluster_by_seq`
+  (sorted-seq gap split), and `group_by_overlap` (merges items whose bboxes overlap or are within an
+  optional `tolerance` of each other, via module-level `_bboxes_close_or_overlapping` —
+  `geometry.rect_gap` already returns 0.0 for overlapping/touching boxes, so one gap check covers
+  both "touching" and "merely nearby"; `_bbox_fully_contains` keeps a fully-contained/equal pair
+  from ever merging regardless of tolerance). Has safety caps (`_MAX_CELLS_PER_ITEM`,
+  `_MAX_GROUP_SIZE_FOR_PAIRWISE`) so a huge unfiltered bbox or a very dense cluster degrades to
+  "keep as one cluster" (logged) instead of hanging — verified against a 78k-path reference PDF in
+  ~3.5s. `cluster_by_dimension`/`cluster_by_seq`/`group_by_overlap` aren't currently called by the
+  fixed Vector Classification chain below, kept for reuse (own tests, own callers).
+- **`Reader/reader.py` — `Reader`** *(implemented)*: opens a PDF, hands out `Page` objects one at a
+  time (`get_page(index)`, `iter_pages(indices=None)`), each carrying a `PageMeta` snapshot
+  (mediabox, rotation, dimensions) plus the live `fitz.Page`.
+- **`Native_Text/native.py` — `Native`** *(implemented)*: `extract_text(page) -> list[TextWord]`,
+  via `get_text("dict")` for span metadata (font/size/color/direction) joined to `get_text("words")`
   geometry by max bbox-overlap (`_match_word_to_span`), producing correctly oriented quads even for
   rotated text (`_build_oriented_quad`). Split into small private methods
   (`_extract_spans`/`_extract_words`/`_match_word_to_span`/`_build_oriented_quad`/`_to_text_word`)
   so each is independently testable against a synthetic `fitz.Page`.
-- **`vector.py` — `Vector`** *(implemented)*: `extract_paths(page) -> list[VectorPath]` walks
+- **`Vector/vector.py` — `Vector`** *(implemented)*: `extract_paths(page) -> list[VectorPath]` walks
   `page.fitz_page.get_drawings()`, emitting one `VectorPath` per drawing item (`l`/`re`/`qu`/`c`),
   tagged with its parent drawing's `seq` (drawing index) plus stroke/fill color, width, dashes,
-  closed, layer, and item-level `bbox`/`points`. `separate_by_layer`/`separate_by_color` group paths
-  by `layer` (`""` for none) / by `stroke_color` if set else `fill_color` else `None`.
-
-  Classification is a **single fixed, non-configurable 12-step pipeline**, run in order by
-  `cluster()` (each step implemented as a plain function in `helpers/vector_classification.py`; see
-  that module's docstring for the exhaustive per-step description):
-  1. `filter_large_items` — drop items whose own bbox's max dimension exceeds a fraction of the
-     page's smaller side (border/frame geometry).
-  2. `compute_vector_signatures` — informational: per-signature occurrence counts, reused below.
-  3. `remove_duplicate_runs` + `combine_overlapping_seq` — drop long runs of exact-duplicate shapes,
-     then chain-merge the rest by `seq` order into "groups" (see Glossary.md).
-  4. `filter_tiny_groups` / 5. `filter_large_groups` — drop undersized/oversized groups.
-  6. `cluster_spatial_groups` — single-linkage spatial merge of groups into clusters, constrained to
-     groups sharing a similar-length parallel side; also tracks `lineage` (which groups compose each
-     cluster) for every later step and for `StepResult.cluster_groups`.
-  7. `filter_mixed_fill_rule_clusters` — drop clusters mixing fill/stroke paint styles.
-  8. `compute_group_stats` — informational per-cluster stats (member/signature counts, bbox).
-  9. `filter_perimeter_only_clusters` — drop border/ring-only clusters.
-  10. `filter_density_clusters` — drop clusters too sparse across their own bbox grid.
-  11. `filter_constant_spacing_clusters` — drop clusters where most members belong to a
-      near-perfectly-regular repeated same-shape sub-group (hatching, tick marks).
-  12. `filter_low_variety_clusters` — drop clusters below a member-count-scaled minimum
-      distinct-shape-type count.
+  closed, layer, and item-level `bbox`/`points`. `separate_by_layer`/`separate_by_color` delegate to
+  `Vector/Layer_Color_Separation/layer_color_separation.py`'s module-level functions of the same
+  name, which group paths by `layer` (`""` for none) / by `stroke_color` if set else `fill_color`
+  else `None`.
+- **`Vector_Classification/`** — classification of extracted paths into text candidates vs. drawing
+  content. `classification.py`'s `VectorClassifier` is the orchestrator (`cluster`, `classify`,
+  `build_drawing_vectors`, plus `CategoryResult`/`StepResult` and every threshold constant); the
+  fixed 12-step chain itself is split by processing level into three submodules (each step
+  implemented as a plain function; see each submodule's own docstring for the exhaustive per-step
+  description):
+  - `items/item_filters.py` (step 1-2, plus the shared `_bbox_of`/`_max_dimension`/`_dims` bbox
+    helpers reused by the other two submodules): `filter_large_items` — drop items whose own bbox's
+    max dimension exceeds a fraction of the page's smaller side (border/frame geometry).
+    `compute_vector_signatures` — informational: per-signature occurrence counts, reused below.
+  - `groups/group_filters.py` (steps 3-5, 8): `remove_duplicate_runs` + `combine_overlapping_seq` —
+    drop long runs of exact-duplicate shapes, then chain-merge the rest by `seq` order into "groups"
+    (see Glossary.md). `filter_tiny_groups` / `filter_large_groups` — drop undersized/oversized
+    groups. `compute_group_stats` — informational per-cluster stats (member/signature counts, bbox).
+  - `clusters/cluster_filters.py` (steps 6-7, 9-12, plus `group_similar_clusters`, not one of the
+    numbered steps): `cluster_spatial_groups` — single-linkage spatial merge of groups into
+    clusters, constrained to groups sharing a similar-length parallel side; also tracks `lineage`
+    (which groups compose each cluster) for every later step and for `StepResult.cluster_groups`.
+    `filter_mixed_fill_rule_clusters` — drop clusters mixing fill/stroke paint styles.
+    `filter_perimeter_only_clusters` — drop border/ring-only clusters. `filter_density_clusters` —
+    drop clusters too sparse across their own bbox grid. `filter_constant_spacing_clusters` — drop
+    clusters where most members belong to a near-perfectly-regular repeated same-shape sub-group
+    (hatching, tick marks). `filter_low_variety_clusters` — drop clusters below a
+    member-count-scaled minimum distinct-shape-type count. `group_similar_clusters` — whole-page
+    similarity grouping of text-candidate clusters (see "similarity group" in Glossary.md).
 
   There is deliberately **no drawing-vs-text heuristic** anywhere in this chain — every group/cluster
   any filter step drops along the way is drawing content (`pipeline.py`'s `_run_drawing_vectors`
@@ -170,49 +196,66 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   whole chain is a *text candidate*, handed to `unique_clusters`/`fast_text_detect`/`ocr_compare` —
   OCR success/failure is the actual signal for whether a cluster was text, not a pre-filter guess.
 
-  `cluster(paths, page) -> list[StepResult]` runs the fixed chain in order; each `StepResult` holds
-  every named `CategoryResult` that step produced (`role="kept"` always present and fed to the next
-  step; `role="dropped"` is a side channel folded into `drawing_vectors`; `role="info"` is
-  display-only). `steps[-1].categories["kept"]` is the final surviving clusters. The last step's
-  `StepResult.cluster_groups` (keyed by `id(cluster)`) records which of step 6's pre-spatial "groups"
-  each survivor is composed of, via the `lineage` dict step 6 builds internally.
-  `classify(paths, page) -> list[list[VectorPath]]` is a thin convenience wrapper returning just the
-  final kept groups. `build_drawing_vectors(paths) -> list[DrawingVector]` re-aggregates same-`seq`
-  paths back into one `DrawingVector` per original drawing. `group_similar_clusters(clusters) ->
-  list[list[list[VectorPath]]]` groups text-candidate clusters by whole-page geometric similarity
-  (see "similarity group" in Glossary.md and the `unique_clusters` pipeline stage below). All
+  `VectorClassifier.cluster(paths, page) -> list[StepResult]` runs the fixed chain in order; each
+  `StepResult` holds every named `CategoryResult` that step produced (`role="kept"` always present
+  and fed to the next step; `role="dropped"` is a side channel folded into `drawing_vectors`;
+  `role="info"` is display-only). `steps[-1].categories["kept"]` is the final surviving clusters.
+  The last step's `StepResult.cluster_groups` (keyed by `id(cluster)`) records which of step 6's
+  pre-spatial "groups" each survivor is composed of, via the `lineage` dict step 6 builds
+  internally. `classify(paths, page) -> list[list[VectorPath]]` is a thin convenience wrapper
+  returning just the final kept groups. `build_drawing_vectors(paths) -> list[DrawingVector]`
+  re-aggregates same-`seq` paths back into one `DrawingVector` per original drawing.
+  `group_similar_clusters(clusters) -> list[list[list[VectorPath]]]` groups text-candidate clusters
+  by whole-page geometric similarity (see the `unique_clusters` pipeline stage below). All
   thresholds (`MAX_DIMENSION_FRACTION`, `SPATIAL_CLUSTER_THRESHOLD`, `SPATIAL_SIZE_TOLERANCE`,
   `PERIMETER_MARGIN_FRACTION`, `DENSITY_*`, `PATTERN_*`, `LOW_VARIETY_*`, `UNIQUE_CLUSTER_TOLERANCE`)
-  are module-level constants in `vector.py` — tune per-PDF if a specific page's default
+  are module-level constants in `classification.py` — tune per-PDF if a specific page's default
   classification looks wrong; there's no runtime/UI way to change them or the step order.
 
   **Clustering/filtering always operates within one `(layer, color)` bucket, never across buckets**:
   `pipeline.py`'s `_iter_groups`/`_run_clustering` key the whole chain's work by `GroupKey = (layer,
-  color)` (from `color_separation`'s output), and `Vector.cluster()` is only ever called with one
-  bucket's paths at a time — two paths in different layers, or with different stroke/fill colors,
-  are never spatially merged together, regardless of how close they are on the page.
-- **`helpers/clustering.py` — `Clustering`** *(cluster_spatial/cluster_by_dimension/cluster_by_seq/
-  group_by_overlap implemented, `cluster_hsv` still a stub)*: pure-Python (no scipy/sklearn) spatial
-  hash grid + union-find for `cluster_spatial` (buckets items into grid cells sized by `threshold`,
-  unions items in neighboring cells whose `geometry.rect_gap` ≤ `threshold` — `Vector.
-  cluster_spatial_union_find` reuses this same method at the group level, treating each group as one
-  atomic item), then O(k²) pairwise
-  union-find within each resulting group (`_split_group_pairwise`, shared by all three of the
-  following) for `cluster_by_dimension` (relative width/height closeness — reused both per-path,
-  early on, and per-group, late in `Vector`'s pipeline), `cluster_by_seq` (sorted-seq gap split), and
-  `group_by_overlap` (merges items whose bboxes overlap or are within an optional `tolerance` of
-  each other, via module-level `_bboxes_close_or_overlapping` — `geometry.rect_gap` already returns
-  0.0 for overlapping/touching boxes, so one gap check covers both "touching" and "merely nearby";
-  `_bbox_fully_contains` keeps a fully-contained/equal pair from ever merging regardless of
-  tolerance). Has safety caps (`_MAX_CELLS_PER_ITEM`, `_MAX_GROUP_SIZE_FOR_PAIRWISE`) so a huge
-  unfiltered bbox or a very dense cluster degrades to "keep as one cluster" (logged) instead of
-  hanging — verified against a 78k-path reference PDF in ~3.5s. `Raster.separate_by_color` (HSV
-  pixel clustering, not yet implemented) is designed to reuse `cluster_hsv` once Raster is built.
-- **`raster.py`, `helpers/clustering.py`'s `cluster_hsv`, `helpers/masking.py`, `helpers/junction.py`,
-  `evaluation.py`, `Renderer.render_raster_region`** *(interface stubs)*: full method signatures and
-  docstrings exist, bodies `raise NotImplementedError` — everything the not-yet-built Raster stage
-  needs. `Raster.separate_by_color` (HSV pixel clustering) is designed to reuse `cluster_hsv` once
-  Raster is built.
+  color)` (from `color_separation`'s output), and `VectorClassifier.cluster()` is only ever called
+  with one bucket's paths at a time — two paths in different layers, or with different stroke/fill
+  colors, are never spatially merged together, regardless of how close they are on the page.
+- **`OCR/FAST_Text_Detect/fast_detect.py` — `FastDetector`** *(implemented)*: see the `pipeline.py`
+  bullet below for `detect`/`detect_tiled`.
+- **`OCR/Rotation_Correction/rotation_correction.py` — `RotationCheck`, `_run_rotation_verify`**
+  *(implemented)*: see the `pipeline.py` bullet below.
+- **`OCR/Paddle_OCR/ocr_backend.py`** *(implemented, PaddleOCR-only — `TesseractOcrBackend` was
+  removed, see Commands section above)*: `OcrBackend` (Protocol: `detect(image) -> OcrDetection`),
+  `OcrBox` (one detected text box: `text`/`confidence`/`corners`/`is_word`, always already mapped
+  into the *caller's* original image pixel space), `OcrDetection` (`boxes` + page-level `rotation`).
+  `PaddleOcrBackend`: PP-OCRv6 via PaddleOCR, orientation classifiers on
+  (`use_doc_orientation_classify=use_textline_orientation=True, use_doc_unwarping=False`), engine
+  lazily built and cached per `lang` at class scope (`_ENGINE_CACHE`). Detected boxes are
+  **line/region-level**, never word-level (`OcrBox.is_word=False`). `_page_rotation(page)` combines
+  Paddle's own `doc_preprocessor_res.angle` (0/90/180/270 document-orientation classification) with
+  the majority vote of `textline_orientation_angles` (0/180 per-line flip correction). **Confirmed
+  bug fix**: when `use_doc_orientation_classify=True`, PaddleOCR's own doc-preprocessor sub-pipeline
+  actually rotates the input image by `doc_preprocessor_res.angle` degrees *before* running text
+  detection (confirmed by reading paddlex's `doc_preprocessor/pipeline.py`/`ocr/pipeline.py`
+  source), so every `rec_poly` it returns is in that rotated image's own pixel space (size-swapped
+  for 90/270) — not the space of the image actually passed in; `detect()` corrects every corner back
+  via `_undo_doc_rotation` (exact per-point inverse of `cv2.getRotationMatrix2D`'s rotation, derived
+  for each of the 4 possible angles) before returning.
+- **`OCR/Paddle_OCR/render_ocr.py` — `RenderOCR`** *(implemented)*: render + detect, backend-agnostic
+  (though PaddleOCR is the only backend now) — OCR's rendered vector-text clusters (`ocr_cluster`
+  only ever handles `list[VectorPath]` clusters; there is no Raster stage in this project to OCR
+  raster image regions). `__init__(self, backend: OcrBackend | None = None)` defaults to
+  `PaddleOcrBackend()`. `ocr_boxes(image)`/`ocr(image)` wrap `self.backend.detect(image)` (`ocr`
+  joins every detected box left-to-right into one `(text, confidence, bbox_corners)` result, used
+  by the debug app's OCR inspector). `ocr_cluster(cluster, page, renderer, dpi=300)` is the shared
+  entrypoint: render the cluster **once**, upright, run **one** `backend.detect()` call, and build a
+  `TextVectorResult` whose `rotation_used` comes from `OcrDetection.rotation`, whose `ocr_bbox`
+  (union of every detected box, mapped back to page space via `Renderer.pixel_to_page_bbox`) is
+  `None` when nothing was detected, and whose `words: list[OcrWord] | None` field (models.py) is one
+  `OcrWord` per individually detected box, each independently mapped through `pixel_to_page_bbox`
+  (line-granularity, since Paddle is the only backend); `None` when nothing was detected.
+- **`Evaluation/evaluation.py` — `Evaluation`** *(interface stub, not yet implemented)*: the
+  pipeline's actual intended final stage — `reconstruct_page`/`build_pdf` will reassemble
+  consolidated text/line objects back into a PDF for evaluation, once implemented alongside the
+  Conversion/Labelling/Evaluate benchmarking suite this package is meant to also hold — not yet
+  registered in `Pipeline.STAGES`.
 - **`renderer.py` — `Renderer`** *(rendering helpers, not a pipeline stage)*: `path_color_hex(path)`
   returns a path's real PDF stroke/fill color as hex (used by both the debug app and OCR input
   rendering) — any B/W-style simplification stays purely internal to classification, never
@@ -232,7 +275,7 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `RenderOCR.ocr_cluster` to compute a `TextVectorResult.ocr_bbox`. `render_page_paths(paths,
   page_meta, dpi)` is the whole-page counterpart (every given path drawn onto one page-sized canvas,
   no isolation/padding, no rotation applied) — used as FAST's own detection input by
-  `fast_text_detect` (see below). `render_raster_region` (raster-image OCR input) is still a stub.
+  `fast_text_detect` (see below).
   `render_reconstructed_page(page_meta, *, native_words=None, drawing_vectors=None,
   ocr_results=None, zoom=1.0)` *(implemented, debug-app-only preview — not OCR input, not
   `evaluation.py`'s real reconstruction stage)*: redraws whatever elements are passed onto a fresh
@@ -249,9 +292,9 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   (bbox_height) / (ascender - descender)`, `baseline_y = bbox_top + ascender * fontsize`. For
   `ocr_results` specifically, placement is per-word when `TextVectorResult.words` is populated
   (one `_place_text` call per `OcrWord`, each scaled/baselined into its own bbox instead of one
-  string stretched across the whole cluster bbox — meaningful with Tesseract's word-level
-  detection; falls back to the single-bbox `result.text`/`result.bbox` path when `words` is
-  `None`/empty, e.g. Paddle's line-level boxes or `native_words`, which has no per-word concept).
+  string stretched across the whole cluster bbox; falls back to the single-bbox
+  `result.text`/`result.bbox` path when `words` is `None`/empty, e.g. Paddle's line-level boxes or
+  `native_words`, which has no per-word concept).
   Either way, that height-derived fontsize is then shrunk further if needed so the
   text actually fits the bbox it was read from *widthwise* too, via `fitz.Font.text_length(text,
   fontsize)` against `bbox_width` -- the height-only fontsize can otherwise overflow a narrow
@@ -265,77 +308,30 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   look roughly right" preview, not a byte-accurate reconstruction. A
   blank/whitespace-only `text` is skipped outright (never handed to `insert_text`, which can be
   finicky with empty strings).
-- **`helpers/ocr_backend.py`** *(implemented)*: the strategy-pattern split behind OCR engine choice
-  — `OcrBackend` (Protocol: `detect(image) -> OcrDetection`), `OcrBox` (one detected text box:
-  `text`/`confidence`/`corners`/`is_word`, always already mapped into the *caller's* original image
-  pixel space — no engine-specific rotation quirks leak past this module), `OcrDetection` (`boxes` +
-  page-level `rotation`). Two concrete backends:
-  - `PaddleOcrBackend` *(the original/default engine)*: PP-OCRv6 via PaddleOCR, orientation
-    classifiers on (`use_doc_orientation_classify=use_textline_orientation=True,
-    use_doc_unwarping=False`), engine lazily built and cached per `lang` at class scope
-    (`_ENGINE_CACHE`). Detected boxes are **line/region-level**, never word-level
-    (`OcrBox.is_word=False`). `_page_rotation(page)` combines Paddle's own `doc_preprocessor_res
-    .angle` (0/90/180/270 document-orientation classification) with the majority vote of
-    `textline_orientation_angles` (0/180 per-line flip correction). **Confirmed bug fix**: when
-    `use_doc_orientation_classify=True`, PaddleOCR's own doc-preprocessor sub-pipeline actually
-    rotates the input image by `doc_preprocessor_res.angle` degrees *before* running text detection
-    (confirmed by reading paddlex's `doc_preprocessor/pipeline.py`/`ocr/pipeline.py` source), so
-    every `rec_poly` it returns is in that rotated image's own pixel space (size-swapped for
-    90/270) — not the space of the image actually passed in; `detect()` corrects every corner back
-    via `_undo_doc_rotation` (exact per-point inverse of `cv2.getRotationMatrix2D`'s rotation,
-    derived for each of the 4 possible angles) before returning.
-  - `TesseractOcrBackend` *(alternative engine, not active by default — see pipeline.py below)*: via
-    `pytesseract`, **word-level** detection (`image_to_data`, one row per word,
-    `OcrBox.is_word=True` — aggregate line/block/paragraph rows, which carry `conf == -1`, are
-    filtered out). Rotation comes from `image_to_osd`, wrapped in `try/except
-    pytesseract.TesseractError` since OSD needs enough text to classify orientation and routinely
-    fails on the small, sparse cluster crops this only ever sees — falls back to `rotation=0`
-    rather than raising. Needs the actual `tesseract.exe` binary installed separately (see
-    Commands section above); constructing one and calling `.detect()` without it raises
-    `pytesseract.TesseractNotFoundError`.
-- **`helpers/render_ocr.py` — `RenderOCR`** *(implemented)*: render + detect, backend-agnostic —
-  shared by the Vector stage (OCR'ing rendered vector-text clusters, the only case actually
-  reachable today) and, once built, the Raster stage (OCR'ing raster image regions — `ocr_cluster`
-  already branches on `list[VectorPath]` vs. `RasterImage`, but the raster branch hits `Renderer.
-  render_raster_region`'s `NotImplementedError` until that stage exists). `__init__(self, backend:
-  OcrBackend | None = None)` defaults to `PaddleOcrBackend()`. `ocr_boxes(image)`/`ocr(image)` wrap
-  `self.backend.detect(image)` (`ocr` joins every detected box left-to-right into one `(text,
-  confidence, bbox_corners)` result, used by the debug app's OCR inspector).
-  `ocr_cluster(cluster, page, renderer, dpi=300)` is the shared entrypoint: render the cluster
-  **once**, upright, run **one** `backend.detect()` call, and build a `TextVectorResult` whose
-  `rotation_used` comes from `OcrDetection.rotation`, whose `ocr_bbox` (union of every detected
-  box, mapped back to page space via `Renderer.pixel_to_page_bbox`) is `None` when nothing was
-  detected or the input was a `RasterImage`, and whose new `words: list[OcrWord] | None` field
-  (models.py) is one `OcrWord` per individually detected box, each independently mapped through
-  `pixel_to_page_bbox` — line-granularity for Paddle, word-granularity for Tesseract; `None` when
-  nothing was detected or the input wasn't a vector-path cluster. `pipeline.py`'s
-  `_run_ocr_compare` merges `.words` across joined group readings the same way it already joins
-  `.text` (left-to-right by bbox) when building a fallback `resolved` reading.
-- **`evaluation.py` — `Evaluation`** *(interface stub)*: the pipeline's actual intended final stage
-  — `reconstruct_page`/`build_pdf` reassemble consolidated text/line objects back into a PDF for
-  evaluation — not yet registered in `Pipeline.STAGES` since not implemented.
 - **`pipeline.py`** — shared stage-running machinery, used by both the CLI (`main()` in this file)
   and `debug_app.py`. `PipelineContext` accumulates state across stages for one page run: `page`,
   `native_words`, `vector_paths`, `paths_by_layer`, `paths_by_layer_color`, `clustering` (`dict
   [GroupKey, ClusteringStageResult]`, `GroupKey = (layer, color)`; `ClusteringStageResult.steps` is
-  exactly `Vector.cluster()`'s return value), `text_clusters` + `cluster_groups` (every bucket's
-  final "kept" clusters flattened, plus their merged group lineage), `similarity_groups` +
+  exactly `VectorClassifier.cluster()`'s return value), `text_clusters` + `cluster_groups` (every
+  bucket's final "kept" clusters flattened, plus their merged group lineage), `similarity_groups` +
   `cluster_similarity_id` (whole-page similarity grouping, see "similarity group" in Glossary.md),
-  `fast_result` + `fast_passed`/`fast_dropped`, `ocr_comparisons` + `ocr_results` + `ocr_failed`,
-  `rotation_checks`, `drawing_vectors`. `StageSpec(key, label, run)` is one stage; `Pipeline.STAGES`
-  is the ordered list: `reader`, `native`, `vector_extract`, `layer_separation`, `color_separation`,
-  `clustering`, `text_candidates`, `unique_clusters`, `fast_text_detect`, `ocr_compare`,
-  `rotation_verify`, `drawing_vectors` (12 stages total).
+  `fast_result` + `fast_passed`/`fast_dropped`, `regrouped_clusters`, `cluster_ocr_results` +
+  `ocr_results` + `ocr_failed`, `rotation_checks`, `drawing_vectors`. `StageSpec(key, label, run)` is
+  one stage; `Pipeline.STAGES` is the ordered list: `reader`, `native`, `vector_extract`,
+  `layer_separation`, `color_separation`, `clustering`, `text_candidates`, `unique_clusters`,
+  `fast_text_detect`, `spatial_regroup`, `ocr_compare`, `rotation_verify`, `drawing_vectors` (13
+  stages total).
 
-  `_run_clustering` calls `vector.cluster(paths, ctx.page)` per `(layer, color)` bucket from
-  `_iter_groups(ctx.paths_by_layer_color)`. `_run_text_candidates` gathers every bucket's final "kept" clusters into
-  `ctx.text_clusters` and merges every bucket's `StepResult.cluster_groups` into `ctx.cluster_groups`.
-  `_run_unique_clusters` groups `ctx.text_clusters` by whole-page geometric similarity (`Vector.
-  group_similar_clusters`) into `ctx.similarity_groups`/`ctx.cluster_similarity_id`.
+  `_run_clustering` calls `VectorClassifier().cluster(paths, ctx.page)` per `(layer, color)` bucket
+  from `_iter_groups(ctx.paths_by_layer_color)`. `_run_text_candidates` gathers every bucket's final
+  "kept" clusters into `ctx.text_clusters` and merges every bucket's `StepResult.cluster_groups`
+  into `ctx.cluster_groups`. `_run_unique_clusters` groups `ctx.text_clusters` by whole-page
+  geometric similarity (`VectorClassifier.group_similar_clusters`) into `ctx.similarity_groups`/
+  `ctx.cluster_similarity_id`.
 
   `_run_fast_text_detect` renders **one** whole-page image (`Renderer.render_page_paths`) of every
   path in `ctx.vector_paths` (drawing content included, not just `ctx.text_clusters`' paths), and
-  runs `FastDetector.detect_tiled` once on it. `detect_tiled` (`helpers/fast_detect.py`) doesn't run
+  runs `FastDetector.detect_tiled` once on it. `detect_tiled` (`OCR/FAST_Text_Detect/fast_detect.py`) doesn't run
   FAST on the whole render in one direct pass -- it upscales the render by `TILED_SCALE_FACTOR` (5x),
   splits it into non-overlapping `TILED_BLOCK_SIZE`-square tiles (the last row/column right-padded
   with white), and detects each tile at `TILED_ROTATION_COUNT` (4) evenly-spaced rotations, rotating
@@ -353,50 +349,53 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   carries the render/mask, the final `scores`, `passed`/`dropped`, and `detect_seconds` timing. A
   page with zero vector paths never even constructs `FastDetector`'s underlying torch model.
 
-  `_run_ocr_compare` constructs `RenderOCR()` — Paddle (`PaddleOcrBackend`, `RenderOCR`'s own
-  default), whose text detector already returns line-level boxes (not one per whole paragraph), so
-  `TextVectorResult.words` ends up one entry per detected line, and reconstruction places/scales
-  each line into its own bbox rather than one string across the whole cluster; pass
-  `backend=TesseractOcrBackend()` instead for word-level detection. OCRs each
-  FAST-passed cluster whole first (`RenderOCR.ocr_cluster`); a reading above
-  `OCR_CLUSTER_CONFIDENCE_THRESHOLD` (0.9) is trusted outright as `resolved`. Otherwise every
-  composing group (`ctx.cluster_groups`, skipping the redundant re-render when there's only one
-  group) is OCR'd on its own; readings below `OCR_GROUP_CONFIDENCE_THRESHOLD` (0.8) are dropped, and
-  unless at least one surviving group reading itself clears `OCR_CLUSTER_CONFIDENCE_THRESHOLD`, the
-  whole cluster is a failure (`resolved` is blank, its full path list collected into `ctx.
-  ocr_failed`) — otherwise the surviving group readings are joined left-to-right by bbox into one
-  `resolved` reading, `.words` concatenated the same left-to-right way. Each `ClusterOcrComparison`
-  records `cluster_reading`, `group_readings`, `resolved`, and every OCR call's wall-clock duration
-  (`cluster_seconds`/`group_seconds`). This loop is wrapped in a `tqdm` progress bar
-  (`desc="OCR compare"`).
+  `_run_spatial_regroup` re-merges every FAST-passed cluster whose member paths actually overlap
+  (or touch within `SPATIAL_REGROUP_TOLERANCE_PX`) some other cluster's member paths
+  (`_clusters_overlap`, via `Clustering.cluster_spatial`) — deliberately ignores which `(layer,
+  color)` bucket or `unique_clusters` similarity group a cluster originally came from, unlike every
+  earlier clustering step in this pipeline (see `Vector_Classification/classification.py`'s module
+  docstring: normal classification never merges across `(layer, color)` buckets). Two nearby
+  FAST-passed clusters that classification/FAST happened to keep as separate pieces are stitched
+  back into one piece here (`ctx.regrouped_clusters`) before OCR sees them.
 
-  `_run_rotation_verify` (new layer between `ocr_compare` and `drawing_vectors`): for every
-  `ocr_comparisons` entry with real (non-blank) `resolved` text, compares the text's own natural
-  width/height aspect ratio (`_text_aspect_ratio` — `fitz.Font("helv").text_length(text,
-  fontsize=1.0)` over `ascender - descender`, fontsize-invariant so no bbox/fontsize input is
-  needed) against `resolved.bbox`'s aspect ratio as-is, and again against that same bbox rotated 90
-  deg (width/height swapped, i.e. `1 / bbox_ratio`). If the rotated comparison is a meaningfully
-  closer match (`error_unrotated - error_rotated > ROTATION_VERIFY_IMPROVEMENT_MARGIN`, 0.15 —
-  avoids flipping on a near-tie), `resolved.rotation_used` is corrected by `+90 % 360` **in place**:
-  since `resolved` is the exact same `TextVectorResult` object `ctx.ocr_comparisons`/`ctx.
-  ocr_results` (and the debug app's cached `ocr_compare` `StageOutput`) already hold, the fix is
-  visible to every later consumer — the reconstruction toggle, `drawing_vectors`, eventually
-  `evaluation.py` — automatically, with nothing to rebuild. One `RotationCheck` (`cluster`, `text`,
-  `bbox`, `before_rotation`, `after_rotation`, `applied`, `error_unrotated`, `error_rotated`) is
-  recorded per checked cluster into `ctx.rotation_checks`, blank/failed readings and degenerate
-  (zero-area) bboxes are skipped outright (nothing to check).
+  `_run_ocr_compare` constructs `RenderOCR()` (PaddleOCR) and OCRs each `regrouped_clusters` cluster
+  directly with one `RenderOCR.ocr_cluster` call each (no fallback tiers, no similarity-group
+  reuse) — wrapped in a `tqdm` progress bar (`desc="OCR compare"`). A cluster's reading counts as
+  failed if its text comes back blank; its full path list is collected into `ctx.ocr_failed`
+  (folded into `drawing_vectors`), in addition to being kept (blank) in `ctx.ocr_results`. Each
+  `ClusterOcrResult` records `cluster`, `resolved`, and the OCR call's wall-clock duration
+  (`ocr_seconds`).
 
-  `_run_drawing_vectors` folds three sources into one `drawing_paths` list before calling `Vector.
-  build_drawing_vectors`: every `role="dropped"` category from every classification-chain step,
-  `ctx.fast_dropped` (FAST found no text signal), and `ctx.ocr_failed` (OCR resolution failed) —
-  whatever `ctx.ocr_results` still holds real text for is the only content that doesn't end up in
-  `drawing_vectors`. `Pipeline.run_page(reader, page_index, final_stage=None)` wraps each stage in
-  `try/except` (`StageOutput(status="error", ...)` on failure, never crashing the run) and, if
-  `final_stage` is given, stops right after that stage's output is appended — e.g. `--final-stage
-  fast_text_detect` skips `ocr_compare` (and the PaddleOCR engine it would otherwise build) entirely.
+  `_run_rotation_verify` (`OCR/Rotation_Correction/rotation_correction.py`'s `_run_rotation_verify`,
+  a new layer between `ocr_compare` and `drawing_vectors`): for every `cluster_ocr_results` entry
+  with real (non-blank) `resolved` text, compares the text's own natural width/height aspect ratio
+  (`_text_aspect_ratio` — `fitz.Font("helv").text_length(text, fontsize=1.0)` over `ascender -
+  descender`, fontsize-invariant so no bbox/fontsize input is needed) against `resolved.bbox`'s
+  aspect ratio as-is, and again against that same bbox rotated 90 deg (width/height swapped, i.e.
+  `1 / bbox_ratio`). If the rotated comparison is a meaningfully closer match (`error_unrotated -
+  error_rotated > ROTATION_VERIFY_IMPROVEMENT_MARGIN`, 0.15 — avoids flipping on a near-tie),
+  `RotationCheck.resolved` is a *new* `TextVectorResult` (via `dataclasses.replace`, not a mutation
+  of `ocr_compare`'s own object) with `rotation_used` corrected by `+90 % 360` (`applied=True`) —
+  `ocr_compare`'s own `resolved` reading (held by `ctx.cluster_ocr_results`/`ctx.ocr_results`) is
+  never mutated; consumers wanting the corrected orientation (this stage's own reconstruction view,
+  `drawing_vectors`) read `RotationCheck.resolved` instead. One `RotationCheck` (`cluster`, `text`,
+  `bbox`, `before_rotation`, `after_rotation`, `applied`, `error_unrotated`, `error_rotated`,
+  `resolved`) is recorded per checked cluster into `ctx.rotation_checks`; blank/failed readings and
+  degenerate (zero-area) bboxes are skipped outright (nothing to check).
+
+  `_run_drawing_vectors` folds three sources into one `drawing_paths` list before calling
+  `VectorClassifier.build_drawing_vectors`: every `role="dropped"` category from every
+  classification-chain step, `ctx.fast_dropped` (FAST found no text signal), and `ctx.ocr_failed`
+  (OCR resolution failed) — whatever `ctx.ocr_results` still holds real text for is the only
+  content that doesn't end up in `drawing_vectors`. `Pipeline.run_page(reader, page_index,
+  final_stage=None)` wraps each stage in `try/except` (`StageOutput(status="error", ...)` on
+  failure, never crashing the run) and, if `final_stage` is given, stops right after that stage's
+  output is appended — e.g. `--final-stage fast_text_detect` skips `ocr_compare` (and the PaddleOCR
+  engine it would otherwise build) entirely.
 - **`debug_app.py`** — Tk GUI (`python -m rastervec.debug_app [pdf]`): page pixmap on a canvas, a
   page-nav bar (reusing the same `page.rotation_matrix * zoom_matrix` display-transform rule as
-  `inspector/app.py`), and a stage-nav bar (`< Prev Stage | Stage i/N: Label | Next Stage >`) that
+  the inspector tool's `inspector.py`), and a stage-nav bar (`< Prev Stage | Stage i/N: Label |
+  Next Stage >`) that
   cycles **only over `Pipeline.STAGES`**. Per-page `StageOutput` results are cached in
   `DebugAppState.stage_cache`, keyed by `page_index`. Each stage's overlay is drawn by a small
   function registered in `_STAGE_RENDERERS`, keyed by `StageSpec.key`, taking a `RenderContext`
@@ -495,24 +494,29 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   many clusters were checked.
 
 `scripts/rasterize_pdf.py` (outside `rastervec/`, a one-off utility not a pipeline stage): flattens
-every page of a PDF to an image and rebuilds a pure-raster PDF from those images — used as test
-input for the Raster stage, independent of the Vector stage.
+every page of a PDF to an image and rebuilds a pure-raster PDF from those images — not currently
+consumed by anything in `rastervec/` (kept for possible future raster-image work).
 
-`tests/` mirrors `rastervec/`'s layout; `tests/conftest.py`'s `synthetic_pdf_factory` builds small
+`tests/rastervec/` mirrors `rastervec/`'s own folder layout (e.g. `tests/rastervec/Reader/
+test_reader.py` for `rastervec/Reader/reader.py`, `tests/rastervec/Vector_Classification/
+test_classification.py` for `Vector_Classification/classification.py`); modules that stay at
+`rastervec/`'s top level (`renderer.py`, `output_types.py`, `pipeline.py`) keep their tests at
+`tests/rastervec/`'s top level too. `tests/conftest.py`'s `synthetic_pdf_factory` builds small
 in-memory PDFs via `fitz.open()`/`insert_text`/`set_rotation` — preferred over `references/*.pdf`
 for unit tests since those are gitignored and give no exact expected values to assert against.
 
-### Adding the next `rastervec` stage
+### Adding a new `rastervec` module or pipeline stage
 
-Three things, all following the Reader/Native pattern:
-1. Define the stage's dataclass(es) in `models.py` if not already forward-declared there, and
-   replace the stub file's `NotImplementedError` bodies with real logic split into small private
-   methods per sub-step (e.g. `_extract_x`/`_match_y`) so each is independently testable.
+Three things, all following the existing stage folders' pattern:
+1. Define the module's dataclass(es) in `models.py` if they don't exist yet, and give the module
+   its own folder under `rastervec/` (or a new file inside an existing one, e.g. a new submodule
+   under `Vector_Classification/`) with real logic split into small private methods per sub-step
+   (e.g. `_extract_x`/`_match_y`) so each is independently testable.
 2. Add one `StageSpec` to `Pipeline.STAGES` in `pipeline.py` (a `_run_<stage>(ctx)` function that
    reads whatever `PipelineContext` fields it needs and stores its own result back onto `ctx`).
 3. Add one entry to `debug_app.py`'s `_STAGE_RENDERERS` — a `_render_<stage>_stage(ctx: RenderContext)`
    function drawing that stage's overlay onto `ctx.canvas` (via `ctx.matrix`), and, if the stage has
    filterable sub-groups, building checkboxes into `ctx.side_panel` backed by `ctx.filters`.
-Also add a `tests/rastervec/test_<stage>.py` using the synthetic PDF fixtures, and new third-party
-dependencies (scikit-learn/scipy/torch/opencv-python/paddleocr) to `requirements.txt` only when the
-stage that needs them is actually implemented.
+Also add tests under the matching `tests/rastervec/` subfolder using the synthetic PDF fixtures,
+and new third-party dependencies to `requirements.txt` only when the stage that needs them is
+actually implemented.

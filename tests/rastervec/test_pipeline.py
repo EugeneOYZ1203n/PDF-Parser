@@ -16,8 +16,8 @@ from rastervec.pipeline import (
     _sample_mask,
     _text_aspect_ratio,
 )
-from rastervec.reader import Reader
-from rastervec.vector import CategoryResult, StepResult
+from rastervec.Reader.reader import Reader
+from rastervec.Vector_Classification.classification import CategoryResult, StepResult
 
 _EXPECTED_STAGE_KEYS = [
     "reader",

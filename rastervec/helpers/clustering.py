@@ -1,14 +1,11 @@
 """Clustering helper.
 
-cluster_spatial is used by Vector's fixed classification pipeline (see
-rastervec/helpers/vector_classification.py's cluster_spatial_groups) for
-its spatial-clustering step. cluster_by_dimension/cluster_by_seq/
-group_by_overlap/cluster_by_pairwise_distance are generic reusable
-utilities not currently called by that pipeline, kept for reuse (own
-tests, own callers). cluster_hsv (Raster.separate_by_color's HSV pixel
-clustering) is not implemented yet -- that's a Raster-phase concern,
-deferred along with numpy/image-library imports until Raster is actually
-built.
+cluster_spatial is used by the Vector Classification pipeline (see
+rastervec/Vector_Classification/clusters/cluster_filters.py's
+cluster_spatial_groups) for its spatial-clustering step.
+cluster_by_dimension/cluster_by_seq/group_by_overlap/
+cluster_by_pairwise_distance are generic reusable utilities not currently
+called by that pipeline, kept for reuse (own tests, own callers).
 
 No scikit-learn/scipy dependency: cluster_spatial uses a plain spatial
 hash grid + union-find, which stays fast even on pages with tens of
@@ -19,7 +16,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, Callable
 
-from rastervec.geometry import rect_gap
+from rastervec.helpers.geometry import rect_gap
 from rastervec.logging_setup import get_logger
 
 _LOG = get_logger("clustering")
@@ -306,10 +303,3 @@ class Clustering:
             len(groups), len(result), tolerance,
         )
         return result
-
-    def cluster_hsv(self, pixels: "np.ndarray") -> list["np.ndarray"]:
-        """Cluster image pixels by HSV value into an unknown number of
-        color groups, using a predetermined distance threshold.
-
-        Not implemented yet -- Raster-phase concern."""
-        raise NotImplementedError

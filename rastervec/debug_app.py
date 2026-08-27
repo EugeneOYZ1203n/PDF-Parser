@@ -32,9 +32,7 @@ import hashlib
 
 import numpy as np
 
-from rastervec import geometry
-from rastervec.helpers import vector_classification as vc
-from rastervec.helpers.render_ocr import RenderOCR
+from rastervec.helpers import geometry
 from rastervec.logging_setup import configure_logging
 from rastervec.models import (
     ClusterOcrResult,
@@ -44,6 +42,7 @@ from rastervec.models import (
     TextWord,
     VectorPath,
 )
+from rastervec.OCR.Paddle_OCR.render_ocr import RenderOCR
 from rastervec.pipeline import (
     FAST_PAGE_RENDER_DPI,
     SPATIAL_REGROUP_TOLERANCE_PX,
@@ -53,9 +52,10 @@ from rastervec.pipeline import (
     RotationCheck,
     StageOutput,
 )
-from rastervec.reader import Reader
+from rastervec.Reader.reader import Reader
 from rastervec.renderer import Renderer
-from rastervec.vector import SIGNATURE_ROUND_PX
+from rastervec.Vector_Classification.classification import SIGNATURE_ROUND_PX
+from rastervec.Vector_Classification.items import item_filters as vc
 
 REFERENCES_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -424,7 +424,7 @@ def _bind_bucket_hover(
 
 
 def _get_display_matrix(fitz_page: "fitz.Page", zoom: float) -> "fitz.Matrix":
-    """page-space (unrotated) -> canvas-space, same rule as inspector/app.py:
+    """page-space (unrotated) -> canvas-space, same rule as rastervec/Evaluation/inspector/inspector.py:
     TextWord/geometry is canonical unrotated MediaBox space (models.py),
     so this is the one transform both the pixmap and every overlay must
     go through to land in the same canvas space."""
