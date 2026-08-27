@@ -113,6 +113,27 @@ def union_bbox(
     return (x0, y0, x1, y1)
 
 
+def bbox_iou(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    """Intersection-over-union of two axis-aligned (x0, y0, x1, y1) boxes,
+    0.0 if they don't overlap. Used to match a predicted cluster bbox
+    against a ground-truth text bbox (Evaluation/Labelling's auto_label.py,
+    Evaluation/Evaluate's evaluate.py)."""
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    if ix1 <= ix0 or iy1 <= iy0:
+        return 0.0
+    intersection = (ix1 - ix0) * (iy1 - iy0)
+    area_a = max(ax1 - ax0, 0.0) * max(ay1 - ay0, 0.0)
+    area_b = max(bx1 - bx0, 0.0) * max(by1 - by0, 0.0)
+    union = area_a + area_b - intersection
+    return intersection / union if union > 0 else 0.0
+
+
 def make_oriented_quad(bbox: fitz.Rect, dx: float, dy: float) -> fitz.Quad:
     """Build a quad around bbox, oriented along the text direction (dx, dy).
 

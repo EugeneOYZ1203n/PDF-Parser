@@ -17,10 +17,12 @@ Classification are implemented, including OCR (`Renderer.render_vector_cluster` 
 `RenderOCR`/`OcrBackend`, PaddleOCR-only — see `OCR/Paddle_OCR/ocr_backend.py`). A raster-image
 line-diagram stage (CNN junction detector + line tracing) was scoped out for now — no `Raster`
 module exists in the current tree. The `Evaluation/` package holds the pipeline's still-unbuilt
-final reconstruction stage (`evaluation.py`, interface-only) plus a benchmarking suite
-(Conversion/Labelling/Evaluate, not yet built) and the inspector tool — see "rastervec
-architecture" below. `junction_cnn/` and `hawp/` at the repo root are unrelated, independent
-experiments; nothing in `rastervec/` imports from them.
+final reconstruction stage (`evaluation.py`, interface-only), a benchmarking suite for the Vector
+Classification + OCR pipeline (`Conversion/` — native text → vector-text PDF; `Labelling/` —
+manual + automatic ground-truth labelling; `Evaluate/` — accuracy metrics against those labels;
+all three implemented), and the inspector tool — see "rastervec architecture" below.
+`junction_cnn/` and `hawp/` at the repo root are unrelated, independent experiments; nothing in
+`rastervec/` imports from them.
 
 ## Commands
 
@@ -253,9 +255,47 @@ testable independently of the others (every stage's *output* is a plain dataclas
   (line-granularity, since Paddle is the only backend); `None` when nothing was detected.
 - **`Evaluation/evaluation.py` — `Evaluation`** *(interface stub, not yet implemented)*: the
   pipeline's actual intended final stage — `reconstruct_page`/`build_pdf` will reassemble
-  consolidated text/line objects back into a PDF for evaluation, once implemented alongside the
-  Conversion/Labelling/Evaluate benchmarking suite this package is meant to also hold — not yet
-  registered in `Pipeline.STAGES`.
+  consolidated text/line objects back into a PDF for evaluation — not yet registered in
+  `Pipeline.STAGES`. Distinct from the `Evaluation/Evaluate/` benchmarking subpackage below, which
+  is implemented and scores the existing Vector Classification + OCR pipeline, not this stub.
+- **`Evaluation/Conversion/conversion.py` — `convert_page_to_vector_text`** *(implemented)*: turns
+  one page's native text into vector-drawn text (`get_svg_image()` → `fitz.open(filetype="svg")` →
+  `convert_to_pdf()` → `show_pdf_page` onto a page sized from the source's own `PageMeta.mediabox`/
+  `rotation`) — confirmed by a spike (see the module's own docstring) that PyMuPDF renders text as
+  filled SVG `<path>`s, never an SVG `<text>` element or an embedded raster fallback, so the
+  round-tripped PDF's `get_drawings()` holds real vector path content and `get_text()` comes back
+  empty. Turns a native-text PDF into a known-answer test case for Vector_Classification, since the
+  ground-truth text is whatever the original native words said.
+- **`Evaluation/Labelling/`** *(implemented)*: ground-truth labelling for vector-text clusters.
+  `label_schema.py`'s `LabelEntry` (`page_index`, `cluster_bbox`, `cluster_signature`, `text`,
+  `source: "manual"|"auto"`, `expected_rotation`) + `LabelSet` are the sidecar JSON format
+  (`save_labels`/`load_labels`); `cluster_signature(cluster)` is a deterministic member-count +
+  rounded-bbox string identifying a cluster across repeated pipeline runs (VectorPath objects have
+  no identity across runs). `auto_label.py`'s `auto_label_pdf` runs `Conversion` on a native-text
+  PDF, reads the *original* PDF's `Native.extract_text` as ground truth, runs the extraction/
+  clustering chain (reader through text_candidates, via `pipeline.py`'s own private `_run_*` stage
+  functions — OCR isn't needed since ground truth already gives the text) on the *converted* page,
+  and spatially matches each surviving cluster's bbox to native word bboxes by
+  `helpers.geometry.bbox_iou`, emitting one `source="auto"` label per matched cluster (joined
+  left-to-right by word x0 when several words match one cluster). `manual_label.py`'s
+  `ManualLabelApp` (`python -m rastervec.Evaluation.Labelling.manual_label PDF --page N --out
+  labels.json`) is a Tk UI reusing `debug_app._get_display_matrix` for the same page-space →
+  canvas-space transform the debug app/inspector use: click a cluster's bbox to type its
+  ground-truth text (turns green once labelled), Save/window-close writes the label file — not
+  unit-testable (a real Tk event loop), smoke-test steps are in its own module docstring.
+- **`Evaluation/Evaluate/evaluate.py` — `evaluate_pipeline`** *(implemented)*: scores a completed
+  pipeline run's `ClusterOcrResult`/`DrawingVector`/`RotationCheck` lists against a `LabelSet`.
+  Matches each label to a predicted OCR reading by `bbox_iou` (greedy highest-IoU-first, one-to-one)
+  above `iou_threshold`; a `RotationCheck` with `applied=True` for a matched cluster overrides that
+  reading's `rotation_used` for the rotation-accuracy check. Returns an `EvaluationResult`:
+  `characters_found_pct` (char-count-weighted, not label-count-weighted), `character_accuracy`/
+  `character_error_rate` (mean `difflib.SequenceMatcher` ratio per matched pair — stdlib, no
+  string-distance dependency in `requirements.txt`), `rotation_accuracy` (matched-pair rotation vs.
+  `expected_rotation`), `bbox_accuracy` (mean IoU), `classification_precision`/`_recall` (matched =
+  true positive, unmatched label = false negative i.e. text the pipeline dropped as drawing content,
+  unmatched prediction = false positive), `drawing_vector_count`. Deliberately decoupled from
+  `PipelineContext`/a real PDF — callers pass their own OCR/drawing-vector/rotation-check lists, so
+  this module is testable against small hand-built inputs.
 - **`renderer.py` — `Renderer`** *(rendering helpers, not a pipeline stage)*: `path_color_hex(path)`
   returns a path's real PDF stroke/fill color as hex (used by both the debug app and OCR input
   rendering) — any B/W-style simplification stays purely internal to classification, never

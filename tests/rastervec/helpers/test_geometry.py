@@ -85,3 +85,17 @@ def test_rect_gap_horizontal_separation():
 def test_rect_gap_diagonal_separation():
     # boxes offset by (3, 4) with no overlap on either axis -> gap = 5 (3-4-5 triangle)
     assert geometry.rect_gap((0, 0, 10, 10), (13, 14, 20, 20)) == pytest.approx(5.0)
+
+
+def test_bbox_iou_identical_boxes_is_one():
+    box = (0, 0, 10, 10)
+    assert geometry.bbox_iou(box, box) == pytest.approx(1.0)
+
+
+def test_bbox_iou_disjoint_boxes_is_zero():
+    assert geometry.bbox_iou((0, 0, 10, 10), (20, 20, 30, 30)) == 0.0
+
+
+def test_bbox_iou_partial_overlap():
+    # (0,0,10,10) and (5,5,15,15): intersection 5x5=25, union 100+100-25=175
+    assert geometry.bbox_iou((0, 0, 10, 10), (5, 5, 15, 15)) == pytest.approx(25 / 175)
