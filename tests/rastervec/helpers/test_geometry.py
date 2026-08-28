@@ -99,3 +99,16 @@ def test_bbox_iou_disjoint_boxes_is_zero():
 def test_bbox_iou_partial_overlap():
     # (0,0,10,10) and (5,5,15,15): intersection 5x5=25, union 100+100-25=175
     assert geometry.bbox_iou((0, 0, 10, 10), (5, 5, 15, 15)) == pytest.approx(25 / 175)
+
+
+@pytest.mark.parametrize(
+    "dashes, expected",
+    [
+        (None, False),
+        ("", False),
+        ("[] 0", False),
+        ("[3 2] 0", True),
+    ],
+)
+def test_is_dashed(dashes, expected):
+    assert geometry.is_dashed(dashes) is expected

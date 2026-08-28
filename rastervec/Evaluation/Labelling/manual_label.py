@@ -3,8 +3,8 @@ rendered page and typing its ground-truth text, saved via
 `label_schema.save_labels`. Reuses `debug_app._get_display_matrix` (the
 same page-space -> canvas-space transform rule the debug app and inspector
 tool both use, see `rastervec/models.py`'s coordinate-space docstring) and
-`pipeline.py`'s own stage functions to get the same text-candidate clusters
-the debug app's "Text Candidates" stage would show, rather than
+`pipeline.run_page_context` to get the same text-candidate clusters the
+debug app's "Text Candidates" stage would show, rather than
 re-implementing extraction/clustering/rendering here.
 
 Not unit-testable (a real Tk event loop). Smoke-test manually:
@@ -40,16 +40,7 @@ from rastervec.Evaluation.Labelling.label_schema import (
 )
 from rastervec.helpers.geometry import union_bbox
 from rastervec.logging_setup import configure_logging, get_logger
-from rastervec.pipeline import (
-    PipelineContext,
-    _run_clustering,
-    _run_color_separation,
-    _run_layer_separation,
-    _run_native,
-    _run_reader,
-    _run_text_candidates,
-    _run_vector_extract,
-)
+from rastervec.pipeline import run_page_context
 from rastervec.Reader.reader import Reader
 
 _LOG = get_logger("manual_label")
@@ -66,16 +57,13 @@ class ManualLabelApp:
         self.out_path = out_path
 
         self.reader = Reader(pdf_path)
-        ctx = PipelineContext(reader=self.reader, page_index=page_index)
-        _run_reader(ctx)
-        _run_native(ctx)
-        _run_vector_extract(ctx)
-        _run_layer_separation(ctx)
-        _run_color_separation(ctx)
-        _run_clustering(ctx)
-        _run_text_candidates(ctx)
+        ctx = run_page_context(self.reader, page_index, final_stage="text_candidates")
         self.ctx = ctx
         self.clusters = ctx.text_clusters or []
+        self._cluster_bboxes = {
+            id(cluster): union_bbox([p.bbox for p in cluster])
+            for cluster in self.clusters if cluster
+        }
 
         self.labels = (
             load_labels(out_path) if Path(out_path).exists()
@@ -106,7 +94,7 @@ class ManualLabelApp:
         for cluster in self.clusters:
             if not cluster:
                 continue
-            bbox = union_bbox([p.bbox for p in cluster])
+            bbox = self._cluster_bboxes[id(cluster)]
             rect = fitz.Rect(bbox) * self.matrix
             sig = cluster_signature(cluster)
             color = _LABELLED_COLOR if sig in self._labelled_signatures else _UNLABELLED_COLOR
@@ -124,14 +112,14 @@ class ManualLabelApp:
         for cluster in self.clusters:
             if not cluster:
                 continue
-            bbox = union_bbox([p.bbox for p in cluster])
+            bbox = self._cluster_bboxes[id(cluster)]
             if bbox[0] <= page_pt.x <= bbox[2] and bbox[1] <= page_pt.y <= bbox[3]:
                 hit = cluster
                 break
         if hit is None:
             return
 
-        bbox = union_bbox([p.bbox for p in hit])
+        bbox = self._cluster_bboxes[id(hit)]
         sig = cluster_signature(hit)
         text = simpledialog.askstring("Label cluster", "Ground-truth text:", parent=self.root)
         if text is None:

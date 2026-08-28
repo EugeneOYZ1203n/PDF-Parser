@@ -1,104 +1,77 @@
-"""Automatic labelling: derives ground-truth text labels for vector-text
-clusters without any manual work, by exploiting the fact that Conversion
-(`Evaluation/Conversion/conversion.py`) turns known native text into vector
-paths -- so whatever the *original* native text said, at the same page
-location, is the correct label for whichever vector cluster ends up there.
+"""Automatic labelling: derives ground-truth text labels directly from a
+PDF's own native text, independent of any pipeline run.
 
-Pipeline: read `pdf_path`'s native `TextWord`s (ground truth), convert that
-same page to vector text via `convert_page_to_vector_text`, run the vector
-extraction/clustering chain (reader through text_candidates only -- OCR
-isn't needed since the ground truth already gives the text) on the
-converted page, then spatially match each surviving cluster's bbox against
-the native words' bboxes by IoU (`helpers.geometry.bbox_iou`). A cluster
-whose bbox overlaps one or more native words above `iou_threshold` gets
-those words' text (sorted left-to-right, joined with spaces) as its label,
-source="auto"; a cluster with no matching word is skipped (nothing to
-label it with -- typically a different clustering split than the original
-per-word granularity would need a lower threshold or run to run merging
-instead of raising it here).
+Ground truth must not depend on what the system under test decided --
+an earlier version of this module ran the actual Vector_Classification
+chain on the converted page and only emitted a label for a cluster that
+*survived* classification, which meant any native word the classification
+chain's own filter steps wrongly dropped silently vanished from the
+ground-truth set instead of becoming a scored false negative. This version
+reads only the *original* PDF's native text and needs no Conversion/
+pipeline run at all: `Evaluation/Conversion/conversion.py`'s
+`convert_page_to_vector_text` places its converted content onto a page
+sized from the source's own `PageMeta.mediabox` (confirmed exactly
+matching, see that module's own docstring), so a native word's bbox on the
+original page is already valid ground truth for the converted page too --
+no coordinate transform needed.
+
+Native words are grouped by `(block_no, line_no)` (from `Native.
+extract_records`, richer than `extract_text`) into line-level ground-truth
+regions -- closer to a vector cluster's natural granularity than one word
+each. `expected_rotation` per line is each word's own `angle` rounded to
+the nearest quarter-turn (same convention `output_types.TextDTO.
+from_text_word`'s `rotate` field uses), so `Evaluation/Evaluate/
+evaluate.py`'s rotation-accuracy metric has real ground truth to check
+against instead of an always-0 placeholder.
 """
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
+from collections import defaultdict
 
-from rastervec.Evaluation.Conversion.conversion import convert_page_to_vector_text
-from rastervec.Evaluation.Labelling.label_schema import (
-    LabelEntry,
-    LabelSet,
-    cluster_signature,
-)
-from rastervec.helpers.geometry import bbox_iou, union_bbox
+from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet
+from rastervec.helpers.geometry import union_bbox
 from rastervec.logging_setup import get_logger
+from rastervec.models import TextRecord
 from rastervec.Native_Text.native import Native
-from rastervec.pipeline import (
-    PipelineContext,
-    _run_clustering,
-    _run_color_separation,
-    _run_layer_separation,
-    _run_native,
-    _run_reader,
-    _run_text_candidates,
-    _run_vector_extract,
-)
 from rastervec.Reader.reader import Reader
 
 _LOG = get_logger("auto_label")
 
-DEFAULT_IOU_THRESHOLD = 0.3
+
+def _expected_rotation(words: list[TextRecord]) -> int:
+    return round(words[0].angle / 90.0) % 4 * 90
 
 
-def auto_label_pdf(
-    pdf_path: str, page_index: int, iou_threshold: float = DEFAULT_IOU_THRESHOLD,
-) -> LabelSet:
-    """Auto-labels one page of `pdf_path` (a native-text PDF). Returns a
-    `LabelSet` with one `LabelEntry` (source="auto") per matched cluster."""
+def auto_label_pdf(pdf_path: str, page_index: int) -> LabelSet:
+    """Auto-labels one page of `pdf_path` from its own native text. Returns
+    a `LabelSet` with one `LabelEntry` (source="auto") per native-text
+    line, independent of any classification/OCR run over that page's
+    converted-to-vector counterpart."""
     with Reader(pdf_path) as reader:
         page = reader.get_page(page_index)
-        native_words = Native().extract_text(page)
+        native_records = Native().extract_records(page)
 
-    converted_bytes = convert_page_to_vector_text(pdf_path, page_index)
+    lines: dict[tuple[int, int], list[TextRecord]] = defaultdict(list)
+    for record in native_records:
+        lines[(record.block_no, record.line_no)].append(record)
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        converted_path = str(Path(tmp_dir) / "converted.pdf")
-        Path(converted_path).write_bytes(converted_bytes)
-
-        with Reader(converted_path) as conv_reader:
-            ctx = PipelineContext(reader=conv_reader, page_index=0)
-            _run_reader(ctx)
-            _run_native(ctx)
-            _run_vector_extract(ctx)
-            _run_layer_separation(ctx)
-            _run_color_separation(ctx)
-            _run_clustering(ctx)
-            _run_text_candidates(ctx)
-
-    clusters = ctx.text_clusters or []
     entries: list[LabelEntry] = []
-
-    for cluster in clusters:
-        if not cluster:
-            continue
-        cluster_bbox = union_bbox([p.bbox for p in cluster])
-        matched_words = [
-            w for w in native_words if bbox_iou(w.bbox, cluster_bbox) >= iou_threshold
-        ]
-        if not matched_words:
-            continue
-        matched_words.sort(key=lambda w: w.bbox[0])
-        text = " ".join(w.text for w in matched_words)
+    for (block_no, line_no), words in lines.items():
+        words_sorted = sorted(words, key=lambda w: w.bbox[0])
+        bbox = union_bbox([w.bbox for w in words_sorted])
+        text = " ".join(w.text for w in words_sorted)
         entries.append(
             LabelEntry(
                 page_index=page_index,
-                cluster_bbox=cluster_bbox,
-                cluster_signature=cluster_signature(cluster),
+                cluster_bbox=bbox,
+                cluster_signature=f"line:{page_index}:{block_no}:{line_no}",
                 text=text,
                 source="auto",
+                expected_rotation=_expected_rotation(words_sorted),
             )
         )
 
     _LOG.debug(
-        "auto_label_pdf: page %d, %d cluster(s), %d matched",
-        page_index, len(clusters), len(entries),
+        "auto_label_pdf: page %d, %d line(s) labelled", page_index, len(entries),
     )
     return LabelSet(pdf_path=pdf_path, entries=entries)

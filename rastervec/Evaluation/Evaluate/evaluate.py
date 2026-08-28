@@ -32,16 +32,34 @@ Metrics computed (`EvaluationResult`):
     text -- likely ended up in `drawing_vectors`), false positives are
     predicted OCR readings matching no label (over-detection).
   - `drawing_vector_count` -- just `len(drawing_vectors)`.
+  - `miss_attributions` -- populated only when `clustering` is passed:
+    for each unmatched label, which stage lost it (see `_attribute_miss`).
+
+`clustering`/`fast_dropped`/`ocr_failed` (all optional, default `None`,
+fully backward-compatible with earlier callers/tests) let
+`evaluate_pipeline` build a stage-attributed "loss funnel" instead of just
+reporting *that* a label was missed: for each unmatched label,
+`_attribute_miss` checks -- in pipeline order -- whether its bbox overlaps
+a `role="dropped"` category's groups in `clustering` (attributes to that
+classification step, the *earliest* one that matches), else a
+`fast_dropped` cluster (`"fast_text_detect"`), else an `ocr_failed`
+cluster (`"ocr_blank"`), else `"not_found"` (never appeared in any known
+bucket at all -- a Conversion-fidelity gap or extraction issue, not a
+classification/OCR decision).
 """
 from __future__ import annotations
 
 import difflib
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet
-from rastervec.helpers.geometry import bbox_iou
-from rastervec.models import ClusterOcrResult, DrawingVector
+from rastervec.helpers.geometry import bbox_iou, union_bbox
+from rastervec.models import ClusterOcrResult, DrawingVector, VectorPath
 from rastervec.OCR.Rotation_Correction.rotation_correction import RotationCheck
+
+if TYPE_CHECKING:
+    from rastervec.pipeline import ClusteringStageResult, GroupKey
 
 DEFAULT_IOU_THRESHOLD = 0.3
 
@@ -53,6 +71,12 @@ class MatchedPair:
     predicted_bbox: tuple[float, float, float, float]
     predicted_rotation: int
     iou: float
+
+
+@dataclass
+class MissAttribution:
+    label: LabelEntry
+    reason: str  # "classification:<step label>" | "fast_text_detect" | "ocr_blank" | "not_found"
 
 
 @dataclass
@@ -68,6 +92,7 @@ class EvaluationResult:
     classification_precision: float = 0.0
     classification_recall: float = 0.0
     drawing_vector_count: int = 0
+    miss_attributions: list[MissAttribution] = field(default_factory=list)
 
 
 def _predictions_from_ocr(
@@ -94,12 +119,54 @@ def _predictions_from_ocr(
     return predictions
 
 
+def _group_matches(
+    label: LabelEntry, groups: list[list[VectorPath]], iou_threshold: float,
+) -> bool:
+    for group in groups:
+        if not group:
+            continue
+        if bbox_iou(label.cluster_bbox, union_bbox([p.bbox for p in group])) >= iou_threshold:
+            return True
+    return False
+
+
+def _attribute_miss(
+    label: LabelEntry,
+    clustering: "dict[GroupKey, ClusteringStageResult] | None",
+    fast_dropped: list[list[VectorPath]] | None,
+    ocr_failed: list[list[VectorPath]] | None,
+    iou_threshold: float,
+) -> str:
+    """One unmatched label's loss-funnel reason -- see this module's
+    docstring. Checked in pipeline order so the *earliest* stage that lost
+    this label's region is reported, not a later one that also happens to
+    contain a nearby group."""
+    for stage_result in (clustering or {}).values():
+        for step in stage_result.steps:
+            for category in step.categories.values():
+                if category.role != "dropped":
+                    continue
+                if _group_matches(label, category.groups, iou_threshold):
+                    return f"classification:{step.label}"
+
+    if _group_matches(label, fast_dropped or [], iou_threshold):
+        return "fast_text_detect"
+
+    if _group_matches(label, ocr_failed or [], iou_threshold):
+        return "ocr_blank"
+
+    return "not_found"
+
+
 def evaluate_pipeline(
     labels: LabelSet,
     cluster_ocr_results: list[ClusterOcrResult],
     drawing_vectors: list[DrawingVector],
     rotation_checks: list[RotationCheck] | None = None,
     iou_threshold: float = DEFAULT_IOU_THRESHOLD,
+    clustering: "dict[GroupKey, ClusteringStageResult] | None" = None,
+    fast_dropped: list[list[VectorPath]] | None = None,
+    ocr_failed: list[list[VectorPath]] | None = None,
 ) -> EvaluationResult:
     predictions = _predictions_from_ocr(cluster_ocr_results, rotation_checks)
 
@@ -156,6 +223,18 @@ def evaluate_pipeline(
         if (true_positive + false_negative) > 0 else 0.0
     )
 
+    miss_attributions = (
+        [
+            MissAttribution(
+                label=label,
+                reason=_attribute_miss(label, clustering, fast_dropped, ocr_failed, iou_threshold),
+            )
+            for label in unmatched_labels
+        ]
+        if clustering is not None
+        else []
+    )
+
     return EvaluationResult(
         matched=matched,
         unmatched_labels=unmatched_labels,
@@ -168,4 +247,5 @@ def evaluate_pipeline(
         classification_precision=classification_precision,
         classification_recall=classification_recall,
         drawing_vector_count=len(drawing_vectors),
+        miss_attributions=miss_attributions,
     )

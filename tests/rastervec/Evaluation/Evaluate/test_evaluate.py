@@ -8,6 +8,8 @@ from rastervec.Evaluation.Evaluate.evaluate import evaluate_pipeline
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet
 from rastervec.models import ClusterOcrResult, DrawingVector, TextVectorResult, VectorPath
 from rastervec.OCR.Rotation_Correction.rotation_correction import RotationCheck
+from rastervec.pipeline import ClusteringStageResult
+from rastervec.Vector_Classification.classification import CategoryResult, StepResult
 
 
 def _make_path(*, bbox=(0, 0, 1, 1)) -> VectorPath:
@@ -137,3 +139,79 @@ def test_evaluate_pipeline_blank_ocr_reading_excluded():
     assert result.matched == []
     assert result.unmatched_labels == [label]
     assert result.unmatched_predictions == 0
+
+
+def test_evaluate_pipeline_attributes_miss_to_classification_step():
+    label = LabelEntry(
+        page_index=0, cluster_bbox=(0, 0, 10, 5), cluster_signature="a",
+        text="Hello", source="manual",
+    )
+    labels = LabelSet(pdf_path="x.pdf", entries=[label])
+    dropped_group = [_make_path(bbox=(0, 0, 10, 5))]
+
+    clustering = {
+        ("", ()): ClusteringStageResult(
+            steps=[
+                StepResult(
+                    "Large items", {
+                        "kept": CategoryResult([], "kept"),
+                        "dropped_oversized": CategoryResult([dropped_group], "dropped"),
+                    },
+                ),
+            ]
+        )
+    }
+
+    result = evaluate_pipeline(labels, [], [], clustering=clustering)
+
+    assert result.unmatched_labels == [label]
+    assert len(result.miss_attributions) == 1
+    assert result.miss_attributions[0].label is label
+    assert result.miss_attributions[0].reason == "classification:Large items"
+
+
+def test_evaluate_pipeline_attributes_miss_to_fast_and_ocr_stages():
+    label_fast = LabelEntry(
+        page_index=0, cluster_bbox=(0, 0, 10, 5), cluster_signature="a",
+        text="Fast", source="manual",
+    )
+    label_ocr = LabelEntry(
+        page_index=0, cluster_bbox=(20, 20, 30, 25), cluster_signature="b",
+        text="Ocr", source="manual",
+    )
+    labels = LabelSet(pdf_path="x.pdf", entries=[label_fast, label_ocr])
+
+    fast_dropped = [[_make_path(bbox=(0, 0, 10, 5))]]
+    ocr_failed = [[_make_path(bbox=(20, 20, 30, 25))]]
+
+    result = evaluate_pipeline(
+        labels, [], [], clustering={}, fast_dropped=fast_dropped, ocr_failed=ocr_failed,
+    )
+
+    reasons = {m.label.text: m.reason for m in result.miss_attributions}
+    assert reasons == {"Fast": "fast_text_detect", "Ocr": "ocr_blank"}
+
+
+def test_evaluate_pipeline_attributes_miss_to_not_found():
+    label = LabelEntry(
+        page_index=0, cluster_bbox=(0, 0, 10, 5), cluster_signature="a",
+        text="Ghost", source="manual",
+    )
+    labels = LabelSet(pdf_path="x.pdf", entries=[label])
+
+    result = evaluate_pipeline(labels, [], [], clustering={})
+
+    assert result.miss_attributions[0].reason == "not_found"
+
+
+def test_evaluate_pipeline_no_miss_attributions_when_clustering_omitted():
+    label = LabelEntry(
+        page_index=0, cluster_bbox=(0, 0, 10, 5), cluster_signature="a",
+        text="Hello", source="manual",
+    )
+    labels = LabelSet(pdf_path="x.pdf", entries=[label])
+
+    result = evaluate_pipeline(labels, [], [])
+
+    assert result.unmatched_labels == [label]
+    assert result.miss_attributions == []

@@ -578,9 +578,14 @@ class Pipeline:
             )
 
         ctx = PipelineContext(reader=reader, page_index=page_index)
-        outputs: list[StageOutput] = []
+        return self._run_stages(ctx, final_stage)
 
-        for spec in self.STAGES:
+    @classmethod
+    def _run_stages(
+        cls, ctx: PipelineContext, final_stage: str | None,
+    ) -> list[StageOutput]:
+        outputs: list[StageOutput] = []
+        for spec in cls.STAGES:
             try:
                 data = spec.run(ctx)
                 outputs.append(StageOutput(spec.key, spec.label, "ok", data))
@@ -591,8 +596,28 @@ class Pipeline:
                 )
             if spec.key == final_stage:
                 break
-
         return outputs
+
+
+def run_page_context(
+    reader: Reader, page_index: int, final_stage: str | None = None,
+) -> PipelineContext:
+    """Like Pipeline.run_page, but returns the PipelineContext itself
+    (every field the run's stages set, e.g. ctx.text_clusters) instead of
+    the list[StageOutput] -- for callers that want to read pipeline state
+    directly rather than each stage's StageOutput.data (e.g. Evaluation/
+    Labelling/manual_label.py, which needs ctx.text_clusters to draw
+    clickable cluster bboxes). Runs the exact same Pipeline.STAGES list/
+    order as run_page, so future stage changes never need mirroring at a
+    call site that would otherwise hand-roll its own partial stage
+    sequence."""
+    if final_stage is not None and final_stage not in Pipeline.stage_keys():
+        raise ValueError(
+            f"unknown final_stage {final_stage!r}; must be one of {Pipeline.stage_keys()}"
+        )
+    ctx = PipelineContext(reader=reader, page_index=page_index)
+    Pipeline._run_stages(ctx, final_stage)
+    return ctx
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

@@ -1,14 +1,19 @@
 """Sidecar JSON label format for ground-truth vector-cluster text, used by
 both `manual_label.py` (human-entered) and `auto_label.py` (derived from
-pre-conversion native text) -- and consumed by `Evaluation/Evaluate/
-evaluate.py` to score a pipeline run against these labels.
+native text, independent of any pipeline run) -- and consumed by
+`Evaluation/Evaluate/evaluate.py` to score a pipeline run against these
+labels.
 
-One `LabelEntry` per labelled cluster. `cluster_signature` (see
-`cluster_signature()` below) is a deterministic string built from a
-cluster's own member count and rounded bbox -- stable across repeated runs
-of the *same* pipeline over the *same* PDF (used to re-match a label to a
-freshly re-clustered run's clusters without needing PDF-level object
-identity, which VectorPath instances don't have across runs).
+One `LabelEntry` per labelled region. `cluster_signature`'s meaning
+differs by `source`: for `source="manual"`, it's `cluster_signature()`
+below -- a deterministic string built from a real clustered-run's own
+member count and rounded bbox, stable across repeated runs of the *same*
+pipeline over the *same* PDF (VectorPath instances have no identity across
+runs, so this lets a label re-match a freshly re-clustered run's clusters).
+For `source="auto"`, there is no clustered run backing the label at all
+(see auto_label.py's own docstring) -- `cluster_signature` there is a
+`f"line:{page_index}:{block_no}:{line_no}"` native-text line-region id
+instead, not a VectorPath-cluster signature.
 """
 from __future__ import annotations
 
@@ -16,6 +21,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
+
+from rastervec.helpers.geometry import union_bbox
 
 if TYPE_CHECKING:
     from rastervec.models import VectorPath
@@ -48,10 +55,7 @@ def cluster_signature(cluster: "list[VectorPath]") -> str:
     own member count plus its rounded union bbox. Two clusters with the
     same members (regardless of Python object identity, which doesn't
     survive a fresh pipeline run) produce the same signature."""
-    x0 = min(p.bbox[0] for p in cluster)
-    y0 = min(p.bbox[1] for p in cluster)
-    x1 = max(p.bbox[2] for p in cluster)
-    y1 = max(p.bbox[3] for p in cluster)
+    x0, y0, x1, y1 = union_bbox([p.bbox for p in cluster])
     return f"{len(cluster)}:{x0:.1f}:{y0:.1f}:{x1:.1f}:{y1:.1f}"
 
 

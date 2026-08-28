@@ -113,6 +113,18 @@ def union_bbox(
     return (x0, y0, x1, y1)
 
 
+def is_dashed(dashes: str | None) -> bool:
+    """PyMuPDF's "dashes" is a PDF dash-array string like "[] 0" (no dash)
+    or "[3 2] 0" (dashed). An empty array means solid -- a plain
+    `bool(dashes)` check is wrong here since "[] 0" is itself a non-empty,
+    truthy string. Shared by Vector/vector.py and Vector_Classification/
+    classification.py (both need the same solid-vs-dashed classification
+    from the same raw PyMuPDF field)."""
+    if not dashes:
+        return False
+    return not dashes.strip().startswith("[]")
+
+
 def bbox_iou(
     a: tuple[float, float, float, float],
     b: tuple[float, float, float, float],

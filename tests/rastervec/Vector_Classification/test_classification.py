@@ -4,7 +4,7 @@ import pytest
 
 from rastervec.helpers.clustering import Clustering
 from rastervec.models import VectorPath
-from rastervec.Vector_Classification.classification import VectorClassifier, _is_dashed
+from rastervec.Vector_Classification.classification import VectorClassifier
 from rastervec.Vector_Classification.clusters import cluster_filters as clf
 from rastervec.Vector_Classification.groups import group_filters as grf
 from rastervec.Vector_Classification.items import item_filters as itf
@@ -53,19 +53,6 @@ class _Meta:
 
 class _Page:
     meta = _Meta()
-
-
-@pytest.mark.parametrize(
-    "dashes, expected",
-    [
-        (None, False),
-        ("", False),
-        ("[] 0", False),
-        ("[3 2] 0", True),
-    ],
-)
-def test_is_dashed(dashes, expected):
-    assert _is_dashed(dashes) is expected
 
 
 # ----------------------------------------------------------------------

@@ -266,23 +266,31 @@ testable independently of the others (every stage's *output* is a plain dataclas
   round-tripped PDF's `get_drawings()` holds real vector path content and `get_text()` comes back
   empty. Turns a native-text PDF into a known-answer test case for Vector_Classification, since the
   ground-truth text is whatever the original native words said.
-- **`Evaluation/Labelling/`** *(implemented)*: ground-truth labelling for vector-text clusters.
+- **`Evaluation/Labelling/`** *(implemented)*: ground-truth labelling for vector-text regions.
   `label_schema.py`'s `LabelEntry` (`page_index`, `cluster_bbox`, `cluster_signature`, `text`,
   `source: "manual"|"auto"`, `expected_rotation`) + `LabelSet` are the sidecar JSON format
-  (`save_labels`/`load_labels`); `cluster_signature(cluster)` is a deterministic member-count +
-  rounded-bbox string identifying a cluster across repeated pipeline runs (VectorPath objects have
-  no identity across runs). `auto_label.py`'s `auto_label_pdf` runs `Conversion` on a native-text
-  PDF, reads the *original* PDF's `Native.extract_text` as ground truth, runs the extraction/
-  clustering chain (reader through text_candidates, via `pipeline.py`'s own private `_run_*` stage
-  functions — OCR isn't needed since ground truth already gives the text) on the *converted* page,
-  and spatially matches each surviving cluster's bbox to native word bboxes by
-  `helpers.geometry.bbox_iou`, emitting one `source="auto"` label per matched cluster (joined
-  left-to-right by word x0 when several words match one cluster). `manual_label.py`'s
-  `ManualLabelApp` (`python -m rastervec.Evaluation.Labelling.manual_label PDF --page N --out
-  labels.json`) is a Tk UI reusing `debug_app._get_display_matrix` for the same page-space →
-  canvas-space transform the debug app/inspector use: click a cluster's bbox to type its
-  ground-truth text (turns green once labelled), Save/window-close writes the label file — not
-  unit-testable (a real Tk event loop), smoke-test steps are in its own module docstring.
+  (`save_labels`/`load_labels`); `cluster_signature`'s meaning depends on `source` —
+  `"manual"` entries use `cluster_signature(cluster)`, a deterministic member-count + rounded-bbox
+  string identifying a real clustered-run's cluster across repeated pipeline runs (VectorPath
+  objects have no identity across runs); `"auto"` entries use a
+  `f"line:{page_index}:{block_no}:{line_no}"` native-text line-region id instead, since there's no
+  clustered run backing them (see below). `auto_label.py`'s `auto_label_pdf` is deliberately
+  independent of the pipeline being evaluated — it reads *only* the original PDF's own
+  `Native.extract_records` (never runs Conversion or any classification/clustering), groups words
+  by `(block_no, line_no)` into line-level ground-truth regions (bbox via `helpers.geometry.
+  union_bbox`, text joined left-to-right by word `bbox[0]`), and sets `expected_rotation` from each
+  line's own text angle rounded to the nearest quarter-turn. This independence matters: an earlier
+  version derived labels from the *converted* page's own surviving classification clusters, which
+  meant a native word the classification chain's own filter steps wrongly dropped never became a
+  label at all — silently excluded from ground truth rather than scored as a miss. Ground truth
+  must not depend on what the system under test decided. `manual_label.py`'s `ManualLabelApp`
+  (`python -m rastervec.Evaluation.Labelling.manual_label PDF --page N --out labels.json`) *does*
+  need real clusters (a human has to click something), so it's the one place that still runs the
+  real pipeline — via `pipeline.run_page_context(reader, page_index, final_stage="text_candidates")`
+  — and reuses `debug_app._get_display_matrix` for the same page-space → canvas-space transform the
+  debug app/inspector use: click a cluster's bbox to type its ground-truth text (turns green once
+  labelled), Save/window-close writes the label file — not unit-testable (a real Tk event loop),
+  smoke-test steps are in its own module docstring.
 - **`Evaluation/Evaluate/evaluate.py` — `evaluate_pipeline`** *(implemented)*: scores a completed
   pipeline run's `ClusterOcrResult`/`DrawingVector`/`RotationCheck` lists against a `LabelSet`.
   Matches each label to a predicted OCR reading by `bbox_iou` (greedy highest-IoU-first, one-to-one)
@@ -295,7 +303,26 @@ testable independently of the others (every stage's *output* is a plain dataclas
   true positive, unmatched label = false negative i.e. text the pipeline dropped as drawing content,
   unmatched prediction = false positive), `drawing_vector_count`. Deliberately decoupled from
   `PipelineContext`/a real PDF — callers pass their own OCR/drawing-vector/rotation-check lists, so
-  this module is testable against small hand-built inputs.
+  this module is testable against small hand-built inputs. Optional `clustering`/`fast_dropped`/
+  `ocr_failed` params (the rest of `PipelineContext`, all default `None`) turn on a stage-attributed
+  "loss funnel": `_attribute_miss` checks, in pipeline order, whether an unmatched label's bbox
+  overlaps a `role="dropped"` classification-step category (`"classification:<step label>"`, the
+  *earliest* matching step), else a `fast_dropped` cluster (`"fast_text_detect"`), else an
+  `ocr_failed` cluster (`"ocr_blank"`), else `"not_found"` (never appeared in any known bucket — a
+  Conversion-fidelity gap or extraction issue, not a classification/OCR decision) — populated into
+  `EvaluationResult.miss_attributions` (`list[MissAttribution]`, empty when `clustering` is
+  omitted, so passing none of these three keeps the exact old behavior).
+- **`Evaluation/Evaluate/benchmark.py`** *(implemented)* — the CLI wiring Conversion → auto_label →
+  a real full pipeline run → `evaluate_pipeline` together: `python -m
+  rastervec.Evaluation.Evaluate.benchmark --pdf PATH [--pdf PATH2 ...] --pages 0,1,2
+  [--iou-threshold 0.3]`. `run_one_page` builds ground truth with no pipeline run
+  (`auto_label_pdf`), converts, runs the entire `Pipeline.STAGES` chain including real PaddleOCR
+  via `pipeline.run_page_context`, then scores it with every miss-attribution param wired through.
+  `format_report`/`aggregate_results` (mean of each numeric metric + total miss-reason counts
+  across every page) are pure and unit-tested; `main()`'s actual OCR-backed path is a manual smoke
+  test only (same reasoning as `manual_label.py`'s Tk UI — real PaddleOCR, first run downloads
+  models — matches the existing `RASTERVEC_RUN_OCR_TESTS`-gated convention for OCR-dependent
+  tests).
 - **`renderer.py` — `Renderer`** *(rendering helpers, not a pipeline stage)*: `path_color_hex(path)`
   returns a path's real PDF stroke/fill color as hex (used by both the debug app and OCR input
   rendering) — any B/W-style simplification stays purely internal to classification, never
@@ -431,7 +458,12 @@ testable independently of the others (every stage's *output* is a plain dataclas
   final_stage=None)` wraps each stage in `try/except` (`StageOutput(status="error", ...)` on
   failure, never crashing the run) and, if `final_stage` is given, stops right after that stage's
   output is appended — e.g. `--final-stage fast_text_detect` skips `ocr_compare` (and the PaddleOCR
-  engine it would otherwise build) entirely.
+  engine it would otherwise build) entirely. Module-level `run_page_context(reader, page_index,
+  final_stage=None)` runs that same stage sequence but returns the `PipelineContext` itself instead
+  of the `list[StageOutput]`, for callers that want to read pipeline state directly (e.g.
+  `ctx.text_clusters`) rather than each stage's `StageOutput.data` — used by `Evaluation/
+  Labelling/manual_label.py` and `Evaluation/Evaluate/benchmark.py` instead of either hand-rolling
+  a partial `Pipeline.STAGES` sequence themselves.
 - **`debug_app.py`** — Tk GUI (`python -m rastervec.debug_app [pdf]`): page pixmap on a canvas, a
   page-nav bar (reusing the same `page.rotation_matrix * zoom_matrix` display-transform rule as
   the inspector tool's `inspector.py`), and a stage-nav bar (`< Prev Stage | Stage i/N: Label |

@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from rastervec.helpers.clustering import Clustering
+from rastervec.helpers.geometry import is_dashed, union_bbox
 from rastervec.logging_setup import get_logger
 from rastervec.models import DrawingVector, Page, VectorPath, VectorRecord
 from rastervec.Vector_Classification.clusters import cluster_filters as clf
@@ -103,14 +104,6 @@ class StepResult:
     signature_counts: dict[itf.VectorSignature, int] | None = None
     group_stats: dict[int, grf.GroupStats] | None = None
     cluster_groups: dict[int, list[list[VectorPath]]] | None = None
-
-
-def _is_dashed(dashes: str | None) -> bool:
-    # PyMuPDF's "dashes" is a PDF dash-array string like "[] 0" (no dash)
-    # or "[3 2] 0" (dashed). An empty array means solid.
-    if not dashes:
-        return False
-    return not dashes.strip().startswith("[]")
 
 
 class VectorClassifier:
@@ -242,6 +235,22 @@ class VectorClassifier:
         steps = self.cluster(paths, page)
         return steps[-1].categories["kept"].groups if steps else []
 
+    @staticmethod
+    def _bbox_and_representative(paths: list[VectorPath]) -> dict:
+        """Shared by build_vector_records/build_drawing_vectors: a group's
+        own union bbox, plus style fields read off its first member as a
+        representative value (paths within one group/cluster share the
+        same drawing-level style in practice)."""
+        first = paths[0]
+        return dict(
+            bbox=union_bbox([p.bbox for p in paths]),
+            stroke_color=first.stroke_color,
+            fill_color=first.fill_color,
+            stroke_width=first.stroke_width,
+            dashed=is_dashed(first.dashes),
+            page_index=first.page_index,
+        )
+
     def build_vector_records(self, steps: list[StepResult]) -> list[VectorRecord]:
         """Wires the final step's `cluster_groups` lineage into one
         `VectorRecord` per surviving (role="kept") text-candidate cluster --
@@ -263,25 +272,16 @@ class VectorClassifier:
         for cluster in kept:
             if not cluster:
                 continue
-            x0 = min(p.bbox[0] for p in cluster)
-            y0 = min(p.bbox[1] for p in cluster)
-            x1 = max(p.bbox[2] for p in cluster)
-            y1 = max(p.bbox[3] for p in cluster)
+            common = self._bbox_and_representative(cluster)
             first = cluster[0]
             records.append(
                 VectorRecord(
                     items=cluster,
-                    bbox=(x0, y0, x1, y1),
-                    stroke_color=first.stroke_color,
-                    fill_color=first.fill_color,
-                    stroke_width=first.stroke_width,
-                    dashed=_is_dashed(first.dashes),
-                    page_index=first.page_index,
                     even_odd=False,
                     line_cap=0,
                     line_join=0,
                     seqno=first.seq,
-                    rect=(x0, y0, x1, y1),
+                    rect=common["bbox"],
                     scissor=None,
                     blendmode=None,
                     isolated=False,
@@ -289,6 +289,7 @@ class VectorClassifier:
                     opacity=None,
                     groups=lineage.get(id(cluster), [cluster]),
                     role="kept",
+                    **common,
                 )
             )
         return records
@@ -300,22 +301,7 @@ class VectorClassifier:
 
         result = []
         for group in groups.values():
-            x0 = min(p.bbox[0] for p in group)
-            y0 = min(p.bbox[1] for p in group)
-            x1 = max(p.bbox[2] for p in group)
-            y1 = max(p.bbox[3] for p in group)
-            first = group[0]
-            result.append(
-                DrawingVector(
-                    paths=group,
-                    bbox=(x0, y0, x1, y1),
-                    stroke_color=first.stroke_color,
-                    fill_color=first.fill_color,
-                    stroke_width=first.stroke_width,
-                    dashed=_is_dashed(first.dashes),
-                    page_index=first.page_index,
-                )
-            )
+            result.append(DrawingVector(paths=group, **self._bbox_and_representative(group)))
 
         _LOG.debug("build_drawing_vectors: %d path(s) -> %d drawing(s)", len(paths), len(result))
         return result
