@@ -46,6 +46,26 @@ classification step, the *earliest* one that matches), else a
 cluster (`"ocr_blank"`), else `"not_found"` (never appeared in any known
 bucket at all -- a Conversion-fidelity gap or extraction issue, not a
 classification/OCR decision).
+
+`predicted_groups` (optional, default `None`) additionally populates
+`EvaluationResult.textbox_grouping` -- a grouping-*quality* metric
+independent of OCR correctness, adapted from archive's
+`evaluation/native_vs_ocr/page_textbox_stats.py` correct/split/joint
+classification: for each label, count how many of `predicted_groups`' own
+bboxes it IoU-matches (>= `iou_threshold`) -- 0 matches is skipped
+(unrelated to grouping quality, already covered by `classification_recall`),
+>1 matches means that label's content was split across multiple groups
+(under-merged), exactly 1 match that some *other* label also uniquely
+matches means multiple labels were jointly swallowed into one group
+(over-merged), otherwise it's a clean one-to-one match. `split_score`/
+`joint_score` are each error's own rate; `f1` is the harmonic mean of their
+complements (1.0 when neither kind of error occurs).
+
+`same_word_bag`/`normalize_for_cer` are separate pure helpers (not wired
+into `evaluate_pipeline` automatically) callers can use for their own
+order-independent text comparisons -- ports of archive's
+`_same_word_bag`/`_text_for_compare` from `native_vs_raster_text.py`/
+`native_vs_ocr.py`.
 """
 from __future__ import annotations
 
@@ -80,6 +100,19 @@ class MissAttribution:
 
 
 @dataclass
+class TextboxGroupingResult:
+    """Grouping-quality metric, independent of OCR correctness -- see
+    `classify_textbox_grouping`/this module's docstring."""
+
+    correct: int = 0
+    split: int = 0
+    joint: int = 0
+    split_score: float = 0.0
+    joint_score: float = 0.0
+    f1: float = 0.0
+
+
+@dataclass
 class EvaluationResult:
     matched: list[MatchedPair] = field(default_factory=list)
     unmatched_labels: list[LabelEntry] = field(default_factory=list)
@@ -93,6 +126,75 @@ class EvaluationResult:
     classification_recall: float = 0.0
     drawing_vector_count: int = 0
     miss_attributions: list[MissAttribution] = field(default_factory=list)
+    textbox_grouping: TextboxGroupingResult | None = None
+
+
+_CONFUSABLE_LETTERS = set("zxcvmskwuop")
+
+
+def normalize_for_cer(text: str) -> str:
+    """Strips whitespace, then uppercases only the OCR-confusable lowercase
+    letter set (letters that look nearly identical upper/lower in many
+    fonts) -- port of archive's `native_vs_ocr.py::_text_for_compare`, used
+    as an optional pre-step before comparing two strings so a case swap on
+    an ambiguous letter doesn't count as an error."""
+    stripped = "".join(text.split())
+    return "".join(c.upper() if c.lower() in _CONFUSABLE_LETTERS else c for c in stripped)
+
+
+def same_word_bag(a: str, b: str) -> bool:
+    """Order-independent match: True if `a` and `b` contain the exact same
+    set of whitespace-separated tokens (case-insensitive), regardless of
+    order -- e.g. "line set back building 5m" vs "5m building set back
+    line" -- port of archive's `native_vs_raster_text.py::_same_word_bag`."""
+    tokens_a = tuple(sorted(a.lower().split()))
+    tokens_b = tuple(sorted(b.lower().split()))
+    return bool(tokens_a) and tokens_a == tokens_b
+
+
+def classify_textbox_grouping(
+    labels: list[LabelEntry],
+    predicted_groups: list[list[VectorPath]],
+    iou_threshold: float = DEFAULT_IOU_THRESHOLD,
+) -> TextboxGroupingResult:
+    """See this module's docstring for the correct/split/joint definitions
+    -- port of archive's `evaluation/native_vs_ocr/page_textbox_stats.py`."""
+    group_bboxes = [union_bbox([p.bbox for p in group]) for group in predicted_groups if group]
+
+    label_matches: list[list[int]] = [
+        [i for i, gb in enumerate(group_bboxes) if bbox_iou(label.cluster_bbox, gb) >= iou_threshold]
+        for label in labels
+    ]
+
+    group_label_counts: dict[int, int] = {}
+    for matches in label_matches:
+        if len(matches) == 1:
+            group_label_counts[matches[0]] = group_label_counts.get(matches[0], 0) + 1
+
+    correct = split = joint = 0
+    for matches in label_matches:
+        if not matches:
+            continue
+        if len(matches) > 1:
+            split += 1
+        elif group_label_counts.get(matches[0], 0) > 1:
+            joint += 1
+        else:
+            correct += 1
+
+    split_score = split / (split + correct) if (split + correct) else 0.0
+    joint_score = joint / (joint + correct) if (joint + correct) else 0.0
+    precision_like = 1.0 - split_score
+    recall_like = 1.0 - joint_score
+    f1 = (
+        2 * precision_like * recall_like / (precision_like + recall_like)
+        if (precision_like + recall_like) else 0.0
+    )
+
+    return TextboxGroupingResult(
+        correct=correct, split=split, joint=joint,
+        split_score=split_score, joint_score=joint_score, f1=f1,
+    )
 
 
 def _predictions_from_ocr(
@@ -167,6 +269,7 @@ def evaluate_pipeline(
     clustering: "dict[GroupKey, ClusteringStageResult] | None" = None,
     fast_dropped: list[list[VectorPath]] | None = None,
     ocr_failed: list[list[VectorPath]] | None = None,
+    predicted_groups: list[list[VectorPath]] | None = None,
 ) -> EvaluationResult:
     predictions = _predictions_from_ocr(cluster_ocr_results, rotation_checks)
 
@@ -235,6 +338,12 @@ def evaluate_pipeline(
         else []
     )
 
+    textbox_grouping = (
+        classify_textbox_grouping(labels.entries, predicted_groups, iou_threshold)
+        if predicted_groups is not None
+        else None
+    )
+
     return EvaluationResult(
         matched=matched,
         unmatched_labels=unmatched_labels,
@@ -248,4 +357,5 @@ def evaluate_pipeline(
         classification_recall=classification_recall,
         drawing_vector_count=len(drawing_vectors),
         miss_attributions=miss_attributions,
+        textbox_grouping=textbox_grouping,
     )

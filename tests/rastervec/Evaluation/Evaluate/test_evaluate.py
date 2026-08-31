@@ -4,7 +4,12 @@ import difflib
 
 import pytest
 
-from rastervec.Evaluation.Evaluate.evaluate import evaluate_pipeline
+from rastervec.Evaluation.Evaluate.evaluate import (
+    classify_textbox_grouping,
+    evaluate_pipeline,
+    normalize_for_cer,
+    same_word_bag,
+)
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet
 from rastervec.models import ClusterOcrResult, DrawingVector, TextVectorResult, VectorPath
 from rastervec.OCR.Rotation_Correction.rotation_correction import RotationCheck
@@ -215,3 +220,103 @@ def test_evaluate_pipeline_no_miss_attributions_when_clustering_omitted():
 
     assert result.unmatched_labels == [label]
     assert result.miss_attributions == []
+
+
+def test_normalize_for_cer_strips_whitespace_and_uppercases_confusables():
+    assert normalize_for_cer("5 mm") == "5MM"
+    assert normalize_for_cer("Foo Bar") == "FOOBar"
+
+
+def test_same_word_bag_matches_regardless_of_order():
+    assert same_word_bag("line setback building 5m", "5m building setback line")
+    assert same_word_bag("Hello World", "world hello")
+    assert not same_word_bag("Hello World", "Hello")
+    assert not same_word_bag("", "")
+
+
+def test_classify_textbox_grouping_correct_split_joint():
+    label_a = LabelEntry(
+        page_index=0, cluster_bbox=(0, 0, 10, 5), cluster_signature="a",
+        text="A", source="manual",
+    )
+    label_b = LabelEntry(
+        page_index=0, cluster_bbox=(20, 20, 30, 25), cluster_signature="b",
+        text="B", source="manual",
+    )
+    label_c = LabelEntry(
+        page_index=0, cluster_bbox=(30, 20, 40, 25), cluster_signature="c",
+        text="C", source="manual",
+    )
+    labels = [label_a, label_b, label_c]
+
+    # A -> its own group exactly (correct).
+    group_correct = [_make_path(bbox=(0, 0, 10, 5))]
+    # B and C are each fully inside (and each >=30% IoU with) the same
+    # wider group -- both jointly swallowed into one group.
+    group_joint = [_make_path(bbox=(20, 20, 40, 25))]
+
+    result = classify_textbox_grouping(labels, [group_correct, group_joint])
+
+    assert result.correct == 1
+    assert result.joint == 2
+    assert result.split == 0
+    assert result.joint_score == pytest.approx(2 / 3)
+    assert result.split_score == pytest.approx(0.0)
+
+
+def test_classify_textbox_grouping_split():
+    label = LabelEntry(
+        page_index=0, cluster_bbox=(0, 0, 20, 5), cluster_signature="a",
+        text="A", source="manual",
+    )
+    group_left = [_make_path(bbox=(0, 0, 10, 5))]
+    group_right = [_make_path(bbox=(10, 0, 20, 5))]
+
+    result = classify_textbox_grouping([label], [group_left, group_right])
+
+    assert result.split == 1
+    assert result.correct == 0
+    assert result.split_score == pytest.approx(1.0)
+
+
+def test_classify_textbox_grouping_no_matches_skipped():
+    label = LabelEntry(
+        page_index=0, cluster_bbox=(100, 100, 110, 105), cluster_signature="a",
+        text="A", source="manual",
+    )
+    group = [_make_path(bbox=(0, 0, 10, 5))]
+
+    result = classify_textbox_grouping([label], [group])
+
+    assert result.correct == 0
+    assert result.split == 0
+    assert result.joint == 0
+    # No label matched any group -- neither error rate has any signal, so
+    # f1 stays at its no-errors-observed default of 1.0.
+    assert result.f1 == pytest.approx(1.0)
+
+
+def test_evaluate_pipeline_populates_textbox_grouping_when_predicted_groups_given():
+    label = LabelEntry(
+        page_index=0, cluster_bbox=(0, 0, 10, 5), cluster_signature="a",
+        text="Hello", source="manual",
+    )
+    labels = LabelSet(pdf_path="x.pdf", entries=[label])
+    group = [_make_path(bbox=(0, 0, 10, 5))]
+
+    result = evaluate_pipeline(labels, [], [], predicted_groups=[group])
+
+    assert result.textbox_grouping is not None
+    assert result.textbox_grouping.correct == 1
+
+
+def test_evaluate_pipeline_textbox_grouping_none_when_omitted():
+    label = LabelEntry(
+        page_index=0, cluster_bbox=(0, 0, 10, 5), cluster_signature="a",
+        text="Hello", source="manual",
+    )
+    labels = LabelSet(pdf_path="x.pdf", entries=[label])
+
+    result = evaluate_pipeline(labels, [], [])
+
+    assert result.textbox_grouping is None

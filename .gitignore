@@ -2,4 +2,7 @@
 /.venv/Lib/site-packages
 /.venv
 __pycache__
+/junction_cnn/archive
 /rastervec/weights
+/archive
+/references2

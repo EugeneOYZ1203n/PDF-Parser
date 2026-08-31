@@ -4,6 +4,36 @@ Not implemented yet -- see the "Vector / Raster / Renderer / Helpers"
 section of the rastervec implementation plan. Method bodies intentionally
 raise NotImplementedError. No third-party imports beyond stdlib/typing are
 added here yet, to keep earlier phases' install footprint minimal.
+
+Archive -> rastervec mapping (design notes only, nothing here implements
+any of this yet -- see `archive/raster_parser/` for the actual code):
+
+- `delete_natives/delete_native.py`'s `clear_page` (LibreOffice headless
+  macro strips native text/vector drawings, leaving only embedded raster
+  images) + `page_is_nonempty` (decides whether the raster fallback pass
+  is worth running at all) -- would gate a future `extract_remainder`-style
+  entrypoint: only run this whole `Raster` stage when the LO-cleared page
+  still has real ink on it, not on every page unconditionally.
+- `parsing/text_drawing_parser.py`'s `OcrTextDrawingParser` (Hough-line +
+  morphology line masking, inpaint-based detection cleanup, tiled
+  multi-process PaddleOCR detection) -- maps onto `mask_text` above plus
+  `helpers/masking.py::Masking` (also currently stubbed): line/leader-line
+  removal before OCR detection, and box merge/dedup, would live there.
+- `autotrace/drawing_autotrace.py` + `drawing_colour_fill_autotrace.py`
+  (PNG -> SVG -> PDF -> Vector via `pyautotrace`, colour-cluster multi-mask
+  tracing with page-wash detection) -- no current rastervec stub covers
+  this at all. Would need a new module (e.g. `Raster_Vectorize/`) between
+  `mask_text`/`find_junctions` and `extract_remainder` if ever built, and
+  `pyautotrace` would need adding to `requirements.txt` (not there today).
+- `scripts/testing_paper/skeletonize.py` + `chaining.py` (classical
+  chamfer-distance-transform skeleton thinning + junction/endpoint
+  detection + polyline chain tracing, no ML) -- a working classical-CV
+  alternative to `find_junctions`/`connect_lines`/`measure_line_widths`
+  below, which are scoped for a CNN (`helpers/junction.py::
+  JunctionDetector`, also currently stubbed for `generate_synthetic_data`/
+  `train`/`infer`). Worth revisiting as a lower-effort starting point if
+  the CNN approach stalls -- archive's version is a complete, working
+  implementation, not a stub.
 """
 from __future__ import annotations
 
