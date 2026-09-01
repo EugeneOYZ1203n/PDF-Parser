@@ -22,6 +22,11 @@ from PIL import Image
 from rastervec.helpers.geometry import union_bbox
 from rastervec.models import OcrWord, Page, TextVectorResult, VectorPath
 from rastervec.OCR.Paddle_OCR.ocr_backend import OcrBackend, PaddleOcrBackend
+from rastervec.renderer import (
+    cluster_frame_size,
+    pixel_to_page_bbox,
+    render_vector_cluster,
+)
 
 # ocr_cluster: a render whose shorter side would fall under this many pixels
 # at the requested dpi gets bumped to a higher effective dpi instead --
@@ -92,15 +97,15 @@ class RenderOCR:
         self,
         cluster: list[VectorPath],
         page: Page,
-        renderer: "rastervec.renderer.Renderer",
         dpi: int = 300,
     ) -> TextVectorResult:
-        """Render (via Renderer) once, upright, and run one backend.detect()
-        call over the cluster's render. `rotation_used` comes from the
-        backend's own detected orientation, not a manual rotation search.
-        `words` is one OcrWord per detected box, each mapped from pixel
-        space to page space via Renderer.pixel_to_page_bbox -- used by
-        Renderer.render_reconstructed_page to place/scale each word into
+        """Render (via rastervec.renderer) once, upright, and run one
+        backend.detect() call over the cluster's render. `rotation_used`
+        comes from the backend's own detected orientation, not a manual
+        rotation search. `words` is one OcrWord per detected box, each
+        mapped from pixel space to page space via
+        renderer.pixel_to_page_bbox -- used by
+        renderer.render_reconstructed_page to place/scale each word into
         its own bbox instead of stretching one string across the whole
         cluster bbox. `ocr_bbox` is the union of every detected box, in
         page space (only when something was detected). `dpi` is bumped
@@ -110,12 +115,12 @@ class RenderOCR:
         the OCR backend reads poorly. The same (possibly bumped) dpi is
         reused below for pixel_to_page_bbox, so the pixel<->page-space
         mapping always matches the image actually rendered."""
-        width_pt, height_pt = renderer.cluster_frame_size(cluster)
+        width_pt, height_pt = cluster_frame_size(cluster)
         min_side_pt = min(width_pt, height_pt)
         if min_side_pt > 0:
             needed_dpi = math.ceil(MIN_RENDER_SIDE_PX * 72.0 / min_side_pt)
             dpi = max(dpi, needed_dpi)
-        image = renderer.render_vector_cluster(cluster, dpi)
+        image = render_vector_cluster(cluster, dpi)
         bbox = union_bbox([p.bbox for p in cluster])
 
         detection = self.backend.detect(image)
@@ -126,11 +131,11 @@ class RenderOCR:
         ocr_bbox = None
         words: list[OcrWord] = []
         if pixel_corners:
-            ocr_bbox = renderer.pixel_to_page_bbox(cluster, dpi, pixel_corners)
+            ocr_bbox = pixel_to_page_bbox(cluster, dpi, pixel_corners)
         for b in detection.boxes:
             if not b.corners:
                 continue
-            word_bbox = renderer.pixel_to_page_bbox(cluster, dpi, b.corners)
+            word_bbox = pixel_to_page_bbox(cluster, dpi, b.corners)
             words.append(OcrWord(text=b.text, confidence=b.confidence, bbox=word_bbox))
 
         return TextVectorResult(

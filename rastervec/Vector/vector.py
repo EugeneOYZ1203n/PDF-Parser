@@ -62,6 +62,9 @@ class Vector:
             dashes = drawing.get("dashes")
             closed = drawing.get("closePath")
             layer = drawing.get("layer") or None
+            line_cap = drawing.get("lineCap", 0) or 0
+            if isinstance(line_cap, (list, tuple)):
+                line_cap = line_cap[0] if line_cap else 0
 
             common = dict(
                 seq=seq,
@@ -75,6 +78,9 @@ class Vector:
                 closed=closed,
                 layer=layer,
                 page_index=page_index,
+                even_odd=bool(drawing.get("even_odd", False)),
+                line_cap=int(line_cap),
+                line_join=drawing.get("lineJoin", 0) or 0,
             )
 
             items: list[VectorPath] = []
@@ -105,7 +111,7 @@ class Vector:
                     dashed=is_dashed(dashes),
                     page_index=page_index,
                     even_odd=bool(drawing.get("even_odd", False)),
-                    line_cap=drawing.get("lineCap", 0) or 0,
+                    line_cap=int(line_cap),
                     line_join=drawing.get("lineJoin", 0) or 0,
                     seqno=drawing.get("seqno", seq),
                     rect=rect_tuple,

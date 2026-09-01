@@ -140,7 +140,9 @@ class VectorPath:
     """One drawing path *item* -- a single line/rect/quad/curve primitive
     from a get_drawings() drawing's "items" list. A drawing with several
     items (e.g. a glyph outline made of several curves) becomes several
-    VectorPaths sharing the same `seq`."""
+    VectorPaths sharing the same `seq` (and the same drawing-level paint
+    attrs: `fill_rule`, `even_odd`, `line_cap`, `line_join`), so a renderer
+    can regroup them by `seq` and replay them as one composite path."""
 
     seq: int  # drawing-level seqno (content-stream draw order)
     item_index: int  # index of this item within its drawing's items list
@@ -157,6 +159,16 @@ class VectorPath:
     closed: bool | None
     layer: str | None
     page_index: int
+    # Drawing-level paint attributes, copied onto every item of a drawing
+    # (like `fill_rule`) so a renderer can replay a whole drawing's items
+    # as one composite path -- `even_odd` in particular is what makes a
+    # multi-contour filled glyph render with its counter as a hole rather
+    # than filled solid. Defaulted so existing kwargs constructions are
+    # unaffected. `line_cap`/`line_join` are always plain ints here (a
+    # tuple `lineCap` from get_drawings() is normalised in Vector).
+    even_odd: bool = False
+    line_cap: int = 0
+    line_join: int = 0
 
 
 @dataclass

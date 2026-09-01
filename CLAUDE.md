@@ -13,7 +13,7 @@ at `rastervec/Evaluation/inspector/` (see below).
 reconstructing CAD "text-as-filled-vector-paths" back into real text), consolidated into text/line
 objects and reassembled into a PDF for evaluation. Built stage by stage (Reader → Native Text →
 Vector → Vector Classification → OCR); currently Reader, Native Text, Vector, and Vector
-Classification are implemented, including OCR (`Renderer.render_vector_cluster` +
+Classification are implemented, including OCR (`renderer.render_vector_cluster` +
 `RenderOCR`/`OcrBackend`, PaddleOCR-only — see `OCR/Paddle_OCR/ocr_backend.py`). A raster-image
 line-diagram stage (CNN junction detector + line tracing) was scoped out for now — no `Raster`
 module exists in the current tree. The `Evaluation/` package holds the pipeline's still-unbuilt
@@ -117,7 +117,7 @@ See `rastervec/Glossary.md` for standardized group/cluster/global-group/similari
 terminology used throughout this section. `rastervec/` is organized into one folder per pipeline
 concern (`Reader/`, `Native_Text/`, `Vector/`, `Vector_Classification/`, `OCR/`, `Evaluation/`),
 plus cross-cutting modules that don't belong to one concern (`models.py`, `output_types.py`,
-`logging_setup.py`, `pipeline.py`, `renderer.py`) and a `helpers/` package for
+`logging_setup.py`, `pipeline.py`, `renderer/`) and a `helpers/` package for
 utilities shared across more than one concern (`geometry.py`, `clustering.py`). Every stage is
 testable independently of the others (every stage's *output* is a plain dataclass from
 `models.py`, no `fitz` objects, except `Page.fitz_page` which `Reader` must hand to `Native`/etc.):
@@ -248,10 +248,11 @@ testable independently of the others (every stage's *output* is a plain dataclas
   raster image regions). `__init__(self, backend: OcrBackend | None = None)` defaults to
   `PaddleOcrBackend()`. `ocr_boxes(image)`/`ocr(image)` wrap `self.backend.detect(image)` (`ocr`
   joins every detected box left-to-right into one `(text, confidence, bbox_corners)` result).
-  `ocr_cluster(cluster, page, renderer, dpi=300)` is the shared
-  entrypoint: render the cluster **once**, upright, run **one** `backend.detect()` call, and build a
+  `ocr_cluster(cluster, page, dpi=300)` is the shared
+  entrypoint (it calls `rastervec.renderer`'s module functions directly — no `renderer` param):
+  render the cluster **once**, upright, run **one** `backend.detect()` call, and build a
   `TextVectorResult` whose `rotation_used` comes from `OcrDetection.rotation`, whose `ocr_bbox`
-  (union of every detected box, mapped back to page space via `Renderer.pixel_to_page_bbox`) is
+  (union of every detected box, mapped back to page space via `renderer.pixel_to_page_bbox`) is
   `None` when nothing was detected, and whose `words: list[OcrWord] | None` field (models.py) is one
   `OcrWord` per individually detected box, each independently mapped through `pixel_to_page_bbox`
   (line-granularity, since Paddle is the only backend); `None` when nothing was detected.
@@ -337,34 +338,50 @@ testable independently of the others (every stage's *output* is a plain dataclas
   test only (same reasoning as `manual_label.py`'s Tk UI — real PaddleOCR, first run downloads
   models — matches the existing `RASTERVEC_RUN_OCR_TESTS`-gated convention for OCR-dependent
   tests).
-- **`renderer.py` — `Renderer`** *(rendering helpers, not a pipeline stage)*: `path_color_hex(path)`
-  returns a path's real PDF stroke/fill color as hex (used by both the visualization notebook and
-  OCR input rendering) — any B/W-style simplification stays purely internal to classification, never
-  substituted into a rendered/displayed color. `render_vector_cluster(paths, dpi)` *(implemented)*
+- **`renderer/` — module-level functions, no `Renderer` class** *(rendering helpers, not a pipeline
+  stage)*: a package split by output concern — `png.py` (rasterize vector paths for OCR / FAST
+  input), `pdf.py` (`render_reconstructed_page`), `svg.py` (`render_page_svg`, a thin
+  `get_svg_image()` wrapper), and `_shapes.py` (shared). Import straight from `rastervec.renderer`
+  (`from rastervec.renderer import render_vector_cluster`, etc.).
+  `_shapes.path_color_hex(path)` returns a path's real PDF stroke/fill color as hex (used by both the
+  visualization notebook and OCR input rendering) — any B/W-style simplification stays purely
+  internal to classification, never substituted into a rendered/displayed color.
+  `_shapes.replay_drawing_paths(shape, paths, *, dx, dy)` is the accuracy-critical helper shared by
+  png/pdf: it regroups `paths` by their parent drawing (`VectorPath.seq`), replays every item of a
+  drawing into the `fitz.Shape`, then calls `shape.finish()` **once per drawing** carrying that
+  drawing's real `even_odd` / `line_join` / `line_cap` / stroke+fill opacity (ported from
+  `archive/raster_parser/rendering/pdf_render/reconstruct.py`). This is why a multi-contour filled
+  glyph (an "o", "e", "8", "A" — outer contour + inner counter, one drawing, `even_odd`) renders
+  with its counter as a white hole instead of filled solid; drawing each `VectorPath` primitive on
+  its own and calling `finish(closePath=True)` per primitive (the pre-split behaviour) filled every
+  counter solid — a direct hit to OCR of vector text. `finish()` is per drawing but `commit()` is
+  left to the caller (one commit per render). A drawing whose paths carry neither `stroke_color` nor
+  `fill_color` is skipped outright: `finish()` emits a stroke operator whenever `fill` is `None`
+  regardless of `color`, falling back to the default-black graphics state instead of staying
+  invisible. `even_odd` / `line_cap` / `line_join` are drawing-level fields now copied onto every
+  `VectorPath` of a drawing (like `fill_rule`), defaulted so existing constructions are unaffected;
+  `Vector.extract_records` normalises a tuple `lineCap` from `get_drawings()` to a plain int.
+  `png.render_vector_cluster(paths, dpi)` *(implemented)*
   isolates a cluster onto a fresh single-page PyMuPDF document sized to the cluster's own bbox (plus
   padding — `max(4pt, largest member's stroke_width)`, computed by the private `_cluster_frame`
-  helper — so edge strokes aren't clipped), redraws each path with its own real
-  stroke/fill/width/dashes via `fitz.Shape`, then rasterizes at `dpi` and returns a PIL `Image` —
-  reusing PyMuPDF's own path/curve/fill rendering rather than reimplementing rasterization by hand.
-  A path with neither `stroke_color` nor `fill_color` set is skipped outright (never handed to
-  `Shape.finish()`): `finish()` emits a stroke operator whenever `fill` is `None` regardless of
-  `color`, falling back to the current graphics-state color (default black) instead of staying
-  invisible, so skipping is the only way to keep a genuinely colorless path from getting an unwanted
-  black stroke in the render. `pixel_to_page_bbox(paths, dpi, pixel_points)` inverts
+  helper — so edge strokes aren't clipped), replays each drawing's items via `replay_drawing_paths`,
+  then rasterizes at `dpi` and returns a PIL `Image` — reusing PyMuPDF's own path/curve/fill
+  rendering rather than reimplementing rasterization by hand.
+  `png.pixel_to_page_bbox(paths, dpi, pixel_points)` inverts
   `_cluster_frame`'s same transform to map pixel-space points (e.g. Paddle's detected text-region
   corners, from a render of that exact `paths`/`dpi`) back into PDF page space — used by
-  `RenderOCR.ocr_cluster` to compute a `TextVectorResult.ocr_bbox`. `render_page_paths(paths,
+  `RenderOCR.ocr_cluster` to compute a `TextVectorResult.ocr_bbox`. `png.render_page_paths(paths,
   page_meta, dpi)` is the whole-page counterpart (every given path drawn onto one page-sized canvas,
   no isolation/padding, no rotation applied) — used as FAST's own detection input by
   `fast_text_detect` (see below).
-  `render_reconstructed_page(page_meta, *, native_words=None, drawing_vectors=None,
+  `pdf.render_reconstructed_page(page_meta, *, native_words=None, drawing_vectors=None,
   ocr_results=None, zoom=1.0)` *(implemented, visualization-notebook preview — not OCR input, not
   `evaluation.py`'s real reconstruction stage)*: redraws whatever elements are passed onto a fresh
   blank page sized/rotated to match `page_meta`, then rasterizes at `zoom` the same way the
   notebook's `page_raster()` rasterizes the real page pixmap, so the two are pixel-comparable at the
   same zoom. `drawing_vectors` are redrawn from each `DrawingVector`'s own real member `VectorPath`s
-  (reusing the module-level `_draw_vector_path` helper `render_vector_cluster` also uses), never
-  just their aggregate bbox. `native_words`/`ocr_results` are inserted as real text via
+  (via the shared `_shapes.replay_drawing_paths`, so multi-contour fills keep their holes here too),
+  never just their aggregate bbox. `native_words`/`ocr_results` are inserted as real text via
   `page.insert_text` — necessarily approximate: font family isn't preserved (always PyMuPDF's
   base14 `"helv"`). Font size and baseline are derived from `fitz.Font("helv")`'s own
   ascender/descender metrics rather than treating the bbox height as the fontsize and the bbox's
@@ -411,7 +428,7 @@ testable independently of the others (every stage's *output* is a plain dataclas
   geometric similarity (`VectorClassifier.group_similar_clusters`) into `ctx.similarity_groups`/
   `ctx.cluster_similarity_id`.
 
-  `_run_fast_text_detect` renders **one** whole-page image (`Renderer.render_page_paths`) of every
+  `_run_fast_text_detect` renders **one** whole-page image (`renderer.render_page_paths`) of every
   path in `ctx.vector_paths` (drawing content included, not just `ctx.text_clusters`' paths), and
   runs `FastDetector.detect_tiled` once on it. `detect_tiled` (`OCR/FAST_Text_Detect/fast_detect.py`) doesn't run
   FAST on the whole render in one direct pass -- it upscales the render by `TILED_SCALE_FACTOR` (5x),
@@ -489,10 +506,11 @@ testable independently of the others (every stage's *output* is a plain dataclas
   one of the 12 steps' every category (`kept` + `dropped`/`info` side categories, merged across all
   `(layer, color)` buckets, `f"{step_i}_{name}"` keyed, per-step colour from `CLUSTER_STEP_COLORS`),
   and `color_separation` expands every `(layer, color)` bucket — a dense page can be 100+ images.
-  Overlay drawing is a `PIL.ImageDraw` port of the old `_draw_vector_path` (polylines/polygons via
-  `page.fitz_page.rotation_matrix * fitz.Matrix(zoom, zoom)`, the ex-`_get_display_matrix` rule);
+  Overlay drawing is the notebook's own `PIL.ImageDraw` polyline/polygon port (polylines/polygons via
+  `page.fitz_page.rotation_matrix * fitz.Matrix(zoom, zoom)`, the ex-`_get_display_matrix` rule; it
+  draws per-primitive and does not do the renderer package's per-drawing even-odd replay);
   the four reconstruction stages (`native`, `ocr_compare`, `rotation_verify`, `drawing_vectors`)
-  use `Renderer.render_reconstructed_page(...)` for their isolated panel, and `fast_text_detect`
+  use `renderer.render_reconstructed_page(...)` for their isolated panel, and `fast_text_detect`
   uses `FastPageResult.page_image` + a red-channel `page_mask` heatmap blend. `FINAL_STAGE` stops
   the run early — set it before `fast_text_detect` to skip needing the FAST weights file, before
   `ocr_compare` to skip building PaddleOCR. Inline (matplotlib) only, nothing written to disk.
@@ -503,8 +521,9 @@ consumed by anything in `rastervec/` (kept for possible future raster-image work
 
 `tests/rastervec/` mirrors `rastervec/`'s own folder layout (e.g. `tests/rastervec/Reader/
 test_reader.py` for `rastervec/Reader/reader.py`, `tests/rastervec/Vector_Classification/
-test_classification.py` for `Vector_Classification/classification.py`); modules that stay at
-`rastervec/`'s top level (`renderer.py`, `output_types.py`, `pipeline.py`) keep their tests at
+test_classification.py` for `Vector_Classification/classification.py`, `tests/rastervec/renderer/
+test_png.py` for `rastervec/renderer/png.py`); modules that stay at
+`rastervec/`'s top level (`output_types.py`, `pipeline.py`) keep their tests at
 `tests/rastervec/`'s top level too. `tests/conftest.py`'s `synthetic_pdf_factory` builds small
 in-memory PDFs via `fitz.open()`/`insert_text`/`set_rotation` — preferred over `references/*.pdf`
 for unit tests since those are gitignored and give no exact expected values to assert against.

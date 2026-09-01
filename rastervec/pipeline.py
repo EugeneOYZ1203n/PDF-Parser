@@ -55,7 +55,7 @@ from rastervec.OCR.Rotation_Correction.rotation_correction import (
     _text_aspect_ratio,
 )
 from rastervec.Reader.reader import Reader
-from rastervec.renderer import Renderer
+from rastervec.renderer import render_page_paths
 from rastervec.Vector.vector import Vector
 from rastervec.Vector_Classification.classification import StepResult, VectorClassifier
 
@@ -103,7 +103,7 @@ class ClusteringStageResult:
 @dataclass
 class FastPageResult:
     """fast_text_detect's whole-page result: `page_image`/`page_mask` (via
-    Renderer.render_page_paths + FastDetector.detect_tiled, over every
+    renderer.render_page_paths + FastDetector.detect_tiled, over every
     extracted vector path on the page -- drawing content included, not
     just text candidates), plus `scores`: for every text-candidate cluster
     (keyed by `id(cluster)`), its own page-mask score after taking the min
@@ -355,7 +355,7 @@ def _sample_mask(mask: "np.ndarray | None", cluster: list[VectorPath], zoom: flo
 def _run_fast_text_detect(ctx: PipelineContext) -> FastPageResult:
     """Renders one whole-page image of every extracted vector path on the
     page (ctx.vector_paths -- drawing content included, not just surviving
-    text-candidate clusters) via Renderer.render_page_paths, and runs
+    text-candidate clusters) via renderer.render_page_paths, and runs
     FastDetector.detect_tiled once over it -- `detect_tiled` upscales the
     render and tiles/rotates it (see helpers/fast_detect.py) for a more
     robust per-region score than one downsized whole-page pass would give.
@@ -378,9 +378,8 @@ def _run_fast_text_detect(ctx: PipelineContext) -> FastPageResult:
     detect_seconds = None
 
     if all_paths:
-        renderer = Renderer()
         detector = FastDetector()
-        page_image = renderer.render_page_paths(
+        page_image = render_page_paths(
             all_paths, ctx.page.meta, FAST_PAGE_RENDER_DPI,
         )
         start = time.perf_counter()
@@ -473,7 +472,6 @@ def _run_ocr_compare(ctx: PipelineContext) -> list[ClusterOcrResult]:
     its full path list is collected into ctx.ocr_failed (folded into
     drawing_vectors, same as every other rejection in this pipeline), in
     addition to being kept (blank) in ctx.ocr_results."""
-    renderer = Renderer()
     render_ocr = RenderOCR()
     clusters = ctx.regrouped_clusters or []
 
@@ -483,7 +481,7 @@ def _run_ocr_compare(ctx: PipelineContext) -> list[ClusterOcrResult]:
 
     for cluster in tqdm(clusters, desc="OCR compare", unit="cluster"):
         start = time.perf_counter()
-        resolved = render_ocr.ocr_cluster(cluster, ctx.page, renderer)
+        resolved = render_ocr.ocr_cluster(cluster, ctx.page)
         ocr_seconds = time.perf_counter() - start
 
         results.append(ClusterOcrResult(cluster=cluster, resolved=resolved, ocr_seconds=ocr_seconds))

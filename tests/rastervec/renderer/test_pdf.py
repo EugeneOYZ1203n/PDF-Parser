@@ -1,17 +1,7 @@
 from __future__ import annotations
 
-import pytest
-
 from rastervec.models import DrawingVector, OcrWord, PageMeta, TextVectorResult, TextWord, VectorPath
-from rastervec.renderer import Renderer
-
-
-class _Meta:
-    index = 0
-
-
-class _Page:
-    meta = _Meta()
+from rastervec.renderer import render_reconstructed_page
 
 
 def _make_path(
@@ -34,53 +24,6 @@ def _make_path(
     )
 
 
-def test_render_vector_cluster_requires_at_least_one_path():
-    with pytest.raises(ValueError):
-        Renderer().render_vector_cluster([], 150)
-
-
-def test_render_vector_cluster_draws_something():
-    # A filled black rectangle should show up as non-white pixels in the render.
-    path = _make_path(kind="re", bbox=(0, 0, 20, 10), fill_color=(0, 0, 0))
-    image = Renderer().render_vector_cluster([path], dpi=150)
-
-    assert image.width > 0 and image.height > 0
-    darkest, _lightest = image.convert("L").getextrema()
-    assert darkest < 255  # something was actually drawn, not a blank white page
-
-
-def test_render_vector_cluster_blank_stroke_and_fill_stays_blank():
-    # No stroke_color and no fill_color -> nothing should render.
-    path = _make_path(kind="re", bbox=(0, 0, 20, 10))
-    image = Renderer().render_vector_cluster([path], dpi=150)
-
-    darkest, _lightest = image.convert("L").getextrema()
-    assert darkest == 255
-
-
-def test_render_vector_cluster_line_kind():
-    path = _make_path(kind="l", bbox=(0, 0, 20, 20), stroke_color=(0, 0, 0), stroke_width=2)
-    image = Renderer().render_vector_cluster([path], dpi=150)
-
-    darkest, _lightest = image.convert("L").getextrema()
-    assert darkest < 255
-
-
-def test_pixel_to_page_bbox_round_trips_cluster_frame():
-    path = _make_path(kind="re", bbox=(0, 0, 20, 10), fill_color=(0, 0, 0))
-    renderer = Renderer()
-    dpi = 150
-    zoom = dpi / 72.0
-    x0, y0, padding = renderer._cluster_frame([path])
-
-    # A pixel-space point at the padded top-left corner should map back to
-    # the cluster's own bbox origin in page space.
-    page_bbox = renderer.pixel_to_page_bbox(
-        [path], dpi, [(padding * zoom, padding * zoom), ((padding + 20) * zoom, (padding + 10) * zoom)],
-    )
-    assert page_bbox == pytest.approx((x0, y0, x0 + 20, y0 + 10))
-
-
 def _make_word(*, text="Hi", origin=(10, 20), font_size=10.0, angle=0.0, color=0x000000) -> TextWord:
     return TextWord(
         text=text, bbox=(origin[0], origin[1] - font_size, origin[0] + font_size, origin[1]),
@@ -93,7 +36,7 @@ def _make_word(*, text="Hi", origin=(10, 20), font_size=10.0, angle=0.0, color=0
 def test_render_reconstructed_page_size_matches_zoomed_page_meta():
     meta = PageMeta(index=0, number=1, mediabox=(0, 0, 200, 100), rotation=0, width=200, height=100)
 
-    image = Renderer().render_reconstructed_page(meta, zoom=2.0)
+    image = render_reconstructed_page(meta, zoom=2.0)
 
     assert image.size == (400, 200)
 
@@ -102,8 +45,8 @@ def test_render_reconstructed_page_draws_native_words():
     meta = PageMeta(index=0, number=1, mediabox=(0, 0, 200, 100), rotation=0, width=200, height=100)
     word = _make_word()
 
-    blank = Renderer().render_reconstructed_page(meta, zoom=2.0)
-    with_text = Renderer().render_reconstructed_page(meta, native_words=[word], zoom=2.0)
+    blank = render_reconstructed_page(meta, zoom=2.0)
+    with_text = render_reconstructed_page(meta, native_words=[word], zoom=2.0)
 
     assert blank.convert("L").getextrema() == (255, 255)
     darkest, _lightest = with_text.convert("L").getextrema()
@@ -118,7 +61,7 @@ def test_render_reconstructed_page_draws_drawing_vectors():
         stroke_width=2, dashed=False, page_index=0,
     )
 
-    image = Renderer().render_reconstructed_page(meta, drawing_vectors=[dv], zoom=2.0)
+    image = render_reconstructed_page(meta, drawing_vectors=[dv], zoom=2.0)
 
     darkest, _lightest = image.convert("L").getextrema()
     assert darkest < 255
@@ -132,7 +75,7 @@ def test_render_reconstructed_page_draws_ocr_results():
         bbox=(10, 10, 60, 30), ocr_bbox=None, rotation_used=0, page_index=0,
     )
 
-    image = Renderer().render_reconstructed_page(meta, ocr_results=[result], zoom=2.0)
+    image = render_reconstructed_page(meta, ocr_results=[result], zoom=2.0)
 
     darkest, _lightest = image.convert("L").getextrema()
     assert darkest < 255
@@ -148,16 +91,16 @@ def test_render_reconstructed_page_shrinks_ocr_text_to_fit_narrow_bbox():
         bbox=(10, 10, 30, 20), ocr_bbox=None, rotation_used=0, page_index=0,
     )
 
-    image = Renderer().render_reconstructed_page(meta, ocr_results=[result], zoom=2.0)
+    image = render_reconstructed_page(meta, ocr_results=[result], zoom=2.0)
 
     darkest, _lightest = image.convert("L").getextrema()
     assert darkest < 255
 
 
 def test_render_reconstructed_page_places_words_at_own_bboxes():
-    # When TextVectorResult.words is populated (e.g. Tesseract word-level
-    # detection), each word must be placed/scaled into its own bbox
-    # instead of stretching result.text across the whole cluster bbox.
+    # When TextVectorResult.words is populated, each word must be placed/
+    # scaled into its own bbox instead of stretching result.text across the
+    # whole cluster bbox.
     meta = PageMeta(index=0, number=1, mediabox=(0, 0, 200, 100), rotation=0, width=200, height=100)
     path = _make_path(kind="l", bbox=(10, 10, 90, 30), stroke_color=(0, 0, 0))
     result = TextVectorResult(
@@ -169,21 +112,17 @@ def test_render_reconstructed_page_places_words_at_own_bboxes():
         ],
     )
 
-    image = Renderer().render_reconstructed_page(meta, ocr_results=[result], zoom=2.0)
+    image = render_reconstructed_page(meta, ocr_results=[result], zoom=2.0)
 
     darkest, _lightest = image.convert("L").getextrema()
     assert darkest < 255
 
 
 def test_render_reconstructed_page_arbitrary_angle_text_does_not_raise():
-    # Previously rotation was snapped to the nearest multiple of 90 (the
-    # only angle insert_text's `rotate` param accepts); now it's applied
-    # via a morph matrix instead, so a non-quarter angle like 37deg must
-    # render without raising.
     meta = PageMeta(index=0, number=1, mediabox=(0, 0, 200, 100), rotation=0, width=200, height=100)
     word = _make_word(angle=37.0)
 
-    image = Renderer().render_reconstructed_page(meta, native_words=[word], zoom=2.0)
+    image = render_reconstructed_page(meta, native_words=[word], zoom=2.0)
 
     darkest, _lightest = image.convert("L").getextrema()
     assert darkest < 255
@@ -193,8 +132,6 @@ def test_render_reconstructed_page_skips_blank_text():
     meta = PageMeta(index=0, number=1, mediabox=(0, 0, 200, 100), rotation=0, width=200, height=100)
     blank_word = _make_word(text="   ")
 
-    # Must not raise (insert_text with empty text can be finicky) and must
-    # produce a blank page since there's nothing real to draw.
-    image = Renderer().render_reconstructed_page(meta, native_words=[blank_word], zoom=2.0)
+    image = render_reconstructed_page(meta, native_words=[blank_word], zoom=2.0)
 
     assert image.convert("L").getextrema() == (255, 255)

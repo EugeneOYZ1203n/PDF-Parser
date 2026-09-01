@@ -8,7 +8,6 @@ from PIL import Image
 from rastervec.OCR.Paddle_OCR.ocr_backend import OcrBox, OcrDetection
 from rastervec.OCR.Paddle_OCR.render_ocr import RenderOCR
 from rastervec.models import VectorPath
-from rastervec.renderer import Renderer
 
 # A real PaddleOCR round-trip needs its model weights (downloaded to
 # ~/.paddlex/official_models on first use, which needs network the very
@@ -63,7 +62,7 @@ def test_ocr_cluster_builds_words_from_backend_boxes(tmp_pdf_path):
     with Reader(path) as reader:
         rastervec_page = reader.get_page(0)
         cluster = _rect_cluster()
-        result = render_ocr.ocr_cluster(cluster, rastervec_page, Renderer(), dpi=150)
+        result = render_ocr.ocr_cluster(cluster, rastervec_page, dpi=150)
 
     assert result.text == "HELLO WORLD"
     assert result.words is not None
@@ -101,7 +100,7 @@ def test_ocr_cluster_bumps_dpi_so_tiny_cluster_still_renders_50px(tmp_pdf_path):
 
     with Reader(path) as reader:
         rastervec_page = reader.get_page(0)
-        render_ocr.ocr_cluster(tiny_cluster, rastervec_page, Renderer(), dpi=72)
+        render_ocr.ocr_cluster(tiny_cluster, rastervec_page, dpi=72)
 
     assert backend.last_image is not None
     assert min(backend.last_image.size) >= 50
@@ -120,7 +119,7 @@ def test_ocr_cluster_words_none_when_nothing_detected(tmp_pdf_path):
 
     with Reader(path) as reader:
         rastervec_page = reader.get_page(0)
-        result = render_ocr.ocr_cluster(_rect_cluster(), rastervec_page, Renderer(), dpi=150)
+        result = render_ocr.ocr_cluster(_rect_cluster(), rastervec_page, dpi=150)
 
     assert result.text == ""
     assert result.words is None
@@ -185,7 +184,7 @@ def test_ocr_cluster_end_to_end_on_vector_glyphs(tmp_pdf_path):
                 dashes=None, closed=True, layer=None, page_index=0,
             )
         ]
-        result = RenderOCR().ocr_cluster(cluster, rastervec_page, Renderer(), dpi=150)
+        result = RenderOCR().ocr_cluster(cluster, rastervec_page, dpi=150)
 
     assert result.page_index == 0
     assert result.bbox == (0, 0, 30, 30)
