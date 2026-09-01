@@ -18,7 +18,7 @@ straight from `rastervec.renderer`.
 from __future__ import annotations
 
 from rastervec.renderer._shapes import path_color_hex, replay_drawing_paths
-from rastervec.renderer.pdf import render_reconstructed_page
+from rastervec.renderer.pdf import render_reconstructed_page, render_reconstructed_pdf
 from rastervec.renderer.png import (
     cluster_frame_size,
     pixel_to_page_bbox,
@@ -31,6 +31,7 @@ __all__ = [
     "path_color_hex",
     "replay_drawing_paths",
     "render_reconstructed_page",
+    "render_reconstructed_pdf",
     "render_vector_cluster",
     "render_page_paths",
     "pixel_to_page_bbox",

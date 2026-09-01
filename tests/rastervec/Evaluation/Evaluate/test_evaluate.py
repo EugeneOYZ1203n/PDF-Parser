@@ -9,6 +9,7 @@ from rastervec.Evaluation.Evaluate.evaluate import (
     evaluate_pipeline,
     normalize_for_cer,
     same_word_bag,
+    split_labelset_by_source,
 )
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet
 from rastervec.models import ClusterOcrResult, DrawingVector, TextVectorResult, VectorPath
@@ -320,3 +321,34 @@ def test_evaluate_pipeline_textbox_grouping_none_when_omitted():
     result = evaluate_pipeline(labels, [], [])
 
     assert result.textbox_grouping is None
+
+
+def test_split_labelset_by_source_separates_and_preserves_pdf_path():
+    auto_a = LabelEntry(
+        page_index=0, cluster_bbox=(0, 0, 1, 1), cluster_signature="line:0:0:0",
+        text="a", source="auto",
+    )
+    manual_b = LabelEntry(
+        page_index=1, cluster_bbox=(2, 2, 3, 3), cluster_signature="1:2.0:2.0:3.0:3.0",
+        text="b", source="manual", expected_rotation=90,
+    )
+    labels = LabelSet(pdf_path="x.pdf", entries=[auto_a, manual_b])
+
+    split = split_labelset_by_source(labels)
+
+    assert set(split) == {"auto", "manual"}
+    assert [e.text for e in split["auto"].entries] == ["a"]
+    assert [e.text for e in split["manual"].entries] == ["b"]
+    assert split["auto"].pdf_path == "x.pdf"
+    assert split["manual"].pdf_path == "x.pdf"
+
+
+def test_split_labelset_by_source_empty_bucket_still_present():
+    only_auto = LabelEntry(
+        page_index=0, cluster_bbox=(0, 0, 1, 1), cluster_signature="line:0:0:0",
+        text="a", source="auto",
+    )
+    split = split_labelset_by_source(LabelSet(pdf_path="x.pdf", entries=[only_auto]))
+
+    assert split["manual"].entries == []
+    assert len(split["auto"].entries) == 1

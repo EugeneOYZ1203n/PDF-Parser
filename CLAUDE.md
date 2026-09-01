@@ -300,12 +300,18 @@ testable independently of the others (every stage's *output* is a plain dataclas
   mode a left-click-drag draws a rubber-band box that adds every intersecting cluster/path to the
   selection, or removes them all if they were already selected (one drag both selects and deselects
   an area); a click that barely moves still does the single-item toggle. `Ctrl+Z`
-  undoes the last group/ungroup. Right-click a cluster (cluster mode) to type its ground-truth text
-  and `expected_rotation` (turns green once labelled); hovering shows the assigned text.
-  `LabelEntry`s loaded from `--out` that match no live cluster (every `source="auto"` entry, plus
-  manual entries left stale by an edit) draw as dashed grey boxes, so the same window doubles as an
-  auto-label viewer. Save/window-close writes the label file — not unit-testable (a real Tk event
-  loop), smoke-test steps are in its own module docstring. `view_auto_labels.py`
+  undoes the last group/ungroup. Right-click a cluster (cluster mode) targets it in the **inline
+  label bar** below the toolbar — a persistent Text entry + Rotation dropdown + `Apply`/`Delete`
+  (an earlier version used chained `simpledialog` popups that could vanish behind the topmost hover
+  tooltip); `Apply` (or Enter) writes the manual `LabelEntry`, the bbox turns green. The `<`/`>`
+  buttons (or `PageUp`/`PageDown`) move between pages of the same PDF without relaunching — one
+  `LabelSet` spans every page (`_load_page` reruns `run_page_context` per page, `_page_entries()`
+  scopes overlays/hover/label-bar to the current `page_index`), and the labels are saved on every
+  page change. `LabelEntry`s loaded from `--out` that match no live cluster on the current page
+  (every `source="auto"` entry, plus manual entries left stale by an edit) draw as dashed grey
+  boxes, so the same window doubles as an auto-label viewer. Save/window-close writes the label
+  file — not unit-testable (a real Tk event loop), smoke-test steps are in its own module
+  docstring. `view_auto_labels.py`
   (`python -m rastervec.Evaluation.Labelling.view_auto_labels PDF --page N [--out labels.json]`)
   runs `auto_label_pdf`, merges its entries onto any existing `--out` file (default: a temp file),
   and opens `ManualLabelApp` on it.
@@ -329,7 +335,10 @@ testable independently of the others (every stage's *output* is a plain dataclas
   `ocr_failed` cluster (`"ocr_blank"`), else `"not_found"` (never appeared in any known bucket — a
   Conversion-fidelity gap or extraction issue, not a classification/OCR decision) — populated into
   `EvaluationResult.miss_attributions` (`list[MissAttribution]`, empty when `clustering` is
-  omitted, so passing none of these three keeps the exact old behavior).
+  omitted, so passing none of these three keeps the exact old behavior). `split_labelset_by_source`
+  (pure helper) splits a mixed-source `LabelSet` into `{"auto": …, "manual": …}` so a caller can
+  score auto-derived and human-entered ground truth as separate `evaluate_pipeline` runs (used by
+  the benchmark notebook).
 - **`Evaluation/Evaluate/benchmark.py`** *(implemented)* — the CLI wiring Conversion → auto_label →
   a real full pipeline run → `evaluate_pipeline` together: `python -m
   rastervec.Evaluation.Evaluate.benchmark --pdf PATH [--pdf PATH2 ...] --pages 0,1,2
@@ -340,10 +349,16 @@ testable independently of the others (every stage's *output* is a plain dataclas
   across every page) are pure and unit-tested; `main()`'s actual OCR-backed path is a manual smoke
   test only (same reasoning as `manual_label.py`'s Tk UI — real PaddleOCR, first run downloads
   models — matches the existing `RASTERVEC_RUN_OCR_TESTS`-gated convention for OCR-dependent
-  tests).
+  tests). `notebooks/benchmark_vector_classification.ipynb` is the interactive counterpart: it
+  scores the current (new) pipeline vs. the archive legacy (old) one via `legacy_adapter`, takes
+  either a PDF folder **or** a `manual_label.py` sidecar `.json` (`LABELS_JSON` — derives the
+  `(pdf, page)` pairs from the file, still runs `auto_label_pdf`), scores auto- and manual-source
+  ground truth separately via `split_labelset_by_source`, and writes per-page
+  `_groundtruth`/`_current`/`_legacy` reconstruction PDFs (`renderer.render_reconstructed_pdf`,
+  text-found + drawing vectors; legacy is text-only) into `RECONSTRUCT_DIR`.
 - **`renderer/` — module-level functions, no `Renderer` class** *(rendering helpers, not a pipeline
   stage)*: a package split by output concern — `png.py` (rasterize vector paths for OCR / FAST
-  input), `pdf.py` (`render_reconstructed_page`), `svg.py` (`render_page_svg`, a thin
+  input), `pdf.py` (`render_reconstructed_page`, `render_reconstructed_pdf`), `svg.py` (`render_page_svg`, a thin
   `get_svg_image()` wrapper), and `_shapes.py` (shared). Import straight from `rastervec.renderer`
   (`from rastervec.renderer import render_vector_cluster`, etc.).
   `_shapes.path_color_hex(path)` returns a path's real PDF stroke/fill color as hex (used by both the
@@ -378,9 +393,10 @@ testable independently of the others (every stage's *output* is a plain dataclas
   no isolation/padding, no rotation applied) — used as FAST's own detection input by
   `fast_text_detect` (see below).
   `pdf.render_reconstructed_page(page_meta, *, native_words=None, drawing_vectors=None,
-  ocr_results=None, zoom=1.0)` *(implemented, visualization-notebook preview — not OCR input, not
-  `evaluation.py`'s real reconstruction stage)*: redraws whatever elements are passed onto a fresh
-  blank page sized/rotated to match `page_meta`, then rasterizes at `zoom` the same way the
+  ocr_results=None, text_boxes=None, zoom=1.0)` *(implemented, visualization-notebook preview — not
+  OCR input, not `evaluation.py`'s real reconstruction stage)*: redraws whatever elements are passed
+  onto a fresh blank page sized/rotated to match `page_meta`, then rasterizes at `zoom` the same way
+  the
   notebook's `page_raster()` rasterizes the real page pixmap, so the two are pixel-comparable at the
   same zoom. `drawing_vectors` are redrawn from each `DrawingVector`'s own real member `VectorPath`s
   (via the shared `_shapes.replay_drawing_paths`, so multi-contour fills keep their holes here too),
@@ -408,7 +424,12 @@ testable independently of the others (every stage's *output* is a plain dataclas
   instead of turning it in place, drifting visibly off the bbox at any non-zero angle — a "does this
   look roughly right" preview, not a byte-accurate reconstruction. A
   blank/whitespace-only `text` is skipped outright (never handed to `insert_text`, which can be
-  finicky with empty strings).
+  finicky with empty strings). `text_boxes` is a generic
+  `list[tuple[text, bbox, rotation]]` fed through the same `_place_text` path — the ground-truth
+  reconstruction (label text) uses it, keeping the renderer decoupled from `label_schema`. Both
+  `render_reconstructed_page` and `pdf.render_reconstructed_pdf(...) -> bytes` (the PDF-bytes
+  variant, for a selectable-text comparison file — used by the benchmark notebook) share one
+  private `_build_reconstructed_doc`.
 - **`pipeline.py`** — shared stage-running machinery, used by the CLI (`main()` in this file),
   `run_page_context`, and the visualization notebook. `PipelineContext` accumulates state across
   stages for one page run: `page`,

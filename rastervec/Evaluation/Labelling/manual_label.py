@@ -27,13 +27,22 @@ added to the selection, or -- if all of them were already selected --
 removed from it, so the same drag both selects and deselects an area.
 
 `Ctrl+Z` undoes the last group/ungroup. Right-click a cluster (cluster
-mode) to type its ground-truth text and expected rotation. Hovering a
-cluster shows its assigned text.
+mode) to target it in the inline label bar below the toolbar -- a Text
+entry + a Rotation dropdown that stay visible (an earlier version used
+chained `simpledialog` popups that could vanish behind the topmost hover
+tooltip); `Apply` (or Enter in the Text entry) writes the `LabelEntry`,
+`Delete` removes it. Hovering a cluster shows its assigned text.
+
+The `<` / `>` buttons (or `PageUp` / `PageDown`) move between pages of the
+same PDF without relaunching; the current labels are saved on every page
+change, and one `LabelSet` covers every page (each `LabelEntry` carries
+its own `page_index`), so overlays, hover and the label bar only ever act
+on the page currently shown.
 
 `LabelEntry`s loaded from `--out` whose signature matches no current
-cluster (every `source="auto"` entry, plus manual entries left stale by
-an edit) are drawn as dashed grey boxes, so this same window doubles as
-an auto-label viewer -- see `view_auto_labels.py`.
+cluster on the current page (every `source="auto"` entry, plus manual
+entries left stale by an edit) are drawn as dashed grey boxes, so this
+same window doubles as an auto-label viewer -- see `view_auto_labels.py`.
 
 Not unit-testable (a real Tk event loop). Smoke-test manually:
 
@@ -51,11 +60,16 @@ Not unit-testable (a real Tk event loop). Smoke-test manually:
 3. Switch to path mode, click or drag-box a few paths, `Group` -- a new
    cluster of exactly those paths; the clusters they came from lose them
    (empty ones vanish). `Ctrl+Z` reverts.
-4. Right-click a cluster -- type text, then a rotation -- the bbox turns
-   green; hovering it shows `"<text>"  rot=<n>`.
-5. Click "Save" (or close the window) to write `labels.json` via
-   `label_schema.save_labels`. Re-running against the same PDF/page
-   loads existing labels at `--out` first, so a session can be resumed
+4. Right-click a cluster -- the label bar shows it as the target; type
+   text, pick a rotation, `Apply` -- the bbox turns green; hovering it
+   shows `"<text>"  rot=<n>`. The Text/Rotation fields stay on screen the
+   whole time.
+5. Click `>` -- the next page loads (title shows `page 2/N`); its own
+   clusters appear and the label bar resets. Label something, click `<`
+   back -- the page-1 labels are still there.
+6. Click "Save" (or close the window) to write `labels.json` via
+   `label_schema.save_labels`. Re-running against the same PDF loads
+   existing labels at `--out` first, so a session can be resumed
    (edited-cluster signatures won't re-match, so those show as dashed
    grey boxes on reload).
 """
@@ -64,7 +78,7 @@ from __future__ import annotations
 import argparse
 import tkinter as tk
 from pathlib import Path
-from tkinter import simpledialog, ttk
+from tkinter import ttk
 
 import pymupdf as fitz
 
@@ -166,23 +180,12 @@ def _bbox_area(bbox) -> float:
 class ManualLabelApp:
     def __init__(self, pdf_path: str, page_index: int, out_path: str) -> None:
         self.pdf_path = pdf_path
-        self.page_index = page_index
         self.out_path = out_path
 
         self.reader = Reader(pdf_path)
-        ctx = run_page_context(self.reader, page_index, final_stage="text_candidates")
-        self.ctx = ctx
 
-        # Mutable working list -- all rendering/hit-testing/labelling uses this.
-        # The pipeline's own cluster lists are referenced directly (never
-        # mutated in place -- every edit builds new lists) so their id() still
-        # matches ctx.cluster_groups keys for Ungroup.
-        self.working_clusters: list[list[VectorPath]] = [
-            cluster for cluster in (ctx.text_clusters or []) if cluster
-        ]
-        # id(original cluster) -> its pre-spatial "groups", for Ungroup.
-        self._lineage: dict[int, list[list[VectorPath]]] = dict(ctx.cluster_groups or {})
-
+        # One LabelSet covers every page of the PDF -- each LabelEntry
+        # carries its own page_index, so a page switch never rewrites it.
         self.labels = (
             load_labels(out_path) if Path(out_path).exists()
             else LabelSet(pdf_path=pdf_path)
@@ -194,16 +197,55 @@ class ManualLabelApp:
         self._drag_moved = False
         self._drag_rect_id: int | None = None
         self._undo_stack: list[list[list[VectorPath]]] = []
+        # (cluster_signature, cluster_bbox) the label bar currently edits.
+        self._label_target: tuple[str, tuple[float, float, float, float]] | None = None
         self.zoom = _ZOOM
-        self.matrix = _get_display_matrix(ctx.page.fitz_page, self.zoom)
 
         self.root = tk.Tk()
-        self.root.title(f"Manual Label -- {Path(pdf_path).name} page {page_index}")
         self.tooltip = Tooltip(self.root)
 
         self._build_layout()
         self._bind_events()
+        self._load_page(page_index)
+
+    # ---- per-page state -------------------------------------------------
+
+    def _load_page(self, page_index: int) -> None:
+        """(Re)run the pipeline through Text Candidates for `page_index` and
+        rebuild every per-page working structure. `self.reader`, `self.labels`
+        and the Tk widgets outlive this."""
+        self.page_index = max(0, min(self.reader.page_count() - 1, page_index))
+        self.ctx = run_page_context(
+            self.reader, self.page_index, final_stage="text_candidates"
+        )
+
+        # Mutable working list -- all rendering/hit-testing/labelling uses this.
+        # The pipeline's own cluster lists are referenced directly (never
+        # mutated in place -- every edit builds new lists) so their id() still
+        # matches ctx.cluster_groups keys for Ungroup.
+        self.working_clusters: list[list[VectorPath]] = [
+            cluster for cluster in (self.ctx.text_clusters or []) if cluster
+        ]
+        # id(original cluster) -> its pre-spatial "groups", for Ungroup.
+        self._lineage: dict[int, list[list[VectorPath]]] = dict(
+            self.ctx.cluster_groups or {}
+        )
+
+        self.selected.clear()
+        self._undo_stack.clear()
+        self.matrix = _get_display_matrix(self.ctx.page.fitz_page, self.zoom)
+
+        self.root.title(
+            f"Manual Label -- {Path(self.pdf_path).name} "
+            f"page {self.page_index + 1}/{self.reader.page_count()}"
+        )
+        self._sync_page_entry()
+        self._clear_label_panel()
         self._render()
+
+    def _page_entries(self) -> list[LabelEntry]:
+        """Label entries for the page currently shown."""
+        return [e for e in self.labels.entries if e.page_index == self.page_index]
 
     # ---- layout ---------------------------------------------------------
 
@@ -234,8 +276,43 @@ class ManualLabelApp:
         ttk.Button(bar, text="Ungroup", command=self._ungroup).pack(side=tk.LEFT, padx=2)
         ttk.Button(bar, text="Clear selection", command=self._clear_selection).pack(side=tk.LEFT, padx=2)
 
+        ttk.Separator(bar, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=8)
+
+        ttk.Button(bar, text="<", width=3, command=lambda: self._change_page(-1)).pack(side=tk.LEFT, padx=1)
+        self._page_var = tk.StringVar(value="1")
+        page_entry = ttk.Entry(bar, textvariable=self._page_var, width=4, justify="center")
+        page_entry.pack(side=tk.LEFT)
+        page_entry.bind("<Return>", self._on_page_entry_return)
+        self._page_count_label = ttk.Label(bar, text="/ 1")
+        self._page_count_label.pack(side=tk.LEFT, padx=(1, 1))
+        ttk.Button(bar, text=">", width=3, command=lambda: self._change_page(1)).pack(side=tk.LEFT, padx=1)
+
         self._status = ttk.Label(bar, text="")
         self._status.pack(side=tk.RIGHT, padx=8)
+
+        # ---- inline label bar (replaces the old simpledialog popups) ----
+        label_bar = ttk.Frame(self.root)
+        label_bar.pack(side=tk.TOP, fill=tk.X)
+
+        ttk.Label(label_bar, text="Label:").pack(side=tk.LEFT, padx=(4, 2))
+        self._label_target_lbl = ttk.Label(label_bar, text="(right-click a cluster)", width=28)
+        self._label_target_lbl.pack(side=tk.LEFT)
+
+        ttk.Label(label_bar, text="Text").pack(side=tk.LEFT, padx=(8, 2))
+        self._text_var = tk.StringVar()
+        self._text_entry = ttk.Entry(label_bar, textvariable=self._text_var, width=44)
+        self._text_entry.pack(side=tk.LEFT)
+        self._text_entry.bind("<Return>", lambda _e: self._apply_label())
+
+        ttk.Label(label_bar, text="Rot").pack(side=tk.LEFT, padx=(8, 2))
+        self._rot_var = tk.StringVar(value="0")
+        ttk.Combobox(
+            label_bar, textvariable=self._rot_var, width=5, state="readonly",
+            values=("0", "90", "180", "270"),
+        ).pack(side=tk.LEFT)
+
+        ttk.Button(label_bar, text="Apply", command=self._apply_label).pack(side=tk.LEFT, padx=(8, 2))
+        ttk.Button(label_bar, text="Delete", command=self._delete_label).pack(side=tk.LEFT, padx=2)
 
         canvas_frame = ttk.Frame(self.root)
         canvas_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -264,6 +341,8 @@ class ManualLabelApp:
         self.canvas.bind("<Control-MouseWheel>", self._on_ctrl_wheel)
         self.root.bind("<Control-z>", lambda _e: self._undo())
         self.root.bind("<Escape>", lambda _e: self._clear_selection())
+        self.root.bind("<Next>", lambda _e: self._change_page(1))
+        self.root.bind("<Prior>", lambda _e: self._change_page(-1))
 
     # ---- coordinate helpers -------------------------------------------
 
@@ -288,7 +367,8 @@ class ManualLabelApp:
         self.canvas.create_image(0, 0, anchor="nw", image=self._photo)
         self.canvas.config(scrollregion=(0, 0, pix.width, pix.height))
 
-        labelled = {e.cluster_signature for e in self.labels.entries}
+        page_entries = self._page_entries()
+        labelled = {e.cluster_signature for e in page_entries}
         live_sigs = set()
 
         if self.mode == "cluster":
@@ -319,7 +399,7 @@ class ManualLabelApp:
             live_sigs = {cluster_signature(c) for c in self.working_clusters if c}
 
         # Entries with no matching live cluster (auto labels, stale manual edits).
-        for entry in self.labels.entries:
+        for entry in page_entries:
             if entry.cluster_signature in live_sigs:
                 continue
             rect = fitz.Rect(entry.cluster_bbox) * self.matrix
@@ -331,7 +411,8 @@ class ManualLabelApp:
         self.zoom_label.config(text=f"{round(self.zoom * 100)}%")
         self._status.config(
             text=f"{self.mode} mode  |  {len(self.working_clusters)} clusters  "
-                 f"|  {len(self.selected)} selected  |  {len(self.labels.entries)} labels"
+                 f"|  {len(self.selected)} selected  |  {len(page_entries)} labels "
+                 f"(page)  |  {len(self.labels.entries)} total"
         )
 
     # ---- mode / zoom -------------------------------------------------
@@ -357,6 +438,30 @@ class ManualLabelApp:
 
     def _on_ctrl_wheel(self, event: "tk.Event") -> None:
         self._change_zoom(1 if event.delta > 0 else -1)
+
+    # ---- page navigation -------------------------------------------------
+
+    def _sync_page_entry(self) -> None:
+        self._page_var.set(str(self.page_index + 1))
+        self._page_count_label.config(text=f"/ {self.reader.page_count()}")
+
+    def _change_page(self, delta: int) -> None:
+        self._goto_page(self.page_index + delta)
+
+    def _on_page_entry_return(self, _event: "tk.Event") -> None:
+        try:
+            self._goto_page(int(self._page_var.get()) - 1)
+        except ValueError:
+            self._sync_page_entry()
+
+    def _goto_page(self, new_index: int) -> None:
+        new_index = max(0, min(self.reader.page_count() - 1, new_index))
+        if new_index == self.page_index:
+            self._sync_page_entry()
+            return
+        self.save()  # persist the current page's labels before switching
+        self.tooltip.hide()
+        self._load_page(new_index)
 
     # ---- selection / editing --------------------------------------------
 
@@ -462,7 +567,7 @@ class ManualLabelApp:
             chosen = [self.working_clusters[i] for i in sorted(self.selected)]
             merged: list[VectorPath] = [p for cluster in chosen for p in cluster]
             carried = next((c for c in chosen if cluster_signature(c) in
-                            {e.cluster_signature for e in self.labels.entries}), None)
+                            {e.cluster_signature for e in self._page_entries()}), None)
             self.working_clusters = [
                 c for i, c in enumerate(self.working_clusters) if i not in self.selected
             ]
@@ -508,13 +613,22 @@ class ManualLabelApp:
     # ---- labelling ----------------------------------------------------
 
     def _retarget_entry(self, old_sig: str, cluster: list[VectorPath]) -> None:
-        for entry in self.labels.entries:
+        for entry in self._page_entries():
             if entry.cluster_signature == old_sig:
                 entry.cluster_signature = cluster_signature(cluster)
                 entry.cluster_bbox = self._cluster_bbox(cluster)
                 break
 
+    # ---- inline label bar ------------------------------------------------
+
+    def _clear_label_panel(self) -> None:
+        self._label_target = None
+        self._label_target_lbl.config(text="(right-click a cluster)")
+        self._text_var.set("")
+        self._rot_var.set("0")
+
     def _on_right_click(self, event: "tk.Event") -> None:
+        self.tooltip.hide()
         if self.mode != "cluster":
             return
         pt = self._page_point(event)
@@ -527,35 +641,61 @@ class ManualLabelApp:
             return
         sig = cluster_signature(hit)
         bbox = self._cluster_bbox(hit)
-        existing = next((e for e in self.labels.entries if e.cluster_signature == sig), None)
-
-        text = simpledialog.askstring(
-            "Label cluster", "Ground-truth text:", parent=self.root,
-            initialvalue=existing.text if existing else "",
+        self._label_target = (sig, bbox)
+        existing = next((e for e in self._page_entries() if e.cluster_signature == sig), None)
+        self._text_var.set(existing.text if existing else "")
+        self._rot_var.set(str(existing.expected_rotation if existing else 0))
+        self._label_target_lbl.config(
+            text=f"cluster @ ({bbox[0]:.0f}, {bbox[1]:.0f})  {len(hit)} path(s)"
         )
-        if text is None:
+        self._text_entry.focus_set()
+        self._text_entry.selection_range(0, tk.END)
+
+    def _matching_entry_index(self, sig: str) -> int | None:
+        for i, entry in enumerate(self.labels.entries):
+            if entry.page_index == self.page_index and entry.cluster_signature == sig:
+                return i
+        return None
+
+    def _apply_label(self) -> None:
+        if self._label_target is None:
             return
-        rotation = simpledialog.askinteger(
-            "Label cluster", "Expected rotation (deg, 0/90/180/270):", parent=self.root,
-            initialvalue=existing.expected_rotation if existing else 0,
-        )
-        if rotation is None:
+        sig, bbox = self._label_target
+        text = self._text_var.get().strip()
+        if not text:
+            return  # nothing to write; use Delete to remove an existing label
+        try:
+            rotation = int(self._rot_var.get())
+        except ValueError:
             rotation = 0
-
-        self.labels.entries = [e for e in self.labels.entries if e.cluster_signature != sig]
-        self.labels.entries.append(
-            LabelEntry(
-                page_index=self.page_index, cluster_bbox=bbox, cluster_signature=sig,
-                text=text, source="manual", expected_rotation=rotation,
-            )
+        entry = LabelEntry(
+            page_index=self.page_index, cluster_bbox=bbox, cluster_signature=sig,
+            text=text, source="manual", expected_rotation=rotation,
         )
+        existing = self._matching_entry_index(sig)
+        if existing is not None:
+            self.labels.entries[existing] = entry
+        else:
+            self.labels.entries.append(entry)
+        self._render()
+
+    def _delete_label(self) -> None:
+        if self._label_target is None:
+            return
+        sig, _bbox = self._label_target
+        existing = self._matching_entry_index(sig)
+        if existing is None:
+            return
+        del self.labels.entries[existing]
+        self._text_var.set("")
         self._render()
 
     # ---- hover -------------------------------------------------------
 
     def _on_motion(self, event: "tk.Event") -> None:
         pt = self._page_point(event)
-        entries_by_sig = {e.cluster_signature: e for e in self.labels.entries}
+        page_entries = self._page_entries()
+        entries_by_sig = {e.cluster_signature: e for e in page_entries}
 
         if self.mode == "cluster":
             for cluster in self.working_clusters:
@@ -578,7 +718,7 @@ class ManualLabelApp:
                 self.tooltip.show(event.x_root, event.y_root, f"{hit.kind}  seq={hit.seq}")
                 return
 
-        for entry in self.labels.entries:
+        for entry in page_entries:
             if entry.cluster_signature in entries_by_sig and _bbox_contains(
                 entry.cluster_bbox, pt.x, pt.y
             ):

@@ -9,7 +9,10 @@ this is just:
     auto_label_pdf -> save_labels(<out>) -> ManualLabelApp(pdf, page, <out>)
 
 The same window still shows the real text-candidate clusters, so you can
-right-click one to add a manual label into the very same file.
+right-click one to add a manual label into the very same file. Auto labels
+are only pre-merged for `--page`; if you use the window's `<`/`>` page
+navigation to move to another page, its clusters show but no auto boxes
+until you re-run this against that page.
 
 Not unit-testable (a real Tk event loop). Smoke-test manually:
 

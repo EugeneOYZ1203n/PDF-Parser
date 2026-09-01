@@ -73,7 +73,7 @@ import difflib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet
+from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet, LabelSource
 from rastervec.helpers.geometry import bbox_iou, union_bbox
 from rastervec.models import ClusterOcrResult, DrawingVector, VectorPath
 from rastervec.OCR.Rotation_Correction.rotation_correction import RotationCheck
@@ -150,6 +150,21 @@ def same_word_bag(a: str, b: str) -> bool:
     tokens_a = tuple(sorted(a.lower().split()))
     tokens_b = tuple(sorted(b.lower().split()))
     return bool(tokens_a) and tokens_a == tokens_b
+
+
+def split_labelset_by_source(labels: LabelSet) -> dict[LabelSource, LabelSet]:
+    """Split a mixed-source `LabelSet` into one `LabelSet` per `source`
+    ("auto"/"manual"), each key always present (entries may be empty),
+    `pdf_path` preserved -- so a caller can score auto-derived and
+    human-entered ground truth as separate `evaluate_pipeline` runs with
+    separate accuracy statistics."""
+    return {
+        source: LabelSet(
+            pdf_path=labels.pdf_path,
+            entries=[e for e in labels.entries if e.source == source],
+        )
+        for source in ("auto", "manual")
+    }
 
 
 def classify_textbox_grouping(

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import pymupdf as fitz
+
 from rastervec.models import DrawingVector, OcrWord, PageMeta, TextVectorResult, TextWord, VectorPath
-from rastervec.renderer import render_reconstructed_page
+from rastervec.renderer import render_reconstructed_page, render_reconstructed_pdf
 
 
 def _make_path(
@@ -135,3 +137,50 @@ def test_render_reconstructed_page_skips_blank_text():
     image = render_reconstructed_page(meta, native_words=[blank_word], zoom=2.0)
 
     assert image.convert("L").getextrema() == (255, 255)
+
+
+def test_render_reconstructed_page_draws_text_boxes():
+    meta = PageMeta(index=0, number=1, mediabox=(0, 0, 200, 100), rotation=0, width=200, height=100)
+
+    blank = render_reconstructed_page(meta, zoom=2.0)
+    with_text = render_reconstructed_page(
+        meta, text_boxes=[("Ground truth", (10, 10, 120, 30), 0.0)], zoom=2.0,
+    )
+
+    assert blank.convert("L").getextrema() == (255, 255)
+    darkest, _lightest = with_text.convert("L").getextrema()
+    assert darkest < 255
+
+
+def test_render_reconstructed_pdf_returns_openable_pdf_with_text_and_drawings():
+    meta = PageMeta(index=0, number=1, mediabox=(0, 0, 200, 100), rotation=0, width=200, height=100)
+    path = _make_path(kind="l", bbox=(10, 40, 90, 40), stroke_color=(0, 0, 0), stroke_width=2)
+    dv = DrawingVector(
+        paths=[path], bbox=path.bbox, stroke_color=(0, 0, 0), fill_color=None,
+        stroke_width=2, dashed=False, page_index=0,
+    )
+
+    pdf_bytes = render_reconstructed_pdf(
+        meta,
+        text_boxes=[("HELLO", (10, 10, 90, 30), 0.0)],
+        drawing_vectors=[dv],
+    )
+
+    doc = fitz.open("pdf", pdf_bytes)
+    try:
+        assert doc.page_count == 1
+        page = doc[0]
+        assert "HELLO" in page.get_text()
+        assert len(page.get_drawings()) >= 1
+    finally:
+        doc.close()
+
+
+def test_render_reconstructed_pdf_page_size_matches_page_meta():
+    meta = PageMeta(index=0, number=1, mediabox=(0, 0, 200, 100), rotation=0, width=200, height=100)
+
+    doc = fitz.open("pdf", render_reconstructed_pdf(meta))
+    try:
+        assert (round(doc[0].rect.width), round(doc[0].rect.height)) == (200, 100)
+    finally:
+        doc.close()
