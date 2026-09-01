@@ -296,7 +296,10 @@ testable independently of the others (every stage's *output* is a plain dataclas
   zoom, and two edit modes — **cluster mode** (left-click toggles a whole cluster; `Group` merges
   the selected clusters, `Ungroup` splits one back into its pre-spatial `ctx.cluster_groups`
   "groups", or one-path-per-cluster if it was already edited) and **path mode** (left-click toggles
-  an individual `VectorPath`; `Group` builds a new cluster from exactly the selected paths). `Ctrl+Z`
+  an individual `VectorPath`; `Group` builds a new cluster from exactly the selected paths). In either
+  mode a left-click-drag draws a rubber-band box that adds every intersecting cluster/path to the
+  selection, or removes them all if they were already selected (one drag both selects and deselects
+  an area); a click that barely moves still does the single-item toggle. `Ctrl+Z`
   undoes the last group/ungroup. Right-click a cluster (cluster mode) to type its ground-truth text
   and `expected_rotation` (turns green once labelled); hovering shows the assigned text.
   `LabelEntry`s loaded from `--out` that match no live cluster (every `source="auto"` entry, plus

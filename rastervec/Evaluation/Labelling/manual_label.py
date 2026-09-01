@@ -21,6 +21,11 @@ edit modes:
   builds a brand-new cluster from exactly the selected paths, pulling
   each out of whatever cluster currently owns it.
 
+Instead of a single click you can also left-click-drag a rubber-band box:
+every cluster/path (mode-dependent) whose bbox intersects the box is
+added to the selection, or -- if all of them were already selected --
+removed from it, so the same drag both selects and deselects an area.
+
 `Ctrl+Z` undoes the last group/ungroup. Right-click a cluster (cluster
 mode) to type its ground-truth text and expected rotation. Hovering a
 cluster shows its assigned text.
@@ -41,9 +46,11 @@ Not unit-testable (a real Tk event loop). Smoke-test manually:
    stay aligned with the page on a rotated page.
 2. In cluster mode click two adjacent clusters (they turn orange) then
    `Group` -- one merged bbox. Select it and `Ungroup` -- it splits back.
-3. Switch to path mode, click a few paths, `Group` -- a new cluster of
-   exactly those paths; the clusters they came from lose them (empty
-   ones vanish). `Ctrl+Z` reverts.
+   Drag a box across several clusters -- all turn orange; drag the same
+   box again -- they all clear.
+3. Switch to path mode, click or drag-box a few paths, `Group` -- a new
+   cluster of exactly those paths; the clusters they came from lose them
+   (empty ones vanish). `Ctrl+Z` reverts.
 4. Right-click a cluster -- type text, then a rotation -- the bbox turns
    green; hovering it shows `"<text>"  rot=<n>`.
 5. Click "Save" (or close the window) to write `labels.json` via
@@ -144,6 +151,14 @@ def _bbox_contains(bbox, x: float, y: float) -> bool:
     return bbox[0] <= x <= bbox[2] and bbox[1] <= y <= bbox[3]
 
 
+def _bboxes_intersect(a, b) -> bool:
+    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
+
+
+# Canvas-pixel movement below which a press/release is treated as a plain click.
+_DRAG_THRESHOLD_PX = 4
+
+
 def _bbox_area(bbox) -> float:
     return max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
 
@@ -175,6 +190,9 @@ class ManualLabelApp:
 
         self.mode = "cluster"
         self.selected: set[int] = set()
+        self._drag_start: tuple[float, float] | None = None
+        self._drag_moved = False
+        self._drag_rect_id: int | None = None
         self._undo_stack: list[list[list[VectorPath]]] = []
         self.zoom = _ZOOM
         self.matrix = _get_display_matrix(ctx.page.fitz_page, self.zoom)
@@ -235,7 +253,9 @@ class ManualLabelApp:
 
     def _bind_events(self) -> None:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.canvas.bind("<Button-1>", self._on_left_click)
+        self.canvas.bind("<Button-1>", self._on_left_press)
+        self.canvas.bind("<B1-Motion>", self._on_left_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_left_release)
         self.canvas.bind("<Button-3>", self._on_right_click)
         self.canvas.bind("<Motion>", self._on_motion)
         self.canvas.bind("<Leave>", lambda _e: self.tooltip.hide())
@@ -356,8 +376,45 @@ class ManualLabelApp:
         self.selected.clear()
         self._render()
 
-    def _on_left_click(self, event: "tk.Event") -> None:
-        pt = self._page_point(event)
+    def _on_left_press(self, event: "tk.Event") -> None:
+        self._drag_start = (self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
+        self._drag_moved = False
+
+    def _on_left_drag(self, event: "tk.Event") -> None:
+        if self._drag_start is None:
+            return
+        x0, y0 = self._drag_start
+        x1, y1 = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        if not self._drag_moved and (
+            abs(x1 - x0) < _DRAG_THRESHOLD_PX and abs(y1 - y0) < _DRAG_THRESHOLD_PX
+        ):
+            return
+        self._drag_moved = True
+        if self._drag_rect_id is not None:
+            self.canvas.delete(self._drag_rect_id)
+        self._drag_rect_id = self.canvas.create_rectangle(
+            x0, y0, x1, y1, outline=_SELECTED_COLOR, width=1, dash=(3, 2),
+            tags=("selrect",),
+        )
+
+    def _on_left_release(self, event: "tk.Event") -> None:
+        start = self._drag_start
+        self._drag_start = None
+        if self._drag_rect_id is not None:
+            self.canvas.delete(self._drag_rect_id)
+            self._drag_rect_id = None
+        if start is None:
+            return
+        cx, cy = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        if not self._drag_moved:
+            self._click_select(fitz.Point(cx, cy) * ~self.matrix)
+            return
+        inv = ~self.matrix
+        p0, p1 = fitz.Point(*start) * inv, fitz.Point(cx, cy) * inv
+        rect = (min(p0.x, p1.x), min(p0.y, p1.y), max(p0.x, p1.x), max(p0.y, p1.y))
+        self._area_select(rect)
+
+    def _click_select(self, pt: "fitz.Point") -> None:
         if self.mode == "cluster":
             for idx, cluster in enumerate(self.working_clusters):
                 if cluster and _bbox_contains(self._cluster_bbox(cluster), pt.x, pt.y):
@@ -371,6 +428,30 @@ class ManualLabelApp:
                         hit = path
             if hit is not None:
                 self.selected.symmetric_difference_update({id(hit)})
+        self._render()
+
+    def _items_in_rect(self, rect) -> set[int]:
+        """Selection keys (cluster index / id(path)) whose bbox intersects `rect`."""
+        hits: set[int] = set()
+        if self.mode == "cluster":
+            for idx, cluster in enumerate(self.working_clusters):
+                if cluster and _bboxes_intersect(self._cluster_bbox(cluster), rect):
+                    hits.add(idx)
+        else:
+            for _ci, path in self._iter_paths():
+                if _bboxes_intersect(path.bbox, rect):
+                    hits.add(id(path))
+        return hits
+
+    def _area_select(self, rect) -> None:
+        hits = self._items_in_rect(rect)
+        if not hits:
+            return
+        # All-selected area -> deselect it; otherwise add it to the selection.
+        if hits <= self.selected:
+            self.selected -= hits
+        else:
+            self.selected |= hits
         self._render()
 
     def _group(self) -> None:
