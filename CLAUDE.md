@@ -300,10 +300,14 @@ testable independently of the others (every stage's *output* is a plain dataclas
   mode a left-click-drag draws a rubber-band box that adds every intersecting cluster/path to the
   selection, or removes them all if they were already selected (one drag both selects and deselects
   an area); a click that barely moves still does the single-item toggle. `Ctrl+Z`
-  undoes the last group/ungroup. Right-click a cluster (cluster mode) targets it in the **inline
-  label bar** below the toolbar — a persistent Text entry + Rotation dropdown + `Apply`/`Delete`
-  (an earlier version used chained `simpledialog` popups that could vanish behind the topmost hover
-  tooltip); `Apply` (or Enter) writes the manual `LabelEntry`, the bbox turns green. The `<`/`>`
+  undoes the last group/ungroup. The **inline label bar** below the toolbar — a persistent Text
+  entry + Rotation dropdown + `Apply`/`Delete` (an earlier version used chained `simpledialog`
+  popups that could vanish behind the topmost hover tooltip) — writes to `_label_targets()`:
+  **every selected cluster** (one `Apply` labels them all with the same text+rotation) or, if
+  nothing is selected, the **single** cluster right-clicked (which drops any selection and
+  pre-fills the fields from its existing label). `Apply` (or Enter) upserts the manual
+  `LabelEntry`(s), then clears the selection, empties Text and resets Rotation to 0; `Delete`
+  removes the targeted label(s) the same way. The `<`/`>`
   buttons (or `PageUp`/`PageDown`) move between pages of the same PDF without relaunching — one
   `LabelSet` spans every page (`_load_page` reruns `run_page_context` per page, `_page_entries()`
   scopes overlays/hover/label-bar to the current `page_index`), and the labels are saved on every

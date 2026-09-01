@@ -26,12 +26,18 @@ every cluster/path (mode-dependent) whose bbox intersects the box is
 added to the selection, or -- if all of them were already selected --
 removed from it, so the same drag both selects and deselects an area.
 
-`Ctrl+Z` undoes the last group/ungroup. Right-click a cluster (cluster
-mode) to target it in the inline label bar below the toolbar -- a Text
-entry + a Rotation dropdown that stay visible (an earlier version used
-chained `simpledialog` popups that could vanish behind the topmost hover
-tooltip); `Apply` (or Enter in the Text entry) writes the `LabelEntry`,
-`Delete` removes it. Hovering a cluster shows its assigned text.
+`Ctrl+Z` undoes the last group/ungroup. The inline label bar below the
+toolbar -- a Text entry + a Rotation dropdown that stay visible (an
+earlier version used chained `simpledialog` popups that could vanish
+behind the topmost hover tooltip) -- writes to whichever clusters are
+currently targeted: **every selected cluster** (left-click / rubber-band
+in cluster mode -- one `Apply` labels them all with the same text +
+rotation), or a **single** cluster you right-click (which drops any
+selection and pre-fills the fields from its existing label). `Apply` (or
+Enter in the Text entry) writes the `LabelEntry`(s) then clears the
+selection, empties the Text field and resets Rotation to 0; `Delete`
+removes the targeted label(s) the same way. Hovering a cluster shows its
+assigned text.
 
 The `<` / `>` buttons (or `PageUp` / `PageDown`) move between pages of the
 same PDF without relaunching; the current labels are saved on every page
@@ -61,9 +67,11 @@ Not unit-testable (a real Tk event loop). Smoke-test manually:
    cluster of exactly those paths; the clusters they came from lose them
    (empty ones vanish). `Ctrl+Z` reverts.
 4. Right-click a cluster -- the label bar shows it as the target; type
-   text, pick a rotation, `Apply` -- the bbox turns green; hovering it
-   shows `"<text>"  rot=<n>`. The Text/Rotation fields stay on screen the
-   whole time.
+   text, pick a rotation, `Apply` -- the bbox turns green, the selection
+   clears and the fields reset (Text empty, Rotation 0); hovering it shows
+   `"<text>"  rot=<n>`. The Text/Rotation fields stay on screen the whole
+   time. Select several clusters instead (no right-click) and `Apply` --
+   every one of them gets that same label.
 5. Click `>` -- the next page loads (title shows `page 2/N`); its own
    clusters appear and the label bar resets. Label something, click `<`
    back -- the page-1 labels are still there.
@@ -414,6 +422,7 @@ class ManualLabelApp:
                  f"|  {len(self.selected)} selected  |  {len(page_entries)} labels "
                  f"(page)  |  {len(self.labels.entries)} total"
         )
+        self._refresh_label_hint()
 
     # ---- mode / zoom -------------------------------------------------
 
@@ -623,9 +632,23 @@ class ManualLabelApp:
 
     def _clear_label_panel(self) -> None:
         self._label_target = None
-        self._label_target_lbl.config(text="(right-click a cluster)")
         self._text_var.set("")
         self._rot_var.set("0")
+        self._refresh_label_hint()
+
+    def _refresh_label_hint(self) -> None:
+        """Keep the label-bar's target text in sync: an explicit right-click
+        target wins, else a cluster-mode selection (Apply labels all of it),
+        else the idle prompt."""
+        if self._label_target is not None:
+            sig, bbox = self._label_target
+            self._label_target_lbl.config(text=f"1 cluster @ ({bbox[0]:.0f}, {bbox[1]:.0f})")
+        elif self.mode == "cluster" and self.selected:
+            self._label_target_lbl.config(
+                text=f"{len(self.selected)} selected cluster(s) — Apply labels all"
+            )
+        else:
+            self._label_target_lbl.config(text="(right-click or select clusters)")
 
     def _on_right_click(self, event: "tk.Event") -> None:
         self.tooltip.hide()
@@ -641,13 +664,14 @@ class ManualLabelApp:
             return
         sig = cluster_signature(hit)
         bbox = self._cluster_bbox(hit)
+        # Right-click targets one specific cluster -- drop any multi-selection
+        # so Apply is unambiguous.
+        self.selected.clear()
         self._label_target = (sig, bbox)
         existing = next((e for e in self._page_entries() if e.cluster_signature == sig), None)
         self._text_var.set(existing.text if existing else "")
         self._rot_var.set(str(existing.expected_rotation if existing else 0))
-        self._label_target_lbl.config(
-            text=f"cluster @ ({bbox[0]:.0f}, {bbox[1]:.0f})  {len(hit)} path(s)"
-        )
+        self._render()
         self._text_entry.focus_set()
         self._text_entry.selection_range(0, tk.END)
 
@@ -657,10 +681,24 @@ class ManualLabelApp:
                 return i
         return None
 
+    def _label_targets(self) -> list[tuple[str, tuple[float, float, float, float]]]:
+        """(signature, bbox) for every cluster Apply/Delete should act on: a
+        whole cluster-mode selection if there is one, else the single
+        right-click target."""
+        if self.mode == "cluster" and self.selected:
+            return [
+                (cluster_signature(c), self._cluster_bbox(c))
+                for i, c in enumerate(self.working_clusters)
+                if i in self.selected and c
+            ]
+        if self._label_target is not None:
+            return [self._label_target]
+        return []
+
     def _apply_label(self) -> None:
-        if self._label_target is None:
+        targets = self._label_targets()
+        if not targets:
             return
-        sig, bbox = self._label_target
         text = self._text_var.get().strip()
         if not text:
             return  # nothing to write; use Delete to remove an existing label
@@ -668,26 +706,34 @@ class ManualLabelApp:
             rotation = int(self._rot_var.get())
         except ValueError:
             rotation = 0
-        entry = LabelEntry(
-            page_index=self.page_index, cluster_bbox=bbox, cluster_signature=sig,
-            text=text, source="manual", expected_rotation=rotation,
-        )
-        existing = self._matching_entry_index(sig)
-        if existing is not None:
-            self.labels.entries[existing] = entry
-        else:
-            self.labels.entries.append(entry)
+        for sig, bbox in targets:
+            entry = LabelEntry(
+                page_index=self.page_index, cluster_bbox=bbox, cluster_signature=sig,
+                text=text, source="manual", expected_rotation=rotation,
+            )
+            existing = self._matching_entry_index(sig)
+            if existing is not None:
+                self.labels.entries[existing] = entry
+            else:
+                self.labels.entries.append(entry)
+        self.selected.clear()
+        self._clear_label_panel()  # clears text + resets rotation to 0
         self._render()
 
     def _delete_label(self) -> None:
-        if self._label_target is None:
+        targets = self._label_targets()
+        if not targets:
             return
-        sig, _bbox = self._label_target
-        existing = self._matching_entry_index(sig)
-        if existing is None:
+        removed = False
+        for sig, _bbox in targets:
+            existing = self._matching_entry_index(sig)
+            if existing is not None:
+                del self.labels.entries[existing]
+                removed = True
+        if not removed:
             return
-        del self.labels.entries[existing]
-        self._text_var.set("")
+        self.selected.clear()
+        self._clear_label_panel()
         self._render()
 
     # ---- hover -------------------------------------------------------
