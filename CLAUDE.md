@@ -30,7 +30,7 @@ all three implemented), and the inspector tool — see "rastervec architecture" 
 .venv/Scripts/python.exe -m pip install -r requirements.txt                        # install deps
 .venv/Scripts/python.exe -m rastervec.Evaluation.inspector.inspector [path/to.pdf]  # run the PDF layer inspector
 .venv/Scripts/python.exe -m rastervec.pipeline --pdf PATH --page N                 # run the extraction pipeline demo (CLI)
-.venv/Scripts/python.exe -m rastervec.debug_app [path/to.pdf]                       # run the pipeline debug app (GUI)
+.venv/Scripts/jupyter lab rastervec/notebooks/pipeline_stage_visualization.ipynb   # per-stage pipeline visualization (needs jupyter + matplotlib)
 .venv/Scripts/python.exe -m pytest tests/ -v                                        # run rastervec's test suite
 .venv/Scripts/python.exe scripts/rasterize_pdf.py SRC DST --dpi 300                 # flatten a PDF to pure raster
 .venv/Scripts/python.exe -m rastervec.Evaluation.Labelling.manual_label PDF --page N --out labels.json  # manual cluster-label editor (GUI)
@@ -117,7 +117,7 @@ See `rastervec/Glossary.md` for standardized group/cluster/global-group/similari
 terminology used throughout this section. `rastervec/` is organized into one folder per pipeline
 concern (`Reader/`, `Native_Text/`, `Vector/`, `Vector_Classification/`, `OCR/`, `Evaluation/`),
 plus cross-cutting modules that don't belong to one concern (`models.py`, `output_types.py`,
-`logging_setup.py`, `pipeline.py`, `debug_app.py`, `renderer.py`) and a `helpers/` package for
+`logging_setup.py`, `pipeline.py`, `renderer.py`) and a `helpers/` package for
 utilities shared across more than one concern (`geometry.py`, `clustering.py`). Every stage is
 testable independently of the others (every stage's *output* is a plain dataclass from
 `models.py`, no `fitz` objects, except `Page.fitz_page` which `Reader` must hand to `Native`/etc.):
@@ -247,8 +247,8 @@ testable independently of the others (every stage's *output* is a plain dataclas
   only ever handles `list[VectorPath]` clusters; there is no Raster stage in this project to OCR
   raster image regions). `__init__(self, backend: OcrBackend | None = None)` defaults to
   `PaddleOcrBackend()`. `ocr_boxes(image)`/`ocr(image)` wrap `self.backend.detect(image)` (`ocr`
-  joins every detected box left-to-right into one `(text, confidence, bbox_corners)` result, used
-  by the debug app's OCR inspector). `ocr_cluster(cluster, page, renderer, dpi=300)` is the shared
+  joins every detected box left-to-right into one `(text, confidence, bbox_corners)` result).
+  `ocr_cluster(cluster, page, renderer, dpi=300)` is the shared
   entrypoint: render the cluster **once**, upright, run **one** `backend.detect()` call, and build a
   `TextVectorResult` whose `rotation_used` comes from `OcrDetection.rotation`, whose `ocr_bbox`
   (union of every detected box, mapped back to page space via `Renderer.pixel_to_page_bbox`) is
@@ -289,8 +289,8 @@ testable independently of the others (every stage's *output* is a plain dataclas
   (`python -m rastervec.Evaluation.Labelling.manual_label PDF --page N --out labels.json`) *does*
   need real clusters (a human has to click something), so it's the one place that still runs the
   real pipeline — via `pipeline.run_page_context(reader, page_index, final_stage="text_candidates")`
-  — and reuses `debug_app._get_display_matrix`/`debug_app.Tooltip` for the same page-space →
-  canvas-space transform and hover tooltip the debug app/inspector use. It's also a light cluster
+  — with a `_get_display_matrix` / `Tooltip` for the page-space → canvas-space transform and hover
+  tooltip, both ported from the former `debug_app.py` when it was removed. It's also a light cluster
   *editor* (the pipeline's clustering isn't always right): scroll + `Zoom -`/`Zoom +` + Ctrl-wheel
   zoom, and two edit modes — **cluster mode** (left-click toggles a whole cluster; `Group` merges
   the selected clusters, `Ungroup` splits one back into its pre-spatial `ctx.cluster_groups`
@@ -338,8 +338,8 @@ testable independently of the others (every stage's *output* is a plain dataclas
   models — matches the existing `RASTERVEC_RUN_OCR_TESTS`-gated convention for OCR-dependent
   tests).
 - **`renderer.py` — `Renderer`** *(rendering helpers, not a pipeline stage)*: `path_color_hex(path)`
-  returns a path's real PDF stroke/fill color as hex (used by both the debug app and OCR input
-  rendering) — any B/W-style simplification stays purely internal to classification, never
+  returns a path's real PDF stroke/fill color as hex (used by both the visualization notebook and
+  OCR input rendering) — any B/W-style simplification stays purely internal to classification, never
   substituted into a rendered/displayed color. `render_vector_cluster(paths, dpi)` *(implemented)*
   isolates a cluster onto a fresh single-page PyMuPDF document sized to the cluster's own bbox (plus
   padding — `max(4pt, largest member's stroke_width)`, computed by the private `_cluster_frame`
@@ -358,11 +358,11 @@ testable independently of the others (every stage's *output* is a plain dataclas
   no isolation/padding, no rotation applied) — used as FAST's own detection input by
   `fast_text_detect` (see below).
   `render_reconstructed_page(page_meta, *, native_words=None, drawing_vectors=None,
-  ocr_results=None, zoom=1.0)` *(implemented, debug-app-only preview — not OCR input, not
+  ocr_results=None, zoom=1.0)` *(implemented, visualization-notebook preview — not OCR input, not
   `evaluation.py`'s real reconstruction stage)*: redraws whatever elements are passed onto a fresh
-  blank page sized/rotated to match `page_meta`, then rasterizes at `zoom` the same way
-  `DebugApp.render()` rasterizes the real page pixmap, so the two are pixel-comparable at the same
-  zoom. `drawing_vectors` are redrawn from each `DrawingVector`'s own real member `VectorPath`s
+  blank page sized/rotated to match `page_meta`, then rasterizes at `zoom` the same way the
+  notebook's `page_raster()` rasterizes the real page pixmap, so the two are pixel-comparable at the
+  same zoom. `drawing_vectors` are redrawn from each `DrawingVector`'s own real member `VectorPath`s
   (reusing the module-level `_draw_vector_path` helper `render_vector_cluster` also uses), never
   just their aggregate bbox. `native_words`/`ocr_results` are inserted as real text via
   `page.insert_text` — necessarily approximate: font family isn't preserved (always PyMuPDF's
@@ -389,8 +389,9 @@ testable independently of the others (every stage's *output* is a plain dataclas
   look roughly right" preview, not a byte-accurate reconstruction. A
   blank/whitespace-only `text` is skipped outright (never handed to `insert_text`, which can be
   finicky with empty strings).
-- **`pipeline.py`** — shared stage-running machinery, used by both the CLI (`main()` in this file)
-  and `debug_app.py`. `PipelineContext` accumulates state across stages for one page run: `page`,
+- **`pipeline.py`** — shared stage-running machinery, used by the CLI (`main()` in this file),
+  `run_page_context`, and the visualization notebook. `PipelineContext` accumulates state across
+  stages for one page run: `page`,
   `native_words`, `vector_paths`, `paths_by_layer`, `paths_by_layer_color`, `clustering` (`dict
   [GroupKey, ClusteringStageResult]`, `GroupKey = (layer, color)`; `ClusteringStageResult.steps` is
   exactly `VectorClassifier.cluster()`'s return value), `text_clusters` + `cluster_groups` (every
@@ -426,7 +427,7 @@ testable independently of the others (every stage's *output* is a plain dataclas
   (sampled at the cluster's own bbox region, whether or not that region also includes non-candidate
   paths); then — per similarity group — the final score is `min(score)` across every member of that
   group (so one low-scoring instance drags every geometrically-identical cluster down with it). A
-  cluster passes if its final score exceeds `FAST_COMBINED_KEEP_THRESHOLD` (0.1); `FastPageResult`
+  cluster passes if its final score exceeds `FAST_COMBINED_KEEP_THRESHOLD` (0.2); `FastPageResult`
   carries the render/mask, the final `scores`, `passed`/`dropped`, and `detect_seconds` timing. A
   page with zero vector paths never even constructs `FastDetector`'s underlying torch model.
 
@@ -478,106 +479,23 @@ testable independently of the others (every stage's *output* is a plain dataclas
   `ctx.text_clusters`) rather than each stage's `StageOutput.data` — used by `Evaluation/
   Labelling/manual_label.py` and `Evaluation/Evaluate/benchmark.py` instead of either hand-rolling
   a partial `Pipeline.STAGES` sequence themselves.
-- **`debug_app.py`** — Tk GUI (`python -m rastervec.debug_app [pdf]`): page pixmap on a canvas, a
-  page-nav bar (reusing the same `page.rotation_matrix * zoom_matrix` display-transform rule as
-  the inspector tool's `inspector.py`), and a stage-nav bar (`< Prev Stage | Stage i/N: Label |
-  Next Stage >`) that
-  cycles **only over `Pipeline.STAGES`**. Per-page `StageOutput` results are cached in
-  `DebugAppState.stage_cache`, keyed by `page_index`. Each stage's overlay is drawn by a small
-  function registered in `_STAGE_RENDERERS`, keyed by `StageSpec.key`, taking a `RenderContext`
-  (`canvas`, `matrix`, `output`, `tooltip`, `side_panel`, `filters`, `on_change`, `epoch_box`,
-  `page`). Vector paths are always drawn in their **real PDF stroke/fill color** (`_path_color_hex`)
-  — any black/white simplification a classification step might use internally is never substituted
-  into the overlay itself; synthetic colors (`_DROPPED_COLOR` grey, `_CENTROID_COLOR` red, one color
-  per step in `_CLUSTER_STEP_COLORS`) are only ever used for bbox/centroid *outlines*. Stages with
-  filterable sub-groups (`vector_extract` by path kind, `layer_separation` by layer,
-  `color_separation` by layer+color, `drawing_vectors` by dashed/solid) build `ttk.Checkbutton`s per
-  sub-group into `ctx.side_panel`.
-
-  `_render_clustering_stage` shows every one of the fixed 13 classification steps' kept/dropped
-  categories as its own toggleable checkbox (bbox + centroid, `_CLUSTER_STEP_COLORS`-keyed, plus a
-  live `_cluster_size_stats_text` stats line for each kept category); `_render_unique_clusters_stage`
-  colors each similarity group distinctly. This renderer (and other high-volume stages) shares
-  viewport-culling + chunked-drawing machinery, since these stages can have tens of thousands of
-  clusters/paths: `_SpatialIndex` (a uniform grid over `(bbox, payload)` entries) is built once per
-  category per stage-visit; only the subset whose bbox overlaps the current viewport
-  (`_visible_page_rect`, page-space via the inverse display matrix, padded 20%) is ever drawn,
-  redrawing the delta on scroll/resize (`_recull`) and streaming even that delta in via small
-  `after_idle` chunks (`_RECULL_CHUNK_SIZE`) so no single draw blocks the UI. A per-category
-  `generation` counter plus `ctx.epoch_box` (bumped once per `redraw_overlay()` call) let a deferred
-  chunk callback detect it's been superseded and stop instead of drawing ghost items. Hover precision:
-  a group only counts as hovered when the cursor is over an actual *member path's* own bbox, not
-  merely anywhere inside the group's aggregate bbox (`_bind_bucket_hover`'s `_group_hit`), padded by
-  a small screen-pixel tolerance (`_HOVER_TOLERANCE_PX`). Checkbox/toggle state is persisted
-  per-stage in `DebugAppState.filter_state` (keyed by `StageSpec.key`).
-
-  **Reconstructed-PDF compare toggle**: `native`, `ocr_compare`, `rotation_verify`, and
-  `drawing_vectors` each open their renderer with a call to the shared
-  `_add_reconstruction_toggle(ctx, build_own_fn, build_combined_fn)`, which packs a "Show
-  Reconstructed Compare"/"Hide Reconstructed Compare" `ttk.Button` at the top of `ctx.side_panel`
-  (state persisted per-stage in `ctx.filters["show_reconstructed"]`). Clicking it flips the state and
-  calls `ctx.on_change()`; when on, a "This layer"/"Combined" `ttk.Radiobutton` pair also appears
-  (state in `ctx.filters["reconstruction_scope"]`, default `"own"`), picking whether `build_own_fn()`
-  (just that stage's own captured elements — `native_words` for `native`, `ocr_results=[c.resolved
-  for c in passed]` for `ocr_compare`/`rotation_verify`, `drawing_vectors` for `drawing_vectors`) or
-  `build_combined_fn()` (that stage's own elements plus every earlier stage's, looked up via
-  `_stage_output_data(ctx, key)` scanning `ctx.all_outputs` — e.g. `drawing_vectors`'s combined view
-  draws `native_words` + `ocr_results` + `drawing_vectors` together; `native`'s combined view is
-  identical to its own, since nothing precedes it) is called to build the image. `ctx.all_outputs`
-  (every `StageOutput` for the current page, in `Pipeline.STAGES` order) is populated once in
-  `redraw_overlay` alongside the rest of `RenderContext`. `rotation_verify`'s own build functions
-  read `ocr_compare`'s `resolved` readings via `_stage_output_data` rather than its own
-  `ctx.output.data` (a `list[RotationCheck]`, not readings) — since `_run_rotation_verify` corrects
-  `rotation_used` **in place** on those same `TextVectorResult` objects, this already shows the
-  corrected orientation with no extra plumbing.
-
-  The built image isn't drawn as a flat overlay — it's a **drag-anywhere compare slider**: left of
-  the divider shows the reconstruction, right of it shows the real original page pixmap (the base
-  canvas layer beneath, never touched — the slider just crops how much of the reconstruction
-  image covers it). Divider position is `ctx.filters["reconstruction_slider"]` (a 0..1 fraction,
-  default 0.5). `ButtonPress-1`/`B1-Motion` bound directly on `ctx.canvas` (cleaned up centrally in
-  `redraw_overlay`'s unbind block, alongside `Motion`/`Leave`/`Left`/`Right`, so a stage switch can't
-  leave a stale drag handler attached) recompute the fraction from `canvas.canvasx(event.x)` and
-  call a local `_apply_slider`, which re-crops the **already-built** PIL image (a cheap operation)
-  and updates the existing canvas image item + divider line via `itemconfig`/`coords` directly —
-  no full stage redraw, no re-render, so dragging stays smooth even though building the
-  reconstruction itself (a `Renderer.render_reconstructed_page` call) can be relatively expensive.
-  `_add_reconstruction_toggle` returns whether the compare view is currently showing; each of the 4
-  stage renderers `return`s early when it's `True`, skipping their normal overlay. Skipped
-  altogether if `ctx.page` is `None`.
-
-  `fast_text_detect` (`_render_fast_text_detect_stage`) shows `FastPageResult`'s single
-  all-vectors render+mask, "Render"/"Detection heatmap" toggles, a page-level FAST detect-time
-  readout, and per-cluster hover rects resized to the current debug-app zoom (via
-  `geometry.matrix_scale(ctx.matrix)`, not a fixed DPI/72 factor) reporting the final
-  (post-similarity-group-min) score and pass/fail.
-
-  `ocr_compare` (`_render_ocr_compare_stage`) — text clusters per page are few compared to raw path
-  counts, so it skips the viewport-culling/spatial-index machinery above and just draws each
-  *visible* comparison's `resolved.bbox` with a plain `tag_bind` hover, plus a click binding to
-  select that cluster for the inspector panel below. "Visible" is gated by "Show passed (N)"/"Show
-  failed (N)" (a comparison "passed" if `resolved.text.strip()` is non-empty, `_ocr_passed`). A
-  page-level OCR timing readout (total + average across every `cluster_seconds`/`group_seconds`
-  call) sits at the top. Two more checkboxes, "Show Paddle OCR bbox" and "Show group bbox", draw
-  `resolved.ocr_bbox`/each `group_readings[i].ocr_bbox` and each `group_readings[i].bbox` alongside
-  the main bbox.
-
-  Clicking a cluster's bbox (or the app defaulting to cluster 0) opens an inspector section: its
-  Prev/Next nav row and Left/Right arrow-key binding cycle between *visible* clusters.
-  `_ocr_cluster_preview` renders the selected cluster once, at `resolved.rotation_used`, and re-OCRs
-  just that one rendered image purely to recover the detected-text bbox in that image's own pixel
-  space for the overlay — `text`/`confidence` are read directly off the already-computed
-  `TextVectorResult`, never re-derived from that extra OCR call. Cached on `DebugAppState.
-  ocr_detail_cache`, keyed by `(page_index, cluster_index)`. The inspector text panel shows
-  RESOLVED, the raw CLUSTER (whole) reading plus its own timing, and — only when the fallback ran —
-  each raw GROUPS reading tagged `[kept]`/`[dropped]` against `OCR_GROUP_CONFIDENCE_THRESHOLD`
-  (imported from `pipeline.py`), plus a note if the fallback gate itself failed.
-
-  `rotation_verify` (`_render_rotation_verify_stage`) draws each checked cluster's `RotationCheck.
-  bbox` as a hover rect — orange + thicker outline if `applied` (the fix flipped `rotation_used` by
-  90 deg), grey + thin if not — with a tooltip showing the OCR'd text, both aspect-ratio errors, and
-  the before/after rotation. A summary label at the top shows how many fixes were applied out of how
-  many clusters were checked.
+- **`notebooks/pipeline_stage_visualization.ipynb`** — the static replacement for the former
+  `debug_app.py` Tk GUI (deleted). One `Pipeline._run_stages(ctx, FINAL_STAGE)` run on a single
+  configured `(PDF_PATH, PAGE_INDEX)` gives both the accumulated `ctx.*` fields and each stage's
+  `StageOutput` (`status`/`error`). A `visualize(stage_key, categories)` helper renders, per stage:
+  one **original page** raster, then for **every** overlay category a pair — the category's geometry
+  drawn alone on white (**isolated**) and the same geometry on the original page (**overlay**) — so
+  a single-overlay stage is 3 images and an N-overlay stage is `1 + 2N`. `clustering` expands every
+  one of the 12 steps' every category (`kept` + `dropped`/`info` side categories, merged across all
+  `(layer, color)` buckets, `f"{step_i}_{name}"` keyed, per-step colour from `CLUSTER_STEP_COLORS`),
+  and `color_separation` expands every `(layer, color)` bucket — a dense page can be 100+ images.
+  Overlay drawing is a `PIL.ImageDraw` port of the old `_draw_vector_path` (polylines/polygons via
+  `page.fitz_page.rotation_matrix * fitz.Matrix(zoom, zoom)`, the ex-`_get_display_matrix` rule);
+  the four reconstruction stages (`native`, `ocr_compare`, `rotation_verify`, `drawing_vectors`)
+  use `Renderer.render_reconstructed_page(...)` for their isolated panel, and `fast_text_detect`
+  uses `FastPageResult.page_image` + a red-channel `page_mask` heatmap blend. `FINAL_STAGE` stops
+  the run early — set it before `fast_text_detect` to skip needing the FAST weights file, before
+  `ocr_compare` to skip building PaddleOCR. Inline (matplotlib) only, nothing written to disk.
 
 `scripts/rasterize_pdf.py` (outside `rastervec/`, a one-off utility not a pipeline stage): flattens
 every page of a PDF to an image and rebuilds a pure-raster PDF from those images — not currently
@@ -600,9 +518,9 @@ Three things, all following the existing stage folders' pattern:
    (e.g. `_extract_x`/`_match_y`) so each is independently testable.
 2. Add one `StageSpec` to `Pipeline.STAGES` in `pipeline.py` (a `_run_<stage>(ctx)` function that
    reads whatever `PipelineContext` fields it needs and stores its own result back onto `ctx`).
-3. Add one entry to `debug_app.py`'s `_STAGE_RENDERERS` — a `_render_<stage>_stage(ctx: RenderContext)`
-   function drawing that stage's overlay onto `ctx.canvas` (via `ctx.matrix`), and, if the stage has
-   filterable sub-groups, building checkboxes into `ctx.side_panel` backed by `ctx.filters`.
+3. Add a per-stage cell to `notebooks/pipeline_stage_visualization.ipynb` — a markdown header plus
+   a code cell that builds the stage's overlay `categories` list from `ctx` / `outputs[<key>].data`
+   and calls `visualize("<key>", categories)`.
 Also add tests under the matching `tests/rastervec/` subfolder using the synthetic PDF fixtures,
 and new third-party dependencies to `requirements.txt` only when the stage that needs them is
 actually implemented.

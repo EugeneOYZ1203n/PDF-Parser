@@ -1,12 +1,13 @@
-"""Pipeline orchestration: shared stage-running machinery driven by both
-the CLI in this file and the debug Tkinter app (rastervec/debug_app.py).
+"""Pipeline orchestration: shared stage-running machinery driven by the CLI
+in this file, `run_page_context`, and
+`rastervec/notebooks/pipeline_stage_visualization.ipynb`.
 
 Only calls high-level class methods -- no inline extraction logic. A stage
 is a (key, label, run) triple appended to Pipeline.STAGES; run(ctx) mutates
 the shared PipelineContext and returns this stage's output data. Adding a
-new stage once it's actually implemented means: add one StageSpec here,
-and one view-renderer entry in debug_app.py's registry -- the CLI and the
-debug app's cycling nav both pick it up automatically.
+new stage once it's actually implemented means adding one StageSpec here;
+the CLI picks it up automatically, and the visualization notebook gets a
+per-stage cell calling `visualize(<key>, [...])`.
 """
 from __future__ import annotations
 

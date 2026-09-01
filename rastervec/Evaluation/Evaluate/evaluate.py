@@ -203,8 +203,9 @@ def _predictions_from_ocr(
 ) -> list[tuple[str, tuple[float, float, float, float], int]]:
     """One (text, bbox, rotation_used) per non-blank OCR reading -- using
     rotation_checks' corrected rotation_used for a cluster when a fix was
-    applied there, else ocr_compare's own reading (mirrors debug_app.py's
-    own rotation_verify-vs-ocr_compare precedence)."""
+    applied there, else ocr_compare's own reading (the same
+    rotation_verify-vs-ocr_compare precedence the visualization notebook
+    uses)."""
     corrected_by_cluster_id = {
         id(rc.cluster): rc.resolved for rc in (rotation_checks or []) if rc.applied
     }

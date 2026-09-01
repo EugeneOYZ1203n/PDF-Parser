@@ -1,11 +1,12 @@
 """Manual labelling: a small Tk UI for editing vector-text clusters on a
 rendered page and typing their ground-truth text, saved via
-`label_schema.save_labels`. Reuses `debug_app._get_display_matrix` (the
-same page-space -> canvas-space transform rule the debug app and inspector
-tool both use, see `rastervec/models.py`'s coordinate-space docstring),
-`debug_app.Tooltip`, and `pipeline.run_page_context` to get the same
-text-candidate clusters the debug app's "Text Candidates" stage would
-show, rather than re-implementing extraction/clustering/rendering here.
+`label_schema.save_labels`. `_get_display_matrix` (the page-space ->
+canvas-space transform rule, see `rastervec/models.py`'s coordinate-space
+docstring) and the `Tooltip` class were ported from the former
+`debug_app.py` when it was removed. `pipeline.run_page_context` gets the
+same text-candidate clusters the pipeline's "Text Candidates" stage
+produces, rather than re-implementing extraction/clustering/rendering
+here.
 
 Beyond plain labelling it's a light cluster *editor*: the pipeline's
 clustering is not always right (a word split across two clusters, or two
@@ -60,7 +61,6 @@ from tkinter import simpledialog, ttk
 
 import pymupdf as fitz
 
-from rastervec.debug_app import MAX_ZOOM, MIN_ZOOM, ZOOM_STEP, Tooltip, _get_display_matrix
 from rastervec.Evaluation.Labelling.label_schema import (
     LabelEntry,
     LabelSet,
@@ -75,6 +75,47 @@ from rastervec.pipeline import run_page_context
 from rastervec.Reader.reader import Reader
 
 _LOG = get_logger("manual_label")
+
+# Ported from the former debug_app.py when it was removed.
+MIN_ZOOM = 0.25
+MAX_ZOOM = 6.0
+ZOOM_STEP = 1.25
+
+
+def _get_display_matrix(fitz_page: "fitz.Page", zoom: float) -> "fitz.Matrix":
+    """page-space (unrotated MediaBox) -> canvas-space, page rotation baked in."""
+    return fitz_page.rotation_matrix * fitz.Matrix(zoom, zoom)
+
+
+class Tooltip:
+    """Mouse-following tooltip, ported from the former debug_app.py
+    (originally inspector/overlay_canvas.py)."""
+
+    def __init__(self, parent: "tk.Widget"):
+        self.parent = parent
+        self.window: "tk.Toplevel | None" = None
+        self.label: "tk.Label | None" = None
+
+    def show(self, x: int, y: int, text: str) -> None:
+        if self.window is None:
+            self.window = tk.Toplevel(self.parent)
+            self.window.overrideredirect(True)
+            self.window.attributes("-topmost", True)
+            self.label = tk.Label(
+                self.window, text=text, justify="left", anchor="w", padx=8, pady=6,
+                bg="#ffffe0", fg="#111111", relief="solid", borderwidth=1,
+                font=("TkDefaultFont", 9),
+            )
+            self.label.pack()
+        else:
+            self.label.config(text=text)
+        self.window.geometry(f"+{x + 15}+{y + 15}")
+        self.window.deiconify()
+
+    def hide(self) -> None:
+        if self.window is not None:
+            self.window.withdraw()
+
 
 _ZOOM = 1.5
 _UNLABELLED_COLOR = "#3366ff"

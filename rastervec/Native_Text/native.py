@@ -58,7 +58,7 @@ class Native:
         per word, carrying get_text("words")'s block_no/line_no/word_no and
         get_text("dict")'s line-level wmode alongside everything TextWord
         already has. Never replaces extract_text/TextWord for existing
-        consumers (pipeline.py, debug_app.py)."""
+        consumers (pipeline.py)."""
         fitz_page = page.fitz_page
         page_index = page.meta.index
 
