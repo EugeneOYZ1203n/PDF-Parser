@@ -355,7 +355,10 @@ testable independently of the others (every stage's *output* is a plain dataclas
   `(pdf, page)` pairs from the file, still runs `auto_label_pdf`), scores auto- and manual-source
   ground truth separately via `split_labelset_by_source`, and writes per-page
   `_groundtruth`/`_current`/`_legacy` reconstruction PDFs (`renderer.render_reconstructed_pdf`,
-  text-found + drawing vectors; legacy is text-only) into `RECONSTRUCT_DIR`.
+  text-found + drawing vectors; legacy is text-only) into `RECONSTRUCT_DIR`. A showcase cell
+  plots `SHOWCASE_N` of the current pipeline's actual PaddleOCR cluster renders (re-rendered by
+  `render_ocr_input`, matching `RenderOCR.ocr_cluster`'s own dpi-bump), sampled ~50/50 between
+  non-blank (PASS) and blank (FAIL) OCR readings.
 - **`renderer/` — module-level functions, no `Renderer` class** *(rendering helpers, not a pipeline
   stage)*: a package split by output concern — `png.py` (rasterize vector paths for OCR / FAST
   input), `pdf.py` (`render_reconstructed_page`, `render_reconstructed_pdf`), `svg.py` (`render_page_svg`, a thin
