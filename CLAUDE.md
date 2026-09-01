@@ -33,6 +33,8 @@ all three implemented), and the inspector tool — see "rastervec architecture" 
 .venv/Scripts/python.exe -m rastervec.debug_app [path/to.pdf]                       # run the pipeline debug app (GUI)
 .venv/Scripts/python.exe -m pytest tests/ -v                                        # run rastervec's test suite
 .venv/Scripts/python.exe scripts/rasterize_pdf.py SRC DST --dpi 300                 # flatten a PDF to pure raster
+.venv/Scripts/python.exe -m rastervec.Evaluation.Labelling.manual_label PDF --page N --out labels.json  # manual cluster-label editor (GUI)
+.venv/Scripts/python.exe -m rastervec.Evaluation.Labelling.view_auto_labels PDF --page N               # view auto_label output in that editor
 ```
 
 venv is **Python 3.12** (`py -3.12 -m venv .venv`), not 3.14 — `rastervec`'s OCR (paddleocr/
@@ -287,10 +289,22 @@ testable independently of the others (every stage's *output* is a plain dataclas
   (`python -m rastervec.Evaluation.Labelling.manual_label PDF --page N --out labels.json`) *does*
   need real clusters (a human has to click something), so it's the one place that still runs the
   real pipeline — via `pipeline.run_page_context(reader, page_index, final_stage="text_candidates")`
-  — and reuses `debug_app._get_display_matrix` for the same page-space → canvas-space transform the
-  debug app/inspector use: click a cluster's bbox to type its ground-truth text (turns green once
-  labelled), Save/window-close writes the label file — not unit-testable (a real Tk event loop),
-  smoke-test steps are in its own module docstring.
+  — and reuses `debug_app._get_display_matrix`/`debug_app.Tooltip` for the same page-space →
+  canvas-space transform and hover tooltip the debug app/inspector use. It's also a light cluster
+  *editor* (the pipeline's clustering isn't always right): scroll + `Zoom -`/`Zoom +` + Ctrl-wheel
+  zoom, and two edit modes — **cluster mode** (left-click toggles a whole cluster; `Group` merges
+  the selected clusters, `Ungroup` splits one back into its pre-spatial `ctx.cluster_groups`
+  "groups", or one-path-per-cluster if it was already edited) and **path mode** (left-click toggles
+  an individual `VectorPath`; `Group` builds a new cluster from exactly the selected paths). `Ctrl+Z`
+  undoes the last group/ungroup. Right-click a cluster (cluster mode) to type its ground-truth text
+  and `expected_rotation` (turns green once labelled); hovering shows the assigned text.
+  `LabelEntry`s loaded from `--out` that match no live cluster (every `source="auto"` entry, plus
+  manual entries left stale by an edit) draw as dashed grey boxes, so the same window doubles as an
+  auto-label viewer. Save/window-close writes the label file — not unit-testable (a real Tk event
+  loop), smoke-test steps are in its own module docstring. `view_auto_labels.py`
+  (`python -m rastervec.Evaluation.Labelling.view_auto_labels PDF --page N [--out labels.json]`)
+  runs `auto_label_pdf`, merges its entries onto any existing `--out` file (default: a temp file),
+  and opens `ManualLabelApp` on it.
 - **`Evaluation/Evaluate/evaluate.py` — `evaluate_pipeline`** *(implemented)*: scores a completed
   pipeline run's `ClusterOcrResult`/`DrawingVector`/`RotationCheck` lists against a `LabelSet`.
   Matches each label to a predicted OCR reading by `bbox_iou` (greedy highest-IoU-first, one-to-one)
