@@ -185,6 +185,11 @@ class PipelineContext:
     # drops, fast_dropped (FAST found no text in these), and ocr_failed
     # (OCR resolution failed for these).
     drawing_vectors: list[DrawingVector] | None = None
+    # _run_stages: wall-clock seconds each stage's run(ctx) took, keyed by
+    # stage key, in run order. Filled for every stage that ran (including
+    # one that raised). sum(stage_durations.values()) is the per-page
+    # pipeline total -- consumed by the benchmark notebook's timing report.
+    stage_durations: dict[str, float] | None = None
     # Future stages add fields here as they're implemented (raster_images,
     # etc.) so later stages can read earlier stages' output.
 
@@ -210,6 +215,8 @@ class StageOutput:
     status: str  # "ok" | "error"
     data: Any = None
     error: str | None = None
+    # Wall-clock seconds spec.run(ctx) took (set even when status="error").
+    duration_seconds: float | None = None
 
 
 @dataclass
@@ -568,15 +575,25 @@ class Pipeline:
         cls, ctx: PipelineContext, final_stage: str | None,
     ) -> list[StageOutput]:
         outputs: list[StageOutput] = []
+        ctx.stage_durations = {}
         for spec in cls.STAGES:
+            start = time.perf_counter()
             try:
                 data = spec.run(ctx)
-                outputs.append(StageOutput(spec.key, spec.label, "ok", data))
+                elapsed = time.perf_counter() - start
+                outputs.append(
+                    StageOutput(spec.key, spec.label, "ok", data, duration_seconds=elapsed)
+                )
             except Exception as exc:  # noqa: BLE001 -- debug tool: surface, don't crash
+                elapsed = time.perf_counter() - start
                 _LOG.exception("stage %s failed", spec.key)
                 outputs.append(
-                    StageOutput(spec.key, spec.label, "error", None, str(exc))
+                    StageOutput(
+                        spec.key, spec.label, "error", None, str(exc),
+                        duration_seconds=elapsed,
+                    )
                 )
+            ctx.stage_durations[spec.key] = elapsed
             if spec.key == final_stage:
                 break
         return outputs

@@ -26,7 +26,10 @@ from __future__ import annotations
 
 import argparse
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
+
+import numpy as np
 
 from rastervec.Evaluation.Conversion.conversion import convert_page_to_vector_text
 from rastervec.Evaluation.Evaluate.evaluate import (
@@ -133,6 +136,72 @@ def aggregate_results(results: list[EvaluationResult]) -> dict:
     aggregate["miss_reason_counts"] = miss_reason_counts
 
     return aggregate
+
+
+# ---------------------------------------------------------------------------
+# Timing statistics -- pure, unit-tested. Used by
+# notebooks/benchmark_vector_classification.ipynb to summarize the per-stage
+# and per-page wall-clock times a run records in
+# `PipelineContext.stage_durations` (see pipeline.py).
+# ---------------------------------------------------------------------------
+
+_TIMING_STAT_COLUMNS = ("n", "min", "q1", "median", "mean", "q3", "max")
+
+
+def distribution_stats(values: Sequence[float]) -> dict:
+    """min / Q1 / median / mean / Q3 / max (plus `n`) of `values`. Quartiles
+    are linear-interpolated (`numpy.percentile` default). `{}` for an empty
+    input rather than raising."""
+    if not values:
+        return {}
+    arr = np.asarray(values, dtype=float)
+    q1, median, q3 = (float(x) for x in np.percentile(arr, [25, 50, 75]))
+    return {
+        "n": int(arr.size),
+        "min": float(arr.min()),
+        "q1": q1,
+        "median": median,
+        "mean": float(arr.mean()),
+        "q3": q3,
+        "max": float(arr.max()),
+    }
+
+
+def summarize_stage_timings(
+    per_page: list[dict[str, float]], stage_order: list[str],
+) -> dict[str, dict]:
+    """One `distribution_stats` per stage key (ordered by `stage_order`,
+    only keys that appear in at least one page), plus a `"total"` key over
+    each page's summed stage time. `{}` for no pages."""
+    if not per_page:
+        return {}
+
+    summary: dict[str, dict] = {}
+    for key in stage_order:
+        column = [page[key] for page in per_page if key in page]
+        if column:
+            summary[key] = distribution_stats(column)
+    summary["total"] = distribution_stats([sum(page.values()) for page in per_page])
+    return summary
+
+
+def format_timing_report(
+    summary: dict[str, dict], *, title: str = "Stage timing (seconds)",
+) -> str:
+    """Fixed-width table of a `summarize_stage_timings` result."""
+    if not summary:
+        return f"{title}\n  (no timing data)"
+
+    name_width = max(len(name) for name in summary)
+    header = f"  {'stage':<{name_width}}  " + "  ".join(f"{c:>8}" for c in _TIMING_STAT_COLUMNS)
+    lines = [title, header, "  " + "-" * (len(header) - 2)]
+    for name, stats in summary.items():
+        cells = []
+        for c in _TIMING_STAT_COLUMNS:
+            value = stats.get(c, 0.0)
+            cells.append(f"{int(value):>8}" if c == "n" else f"{value:>8.3f}")
+        lines.append(f"  {name:<{name_width}}  " + "  ".join(cells))
+    return "\n".join(lines)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

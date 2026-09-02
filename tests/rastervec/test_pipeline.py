@@ -13,6 +13,7 @@ from rastervec.pipeline import (
     _run_drawing_vectors,
     _run_spatial_regroup,
     _sample_mask,
+    run_page_context,
 )
 from rastervec.Reader.reader import Reader
 from rastervec.Vector_Classification.classification import CategoryResult, StepResult
@@ -83,6 +84,29 @@ def test_run_page_final_stage_stops_early_and_skips_ocr_engine(
     # drawing_vectors
     assert [o.key for o in outputs] == _EXPECTED_STAGE_KEYS[:-3]
     assert all(o.status == "ok" for o in outputs)
+
+
+def test_run_page_records_stage_durations(synthetic_pdf_factory, tmp_pdf_path):
+    doc = synthetic_pdf_factory([{"texts": [{"point": (10, 20), "text": "Hello"}]}])
+    path = tmp_pdf_path(doc)
+
+    with Reader(path) as reader:
+        ctx = PipelineContext(reader=reader, page_index=0)
+        outputs = Pipeline._run_stages(ctx, final_stage=None)
+
+    assert list(ctx.stage_durations) == _EXPECTED_STAGE_KEYS
+    assert all(isinstance(v, float) and v >= 0.0 for v in ctx.stage_durations.values())
+    assert all(o.duration_seconds is not None and o.duration_seconds >= 0.0 for o in outputs)
+
+
+def test_run_page_final_stage_only_times_stages_that_ran(synthetic_pdf_factory, tmp_pdf_path):
+    doc = synthetic_pdf_factory([{"texts": [{"point": (10, 20), "text": "Hello"}]}])
+    path = tmp_pdf_path(doc)
+
+    with Reader(path) as reader:
+        ctx = run_page_context(reader, 0, final_stage="text_candidates")
+
+    assert list(ctx.stage_durations) == _EXPECTED_STAGE_KEYS[: _EXPECTED_STAGE_KEYS.index("text_candidates") + 1]
 
 
 def test_run_page_final_stage_unknown_raises(synthetic_pdf_factory, tmp_pdf_path):
