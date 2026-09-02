@@ -61,11 +61,12 @@ matches means multiple labels were jointly swallowed into one group
 `joint_score` are each error's own rate; `f1` is the harmonic mean of their
 complements (1.0 when neither kind of error occurs).
 
-`same_word_bag`/`normalize_for_cer` are separate pure helpers (not wired
-into `evaluate_pipeline` automatically) callers can use for their own
-order-independent text comparisons -- ports of archive's
-`_same_word_bag`/`_text_for_compare` from `native_vs_raster_text.py`/
-`native_vs_ocr.py`.
+`same_word_bag` is a pure helper (not wired into `evaluate_pipeline`
+automatically) callers can use for order-independent text comparisons.
+`normalize_for_cer` is a backward-compatible alias of
+`text_metrics.normalize_text` (full upper-case fold + whitespace collapse).
+The new metric suite lives in `metrics.py`; this module is the legacy
+1:1-match scorer, kept for `render_evaluation_pdf` / `--eval-pdf-dir`.
 
 `render_evaluation_pdf(result, page_meta)` -- a separate, optional visual
 counterpart to one `EvaluationResult`: matched/unmatched-label/
@@ -80,6 +81,7 @@ import difflib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from rastervec.Evaluation.Evaluate.text_metrics import normalize_text, word_tokens
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet, LabelSource
 from rastervec.helpers.geometry import bbox_iou, union_bbox
 from rastervec.models import ClusterOcrResult, DrawingVector, PageMeta, VectorPath
@@ -140,26 +142,20 @@ class EvaluationResult:
     textbox_grouping: TextboxGroupingResult | None = None
 
 
-_CONFUSABLE_LETTERS = set("zxcvmskwuop")
-
-
-def normalize_for_cer(text: str) -> str:
-    """Strips whitespace, then uppercases only the OCR-confusable lowercase
-    letter set (letters that look nearly identical upper/lower in many
-    fonts) -- port of archive's `native_vs_ocr.py::_text_for_compare`, used
-    as an optional pre-step before comparing two strings so a case swap on
-    an ambiguous letter doesn't count as an error."""
-    stripped = "".join(text.split())
-    return "".join(c.upper() if c.lower() in _CONFUSABLE_LETTERS else c for c in stripped)
+# `normalize_for_cer` is kept as a backward-compatible alias; its behaviour
+# is now `text_metrics.normalize_text` (upper-case everything, trim, collapse
+# internal whitespace to a single space) -- the per-letter confusable set was
+# replaced by a full upper-case fold. See text_metrics.py.
+normalize_for_cer = normalize_text
 
 
 def same_word_bag(a: str, b: str) -> bool:
     """Order-independent match: True if `a` and `b` contain the exact same
-    set of whitespace-separated tokens (case-insensitive), regardless of
-    order -- e.g. "line set back building 5m" vs "5m building set back
-    line" -- port of archive's `native_vs_raster_text.py::_same_word_bag`."""
-    tokens_a = tuple(sorted(a.lower().split()))
-    tokens_b = tuple(sorted(b.lower().split()))
+    set of tokens (after `text_metrics.normalize_text` casing/whitespace
+    handling), regardless of order -- e.g. "line set back building 5m" vs
+    "5m building set back line". Empty on either side -> False."""
+    tokens_a = sorted(word_tokens(a))
+    tokens_b = sorted(word_tokens(b))
     return bool(tokens_a) and tokens_a == tokens_b
 
 

@@ -7,8 +7,6 @@ import pytest
 from rastervec.Evaluation.Evaluate.evaluate import (
     classify_textbox_grouping,
     evaluate_pipeline,
-    normalize_for_cer,
-    same_word_bag,
     split_labelset_by_source,
 )
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet
@@ -208,18 +206,6 @@ def test_evaluate_pipeline_no_miss_attributions_when_clustering_omitted():
 
     assert result.unmatched_labels == [label]
     assert result.miss_attributions == []
-
-
-def test_normalize_for_cer_strips_whitespace_and_uppercases_confusables():
-    assert normalize_for_cer("5 mm") == "5MM"
-    assert normalize_for_cer("Foo Bar") == "FOOBar"
-
-
-def test_same_word_bag_matches_regardless_of_order():
-    assert same_word_bag("line setback building 5m", "5m building setback line")
-    assert same_word_bag("Hello World", "world hello")
-    assert not same_word_bag("Hello World", "Hello")
-    assert not same_word_bag("", "")
 
 
 def test_classify_textbox_grouping_correct_split_joint():

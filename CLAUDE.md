@@ -317,7 +317,38 @@ testable independently of the others (every stage's *output* is a plain dataclas
   (`python -m rastervec.Evaluation.Labelling.view_auto_labels PDF --page N [--out labels.json]`)
   runs `auto_label_pdf`, merges its entries onto any existing `--out` file (default: a temp file),
   and opens `ManualLabelApp` on it.
-- **`Evaluation/Evaluate/evaluate.py` — `evaluate_pipeline`** *(implemented)*: scores a completed
+- **`Evaluation/Evaluate/metrics.py` — `evaluate_metrics`** *(implemented, the current scorer)*: an
+  **independent** metric suite — each metric is a separate reduction over one shared many-to-many
+  `OverlapGraph` between ground-truth `GtRegion`s and `Prediction`s (per (gt, pred) edge: intersection
+  area, IoU, `gt_coverage`, `pred_coverage`; plus an N:1 `assigned_preds_by_gt` so a gt line covered
+  by several predicted clusters is scored as one), rather than the single greedy 1:1 match every
+  `evaluate.py` metric shares. Pure / no `rastervec.pipeline` import. Every metric is a
+  `Ratio(numerator, denominator)` holding **absolute page counts**; `MetricSuiteResult` bundles the 16
+  ratio fields (+ 2 derived `*_f1`) + `per_stage_miss_counts` + `counts`. `aggregate_suite`
+  **micro-averages** — `Ratio(Σ numerators, Σ denominators)` over the applicable pages, NOT the mean of
+  per-page ratios; a `nan` denominator ("not applicable": empty gt, no candidates, zero misses,
+  `clustering=None`) is excluded. Phase-1 metrics (18): page char/word multiset recall/precision/f1
+  (`text_metrics.normalize_text` folds case + whitespace first), `pred_text_fully_contained_in_
+  overlapping_gt_rate` / `gt_text_word_coverage_by_overlapping_preds`, `per_gt_best_single_pred_iou_
+  mean` / `per_gt_union_pred_iou_mean` / `undetected_gt_area_ratio`, `rotation_accuracy_localized_gt`,
+  `classification_recall_gt_reached_ocr` / `classification_precision_candidate_is_text`, and
+  `gt_miss_attributed_to_{classification,fast,ocr_blank,not_found}_frac` + `per_stage_miss_counts`
+  (`attribute_miss`, a port of `evaluate._attribute_miss`). `METRIC_GROUPS` is the display-order source
+  for `benchmark.format_report` + the notebook charts. **`EVAL_METRICS.md`** documents every metric's
+  formula, both normalisation rules (text + aggregation), and the ~36-metric catalogue not yet built.
+- **`Evaluation/Evaluate/adapters.py`** *(implemented)*: the only `Evaluation/Evaluate/` module that
+  imports `rastervec.pipeline`. `gt_regions_from_labelset` / `predictions_from_cluster_ocr` /
+  `text_candidate_boxes` (union bbox per `ctx.regrouped_clusters` cluster, blank OCR included; falls
+  back to resolved bboxes for the archive legacy path) / `build_eval_inputs(ctx)` turn a `LabelSet` +
+  `PipelineContext` into `metrics.evaluate_metrics` arguments.
+- **`Evaluation/Evaluate/text_metrics.py`** *(implemented)*: `normalize_text` (upper-case, trim,
+  collapse internal whitespace to one space — replaces `evaluate.normalize_for_cer`, now an alias),
+  `char_multiset` / `word_tokens`, and pure-Python `levenshtein` / `char_error_rate` / `word_error_rate`
+  (the standard text-diff — **not** `difflib.SequenceMatcher`, which `evaluate.evaluate_pipeline` still
+  uses).
+- **`Evaluation/Evaluate/evaluate.py` — `evaluate_pipeline`** *(implemented, legacy 1:1-match scorer —
+  kept for `render_evaluation_pdf` / `--eval-pdf-dir`; the notebook can still show its metrics behind
+  `SHOW_LEGACY_METRICS`)*: scores a completed
   pipeline run's `ClusterOcrResult`/`DrawingVector` lists against a `LabelSet`.
   Matches each label to a predicted OCR reading by `bbox_iou` (greedy highest-IoU-first, one-to-one)
   above `iou_threshold`. Returns an `EvaluationResult`:
@@ -347,15 +378,18 @@ testable independently of the others (every stage's *output* is a plain dataclas
   green, unmatched labels in red, unmatched predictions in yellow, drawn onto a fresh page via
   `renderer.render_boxes_pdf` — wired in by `benchmark.py`'s `--eval-pdf-dir`.
 - **`Evaluation/Evaluate/benchmark.py`** *(implemented)* — the CLI wiring Conversion → auto_label →
-  a real full pipeline run → `evaluate_pipeline` together: `python -m
+  a real full pipeline run → `metrics.evaluate_metrics` together: `python -m
   rastervec.Evaluation.Evaluate.benchmark --pdf PATH [--pdf PATH2 ...] --pages 0,1,2
-  [--iou-threshold 0.3] [--eval-pdf-dir DIR]`. `run_one_page` builds ground truth with no pipeline run
+  [--iou-threshold 0.1] [--eval-pdf-dir DIR]` (`--iou-threshold` = `MetricConfig.iou_edge_min`).
+  `run_one_page` builds ground truth with no pipeline run
   (`auto_label_pdf`), converts, runs the entire `Pipeline.STAGES` chain including real PaddleOCR
-  via `pipeline.run_page_context`, then scores it with every miss-attribution param wired through;
-  when `--eval-pdf-dir` is given, also writes each page's `evaluate.render_evaluation_pdf` bbox
+  via `pipeline.run_page_context`, then scores it via `adapters.build_eval_inputs` →
+  `evaluate_metrics`, returning a `MetricSuiteResult`;
+  when `--eval-pdf-dir` is given, also writes each page's legacy `evaluate.render_evaluation_pdf` bbox
   overlay there as `<stem>_p<page>_eval.pdf`.
-  `format_report`/`aggregate_results` (mean of each numeric metric + total miss-reason counts
-  across every page) are pure and unit-tested; `main()`'s actual OCR-backed path is a manual smoke
+  `format_report` (per-metric `numerator/denominator (value)`, grouped by dimension) /
+  `aggregate_results` (delegates to `metrics.aggregate_suite`) / `format_aggregate` are pure and
+  unit-tested; `main()`'s actual OCR-backed path is a manual smoke
   test only (same reasoning as `manual_label.py`'s Tk UI — real PaddleOCR, first run downloads
   models — matches the existing `RASTERVEC_RUN_OCR_TESTS`-gated convention for OCR-dependent
   tests). `notebooks/benchmark_vector_classification.ipynb` is the interactive counterpart: it

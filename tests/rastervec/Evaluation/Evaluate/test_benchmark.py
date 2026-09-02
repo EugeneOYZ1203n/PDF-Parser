@@ -1,69 +1,82 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from rastervec.Evaluation.Evaluate.benchmark import (
     aggregate_results,
     distribution_stats,
+    format_aggregate,
     format_report,
     format_timing_report,
     summarize_stage_timings,
 )
-from rastervec.Evaluation.Evaluate.evaluate import EvaluationResult, MissAttribution
-from rastervec.Evaluation.Labelling.label_schema import LabelEntry
+from rastervec.Evaluation.Evaluate.metrics import MetricCounts, MetricSuiteResult, Ratio
 
 
-def _make_label(text="Hello") -> LabelEntry:
-    return LabelEntry(
-        page_index=0, cluster_bbox=(0, 0, 10, 5), cluster_signature="a",
-        text=text, source="manual",
+def _suite(**ratios) -> MetricSuiteResult:
+    base = {name: Ratio(0.0, math.nan) for name in (
+        "page_char_multiset_recall", "page_char_multiset_precision",
+        "page_word_multiset_recall", "page_word_multiset_precision",
+        "pred_text_fully_contained_in_overlapping_gt_rate",
+        "gt_text_word_coverage_by_overlapping_preds",
+        "per_gt_best_single_pred_iou_mean", "per_gt_union_pred_iou_mean",
+        "undetected_gt_area_ratio", "rotation_accuracy_localized_gt",
+        "classification_recall_gt_reached_ocr",
+        "classification_precision_candidate_is_text",
+        "gt_miss_attributed_to_classification_frac", "gt_miss_attributed_to_fast_frac",
+        "gt_miss_attributed_to_ocr_blank_frac", "gt_miss_attributed_to_not_found_frac",
+    )}
+    base.update(ratios)
+    return MetricSuiteResult(ratios=base)
+
+
+def test_format_report_groups_metrics_with_absolute_counts():
+    result = _suite(
+        page_char_multiset_recall=Ratio(9.0, 10.0),
+        page_char_multiset_precision=Ratio(9.0, 12.0),
     )
-
-
-def test_format_report_includes_metrics_and_counts():
-    result = EvaluationResult(
-        characters_found_pct=1.0, character_accuracy=0.9, character_error_rate=0.1,
-        rotation_accuracy=1.0, bbox_accuracy=0.95, classification_precision=0.8,
-        classification_recall=0.7, drawing_vector_count=3,
-        miss_attributions=[MissAttribution(label=_make_label(), reason="ocr_blank")],
-    )
+    result.per_stage_miss_counts = {"ocr_blank": 1}
+    result.counts = MetricCounts(n_gt=4, n_pred=3, n_pred_nonblank=3, n_text_candidates=3)
 
     report = format_report("x.pdf", 0, result)
 
     assert "x.pdf page 0:" in report
-    assert "character_accuracy: 0.900" in report
-    assert "drawing_vector_count: 3" in report
-    assert "miss reasons: {'ocr_blank': 1}" in report
+    assert "[character]" in report
+    assert "page_char_multiset_recall: 9/10  (0.900)" in report
+    assert "page_char_multiset_f1: 0.818" in report  # 2*.9*.75/(.9+.75)
+    assert "rotation_accuracy_localized_gt: 0/nan  (n/a)" in report
+    assert "per_stage_miss_counts: {'ocr_blank': 1}" in report
 
 
-def test_aggregate_results_empty_returns_empty_dict():
-    assert aggregate_results([]) == {}
+def test_aggregate_results_empty_returns_none():
+    assert aggregate_results([]) is None
+    assert "no results" in format_aggregate(None, 0)
 
 
-def test_aggregate_results_averages_numeric_fields():
-    result_a = EvaluationResult(character_accuracy=1.0, drawing_vector_count=2)
-    result_b = EvaluationResult(character_accuracy=0.5, drawing_vector_count=4)
+def test_aggregate_results_micro_averages():
+    a = _suite(page_char_multiset_recall=Ratio(1.0, 3.0))
+    b = _suite(page_char_multiset_recall=Ratio(10.0, 15.0))
 
-    aggregate = aggregate_results([result_a, result_b])
+    agg = aggregate_results([a, b])
 
-    assert aggregate["character_accuracy"] == 0.75
-    assert aggregate["drawing_vector_count_total"] == 6
+    assert agg.ratios["page_char_multiset_recall"] == Ratio(11.0, 18.0)
+    assert agg.get("page_char_multiset_recall") == pytest.approx(11 / 18)
 
 
-def test_aggregate_results_sums_miss_reason_counts():
-    result_a = EvaluationResult(
-        miss_attributions=[
-            MissAttribution(label=_make_label(), reason="ocr_blank"),
-            MissAttribution(label=_make_label(), reason="fast_text_detect"),
-        ]
-    )
-    result_b = EvaluationResult(
-        miss_attributions=[MissAttribution(label=_make_label(), reason="ocr_blank")]
-    )
+def test_aggregate_results_merges_miss_counts_and_sums_counts():
+    a = _suite()
+    a.per_stage_miss_counts = {"ocr_blank": 1, "fast_text_detect": 1}
+    a.counts = MetricCounts(n_gt=2)
+    b = _suite()
+    b.per_stage_miss_counts = {"ocr_blank": 1}
+    b.counts = MetricCounts(n_gt=3)
 
-    aggregate = aggregate_results([result_a, result_b])
+    agg = aggregate_results([a, b])
 
-    assert aggregate["miss_reason_counts"] == {"ocr_blank": 2, "fast_text_detect": 1}
+    assert agg.per_stage_miss_counts == {"ocr_blank": 2, "fast_text_detect": 1}
+    assert agg.counts.n_gt == 5
 
 
 def test_distribution_stats_empty_returns_empty_dict():

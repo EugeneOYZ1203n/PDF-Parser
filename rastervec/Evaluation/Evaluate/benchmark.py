@@ -1,30 +1,28 @@
 """Benchmark CLI: wires Conversion -> auto_label -> a real full pipeline
-run -> evaluate_pipeline together end-to-end, over one or more PDF pages,
-and prints a per-page + aggregate report.
+run -> the independent metric suite (`metrics.py`) together end-to-end,
+over one or more PDF pages, and prints a per-page + aggregate report.
 
     .venv/Scripts/python.exe -m rastervec.Evaluation.Evaluate.benchmark \
         --pdf path/to.pdf --pages 0,1,2 [--iou-threshold 0.3] [--eval-pdf-dir DIR]
 
 `--eval-pdf-dir`, when given, writes one <stem>_p<page>_eval.pdf per page via
-evaluate.render_evaluation_pdf -- matched pairs in green, unmatched labels in
-red, unmatched predictions in yellow.
+the *legacy* evaluate.render_evaluation_pdf (matched pairs green, unmatched
+labels red, unmatched predictions yellow) -- that overlay still uses the old
+1:1-match `evaluate_pipeline`; the scored metrics come from `metrics.py`.
 
 Runs the real `Pipeline.STAGES` chain (via `pipeline.run_page_context`)
-through OCR (`RenderOCR`/PaddleOCR) -- this is deliberately the same real,
-possibly-slow pipeline run being scored, not a stubbed-out one. The first
-run downloads PaddleOCR's models. Not part of the automated test suite for
-that reason (same reasoning as `manual_label.py`'s Tk UI, and the existing
-`RASTERVEC_RUN_OCR_TESTS`-gated convention for OCR-dependent tests) --
-`main()`'s actual PDF/OCR path is a documented manual smoke test only.
+through OCR (`RenderOCR`/PaddleOCR) -- deliberately the same real,
+possibly-slow pipeline run being scored. The first run downloads PaddleOCR's
+models. `main()`'s actual PDF/OCR path is a documented manual smoke test only.
 
-`format_report`/`aggregate_results` are the pure, OCR-free parts of this
-module (formatting/averaging over already-computed `EvaluationResult`s) --
-those ARE unit-tested, see `tests/rastervec/Evaluation/Evaluate/
-test_benchmark.py`.
+`format_report`/`aggregate_results` are the pure, OCR-free parts (formatting /
+micro-averaging over already-computed `MetricSuiteResult`s) -- those ARE
+unit-tested, see `tests/rastervec/Evaluation/Evaluate/test_benchmark.py`.
 """
 from __future__ import annotations
 
 import argparse
+import math
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
@@ -32,11 +30,22 @@ from pathlib import Path
 import numpy as np
 
 from rastervec.Evaluation.Conversion.conversion import convert_page_to_vector_text
+from rastervec.Evaluation.Evaluate.adapters import (
+    build_eval_inputs,
+    gt_regions_from_labelset,
+)
 from rastervec.Evaluation.Evaluate.evaluate import (
     DEFAULT_IOU_THRESHOLD,
-    EvaluationResult,
     evaluate_pipeline,
     render_evaluation_pdf,
+)
+from rastervec.Evaluation.Evaluate.metrics import (
+    DERIVED_F1_FIELDS,
+    METRIC_GROUPS,
+    MetricConfig,
+    MetricSuiteResult,
+    aggregate_suite,
+    evaluate_metrics,
 )
 from rastervec.Evaluation.Labelling.auto_label import auto_label_pdf
 from rastervec.logging_setup import configure_logging, get_logger
@@ -45,24 +54,15 @@ from rastervec.Reader.reader import Reader
 
 _LOG = get_logger("benchmark")
 
-_NUMERIC_FIELDS = (
-    "characters_found_pct",
-    "character_accuracy",
-    "character_error_rate",
-    "rotation_accuracy",
-    "bbox_accuracy",
-    "classification_precision",
-    "classification_recall",
-)
-
 
 def run_one_page(
     pdf_path: str, page_index: int, iou_threshold: float = DEFAULT_IOU_THRESHOLD,
     eval_pdf_path: Path | None = None,
-) -> EvaluationResult:
+) -> MetricSuiteResult:
     """Ground truth (no pipeline run) -> Conversion -> a real full pipeline
-    run (OCR included) -> evaluate_pipeline, for one page. When
-    `eval_pdf_path` is given, also writes render_evaluation_pdf's
+    run (OCR included) -> `metrics.evaluate_metrics`, for one page.
+    `iou_threshold` maps onto `MetricConfig.iou_edge_min`. When
+    `eval_pdf_path` is given, also writes the legacy
     matched(green)/unmatched-label(red)/unmatched-prediction(yellow) bbox
     overlay there (--eval-pdf-dir)."""
     labels = auto_label_pdf(pdf_path, page_index)
@@ -75,67 +75,79 @@ def run_one_page(
         with Reader(converted_path) as reader:
             ctx = run_page_context(reader, 0)
 
-    result = evaluate_pipeline(
-        labels,
-        ctx.cluster_ocr_results or [],
-        ctx.drawing_vectors or [],
-        iou_threshold=iou_threshold,
-        clustering=ctx.clustering,
-        fast_dropped=ctx.fast_dropped,
-        ocr_failed=ctx.ocr_failed,
+    inputs = build_eval_inputs(ctx)
+    result = evaluate_metrics(
+        gt_regions_from_labelset(labels),
+        inputs.predictions,
+        inputs.text_candidate_boxes,
+        clustering=inputs.clustering,
+        fast_dropped=inputs.fast_dropped,
+        ocr_failed=inputs.ocr_failed,
+        cfg=MetricConfig(iou_edge_min=iou_threshold),
     )
 
     if eval_pdf_path is not None:
         eval_pdf_path.parent.mkdir(parents=True, exist_ok=True)
-        # ctx.page.meta is the converted page's own meta -- Conversion sizes
-        # and rotates it to match the source page, so it lines up with both
-        # the auto/manual labels (source page space) and the predictions
-        # (converted page space, same geometry).
-        eval_pdf_path.write_bytes(render_evaluation_pdf(result, ctx.page.meta))
+        legacy = evaluate_pipeline(
+            labels, ctx.cluster_ocr_results or [], ctx.drawing_vectors or [],
+            iou_threshold=DEFAULT_IOU_THRESHOLD, clustering=ctx.clustering,
+            fast_dropped=ctx.fast_dropped, ocr_failed=ctx.ocr_failed,
+        )
+        eval_pdf_path.write_bytes(render_evaluation_pdf(legacy, ctx.page.meta))
 
     return result
 
 
-def format_report(pdf_path: str, page_index: int, result: EvaluationResult) -> str:
+def _fmt_metric_line(name: str, result: MetricSuiteResult) -> str:
+    if name in DERIVED_F1_FIELDS:
+        v = result.get(name)
+        return f"  {name}: {'n/a' if math.isnan(v) else f'{v:.3f}'}"
+    ratio = result.ratios[name]
+    v = ratio.value
+    val = "n/a" if math.isnan(v) else f"{v:.3f}"
+    return f"  {name}: {ratio.numerator:.4g}/{ratio.denominator:.4g}  ({val})"
+
+
+def format_report(pdf_path: str, page_index: int, result: MetricSuiteResult) -> str:
+    """Per-page report -- absolute `numerator/denominator (value)` per metric,
+    grouped by dimension, then a diagnostics block."""
     lines = [f"{pdf_path} page {page_index}:"]
-    for field_name in _NUMERIC_FIELDS:
-        lines.append(f"  {field_name}: {getattr(result, field_name):.3f}")
-    lines.append(f"  drawing_vector_count: {result.drawing_vector_count}")
+    for dimension, names in METRIC_GROUPS:
+        lines.append(f"  [{dimension}]")
+        for name in names:
+            lines.append(_fmt_metric_line(name, result))
+    lines.append("  [diagnostics]")
+    if result.per_stage_miss_counts:
+        lines.append(f"    per_stage_miss_counts: {result.per_stage_miss_counts}")
+    c = result.counts
     lines.append(
-        f"  matched: {len(result.matched)}  unmatched_labels: "
-        f"{len(result.unmatched_labels)}  unmatched_predictions: {result.unmatched_predictions}"
+        f"    counts: gt={c.n_gt} pred={c.n_pred}(nonblank {c.n_pred_nonblank}) "
+        f"candidates={c.n_text_candidates} localized={c.n_gt_localized} missed={c.n_gt_missed}"
     )
-    if result.miss_attributions:
-        counts: dict[str, int] = {}
-        for miss in result.miss_attributions:
-            counts[miss.reason] = counts.get(miss.reason, 0) + 1
-        lines.append(f"  miss reasons: {counts}")
     return "\n".join(lines)
 
 
-def aggregate_results(results: list[EvaluationResult]) -> dict:
-    """Mean of each numeric metric plus total miss-attribution counts by
-    reason, across every page's EvaluationResult. Empty dict for an empty
-    input rather than raising."""
+def aggregate_results(results: list[MetricSuiteResult]) -> MetricSuiteResult | None:
+    """Micro-averaged aggregate (`Ratio(sum num, sum den)` per metric) over
+    every page's `MetricSuiteResult`. `None` for an empty input."""
     if not results:
-        return {}
+        return None
+    return aggregate_suite(results)
 
-    aggregate: dict = {
-        field_name: sum(getattr(r, field_name) for r in results) / len(results)
-        for field_name in _NUMERIC_FIELDS
-    }
-    aggregate["drawing_vector_count_total"] = sum(r.drawing_vector_count for r in results)
-    aggregate["matched_total"] = sum(len(r.matched) for r in results)
-    aggregate["unmatched_labels_total"] = sum(len(r.unmatched_labels) for r in results)
-    aggregate["unmatched_predictions_total"] = sum(r.unmatched_predictions for r in results)
 
-    miss_reason_counts: dict[str, int] = {}
-    for result in results:
-        for miss in result.miss_attributions:
-            miss_reason_counts[miss.reason] = miss_reason_counts.get(miss.reason, 0) + 1
-    aggregate["miss_reason_counts"] = miss_reason_counts
-
-    return aggregate
+def format_aggregate(
+    result: MetricSuiteResult | None, n_pages: int, *, label: str = "Aggregate",
+) -> str:
+    if result is None:
+        return f"{label}: (no results)"
+    lines = [f"{label} (micro-averaged over {n_pages} page-score(s)):"]
+    for dimension, names in METRIC_GROUPS:
+        lines.append(f"  [{dimension}]")
+        for name in names:
+            lines.append(_fmt_metric_line(name, result))
+    if result.per_stage_miss_counts:
+        lines.append(f"  per_stage_miss_counts: {result.per_stage_miss_counts}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -215,8 +227,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--pages", default="0", help="Comma-separated 0-based page indices (default: 0).",
     )
     parser.add_argument(
-        "--iou-threshold", type=float, default=DEFAULT_IOU_THRESHOLD,
-        help=f"IoU threshold for label<->prediction matching (default: {DEFAULT_IOU_THRESHOLD}).",
+        "--iou-threshold", type=float, default=MetricConfig().iou_edge_min,
+        help=f"MetricConfig.iou_edge_min -- minimum IoU for a gt<->prediction "
+        f"localisation edge (default: {MetricConfig().iou_edge_min}).",
     )
     parser.add_argument(
         "--eval-pdf-dir", type=Path, default=None,
@@ -231,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     pages = [int(p) for p in args.pages.split(",")]
 
-    results: list[EvaluationResult] = []
+    results: list[MetricSuiteResult] = []
     for pdf_path in args.pdf:
         for page_index in pages:
             _LOG.info("running %s page %d", pdf_path, page_index)
@@ -247,9 +260,7 @@ def main(argv: list[str] | None = None) -> int:
             print()
 
     if len(results) > 1:
-        print("Aggregate:")
-        for key, value in aggregate_results(results).items():
-            print(f"  {key}: {value}")
+        print(format_aggregate(aggregate_results(results), len(results)))
 
     return 0
 

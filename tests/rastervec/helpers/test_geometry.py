@@ -112,3 +112,44 @@ def test_bbox_iou_partial_overlap():
 )
 def test_is_dashed(dashes, expected):
     assert geometry.is_dashed(dashes) is expected
+
+
+def test_bbox_area_basic():
+    assert geometry.bbox_area((0, 0, 10, 4)) == pytest.approx(40.0)
+
+
+def test_bbox_area_degenerate_is_zero():
+    assert geometry.bbox_area((5, 5, 5, 20)) == 0.0
+    assert geometry.bbox_area((10, 0, 0, 10)) == 0.0  # inverted extent
+
+
+def test_bbox_intersection_area_partial():
+    assert geometry.bbox_intersection_area((0, 0, 10, 10), (5, 5, 15, 15)) == pytest.approx(25.0)
+
+
+def test_bbox_intersection_area_disjoint_is_zero():
+    assert geometry.bbox_intersection_area((0, 0, 10, 10), (20, 20, 30, 30)) == 0.0
+
+
+def test_bbox_intersection_area_touching_is_zero():
+    assert geometry.bbox_intersection_area((0, 0, 10, 10), (10, 0, 20, 10)) == 0.0
+
+
+def test_bbox_coverage_fraction():
+    # small box fully inside a big one -> big is 100% covered? no: coverage(a,b)
+    # is fraction of a covered by b. a=(0,0,10,10) area 100, b=(0,0,5,10) -> 50
+    assert geometry.bbox_coverage((0, 0, 10, 10), (0, 0, 5, 10)) == pytest.approx(0.5)
+
+
+def test_bbox_coverage_fully_contained_is_one():
+    assert geometry.bbox_coverage((2, 2, 4, 4), (0, 0, 10, 10)) == pytest.approx(1.0)
+
+
+def test_bbox_coverage_degenerate_a_is_zero():
+    assert geometry.bbox_coverage((5, 5, 5, 5), (0, 0, 10, 10)) == 0.0
+
+
+def test_bbox_iou_regression_via_intersection_area():
+    # bbox_iou now delegates to bbox_intersection_area; values must be unchanged
+    assert geometry.bbox_iou((0, 0, 10, 10), (5, 5, 15, 15)) == pytest.approx(25 / 175)
+    assert geometry.bbox_iou((0, 0, 4, 4), (2, 0, 6, 4)) == pytest.approx(8 / 24)

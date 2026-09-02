@@ -125,6 +125,43 @@ def is_dashed(dashes: str | None) -> bool:
     return not dashes.strip().startswith("[]")
 
 
+def bbox_area(b: tuple[float, float, float, float]) -> float:
+    """Area of an axis-aligned (x0, y0, x1, y1) box; 0.0 for a degenerate
+    (zero- or negative-extent) box."""
+    return max(b[2] - b[0], 0.0) * max(b[3] - b[1], 0.0)
+
+
+def bbox_intersection_area(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    """Overlap area of two axis-aligned (x0, y0, x1, y1) boxes; 0.0 if they
+    don't overlap. Single source of truth for the overlap term in bbox_iou
+    and bbox_coverage (Evaluation/Evaluate's metrics.py)."""
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    if ix1 <= ix0 or iy1 <= iy0:
+        return 0.0
+    return (ix1 - ix0) * (iy1 - iy0)
+
+
+def bbox_coverage(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    """Fraction of box `a`'s area that box `b` covers -- intersection area
+    over area(a), 0.0 when `a` is degenerate. Asymmetric: call
+    bbox_coverage(gt, pred) for "how much of the ground truth is covered",
+    bbox_coverage(pred, gt) for "how much of the prediction lands on text".
+    Used by Evaluation/Evaluate's metrics.py for many-to-one matching."""
+    area_a = bbox_area(a)
+    if area_a <= 0.0:
+        return 0.0
+    return bbox_intersection_area(a, b) / area_a
+
+
 def bbox_iou(
     a: tuple[float, float, float, float],
     b: tuple[float, float, float, float],
@@ -133,16 +170,10 @@ def bbox_iou(
     0.0 if they don't overlap. Used to match a predicted cluster bbox
     against a ground-truth text bbox (Evaluation/Labelling's auto_label.py,
     Evaluation/Evaluate's evaluate.py)."""
-    ax0, ay0, ax1, ay1 = a
-    bx0, by0, bx1, by1 = b
-    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
-    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
-    if ix1 <= ix0 or iy1 <= iy0:
+    intersection = bbox_intersection_area(a, b)
+    if intersection <= 0.0:
         return 0.0
-    intersection = (ix1 - ix0) * (iy1 - iy0)
-    area_a = max(ax1 - ax0, 0.0) * max(ay1 - ay0, 0.0)
-    area_b = max(bx1 - bx0, 0.0) * max(by1 - by0, 0.0)
-    union = area_a + area_b - intersection
+    union = bbox_area(a) + bbox_area(b) - intersection
     return intersection / union if union > 0 else 0.0
 
 
