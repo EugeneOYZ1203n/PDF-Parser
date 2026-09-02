@@ -6,7 +6,8 @@ Split by output concern:
   (`render_vector_cluster`, `render_page_paths`, plus the
   `pixel_to_page_bbox` / `cluster_frame_size` transform helpers).
 - `pdf.py`  -- `render_reconstructed_page`, the notebook's reconstruction
-  preview.
+  preview, plus `render_boxes_pdf`, a generic colored-bbox-outline
+  primitive used by evaluate.py's `render_evaluation_pdf`.
 - `svg.py`  -- `render_page_svg`, a thin `get_svg_image()` wrapper.
 - `_shapes.py` -- `replay_drawing_paths` (per-drawing composite path replay
   with the even_odd fill rule, so filled glyph counters render as holes)
@@ -18,7 +19,11 @@ straight from `rastervec.renderer`.
 from __future__ import annotations
 
 from rastervec.renderer._shapes import path_color_hex, replay_drawing_paths
-from rastervec.renderer.pdf import render_reconstructed_page, render_reconstructed_pdf
+from rastervec.renderer.pdf import (
+    render_boxes_pdf,
+    render_reconstructed_page,
+    render_reconstructed_pdf,
+)
 from rastervec.renderer.png import (
     cluster_frame_size,
     pixel_to_page_bbox,
@@ -32,6 +37,7 @@ __all__ = [
     "replay_drawing_paths",
     "render_reconstructed_page",
     "render_reconstructed_pdf",
+    "render_boxes_pdf",
     "render_vector_cluster",
     "render_page_paths",
     "pixel_to_page_bbox",

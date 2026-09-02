@@ -13,7 +13,6 @@ from rastervec.Evaluation.Evaluate.evaluate import (
 )
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet
 from rastervec.models import ClusterOcrResult, DrawingVector, TextVectorResult, VectorPath
-from rastervec.OCR.Rotation_Correction.rotation_correction import RotationCheck
 from rastervec.pipeline import ClusteringStageResult
 from rastervec.Vector_Classification.classification import CategoryResult, StepResult
 
@@ -60,24 +59,12 @@ def test_evaluate_pipeline_perfect_match():
     cluster_hello = [_make_path(bbox=(0, 0, 10, 5))]
     cluster_world = [_make_path(bbox=(20, 20, 30, 25))]
     result_hello = _make_ocr_result(cluster=cluster_hello, text="Hello", bbox=(0, 0, 10, 5), rotation_used=0)
-    result_world = _make_ocr_result(cluster=cluster_world, text="World", bbox=(20, 20, 30, 25), rotation_used=0)
-
-    rotation_checks = [
-        RotationCheck(
-            cluster=cluster_world, text="World", bbox=(20, 20, 30, 25),
-            before_rotation=0, after_rotation=90, applied=True,
-            error_unrotated=0.5, error_rotated=0.05,
-            resolved=TextVectorResult(
-                paths=cluster_world, text="World", confidence=0.9,
-                bbox=(20, 20, 30, 25), ocr_bbox=(20, 20, 30, 25),
-                rotation_used=90, page_index=0,
-            ),
-        )
-    ]
+    # rotation_used=90 straight off ocr_compare -- matches label_world's own
+    # expected_rotation=90.
+    result_world = _make_ocr_result(cluster=cluster_world, text="World", bbox=(20, 20, 30, 25), rotation_used=90)
 
     result = evaluate_pipeline(
         labels, [result_hello, result_world], [_make_drawing_vector()],
-        rotation_checks=rotation_checks,
     )
 
     assert len(result.matched) == 2

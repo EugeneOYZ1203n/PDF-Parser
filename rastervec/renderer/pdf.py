@@ -11,6 +11,11 @@ comparison files (see `notebooks/benchmark_vector_classification.ipynb`).
 Both are rough previews, not `Evaluation/evaluation.py`'s real
 (still-unbuilt) reconstruction stage: font family isn't preserved (always
 the base14 "helv"), only size/baseline/rotation are approximated.
+
+`render_boxes_pdf` is unrelated to reconstruction -- a generic "draw these
+colored bbox outlines on a fresh page" primitive, used by
+`Evaluation/Evaluate/evaluate.py`'s `render_evaluation_pdf` to visualize
+matched/unmatched-label/unmatched-prediction bboxes.
 """
 from __future__ import annotations
 
@@ -198,6 +203,35 @@ def render_reconstructed_pdf(
         text_boxes=text_boxes,
     )
     try:
+        return doc.tobytes()
+    finally:
+        doc.close()
+
+
+# One box overlay: a page-space bbox plus the (r, g, b) 0..1 color to
+# outline it in.
+BoxOverlay = tuple[tuple[float, float, float, float], tuple[float, float, float]]
+
+
+def render_boxes_pdf(
+    page_meta: PageMeta,
+    boxes: list[BoxOverlay],
+    *,
+    width: float = 1.5,
+) -> bytes:
+    """A fresh page sized/rotated to `page_meta`, with each of `boxes`'s
+    (bbox, color) pairs drawn as an unfilled rectangle outline
+    (`page.draw_rect`, no fill -- so overlapping boxes stay legible). Used
+    by `Evaluation/Evaluate/evaluate.py`'s `render_evaluation_pdf` to
+    visualize one `evaluate_pipeline()` call's matched/unmatched-label/
+    unmatched-prediction bboxes; generic otherwise -- it knows nothing
+    about evaluation, just draws colored boxes."""
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=page_meta.width, height=page_meta.height)
+        page.set_rotation(page_meta.rotation)
+        for bbox, color in boxes:
+            page.draw_rect(fitz.Rect(*bbox), color=color, width=width)
         return doc.tobytes()
     finally:
         doc.close()

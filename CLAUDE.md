@@ -223,8 +223,6 @@ testable independently of the others (every stage's *output* is a plain dataclas
   colors, are never spatially merged together, regardless of how close they are on the page.
 - **`OCR/FAST_Text_Detect/fast_detect.py` — `FastDetector`** *(implemented)*: see the `pipeline.py`
   bullet below for `detect`/`detect_tiled`.
-- **`OCR/Rotation_Correction/rotation_correction.py` — `RotationCheck`, `_run_rotation_verify`**
-  *(implemented)*: see the `pipeline.py` bullet below.
 - **`OCR/Paddle_OCR/ocr_backend.py`** *(implemented, PaddleOCR-only — `TesseractOcrBackend` was
   removed, see Commands section above)*: `OcrBackend` (Protocol: `detect(image) -> OcrDetection`),
   `OcrBox` (one detected text box: `text`/`confidence`/`corners`/`is_word`, always already mapped
@@ -320,17 +318,19 @@ testable independently of the others (every stage's *output* is a plain dataclas
   runs `auto_label_pdf`, merges its entries onto any existing `--out` file (default: a temp file),
   and opens `ManualLabelApp` on it.
 - **`Evaluation/Evaluate/evaluate.py` — `evaluate_pipeline`** *(implemented)*: scores a completed
-  pipeline run's `ClusterOcrResult`/`DrawingVector`/`RotationCheck` lists against a `LabelSet`.
+  pipeline run's `ClusterOcrResult`/`DrawingVector` lists against a `LabelSet`.
   Matches each label to a predicted OCR reading by `bbox_iou` (greedy highest-IoU-first, one-to-one)
-  above `iou_threshold`; a `RotationCheck` with `applied=True` for a matched cluster overrides that
-  reading's `rotation_used` for the rotation-accuracy check. Returns an `EvaluationResult`:
+  above `iou_threshold`. Returns an `EvaluationResult`:
   `characters_found_pct` (char-count-weighted, not label-count-weighted), `character_accuracy`/
   `character_error_rate` (mean `difflib.SequenceMatcher` ratio per matched pair — stdlib, no
-  string-distance dependency in `requirements.txt`), `rotation_accuracy` (matched-pair rotation vs.
-  `expected_rotation`), `bbox_accuracy` (mean IoU), `classification_precision`/`_recall` (matched =
+  string-distance dependency in `requirements.txt`), `rotation_accuracy` (matched-pair rotation, off
+  `ocr_compare`'s own `rotation_used`, vs. `expected_rotation`), `bbox_accuracy` (mean IoU),
+  `classification_precision`/`_recall` (matched =
   true positive, unmatched label = false negative i.e. text the pipeline dropped as drawing content,
-  unmatched prediction = false positive), `drawing_vector_count`. Deliberately decoupled from
-  `PipelineContext`/a real PDF — callers pass their own OCR/drawing-vector/rotation-check lists, so
+  unmatched prediction = false positive), `drawing_vector_count`, and
+  `unmatched_prediction_boxes` (each unmatched prediction's own bbox, alongside the
+  `unmatched_predictions` count — feeds `render_evaluation_pdf` below). Deliberately decoupled from
+  `PipelineContext`/a real PDF — callers pass their own OCR/drawing-vector lists, so
   this module is testable against small hand-built inputs. Optional `clustering`/`fast_dropped`/
   `ocr_failed` params (the rest of `PipelineContext`, all default `None`) turn on a stage-attributed
   "loss funnel": `_attribute_miss` checks, in pipeline order, whether an unmatched label's bbox
@@ -342,13 +342,18 @@ testable independently of the others (every stage's *output* is a plain dataclas
   omitted, so passing none of these three keeps the exact old behavior). `split_labelset_by_source`
   (pure helper) splits a mixed-source `LabelSet` into `{"auto": …, "manual": …}` so a caller can
   score auto-derived and human-entered ground truth as separate `evaluate_pipeline` runs (used by
-  the benchmark notebook).
+  the benchmark notebook). `render_evaluation_pdf(result, page_meta)` is a separate, optional visual
+  counterpart (this module stays I/O-free otherwise): matched pairs' label+predicted bboxes in
+  green, unmatched labels in red, unmatched predictions in yellow, drawn onto a fresh page via
+  `renderer.render_boxes_pdf` — wired in by `benchmark.py`'s `--eval-pdf-dir`.
 - **`Evaluation/Evaluate/benchmark.py`** *(implemented)* — the CLI wiring Conversion → auto_label →
   a real full pipeline run → `evaluate_pipeline` together: `python -m
   rastervec.Evaluation.Evaluate.benchmark --pdf PATH [--pdf PATH2 ...] --pages 0,1,2
-  [--iou-threshold 0.3]`. `run_one_page` builds ground truth with no pipeline run
+  [--iou-threshold 0.3] [--eval-pdf-dir DIR]`. `run_one_page` builds ground truth with no pipeline run
   (`auto_label_pdf`), converts, runs the entire `Pipeline.STAGES` chain including real PaddleOCR
-  via `pipeline.run_page_context`, then scores it with every miss-attribution param wired through.
+  via `pipeline.run_page_context`, then scores it with every miss-attribution param wired through;
+  when `--eval-pdf-dir` is given, also writes each page's `evaluate.render_evaluation_pdf` bbox
+  overlay there as `<stem>_p<page>_eval.pdf`.
   `format_report`/`aggregate_results` (mean of each numeric metric + total miss-reason counts
   across every page) are pure and unit-tested; `main()`'s actual OCR-backed path is a manual smoke
   test only (same reasoning as `manual_label.py`'s Tk UI — real PaddleOCR, first run downloads
@@ -356,16 +361,22 @@ testable independently of the others (every stage's *output* is a plain dataclas
   tests). `notebooks/benchmark_vector_classification.ipynb` is the interactive counterpart: it
   scores the current (new) pipeline vs. the archive legacy (old) one via `legacy_adapter`, takes
   either a PDF folder **or** a `manual_label.py` sidecar `.json` (`LABELS_JSON` — derives the
-  `(pdf, page)` pairs from the file, still runs `auto_label_pdf`), scores auto- and manual-source
-  ground truth separately via `split_labelset_by_source`, and writes per-page
-  `_groundtruth`/`_current`/`_legacy` reconstruction PDFs (`renderer.render_reconstructed_pdf`,
+  `(pdf, page)` pairs from the file, still runs `auto_label_pdf`). A `prepare_page(pdf_path,
+  page_index)` prep function runs once per `(pdf, page)` pair, ahead of both pipeline loops
+  (`page_prep` dict), doing both the ground-truth build (auto + any loaded manual labels) and the
+  Conversion call (`convert_page_to_vector_text`) together — so both the current and legacy loops
+  score against, and the current pipeline runs against, exactly the same precomputed data instead
+  of each loop recomputing ground truth (and the current loop separately reconverting) on its own.
+  Scores auto- and manual-source ground truth separately via `split_labelset_by_source`, and writes
+  per-page `_groundtruth`/`_current`/`_legacy` reconstruction PDFs (`renderer.render_reconstructed_pdf`,
   text-found + drawing vectors; legacy is text-only) into `RECONSTRUCT_DIR`. A showcase cell
   plots `SHOWCASE_N` of the current pipeline's actual PaddleOCR cluster renders (re-rendered by
   `render_ocr_input`, matching `RenderOCR.ocr_cluster`'s own dpi-bump), sampled ~50/50 between
   non-blank (PASS) and blank (FAIL) OCR readings.
 - **`renderer/` — module-level functions, no `Renderer` class** *(rendering helpers, not a pipeline
   stage)*: a package split by output concern — `png.py` (rasterize vector paths for OCR / FAST
-  input), `pdf.py` (`render_reconstructed_page`, `render_reconstructed_pdf`), `svg.py` (`render_page_svg`, a thin
+  input), `pdf.py` (`render_reconstructed_page`, `render_reconstructed_pdf`, `render_boxes_pdf`),
+  `svg.py` (`render_page_svg`, a thin
   `get_svg_image()` wrapper), and `_shapes.py` (shared). Import straight from `rastervec.renderer`
   (`from rastervec.renderer import render_vector_cluster`, etc.).
   `_shapes.path_color_hex(path)` returns a path's real PDF stroke/fill color as hex (used by both the
@@ -387,9 +398,16 @@ testable independently of the others (every stage's *output* is a plain dataclas
   `VectorPath` of a drawing (like `fill_rule`), defaulted so existing constructions are unaffected;
   `Vector.extract_records` normalises a tuple `lineCap` from `get_drawings()` to a plain int.
   `png.render_vector_cluster(paths, dpi)` *(implemented)*
-  isolates a cluster onto a fresh single-page PyMuPDF document sized to the cluster's own bbox (plus
-  padding — `max(4pt, largest member's stroke_width)`, computed by the private `_cluster_frame`
-  helper — so edge strokes aren't clipped), replays each drawing's items via `replay_drawing_paths`,
+  isolates a cluster onto a fresh single-page PyMuPDF document sized to the cluster's own bbox plus
+  an asymmetric OCR render border, computed by the private `_cluster_frame` helper: each side is at
+  least `max(4pt, largest member's stroke_width)` (clipping safety), then further widened per axis
+  by a fraction of the cluster's own bbox height — tight vertically (5%, keeps glyphs filling the
+  frame) and generous horizontally (30%, keeps edge glyphs from clipping) — ported from
+  `archive/raster_parser`'s Type-2 full native-to-OCR pipeline
+  (`parsing/parser.py::normalise_crop_for_ocr`), which padded an already-rasterized crop with
+  `cv2.copyMakeBorder` before resizing it for PaddleOCR; here the same ratios expand the render
+  frame itself, in PDF-point space, before the page is rasterized, rather than as a post-render
+  pixel-fill step. `render_vector_cluster` then replays each drawing's items via `replay_drawing_paths`,
   then rasterizes at `dpi` and returns a PIL `Image` — reusing PyMuPDF's own path/curve/fill
   rendering rather than reimplementing rasterization by hand.
   `png.pixel_to_page_bbox(paths, dpi, pixel_points)` inverts
@@ -446,10 +464,10 @@ testable independently of the others (every stage's *output* is a plain dataclas
   bucket's final "kept" clusters flattened, plus their merged group lineage), `similarity_groups` +
   `cluster_similarity_id` (whole-page similarity grouping, see "similarity group" in Glossary.md),
   `fast_result` + `fast_passed`/`fast_dropped`, `regrouped_clusters`, `cluster_ocr_results` +
-  `ocr_results` + `ocr_failed`, `rotation_checks`, `drawing_vectors`. `StageSpec(key, label, run)` is
+  `ocr_results` + `ocr_failed`, `drawing_vectors`. `StageSpec(key, label, run)` is
   one stage; `Pipeline.STAGES` is the ordered list: `reader`, `native`, `vector_extract`,
   `layer_separation`, `color_separation`, `clustering`, `text_candidates`, `unique_clusters`,
-  `fast_text_detect`, `spatial_regroup`, `ocr_compare`, `rotation_verify`, `drawing_vectors` (13
+  `fast_text_detect`, `spatial_regroup`, `ocr_compare`, `drawing_vectors` (12
   stages total).
 
   `_run_clustering` calls `VectorClassifier().cluster(paths, ctx.page)` per `(layer, color)` bucket
@@ -496,23 +514,6 @@ testable independently of the others (every stage's *output* is a plain dataclas
   `ClusterOcrResult` records `cluster`, `resolved`, and the OCR call's wall-clock duration
   (`ocr_seconds`).
 
-  `_run_rotation_verify` (`OCR/Rotation_Correction/rotation_correction.py`'s `_run_rotation_verify`,
-  a new layer between `ocr_compare` and `drawing_vectors`): for every `cluster_ocr_results` entry
-  with real (non-blank) `resolved` text, compares the text's own natural width/height aspect ratio
-  (`_text_aspect_ratio` — `fitz.Font("helv").text_length(text, fontsize=1.0)` over `ascender -
-  descender`, fontsize-invariant so no bbox/fontsize input is needed) against `resolved.bbox`'s
-  aspect ratio as-is, and again against that same bbox rotated 90 deg (width/height swapped, i.e.
-  `1 / bbox_ratio`). If the rotated comparison is a meaningfully closer match (`error_unrotated -
-  error_rotated > ROTATION_VERIFY_IMPROVEMENT_MARGIN`, 0.15 — avoids flipping on a near-tie),
-  `RotationCheck.resolved` is a *new* `TextVectorResult` (via `dataclasses.replace`, not a mutation
-  of `ocr_compare`'s own object) with `rotation_used` corrected by `+90 % 360` (`applied=True`) —
-  `ocr_compare`'s own `resolved` reading (held by `ctx.cluster_ocr_results`/`ctx.ocr_results`) is
-  never mutated; consumers wanting the corrected orientation (this stage's own reconstruction view,
-  `drawing_vectors`) read `RotationCheck.resolved` instead. One `RotationCheck` (`cluster`, `text`,
-  `bbox`, `before_rotation`, `after_rotation`, `applied`, `error_unrotated`, `error_rotated`,
-  `resolved`) is recorded per checked cluster into `ctx.rotation_checks`; blank/failed readings and
-  degenerate (zero-area) bboxes are skipped outright (nothing to check).
-
   `_run_drawing_vectors` folds three sources into one `drawing_paths` list before calling
   `VectorClassifier.build_drawing_vectors`: every `role="dropped"` category from every
   classification-chain step, `ctx.fast_dropped` (FAST found no text signal), and `ctx.ocr_failed`
@@ -540,7 +541,7 @@ testable independently of the others (every stage's *output* is a plain dataclas
   Overlay drawing is the notebook's own `PIL.ImageDraw` polyline/polygon port (polylines/polygons via
   `page.fitz_page.rotation_matrix * fitz.Matrix(zoom, zoom)`, the ex-`_get_display_matrix` rule; it
   draws per-primitive and does not do the renderer package's per-drawing even-odd replay);
-  the four reconstruction stages (`native`, `ocr_compare`, `rotation_verify`, `drawing_vectors`)
+  the three reconstruction stages (`native`, `ocr_compare`, `drawing_vectors`)
   use `renderer.render_reconstructed_page(...)` for their isolated panel, and `fast_text_detect`
   uses `FastPageResult.page_image` + a red-channel `page_mask` heatmap blend. `FINAL_STAGE` stops
   the run early — set it before `fast_text_detect` to skip needing the FAST weights file, before

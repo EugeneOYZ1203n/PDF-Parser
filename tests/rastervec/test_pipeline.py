@@ -4,17 +4,15 @@ import numpy as np
 import pymupdf as fitz
 import pytest
 
-from rastervec.models import ClusterOcrResult, DrawingVector, Page, TextVectorResult, TextWord, VectorPath
+from rastervec.models import DrawingVector, Page, TextWord, VectorPath
 from rastervec.pipeline import (
     ClusteringStageResult,
     Pipeline,
     PipelineContext,
     StageSpec,
     _run_drawing_vectors,
-    _run_rotation_verify,
     _run_spatial_regroup,
     _sample_mask,
-    _text_aspect_ratio,
 )
 from rastervec.Reader.reader import Reader
 from rastervec.Vector_Classification.classification import CategoryResult, StepResult
@@ -31,7 +29,6 @@ _EXPECTED_STAGE_KEYS = [
     "fast_text_detect",
     "spatial_regroup",
     "ocr_compare",
-    "rotation_verify",
     "drawing_vectors",
 ]
 
@@ -82,9 +79,9 @@ def test_run_page_final_stage_stops_early_and_skips_ocr_engine(
         outputs = Pipeline().run_page(reader, 0, final_stage="fast_text_detect")
 
     # everything up to and including fast_text_detect, but not
-    # spatial_regroup, ocr_compare (which would construct RenderOCR),
-    # rotation_verify, or drawing_vectors
-    assert [o.key for o in outputs] == _EXPECTED_STAGE_KEYS[:-4]
+    # spatial_regroup, ocr_compare (which would construct RenderOCR), or
+    # drawing_vectors
+    assert [o.key for o in outputs] == _EXPECTED_STAGE_KEYS[:-3]
     assert all(o.status == "ok" for o in outputs)
 
 
@@ -319,58 +316,3 @@ def test_run_page_stage_after_error_still_runs(synthetic_pdf_factory, tmp_pdf_pa
     assert outputs[1].data == "fine"
 
 
-def _make_cluster_result(text: str, bbox, rotation_used: int = 0) -> ClusterOcrResult:
-    resolved = TextVectorResult(
-        paths=[], text=text, confidence=0.95, bbox=bbox, ocr_bbox=None,
-        rotation_used=rotation_used, page_index=0,
-    )
-    return ClusterOcrResult(cluster=[], resolved=resolved, ocr_seconds=0.0)
-
-
-def test_rotation_verify_flips_when_bbox_rotated_fits_better():
-    text = "HELLO WORLD"
-    ratio = _text_aspect_ratio(text)
-    assert ratio > 1  # wide text
-
-    # A tall/narrow bbox shaped like the text rotated 90 (ratio swapped)
-    # should trigger the fix.
-    bbox = (0, 0, 10, 10 * ratio)
-    ctx = PipelineContext(reader=None, page_index=0)
-    ctx.cluster_ocr_results = [_make_cluster_result(text, bbox, rotation_used=0)]
-
-    checks = _run_rotation_verify(ctx)
-
-    assert len(checks) == 1
-    assert checks[0].applied
-    assert checks[0].after_rotation == 90
-    assert checks[0].resolved.rotation_used == 90
-    # ocr_compare's own resolved reading is never mutated -- rotation_verify
-    # reports the corrected orientation as a separate RotationCheck.resolved
-    # object instead.
-    assert ctx.cluster_ocr_results[0].resolved.rotation_used == 0
-
-
-def test_rotation_verify_leaves_matching_bbox_alone():
-    text = "HELLO WORLD"
-    ratio = _text_aspect_ratio(text)
-    bbox = (0, 0, 10 * ratio, 10)  # already matches the text's own aspect
-    ctx = PipelineContext(reader=None, page_index=0)
-    ctx.cluster_ocr_results = [_make_cluster_result(text, bbox, rotation_used=0)]
-
-    checks = _run_rotation_verify(ctx)
-
-    assert len(checks) == 1
-    assert not checks[0].applied
-    assert checks[0].after_rotation == 0
-    # Not applied -- resolved is the exact same (unmutated) object.
-    assert checks[0].resolved is ctx.cluster_ocr_results[0].resolved
-    assert ctx.cluster_ocr_results[0].resolved.rotation_used == 0
-
-
-def test_rotation_verify_skips_blank_text():
-    ctx = PipelineContext(reader=None, page_index=0)
-    ctx.cluster_ocr_results = [_make_cluster_result("", (0, 0, 10, 10))]
-
-    checks = _run_rotation_verify(ctx)
-
-    assert checks == []

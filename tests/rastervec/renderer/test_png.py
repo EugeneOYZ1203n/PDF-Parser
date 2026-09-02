@@ -73,10 +73,17 @@ def test_render_vector_cluster_even_odd_keeps_counter_open():
         kind="re", bbox=(20, 20, 40, 40), fill_color=(0, 0, 0),
         seq=3, item_index=1, even_odd=True,
     )
-    image = render_vector_cluster([outer, inner], dpi=300).convert("L")
+    dpi = 300
+    image = render_vector_cluster([outer, inner], dpi=dpi).convert("L")
 
+    # Padding is asymmetric (see _cluster_frame) so the outer rect isn't
+    # centered in the canvas -- derive the ring point from the real frame
+    # instead of assuming a fixed fraction of the image width lands inside
+    # the outer rect's left edge.
+    _x0, _y0, pad_x, _pad_y = _cluster_frame([outer, inner])
+    zoom = dpi / 72.0
     cx, cy = image.width // 2, image.height // 2
-    ring_x = int(image.width * 0.15)  # inside the outer rect, outside the inner
+    ring_x = int((pad_x + 5) * zoom)  # just inside the outer rect's left edge, outside the inner
     assert image.getpixel((cx, cy)) > 200        # counter preserved (white hole)
     assert image.getpixel((ring_x, cy)) < 60     # outer ring still filled
 
@@ -102,11 +109,22 @@ def test_pixel_to_page_bbox_round_trips_cluster_frame():
     path = _make_path(kind="re", bbox=(0, 0, 20, 10), fill_color=(0, 0, 0))
     dpi = 150
     zoom = dpi / 72.0
-    x0, y0, padding = _cluster_frame([path])
+    x0, y0, pad_x, pad_y = _cluster_frame([path])
 
     # A pixel-space point at the padded top-left corner should map back to
     # the cluster's own bbox origin in page space.
     page_bbox = pixel_to_page_bbox(
-        [path], dpi, [(padding * zoom, padding * zoom), ((padding + 20) * zoom, (padding + 10) * zoom)],
+        [path], dpi, [(pad_x * zoom, pad_y * zoom), ((pad_x + 20) * zoom, (pad_y + 10) * zoom)],
     )
     assert page_bbox == pytest.approx((x0, y0, x0 + 20, y0 + 10))
+
+
+def test_cluster_frame_horizontal_padding_more_generous_than_vertical():
+    # A tall bbox (height 200) pushes both fraction-based margins well past
+    # the stroke-safety floor, so the asymmetry actually engages: pad_x
+    # (30% of height) should end up well past pad_y (5% of height).
+    path = _make_path(kind="re", bbox=(0, 0, 20, 200), fill_color=(0, 0, 0))
+    _x0, _y0, pad_x, pad_y = _cluster_frame([path])
+    assert pad_x == pytest.approx(60.0)  # 200 * 0.30
+    assert pad_y == pytest.approx(10.0)  # 200 * 0.05
+    assert pad_x > pad_y

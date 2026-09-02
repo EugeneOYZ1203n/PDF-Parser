@@ -3,7 +3,11 @@ run -> evaluate_pipeline together end-to-end, over one or more PDF pages,
 and prints a per-page + aggregate report.
 
     .venv/Scripts/python.exe -m rastervec.Evaluation.Evaluate.benchmark \
-        --pdf path/to.pdf --pages 0,1,2 [--iou-threshold 0.3]
+        --pdf path/to.pdf --pages 0,1,2 [--iou-threshold 0.3] [--eval-pdf-dir DIR]
+
+`--eval-pdf-dir`, when given, writes one <stem>_p<page>_eval.pdf per page via
+evaluate.render_evaluation_pdf -- matched pairs in green, unmatched labels in
+red, unmatched predictions in yellow.
 
 Runs the real `Pipeline.STAGES` chain (via `pipeline.run_page_context`)
 through OCR (`RenderOCR`/PaddleOCR) -- this is deliberately the same real,
@@ -29,6 +33,7 @@ from rastervec.Evaluation.Evaluate.evaluate import (
     DEFAULT_IOU_THRESHOLD,
     EvaluationResult,
     evaluate_pipeline,
+    render_evaluation_pdf,
 )
 from rastervec.Evaluation.Labelling.auto_label import auto_label_pdf
 from rastervec.logging_setup import configure_logging, get_logger
@@ -50,9 +55,13 @@ _NUMERIC_FIELDS = (
 
 def run_one_page(
     pdf_path: str, page_index: int, iou_threshold: float = DEFAULT_IOU_THRESHOLD,
+    eval_pdf_path: Path | None = None,
 ) -> EvaluationResult:
     """Ground truth (no pipeline run) -> Conversion -> a real full pipeline
-    run (OCR included) -> evaluate_pipeline, for one page."""
+    run (OCR included) -> evaluate_pipeline, for one page. When
+    `eval_pdf_path` is given, also writes render_evaluation_pdf's
+    matched(green)/unmatched-label(red)/unmatched-prediction(yellow) bbox
+    overlay there (--eval-pdf-dir)."""
     labels = auto_label_pdf(pdf_path, page_index)
     converted_bytes = convert_page_to_vector_text(pdf_path, page_index)
 
@@ -63,16 +72,25 @@ def run_one_page(
         with Reader(converted_path) as reader:
             ctx = run_page_context(reader, 0)
 
-    return evaluate_pipeline(
+    result = evaluate_pipeline(
         labels,
         ctx.cluster_ocr_results or [],
         ctx.drawing_vectors or [],
-        rotation_checks=ctx.rotation_checks,
         iou_threshold=iou_threshold,
         clustering=ctx.clustering,
         fast_dropped=ctx.fast_dropped,
         ocr_failed=ctx.ocr_failed,
     )
+
+    if eval_pdf_path is not None:
+        eval_pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        # ctx.page.meta is the converted page's own meta -- Conversion sizes
+        # and rotates it to match the source page, so it lines up with both
+        # the auto/manual labels (source page space) and the predictions
+        # (converted page space, same geometry).
+        eval_pdf_path.write_bytes(render_evaluation_pdf(result, ctx.page.meta))
+
+    return result
 
 
 def format_report(pdf_path: str, page_index: int, result: EvaluationResult) -> str:
@@ -131,6 +149,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--iou-threshold", type=float, default=DEFAULT_IOU_THRESHOLD,
         help=f"IoU threshold for label<->prediction matching (default: {DEFAULT_IOU_THRESHOLD}).",
     )
+    parser.add_argument(
+        "--eval-pdf-dir", type=Path, default=None,
+        help="Write one <stem>_p<page>_eval.pdf per page here -- matched pairs in green, "
+        "unmatched labels in red, unmatched predictions in yellow (see evaluate.render_evaluation_pdf).",
+    )
     return parser
 
 
@@ -143,7 +166,13 @@ def main(argv: list[str] | None = None) -> int:
     for pdf_path in args.pdf:
         for page_index in pages:
             _LOG.info("running %s page %d", pdf_path, page_index)
-            result = run_one_page(pdf_path, page_index, args.iou_threshold)
+            eval_pdf_path = (
+                args.eval_pdf_dir / f"{Path(pdf_path).stem}_p{page_index}_eval.pdf"
+                if args.eval_pdf_dir is not None else None
+            )
+            result = run_one_page(
+                pdf_path, page_index, args.iou_threshold, eval_pdf_path=eval_pdf_path,
+            )
             results.append(result)
             print(format_report(pdf_path, page_index, result))
             print()

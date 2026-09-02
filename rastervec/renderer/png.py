@@ -11,6 +11,15 @@ inverts `render_vector_cluster`'s own isolated-canvas transform (shared via
 `_cluster_frame`) to map a detected-in-pixel-space bbox back into PDF page
 space.
 
+`_cluster_frame`'s border around the cluster's own bbox is asymmetric --
+tight vertically, generous horizontally -- ported from archive/raster_parser's
+Type-2 full native-to-OCR pipeline (`parsing/parser.py::normalise_crop_for_ocr`,
+used by `archive/scripts/type2_full_native_to_ocr_pipeline.py`), which padded
+an already-rasterized crop with `cv2.copyMakeBorder` before resizing it for
+PaddleOCR. Here the same ratios are applied to the render frame itself, in
+PDF-point space, before the page is even rasterized -- the border is part of
+the render, not a separate post-render pixel-fill step.
+
 Coordinate space: everything here stays in unrotated MediaBox space, like
 every other rastervec stage -- no page rotation is applied (see
 `models.py`'s module docstring).
@@ -27,37 +36,50 @@ from rastervec.models import PageMeta, VectorPath
 from rastervec.renderer._shapes import replay_drawing_paths
 
 # Minimum padding (in PDF points) added around a cluster's bbox before
-# rendering, so thin strokes right at the bbox edge aren't clipped.
+# rendering, so thin strokes right at the bbox edge aren't clipped -- the
+# floor both _OCR_*_PADDING_FRACTION margins below are clamped against.
 _MIN_CLUSTER_PADDING = 4.0
 
+# OCR-specific render-border expansion (see module docstring): fractions of
+# the cluster's own bbox height, applied asymmetrically -- tight vertically
+# (keeps glyphs filling the frame's height) and generous horizontally (keeps
+# glyphs right at the cluster's left/right edge from clipping).
+_OCR_VERTICAL_PADDING_FRACTION = 0.05
+_OCR_HORIZONTAL_PADDING_FRACTION = 0.30
 
-def _cluster_frame(paths: list[VectorPath]) -> tuple[float, float, float]:
+
+def _cluster_frame(paths: list[VectorPath]) -> tuple[float, float, float, float]:
     """The isolated-canvas geometry shared by `render_vector_cluster` and
-    `pixel_to_page_bbox`: `(x0, y0, padding)` where `x0`/`y0` are the
-    cluster's own bbox origin (page space) and `padding` is the margin
-    added around it (>= `_MIN_CLUSTER_PADDING`, or a member's own stroke
-    width if wider) so edge strokes aren't clipped. A page-space point
-    maps to canvas space via `(x - x0 + padding, y - y0 + padding)`."""
-    x0, y0, _x1, _y1 = union_bbox([p.bbox for p in paths])
-    padding = max(_MIN_CLUSTER_PADDING, max((p.stroke_width or 0.0) for p in paths))
-    return x0, y0, padding
+    `pixel_to_page_bbox`: `(x0, y0, pad_x, pad_y)` where `x0`/`y0` are the
+    cluster's own bbox origin (page space) and `pad_x`/`pad_y` are the
+    (asymmetric -- see module docstring) margins added around it, each
+    >= `_MIN_CLUSTER_PADDING` or a member's own stroke width if wider. A
+    page-space point maps to canvas space via
+    `(x - x0 + pad_x, y - y0 + pad_y)`."""
+    x0, y0, _x1, y1 = union_bbox([p.bbox for p in paths])
+    height = y1 - y0
+    stroke_floor = max(_MIN_CLUSTER_PADDING, max((p.stroke_width or 0.0) for p in paths))
+    pad_y = max(stroke_floor, height * _OCR_VERTICAL_PADDING_FRACTION)
+    pad_x = max(stroke_floor, height * _OCR_HORIZONTAL_PADDING_FRACTION)
+    return x0, y0, pad_x, pad_y
 
 
 def cluster_frame_size(paths: list[VectorPath]) -> tuple[float, float]:
     """(width, height) in PDF points of the isolated canvas
     `render_vector_cluster` would build for `paths` (bbox plus
-    `_cluster_frame`'s padding) -- lets a caller (`RenderOCR.ocr_cluster`)
-    pick a dpi that keeps the rendered pixel size above some minimum
-    without duplicating `_cluster_frame`'s own padding math."""
+    `_cluster_frame`'s asymmetric padding) -- lets a caller
+    (`RenderOCR.ocr_cluster`) pick a dpi that keeps the rendered pixel size
+    above some minimum without duplicating `_cluster_frame`'s own padding
+    math."""
     x0, y0, x1, y1 = union_bbox([p.bbox for p in paths])
-    _frame_x0, _frame_y0, padding = _cluster_frame(paths)
-    return (x1 - x0) + 2 * padding, (y1 - y0) + 2 * padding
+    _frame_x0, _frame_y0, pad_x, pad_y = _cluster_frame(paths)
+    return (x1 - x0) + 2 * pad_x, (y1 - y0) + 2 * pad_y
 
 
 def render_vector_cluster(paths: list[VectorPath], dpi: int) -> "Image.Image":
     """High-resolution render of an isolated vector path cluster, used as
     OCR input. Builds a fresh single-page PyMuPDF document sized to the
-    cluster's own bbox (plus padding for stroke overflow, via
+    cluster's own bbox (plus the asymmetric OCR border, via
     `_cluster_frame`), replays each drawing's items as one composite path
     via `_shapes.replay_drawing_paths`, then rasterizes at `dpi` -- reusing
     PyMuPDF's own rendering rather than re-implementing curve/fill
@@ -66,10 +88,10 @@ def render_vector_cluster(paths: list[VectorPath], dpi: int) -> "Image.Image":
         raise ValueError("render_vector_cluster requires at least one path")
 
     x0, y0, x1, y1 = union_bbox([p.bbox for p in paths])
-    frame_x0, frame_y0, padding = _cluster_frame(paths)
-    dx, dy = padding - frame_x0, padding - frame_y0
-    width = (x1 - x0) + 2 * padding
-    height = (y1 - y0) + 2 * padding
+    frame_x0, frame_y0, pad_x, pad_y = _cluster_frame(paths)
+    dx, dy = pad_x - frame_x0, pad_y - frame_y0
+    width = (x1 - x0) + 2 * pad_x
+    height = (y1 - y0) + 2 * pad_y
 
     doc = fitz.open()
     try:
@@ -97,10 +119,10 @@ def pixel_to_page_bbox(
     corners, from a render of this exact `paths`/`dpi` pair) back into PDF
     page space, returning their bbox. Used by `RenderOCR.ocr_cluster` to
     compute a `TextVectorResult`'s ocr_bbox."""
-    x0, y0, padding = _cluster_frame(paths)
+    x0, y0, pad_x, pad_y = _cluster_frame(paths)
     zoom = dpi / 72.0
-    xs = [px / zoom - padding + x0 for px, _py in pixel_points]
-    ys = [py / zoom - padding + y0 for _px, py in pixel_points]
+    xs = [px / zoom - pad_x + x0 for px, _py in pixel_points]
+    ys = [py / zoom - pad_y + y0 for _px, py in pixel_points]
     return (min(xs), min(ys), max(xs), max(ys))
 
 

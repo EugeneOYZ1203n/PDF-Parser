@@ -3,9 +3,9 @@ label_schema.py`) and a completed pipeline run's OCR/drawing outputs,
 computes accuracy metrics for the Vector_Classification + OCR pipeline.
 
 Not the pipeline's own metric collector -- callers pass their own
-`ClusterOcrResult`/`DrawingVector`/`RotationCheck` lists directly (read off
-a real `PipelineContext` after a `Pipeline.run_page()` call, or hand-built),
-so this module stays testable against small synthetic inputs (see
+`ClusterOcrResult`/`DrawingVector` lists directly (read off a real
+`PipelineContext` after a `Pipeline.run_page()` call, or hand-built), so
+this module stays testable against small synthetic inputs (see
 `tests/rastervec/Evaluation/Evaluate/test_evaluate.py`) without needing a
 real PDF/pipeline run.
 
@@ -23,8 +23,8 @@ Metrics computed (`EvaluationResult`):
     label text and predicted text. `difflib` (stdlib) is used since no
     string-distance dependency exists in requirements.txt.
   - `rotation_accuracy` -- fraction of matched pairs whose predicted
-    rotation (rotation_verify's corrected `rotation_used` when it applied a
-    fix, else ocr_compare's own) equals the label's `expected_rotation`.
+    rotation (ocr_compare's own `rotation_used`) equals the label's
+    `expected_rotation`.
   - `bbox_accuracy` -- mean IoU across matched pairs.
   - `classification_precision`/`classification_recall` -- text-vs-drawing
     classification: true positives are matched pairs, false negatives are
@@ -66,6 +66,13 @@ into `evaluate_pipeline` automatically) callers can use for their own
 order-independent text comparisons -- ports of archive's
 `_same_word_bag`/`_text_for_compare` from `native_vs_raster_text.py`/
 `native_vs_ocr.py`.
+
+`render_evaluation_pdf(result, page_meta)` -- a separate, optional visual
+counterpart to one `EvaluationResult`: matched/unmatched-label/
+unmatched-prediction bboxes drawn as a real PDF page (green/red/yellow),
+via `renderer.render_boxes_pdf`. Not called automatically by
+`evaluate_pipeline` (this module stays I/O-free) -- wired in by
+`benchmark.py`'s `--eval-pdf-dir`.
 """
 from __future__ import annotations
 
@@ -75,8 +82,8 @@ from typing import TYPE_CHECKING
 
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet, LabelSource
 from rastervec.helpers.geometry import bbox_iou, union_bbox
-from rastervec.models import ClusterOcrResult, DrawingVector, VectorPath
-from rastervec.OCR.Rotation_Correction.rotation_correction import RotationCheck
+from rastervec.models import ClusterOcrResult, DrawingVector, PageMeta, VectorPath
+from rastervec.renderer import render_boxes_pdf
 
 if TYPE_CHECKING:
     from rastervec.pipeline import ClusteringStageResult, GroupKey
@@ -117,6 +124,10 @@ class EvaluationResult:
     matched: list[MatchedPair] = field(default_factory=list)
     unmatched_labels: list[LabelEntry] = field(default_factory=list)
     unmatched_predictions: int = 0
+    # Same unmatched predictions as unmatched_predictions above, but keeping
+    # each one's own bbox (not just the count) -- consumed by
+    # render_evaluation_pdf below to draw the yellow "over-detection" boxes.
+    unmatched_prediction_boxes: list[tuple[float, float, float, float]] = field(default_factory=list)
     characters_found_pct: float = 0.0
     character_accuracy: float = 0.0
     character_error_rate: float = 0.0
@@ -214,26 +225,15 @@ def classify_textbox_grouping(
 
 def _predictions_from_ocr(
     cluster_ocr_results: list[ClusterOcrResult],
-    rotation_checks: list[RotationCheck] | None,
 ) -> list[tuple[str, tuple[float, float, float, float], int]]:
-    """One (text, bbox, rotation_used) per non-blank OCR reading -- using
-    rotation_checks' corrected rotation_used for a cluster when a fix was
-    applied there, else ocr_compare's own reading (the same
-    rotation_verify-vs-ocr_compare precedence the visualization notebook
-    uses)."""
-    corrected_by_cluster_id = {
-        id(rc.cluster): rc.resolved for rc in (rotation_checks or []) if rc.applied
-    }
+    """One (text, bbox, rotation_used) per non-blank OCR reading, straight
+    off ocr_compare's own resolved reading."""
     predictions = []
     for result in cluster_ocr_results:
         resolved = result.resolved
         if not resolved.text.strip():
             continue
-        corrected = corrected_by_cluster_id.get(id(result.cluster))
-        rotation_used = (
-            corrected.rotation_used if corrected is not None else resolved.rotation_used
-        )
-        predictions.append((resolved.text, resolved.bbox, rotation_used))
+        predictions.append((resolved.text, resolved.bbox, resolved.rotation_used))
     return predictions
 
 
@@ -280,14 +280,13 @@ def evaluate_pipeline(
     labels: LabelSet,
     cluster_ocr_results: list[ClusterOcrResult],
     drawing_vectors: list[DrawingVector],
-    rotation_checks: list[RotationCheck] | None = None,
     iou_threshold: float = DEFAULT_IOU_THRESHOLD,
     clustering: "dict[GroupKey, ClusteringStageResult] | None" = None,
     fast_dropped: list[list[VectorPath]] | None = None,
     ocr_failed: list[list[VectorPath]] | None = None,
     predicted_groups: list[list[VectorPath]] | None = None,
 ) -> EvaluationResult:
-    predictions = _predictions_from_ocr(cluster_ocr_results, rotation_checks)
+    predictions = _predictions_from_ocr(cluster_ocr_results)
 
     candidates: list[tuple[float, LabelEntry, int, str, tuple[float, float, float, float], int]] = []
     for label in labels.entries:
@@ -308,7 +307,10 @@ def evaluate_pipeline(
         matched.append(MatchedPair(label, text, bbox, rotation_used, iou))
 
     unmatched_labels = [l for l in labels.entries if id(l) not in matched_label_ids]
-    unmatched_predictions = len(predictions) - len(matched_pred_indices)
+    unmatched_prediction_boxes = [
+        bbox for i, (_text, bbox, _rotation) in enumerate(predictions) if i not in matched_pred_indices
+    ]
+    unmatched_predictions = len(unmatched_prediction_boxes)
 
     total_gt_chars = sum(len(l.text) for l in labels.entries) or 1
     matched_gt_chars = sum(len(m.label.text) for m in matched)
@@ -364,6 +366,7 @@ def evaluate_pipeline(
         matched=matched,
         unmatched_labels=unmatched_labels,
         unmatched_predictions=unmatched_predictions,
+        unmatched_prediction_boxes=unmatched_prediction_boxes,
         characters_found_pct=characters_found_pct,
         character_accuracy=character_accuracy,
         character_error_rate=character_error_rate,
@@ -375,3 +378,35 @@ def evaluate_pipeline(
         miss_attributions=miss_attributions,
         textbox_grouping=textbox_grouping,
     )
+
+
+# render_evaluation_pdf's box colors -- (r, g, b), each channel 0..1, as
+# page.draw_rect (via renderer.render_boxes_pdf) expects.
+MATCHED_BOX_COLOR = (0.0, 0.6, 0.0)
+UNMATCHED_LABEL_BOX_COLOR = (0.85, 0.0, 0.0)
+UNMATCHED_PREDICTION_BOX_COLOR = (0.95, 0.75, 0.0)
+
+
+def render_evaluation_pdf(result: EvaluationResult, page_meta: PageMeta) -> bytes:
+    """One PDF page, sized/rotated to `page_meta`, with every bbox one
+    `evaluate_pipeline()` result touched drawn as an unfilled colored
+    rectangle -- a visual counterpart to classification_precision/_recall
+    for a single page:
+
+    - green: each matched pair's label bbox AND its own predicted bbox
+      (drawn separately, both green, so any positional drift between the
+      two is visible rather than hidden behind a single averaged box).
+    - red: each unmatched label -- ground-truth text the pipeline never
+      recovered as text.
+    - yellow: each unmatched prediction -- an OCR reading matching no
+      label (over-detection).
+    """
+    boxes: list[tuple[tuple[float, float, float, float], tuple[float, float, float]]] = []
+    for m in result.matched:
+        boxes.append((m.label.cluster_bbox, MATCHED_BOX_COLOR))
+        boxes.append((m.predicted_bbox, MATCHED_BOX_COLOR))
+    for label in result.unmatched_labels:
+        boxes.append((label.cluster_bbox, UNMATCHED_LABEL_BOX_COLOR))
+    for bbox in result.unmatched_prediction_boxes:
+        boxes.append((bbox, UNMATCHED_PREDICTION_BOX_COLOR))
+    return render_boxes_pdf(page_meta, boxes)

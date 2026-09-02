@@ -49,11 +49,6 @@ from rastervec.models import (
 from rastervec.Native_Text.native import Native
 from rastervec.OCR.FAST_Text_Detect.fast_detect import FastDetector
 from rastervec.OCR.Paddle_OCR.render_ocr import RenderOCR
-from rastervec.OCR.Rotation_Correction.rotation_correction import (
-    RotationCheck,
-    _run_rotation_verify,
-    _text_aspect_ratio,
-)
 from rastervec.Reader.reader import Reader
 from rastervec.renderer import render_page_paths
 from rastervec.Vector.vector import Vector
@@ -181,21 +176,11 @@ class PipelineContext:
     cluster_ocr_results: list[ClusterOcrResult] | None = None
     # ocr_compare: just the resolved reading out of cluster_ocr_results,
     # kept as its own flat list for to_native_pdf_elements/reconstruction.
-    # This is ocr_compare's own output and is never mutated by
-    # rotation_verify -- see rotation_checks below for the corrected
-    # counterpart.
     ocr_results: list[TextVectorResult] | None = None
     # ocr_compare: full path lists of every cluster whose OCR reading came
     # back blank (see _run_ocr_compare) -- folded into drawing_vectors,
     # same as every other rejection in this pipeline.
     ocr_failed: list[list[VectorPath]] | None = None
-    # rotation_verify: one RotationCheck per cluster_ocr_results entry with
-    # real resolved text -- see _run_rotation_verify. Each RotationCheck's
-    # own `resolved` field is a *new* TextVectorResult with the corrected
-    # rotation_used when `applied` -- ocr_compare's own ocr_results/
-    # cluster_ocr_results objects are never mutated, so re-viewing the
-    # ocr_compare stage always shows exactly what that stage produced.
-    rotation_checks: list["RotationCheck"] | None = None
     # drawing_vectors now runs last -- folds in the clustering chain's own
     # drops, fast_dropped (FAST found no text in these), and ocr_failed
     # (OCR resolution failed for these).
@@ -550,7 +535,6 @@ class Pipeline:
         StageSpec(key="fast_text_detect", label="FAST: Text Detect", run=_run_fast_text_detect),
         StageSpec(key="spatial_regroup", label="Spatial Regroup", run=_run_spatial_regroup),
         StageSpec(key="ocr_compare", label="OCR Compare", run=_run_ocr_compare),
-        StageSpec(key="rotation_verify", label="Rotation Verify", run=_run_rotation_verify),
         StageSpec(key="drawing_vectors", label="Drawing Vectors", run=_run_drawing_vectors),
     ]
 
