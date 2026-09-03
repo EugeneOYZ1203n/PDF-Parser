@@ -3,17 +3,18 @@ run -> the independent metric suite (`metrics.py`) together end-to-end,
 over one or more PDF pages, and prints a per-page + aggregate report.
 
     .venv/Scripts/python.exe -m rastervec.Evaluation.Evaluate.benchmark \
-        --pdf path/to.pdf --pages 0,1,2 [--iou-threshold 0.3] [--eval-pdf-dir DIR]
+        --pdf path/to.pdf --pages 0,1,2 [--iou-threshold 0.3] \
+        [--reconstruct-dir DIR] [--workers N]
 
-`--eval-pdf-dir`, when given, writes one <stem>_p<page>_eval.pdf per page via
-the *legacy* evaluate.render_evaluation_pdf (matched pairs green, unmatched
-labels red, unmatched predictions yellow) -- that overlay still uses the old
-1:1-match `evaluate_pipeline`; the scored metrics come from `metrics.py`.
+`--reconstruct-dir`, when given, writes per page (see
+`Reader/Parallel/benchmark_jobs._write_outputs`): the ground-truth /
+pipeline text reconstruction, the exact PDF fed to the pipeline, and a
+green(matched) / yellow(spurious pred) / red(missed gt) box overlay.
 
-Runs the real `Pipeline.STAGES` chain (via `pipeline.run_page_context`)
-through OCR (`RenderOCR`/PaddleOCR) -- deliberately the same real,
-possibly-slow pipeline run being scored. The first run downloads PaddleOCR's
-models. `main()`'s actual PDF/OCR path is a documented manual smoke test only.
+`--workers N` (>1) runs the pages across a spawn process pool (`Reader/
+Parallel`); the model caches are warmed once up front so the first run is
+safe. The real `Pipeline.STAGES` chain runs through OCR (PaddleOCR) --
+`main()`'s actual PDF/OCR path is a documented manual smoke test only.
 
 `format_report`/`aggregate_results` are the pure, OCR-free parts (formatting /
 micro-averaging over already-computed `MetricSuiteResult`s) -- those ARE
@@ -23,79 +24,43 @@ from __future__ import annotations
 
 import argparse
 import math
-import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
 
-from rastervec.Evaluation.Conversion.conversion import convert_page_to_vector_text
-from rastervec.Evaluation.Evaluate.adapters import (
-    build_eval_inputs,
-    gt_regions_from_labelset,
-)
-from rastervec.Evaluation.Evaluate.evaluate import (
-    DEFAULT_IOU_THRESHOLD,
-    evaluate_pipeline,
-    render_evaluation_pdf,
-)
 from rastervec.Evaluation.Evaluate.metrics import (
     DERIVED_F1_FIELDS,
     METRIC_GROUPS,
     MetricConfig,
     MetricSuiteResult,
     aggregate_suite,
-    evaluate_metrics,
 )
-from rastervec.Evaluation.Labelling.auto_label import auto_label_pdf
 from rastervec.logging_setup import configure_logging, get_logger
-from rastervec.pipeline import run_page_context
-from rastervec.Reader.reader import Reader
 
 _LOG = get_logger("benchmark")
 
 
 def run_one_page(
-    pdf_path: str, page_index: int, iou_threshold: float = DEFAULT_IOU_THRESHOLD,
-    eval_pdf_path: Path | None = None,
+    pdf_path: str, page_index: int,
+    iou_threshold: float = MetricConfig().iou_edge_min,
+    reconstruct_dir: Path | None = None,
 ) -> MetricSuiteResult:
     """Ground truth (no pipeline run) -> Conversion -> a real full pipeline
-    run (OCR included) -> `metrics.evaluate_metrics`, for one page.
-    `iou_threshold` maps onto `MetricConfig.iou_edge_min`. When
-    `eval_pdf_path` is given, also writes the legacy
-    matched(green)/unmatched-label(red)/unmatched-prediction(yellow) bbox
-    overlay there (--eval-pdf-dir)."""
-    labels = auto_label_pdf(pdf_path, page_index)
-    converted_bytes = convert_page_to_vector_text(pdf_path, page_index)
+    run (OCR included) -> `metrics.evaluate_metrics`, for one page (auto
+    labels). `iou_threshold` maps onto `MetricConfig.iou_edge_min`.
+    Delegates to `Reader/Parallel/benchmark_jobs.run_page_task`."""
+    from rastervec.Reader.Parallel.benchmark_jobs import PageTask, run_page_task
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        converted_path = str(Path(tmp_dir) / "converted.pdf")
-        Path(converted_path).write_bytes(converted_bytes)
-
-        with Reader(converted_path) as reader:
-            ctx = run_page_context(reader, 0)
-
-    inputs = build_eval_inputs(ctx)
-    result = evaluate_metrics(
-        gt_regions_from_labelset(labels),
-        inputs.predictions,
-        inputs.text_candidate_boxes,
-        clustering=inputs.clustering,
-        fast_dropped=inputs.fast_dropped,
-        ocr_failed=inputs.ocr_failed,
-        cfg=MetricConfig(iou_edge_min=iou_threshold),
-    )
-
-    if eval_pdf_path is not None:
-        eval_pdf_path.parent.mkdir(parents=True, exist_ok=True)
-        legacy = evaluate_pipeline(
-            labels, ctx.cluster_ocr_results or [], ctx.drawing_vectors or [],
-            iou_threshold=DEFAULT_IOU_THRESHOLD, clustering=ctx.clustering,
-            fast_dropped=ctx.fast_dropped, ocr_failed=ctx.ocr_failed,
-        )
-        eval_pdf_path.write_bytes(render_evaluation_pdf(legacy, ctx.page.meta))
-
-    return result
+    result = run_page_task(PageTask(
+        pdf_path=pdf_path, page_index=page_index, iou_edge_min=iou_threshold,
+        reconstruct_dir=str(reconstruct_dir) if reconstruct_dir else None,
+        showcase_per_page=0,
+    ))
+    if result.error is not None:
+        raise RuntimeError(result.error)
+    assert result.auto is not None
+    return result.auto
 
 
 def _fmt_metric_line(name: str, result: MetricSuiteResult) -> str:
@@ -232,9 +197,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         f"localisation edge (default: {MetricConfig().iou_edge_min}).",
     )
     parser.add_argument(
-        "--eval-pdf-dir", type=Path, default=None,
-        help="Write one <stem>_p<page>_eval.pdf per page here -- matched pairs in green, "
-        "unmatched labels in red, unmatched predictions in yellow (see evaluate.render_evaluation_pdf).",
+        "--reconstruct-dir", type=Path, default=None,
+        help="Write per-page reconstruction / pipeline-input / green-yellow-red "
+        "box-overlay PDFs here (see Reader/Parallel/benchmark_jobs._write_outputs).",
+    )
+    parser.add_argument(
+        "--workers", type=int, default=1,
+        help="Run pages across a spawn process pool of this size (>1). Default 1 "
+        "(serial). See rastervec.Reader.Parallel.",
     )
     return parser
 
@@ -244,20 +214,27 @@ def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     pages = [int(p) for p in args.pages.split(",")]
 
+    from rastervec.Reader.Parallel.benchmark_jobs import PageTask, run_benchmark
+
+    tasks = [
+        PageTask(
+            pdf_path=pdf_path, page_index=page_index, iou_edge_min=args.iou_threshold,
+            reconstruct_dir=str(args.reconstruct_dir) if args.reconstruct_dir else None,
+            showcase_per_page=0,
+        )
+        for pdf_path in args.pdf
+        for page_index in pages
+    ]
+    page_results = run_benchmark(tasks, workers=args.workers, desc="benchmark")
+
     results: list[MetricSuiteResult] = []
-    for pdf_path in args.pdf:
-        for page_index in pages:
-            _LOG.info("running %s page %d", pdf_path, page_index)
-            eval_pdf_path = (
-                args.eval_pdf_dir / f"{Path(pdf_path).stem}_p{page_index}_eval.pdf"
-                if args.eval_pdf_dir is not None else None
-            )
-            result = run_one_page(
-                pdf_path, page_index, args.iou_threshold, eval_pdf_path=eval_pdf_path,
-            )
-            results.append(result)
-            print(format_report(pdf_path, page_index, result))
-            print()
+    for pr in page_results:
+        if pr.error is not None:
+            _LOG.warning("%s page %d failed: %s", pr.pdf_path, pr.page_index, pr.error)
+            continue
+        results.append(pr.auto)
+        print(format_report(pr.pdf_path, pr.page_index, pr.auto))
+        print()
 
     if len(results) > 1:
         print(format_aggregate(aggregate_results(results), len(results)))

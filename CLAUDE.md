@@ -259,14 +259,20 @@ testable independently of the others (every stage's *output* is a plain dataclas
   consolidated text/line objects back into a PDF for evaluation — not yet registered in
   `Pipeline.STAGES`. Distinct from the `Evaluation/Evaluate/` benchmarking subpackage below, which
   is implemented and scores the existing Vector Classification + OCR pipeline, not this stub.
-- **`Evaluation/Conversion/conversion.py` — `convert_page_to_vector_text`** *(implemented)*: turns
-  one page's native text into vector-drawn text (`get_svg_image()` → `fitz.open(filetype="svg")` →
-  `convert_to_pdf()` → `show_pdf_page` onto a page sized from the source's own `PageMeta.mediabox`/
-  `rotation`) — confirmed by a spike (see the module's own docstring) that PyMuPDF renders text as
-  filled SVG `<path>`s, never an SVG `<text>` element or an embedded raster fallback, so the
-  round-tripped PDF's `get_drawings()` holds real vector path content and `get_text()` comes back
-  empty. Turns a native-text PDF into a known-answer test case for Vector_Classification, since the
-  ground-truth text is whatever the original native words said.
+- **`Evaluation/Conversion/conversion.py` — `convert_page_to_vector_text`** *(implemented)*: copies
+  a page verbatim (`out.insert_pdf` — **every pre-existing vector path keeps its exact original
+  geometry**, which matters because manual `LabelEntry` bboxes are taken against the original), then
+  removes the native text objects (redaction with `PDF_REDACT_LINE_ART_NONE` so line art is
+  untouched) and *adds* that same text back as vector paths: a throwaway page copy has line art +
+  images stripped, its text-only `get_svg_image()` → `fitz.open(filetype="svg")` → `convert_to_pdf()`
+  → `show_pdf_page` overlaid onto the output page. Both the output page and the throwaway are forced
+  to rotation 0 first so the SVG and overlay share the page's canonical unrotated MediaBox space; the
+  original `/Rotate` is re-applied at the end (an earlier version SVG-round-tripped the *whole* page,
+  re-encoding the very CAD-text/drawing vectors a human labelled). PyMuPDF renders text as filled SVG
+  `<path>`s, never an SVG `<text>` element or a raster fallback, so `get_drawings()` on the result
+  holds real vector path content and `get_text()` comes back empty. Turns a native-text PDF into a
+  known-answer test case for Vector_Classification, since the ground-truth text is whatever the
+  original native words said.
 - **`Evaluation/Labelling/`** *(implemented)*: ground-truth labelling for vector-text regions.
   `label_schema.py`'s `LabelEntry` (`page_index`, `cluster_bbox`, `cluster_signature`, `text`,
   `source: "manual"|"auto"`, `expected_rotation`) + `LabelSet` are the sidecar JSON format
@@ -327,8 +333,12 @@ testable independently of the others (every stage's *output* is a plain dataclas
   ratio fields (+ 2 derived `*_f1`) + `per_stage_miss_counts` + `counts`. `aggregate_suite`
   **micro-averages** — `Ratio(Σ numerators, Σ denominators)` over the applicable pages, NOT the mean of
   per-page ratios; a `nan` denominator ("not applicable": empty gt, no candidates, zero misses,
-  `clustering=None`) is excluded. Phase-1 metrics (18): page char/word multiset recall/precision/f1
-  (`text_metrics.normalize_text` folds case + whitespace first), `pred_text_fully_contained_in_
+  `clustering=None`) is excluded. Phase-1 metrics (20): page char/word multiset recall/precision/f1
+  (`text_metrics.normalize_text` folds case + whitespace first), `region_concat_char_accuracy_all_gt`
+  / `region_concat_char_accuracy_overlapping` (the only edit-distance metrics — per-gt-region
+  `1 - CER` via `text_metrics.levenshtein` over the region's reading-order-concatenated overlapping
+  predictions; `_all_gt` counts every gt region, `_overlapping` only those with a prediction),
+  `pred_text_fully_contained_in_
   overlapping_gt_rate` / `gt_text_word_coverage_by_overlapping_preds`, `per_gt_best_single_pred_iou_
   mean` / `per_gt_union_pred_iou_mean` / `undetected_gt_area_ratio`, `rotation_accuracy_localized_gt`,
   `classification_recall_gt_reached_ocr` / `classification_precision_candidate_is_text`, and
@@ -345,10 +355,9 @@ testable independently of the others (every stage's *output* is a plain dataclas
   collapse internal whitespace to one space — replaces `evaluate.normalize_for_cer`, now an alias),
   `char_multiset` / `word_tokens`, and pure-Python `levenshtein` / `char_error_rate` / `word_error_rate`
   (the standard text-diff — **not** `difflib.SequenceMatcher`, which `evaluate.evaluate_pipeline` still
-  uses).
+  uses). `levenshtein` is used by `metrics.py`'s two `region_concat_char_accuracy_*` metrics.
 - **`Evaluation/Evaluate/evaluate.py` — `evaluate_pipeline`** *(implemented, legacy 1:1-match scorer —
-  kept for `render_evaluation_pdf` / `--eval-pdf-dir`; the notebook can still show its metrics behind
-  `SHOW_LEGACY_METRICS`)*: scores a completed
+  kept for `render_evaluation_pdf` + its own tests; the benchmark no longer calls it)*: scores a completed
   pipeline run's `ClusterOcrResult`/`DrawingVector` lists against a `LabelSet`.
   Matches each label to a predicted OCR reading by `bbox_iou` (greedy highest-IoU-first, one-to-one)
   above `iou_threshold`. Returns an `EvaluationResult`:
@@ -376,36 +385,47 @@ testable independently of the others (every stage's *output* is a plain dataclas
   the benchmark notebook). `render_evaluation_pdf(result, page_meta)` is a separate, optional visual
   counterpart (this module stays I/O-free otherwise): matched pairs' label+predicted bboxes in
   green, unmatched labels in red, unmatched predictions in yellow, drawn onto a fresh page via
-  `renderer.render_boxes_pdf` — wired in by `benchmark.py`'s `--eval-pdf-dir`.
+  `renderer.render_boxes_pdf`.
+- **`Reader/Parallel/`** *(implemented)*: parallelism for the benchmark. `pool.py` — `worker_init`
+  (pins `OMP`/`MKL`/`OPENBLAS` to 1 per worker), `default_worker_count`, `warmup` (builds the
+  PaddleOCR + FAST caches in the *calling* process, so a spawn pool started next finds the models on
+  disk and no worker races the first-run download — `PaddleOcrBackend.warmup()` /
+  `FastDetector.warmup()` classmethods force the existing lazy `_engine()`/`_model()` path), and
+  `run_parallel(items, fn, *, workers, desc)` — an input-order map that is a plain serial loop when
+  `workers <= 1` and a spawn `ProcessPoolExecutor` otherwise. Processes not threads: the PaddleOCR
+  engine + FAST model module caches are unlocked shared singletons and PyMuPDF is not reentrant.
+  `benchmark_jobs.py` — the picklable per-page job: `PageTask` (pdf/page/manual entries/pipeline/
+  reconstruct dir/…) → `run_page_task` → `PageResult` (auto + manual `MetricSuiteResult`, stage
+  durations, formatted report blocks, a few PNG-bytes `ShowcaseSample`s, `error`). It does the whole
+  page end to end (ground truth, Conversion for `current`, `run_page_context`, `evaluate_metrics`,
+  and the per-page output PDFs) and never raises — a failure lands in `PageResult.error`.
+  `run_benchmark(tasks, *, workers, desc)` is the thin `run_parallel(tasks, run_page_task, …)`
+  wrapper used by both `benchmark.py` and the notebook.
 - **`Evaluation/Evaluate/benchmark.py`** *(implemented)* — the CLI wiring Conversion → auto_label →
   a real full pipeline run → `metrics.evaluate_metrics` together: `python -m
   rastervec.Evaluation.Evaluate.benchmark --pdf PATH [--pdf PATH2 ...] --pages 0,1,2
-  [--iou-threshold 0.1] [--eval-pdf-dir DIR]` (`--iou-threshold` = `MetricConfig.iou_edge_min`).
-  `run_one_page` builds ground truth with no pipeline run
-  (`auto_label_pdf`), converts, runs the entire `Pipeline.STAGES` chain including real PaddleOCR
-  via `pipeline.run_page_context`, then scores it via `adapters.build_eval_inputs` →
-  `evaluate_metrics`, returning a `MetricSuiteResult`;
-  when `--eval-pdf-dir` is given, also writes each page's legacy `evaluate.render_evaluation_pdf` bbox
-  overlay there as `<stem>_p<page>_eval.pdf`.
-  `format_report` (per-metric `numerator/denominator (value)`, grouped by dimension) /
-  `aggregate_results` (delegates to `metrics.aggregate_suite`) / `format_aggregate` are pure and
-  unit-tested; `main()`'s actual OCR-backed path is a manual smoke
-  test only (same reasoning as `manual_label.py`'s Tk UI — real PaddleOCR, first run downloads
-  models — matches the existing `RASTERVEC_RUN_OCR_TESTS`-gated convention for OCR-dependent
-  tests). `notebooks/benchmark_vector_classification.ipynb` is the interactive counterpart: it
-  scores the current (new) pipeline vs. the archive legacy (old) one via `legacy_adapter`, takes
-  either a PDF folder **or** a `manual_label.py` sidecar `.json` (`LABELS_JSON` — derives the
-  `(pdf, page)` pairs from the file, still runs `auto_label_pdf`). A `prepare_page(pdf_path,
-  page_index)` prep function runs once per `(pdf, page)` pair, ahead of both pipeline loops
-  (`page_prep` dict), doing both the ground-truth build (auto + any loaded manual labels) and the
-  Conversion call (`convert_page_to_vector_text`) together — so both the current and legacy loops
-  score against, and the current pipeline runs against, exactly the same precomputed data instead
-  of each loop recomputing ground truth (and the current loop separately reconverting) on its own.
-  Scores auto- and manual-source ground truth separately via `split_labelset_by_source`, and writes
-  per-page `_groundtruth`/`_current`/`_legacy` reconstruction PDFs (`renderer.render_reconstructed_pdf`,
-  text-found + drawing vectors; legacy is text-only) into `RECONSTRUCT_DIR`. A showcase cell
-  plots `SHOWCASE_N` of the current pipeline's actual PaddleOCR cluster renders (re-rendered by
-  `render_ocr_input`, matching `RenderOCR.ocr_cluster`'s own dpi-bump), sampled ~50/50 between
+  [--iou-threshold 0.1] [--reconstruct-dir DIR] [--workers N]` (`--iou-threshold` =
+  `MetricConfig.iou_edge_min`; `--workers N>1` runs pages across `Reader/Parallel`'s spawn pool).
+  `run_one_page` is a thin wrapper over `Reader/Parallel/benchmark_jobs.run_page_task` (auto labels,
+  returns that page's `MetricSuiteResult`); `main()` builds one `PageTask` per `--pdf`×`--pages`
+  cell and calls `run_benchmark`. `--reconstruct-dir` writes the per-page output PDFs (see the
+  notebook bullet). `format_report` / `aggregate_results` (delegates to `metrics.aggregate_suite`) /
+  `format_aggregate` are pure and unit-tested; `main()`'s actual OCR-backed path is a manual smoke
+  test only (real PaddleOCR, first run downloads models — matches the existing
+  `RASTERVEC_RUN_OCR_TESTS`-gated convention for OCR-dependent tests).
+  `notebooks/benchmark_vector_classification.ipynb` is the interactive counterpart: it scores the
+  current (new) pipeline vs. the archive legacy (old) one, over a `collect_dataset` tree (mixed
+  `.pdf` + `manual_label.py` sidecar `.json`). `build_tasks(pipeline)` makes one `PageTask` per
+  deduped `(pdf, page)`; `run_benchmark(build_tasks(...), workers=BENCH_WORKERS)` runs them;
+  `collect_results` splits the `PageResult`s into auto/manual metric lists + stage timings + the
+  showcase pool and writes the per-page report `.txt`. Scores auto- and manual-source ground truth
+  separately via `split_labelset_by_source`. Per page (when `RECONSTRUCT_DIR` is set)
+  `benchmark_jobs._write_outputs` writes `<stem>_p<N>_groundtruth.pdf`, `_<pipeline>.pdf` (text
+  reconstruction, **text-only — no drawing layer**), `_<pipeline>_input.pdf` (the exact PDF fed to
+  that pipeline: converted vector-text for `current`, the original page for `legacy`), and
+  `_<pipeline>_boxes_<auto|manual>.pdf` (`metrics.overlay_boxes` → `renderer.render_boxes_pdf`:
+  green = a gt/pred that overlaps, yellow = a predicted box over no gt, red = a gt no prediction
+  reached). A showcase cell plots `SHOWCASE_N` of the `ShowcaseSample` PNGs, sampled ~50/50 between
   non-blank (PASS) and blank (FAIL) OCR readings.
 - **`renderer/` — module-level functions, no `Renderer` class** *(rendering helpers, not a pipeline
   stage)*: a package split by output concern — `png.py` (rasterize vector paths for OCR / FAST

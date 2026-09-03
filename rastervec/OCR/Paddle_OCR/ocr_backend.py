@@ -106,6 +106,14 @@ class PaddleOcrBackend:
     def __init__(self, lang: str = "en") -> None:
         self.lang = lang
 
+    @classmethod
+    def warmup(cls, lang: str = "en") -> None:
+        """Force the (expensive, model-downloading on first ever call)
+        engine build now, in the calling process -- so a process pool
+        spawned next finds the models on disk and no worker races the
+        download. Safe to call repeatedly."""
+        cls(lang)._engine()
+
     def _engine(self) -> "paddleocr.PaddleOCR":
         if self.lang not in PaddleOcrBackend._ENGINE_CACHE:
             from paddleocr import PaddleOCR

@@ -376,6 +376,16 @@ class FastDetector:
             "FAST_WEIGHTS_PATH", _DEFAULT_WEIGHTS_PATH
         )
 
+    def warmup(self) -> None:
+        """Build + cache the model now, in the calling process, so a
+        process pool spawned next doesn't each pay the load. A missing
+        weights file is swallowed (pages with no vector paths skip FAST
+        anyway) rather than raised."""
+        try:
+            self._model()
+        except FileNotFoundError:
+            pass
+
     def _model(self):
         if self.weights_path not in _MODEL_CACHE:
             import torch
