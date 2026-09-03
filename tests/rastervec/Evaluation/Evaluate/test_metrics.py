@@ -129,6 +129,76 @@ def test_case_and_whitespace_normalised():
 
 
 # --------------------------------------------------------------------------
+# char-level edit-distance metrics
+# --------------------------------------------------------------------------
+def test_region_concat_char_accuracy_exact_match():
+    # normalize_text folds case + spacing; the space is kept in the char count
+    gt = [_gt("Setback  Line", (0, 0, 20, 5))]
+    preds = [_pred("SETBACK LINE", (0, 0, 20, 5))]
+    res = evaluate_metrics(gt, preds, text_candidate_boxes=[(0, 0, 20, 5)])
+    n = float(len("SETBACK LINE"))
+    assert res.ratios["region_concat_char_accuracy_all_gt"] == Ratio(n, n)
+    assert res.ratios["region_concat_char_accuracy_overlapping"] == Ratio(n, n)
+
+
+def test_region_concat_char_accuracy_one_substitution():
+    gt = [_gt("HELLO", (0, 0, 10, 5))]
+    preds = [_pred("HELPO", (0, 0, 10, 5))]  # one substitution: L -> P
+    res = evaluate_metrics(gt, preds, text_candidate_boxes=[(0, 0, 10, 5)])
+    assert res.ratios["region_concat_char_accuracy_all_gt"] == Ratio(4.0, 5.0)
+
+
+def test_region_concat_char_accuracy_missed_gt_only_hits_global():
+    gt = [
+        _gt("READ", (0, 0, 10, 5)),
+        _gt("LOST", (100, 0, 110, 5)),
+    ]
+    preds = [_pred("READ", (0, 0, 10, 5))]  # nothing over the second gt
+    res = evaluate_metrics(gt, preds, text_candidate_boxes=[(0, 0, 10, 5)])
+    # global: 4 correct / 8 total
+    assert res.ratios["region_concat_char_accuracy_all_gt"] == Ratio(4.0, 8.0)
+    # overlapping: only the first gt counts -> 4/4
+    assert res.ratios["region_concat_char_accuracy_overlapping"] == Ratio(4.0, 4.0)
+
+
+def test_region_concat_char_accuracy_na_without_gt():
+    res = evaluate_metrics([], [], text_candidate_boxes=[])
+    assert math.isnan(res.get("region_concat_char_accuracy_all_gt"))
+    assert math.isnan(res.get("region_concat_char_accuracy_overlapping"))
+
+
+def test_region_concat_char_accuracy_micro_averaged():
+    r1 = evaluate_metrics([_gt("AB", (0, 0, 10, 5))], [_pred("AB", (0, 0, 10, 5))],
+                          text_candidate_boxes=[(0, 0, 10, 5)])
+    r2 = evaluate_metrics([_gt("CDEF", (0, 0, 10, 5))], [_pred("CDXF", (0, 0, 10, 5))],
+                          text_candidate_boxes=[(0, 0, 10, 5)])
+    agg = aggregate_suite([r1, r2])
+    # page 1: 2/2, page 2: 3/4 -> micro Ratio(5, 6)
+    assert agg.ratios["region_concat_char_accuracy_all_gt"] == Ratio(5.0, 6.0)
+
+
+# --------------------------------------------------------------------------
+# pred-vs-gt box overlay
+# --------------------------------------------------------------------------
+def test_overlay_boxes_colors():
+    from rastervec.Evaluation.Evaluate.metrics import (
+        MATCH_BOX_COLOR,
+        MISSED_GT_BOX_COLOR,
+        SPURIOUS_PRED_BOX_COLOR,
+        build_overlap_graph,
+        overlay_boxes,
+    )
+
+    gt = [_gt("hit", (0, 0, 10, 10)), _gt("miss", (200, 0, 210, 10))]
+    preds = [_pred("HIT", (0, 0, 10, 10)), _pred("SPUR", (500, 0, 510, 10))]
+    boxes = overlay_boxes(build_overlap_graph(gt, preds))
+    colors = {bbox: color for bbox, color in boxes}
+    assert colors[(0, 0, 10, 10)] == MATCH_BOX_COLOR
+    assert colors[(200, 0, 210, 10)] == MISSED_GT_BOX_COLOR
+    assert colors[(500, 0, 510, 10)] == SPURIOUS_PRED_BOX_COLOR
+
+
+# --------------------------------------------------------------------------
 # misses
 # --------------------------------------------------------------------------
 def test_missed_gt_no_prediction():

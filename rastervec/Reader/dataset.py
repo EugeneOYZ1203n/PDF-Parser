@@ -14,11 +14,20 @@ be auto-labelled).
 A discovered `.json` that does not parse as a `LabelSet` is skipped (a
 tree can hold unrelated JSON) with a warning. A label file's `pdf_path`
 is resolved against, in order: an absolute path that exists, a path
-relative to the JSON file's own directory, then a unique basename match
-among the discovered PDFs.
+relative to the JSON file's own directory, a path (or bare basename)
+under the dataset root, then a unique basename match among the discovered
+PDFs.
+
+PDF identity is by **real filesystem path** (`os.path.realpath` +
+`os.path.normcase`, so case-insensitive on Windows and symlink-stable):
+a PDF sitting in the dataset root that a nested label file references by
+name is the *same* work item as its recursively-discovered copy, never a
+second one -- so every `(pdf, page)` is emitted exactly once, carrying all
+of its manual entries.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +37,13 @@ from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet, lo
 from rastervec.logging_setup import get_logger
 
 _LOG = get_logger("reader.dataset")
+
+
+def _canon(p: Path | str) -> str:
+    """Canonical identity key for a filesystem path: real path (symlinks
+    resolved) with case folded on case-insensitive platforms. Two strings
+    that name the same physical file map to one key."""
+    return os.path.normcase(os.path.realpath(str(p)))
 
 
 @dataclass(frozen=True)
@@ -63,12 +79,13 @@ def find_label_sets(root: Path) -> list[tuple[Path, LabelSet]]:
 
 
 def resolve_pdf_path(
-    raw: str, json_dir: Path, known_pdfs: list[Path],
+    raw: str, json_dir: Path, known_pdfs: list[Path], root: Path | None = None,
 ) -> Path | None:
-    """Resolve a label file's `pdf_path` string to a real PDF path:
-    an absolute path that exists, else `json_dir / raw` if it exists, else
-    a unique basename match among `known_pdfs`. `None` (logged) if none of
-    those land."""
+    """Resolve a label file's `pdf_path` string to a real PDF path, in order:
+    an absolute path that exists, `json_dir / raw` if it exists, `root / raw`
+    or `root / <basename>` if it exists (a PDF sitting in the dataset root),
+    then a unique basename match among `known_pdfs`. `None` (logged) if none
+    of those land."""
     p = Path(raw)
     if p.is_absolute() and p.exists():
         return p.resolve()
@@ -76,6 +93,11 @@ def resolve_pdf_path(
     relative = (json_dir / p).resolve()
     if relative.exists():
         return relative
+
+    if root is not None:
+        for candidate in ((root / p), (root / p.name)):
+            if candidate.exists():
+                return candidate.resolve()
 
     by_name = [pdf for pdf in known_pdfs if pdf.name == p.name]
     if len(by_name) == 1:
@@ -116,47 +138,71 @@ def collect_dataset(
       manual entries -- the benchmark auto-labels these.
     - A label file whose `pdf_path` resolves outside `root` is still
       included (its resolved path is added to the working set).
+
+    PDFs are keyed by `_canon` (real path, case-folded), so a label file
+    that references a root-folder PDF by name resolves onto the same item
+    as its discovered copy -- never a duplicate run.
     """
     root = Path(root)
     known_pdfs = find_pdfs(root)
-    known_by_path: dict[str, Path] = {str(p.resolve()): p for p in known_pdfs}
+    # canonical key -> the resolved path we actually emit
+    known_by_canon: dict[str, Path] = {_canon(p): p.resolve() for p in known_pdfs}
 
-    # (pdf_path_str, page_index) -> list[LabelEntry] (manual only)
+    # (canon, page_index) -> list[LabelEntry] (manual only), de-duplicated
     manual_by_page: dict[tuple[str, int], list[LabelEntry]] = {}
-    # pdf_path_str -> set of page indices a label file explicitly names
+    # (canon, page_index) -> (entry signature -> json path that first supplied it)
+    _manual_seen: dict[tuple[str, int], dict[tuple, str]] = {}
+    # canon -> set of page indices a label file explicitly names
     labelled_pages: dict[str, set[int]] = {}
 
     for json_path, label_set in find_label_sets(root):
-        resolved = resolve_pdf_path(label_set.pdf_path, json_path.parent, known_pdfs)
+        resolved = resolve_pdf_path(
+            label_set.pdf_path, json_path.parent, known_pdfs, root=root,
+        )
         if resolved is None:
             continue
-        pdf_key = str(resolved)
-        known_by_path.setdefault(pdf_key, resolved)
+        canon = _canon(resolved)
+        known_by_canon.setdefault(canon, resolved)
 
         for entry in label_set.entries:
-            labelled_pages.setdefault(pdf_key, set()).add(entry.page_index)
-            if entry.source == "manual":
-                manual_by_page.setdefault((pdf_key, entry.page_index), []).append(entry)
+            labelled_pages.setdefault(canon, set()).add(entry.page_index)
+            if entry.source != "manual":
+                continue
+            key = (canon, entry.page_index)
+            sig = (tuple(entry.cluster_bbox), entry.text, entry.expected_rotation)
+            seen = _manual_seen.setdefault(key, {})
+            if sig in seen:
+                _LOG.warning(
+                    "duplicate manual label for %s page %d (%r) in %s; "
+                    "already supplied by %s -- skipping the duplicate",
+                    resolved.name, entry.page_index, entry.text,
+                    json_path, seen[sig],
+                )
+                continue
+            seen[sig] = str(json_path)
+            manual_by_page.setdefault(key, []).append(entry)
 
-    pages: list[DatasetPage] = []
-    for pdf_key in sorted(known_by_path):
-        if pdf_key in labelled_pages:
-            for page_index in sorted(labelled_pages[pdf_key]):
-                pages.append(
-                    DatasetPage(
-                        pdf_path=pdf_key,
-                        page_index=page_index,
-                        manual_entries=tuple(manual_by_page.get((pdf_key, page_index), [])),
-                    )
+    pages: dict[tuple[str, int], DatasetPage] = {}
+    for canon in sorted(known_by_canon):
+        emit_path = str(known_by_canon[canon])
+        if canon in labelled_pages:
+            for page_index in sorted(labelled_pages[canon]):
+                pages[(canon, page_index)] = DatasetPage(
+                    pdf_path=emit_path,
+                    page_index=page_index,
+                    manual_entries=tuple(manual_by_page.get((canon, page_index), [])),
                 )
         elif include_unlabelled:
-            n_pages = _page_count(Path(pdf_key))
+            n_pages = _page_count(known_by_canon[canon])
             limit = n_pages if pages_per_pdf is None else min(pages_per_pdf, n_pages)
             for page_index in range(limit):
-                pages.append(DatasetPage(pdf_path=pdf_key, page_index=page_index))
+                pages[(canon, page_index)] = DatasetPage(
+                    pdf_path=emit_path, page_index=page_index,
+                )
 
+    ordered = [pages[k] for k in sorted(pages)]
     _LOG.info(
         "collect_dataset(%s): %d (pdf, page) item(s), %d manual label(s)",
-        root, len(pages), sum(len(v) for v in manual_by_page.values()),
+        root, len(ordered), sum(len(v) for v in manual_by_page.values()),
     )
-    return pages
+    return ordered

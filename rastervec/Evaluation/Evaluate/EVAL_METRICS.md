@@ -7,7 +7,7 @@ independent reduction over one shared overlap graph**, and the graph models
 many-to-many overlap — the common case where one ground-truth line is covered by
 several predicted OCR clusters.
 
-This phase implements **18 metrics** (a user-selected subset of a larger
+This phase implements **20 metrics** (a user-selected subset of a larger
 catalogue — see *Not yet implemented*). Adding more is cheap: write one function
 that reduces the `OverlapGraph`, add its name to `_RATIO_FIELDS` + `METRIC_GROUPS`.
 
@@ -89,9 +89,9 @@ edits, so a transposition or a run of single-character substitutions diverges
 sharply from the intuitive error count. (The frozen legacy `evaluate_pipeline`
 still calls `difflib`; that path is not maintained.)
 
-*None of the 18 metrics below currently call the edit-distance helpers* — they
-are all multiset or geometry reductions. The helpers ship now as the standard
-for the position-aware character/word-accuracy metrics in *Not yet implemented*.
+The two `region_concat_char_accuracy_*` metrics below call `levenshtein` (see
+*Character accuracy — position-aware*). Every other metric is a multiset or
+geometry reduction.
 
 ### 2c. Metric normalization — page = absolute counts, aggregate = micro-average
 
@@ -130,7 +130,7 @@ The benchmark CLI's `--iou-threshold` maps onto `iou_edge_min`.
 
 ---
 
-## 4. The 18 metrics
+## 4. The 20 metrics
 
 `G` = GT regions, `P` = non-blank predictions, `C` = text-candidate boxes,
 `τ` = `coverage_tau`, `θ` = `iou_edge_min`.
@@ -160,6 +160,34 @@ The benchmark CLI's `--iou-threshold` maps onto `iou_edge_min`.
 - Harmonic mean of `page_char_multiset_recall` and `page_char_multiset_precision`.
   Per page from that page's two ratios; at aggregate from the aggregated two.
 - **`n/a`** when either side is `n/a` or both are 0.
+
+### Character accuracy — position-aware
+
+Both use `text_metrics.levenshtein` (unit-cost character edit distance) after
+`normalize_text`. Per gt region `i`: `hyp_i` = the text of that region's
+`overlapping_preds_by_gt` predictions, concatenated in reading order (top-to-
+bottom then left-to-right); `correct_i = max(0, len(norm(gt_i)) −
+levenshtein(norm(gt_i), norm(hyp_i)))` (i.e. `1 − CER` clamped at 0);
+`total_i = len(norm(gt_i))`. Mirrors archive `native_vs_ocr._cer` /
+`cer_percentage`.
+
+#### `region_concat_char_accuracy_all_gt`
+- Over **every** gt region (`hyp_i` empty for a gt no prediction overlaps → the
+  whole region counts as wrong). **numerator** `Σ_i correct_i`. **denominator**
+  `Σ_i total_i`.
+- **Measures** end-to-end character accuracy in reading position — a global page
+  CER built from per-region localised comparisons, honest about wholesale misses.
+- **`n/a`** when the page has no gt characters.
+- *Example* — gt `"HELLO"`, one overlapping pred `"HELPO"` → `Ratio(4, 5)`.
+
+#### `region_concat_char_accuracy_overlapping`
+- Same, but only over gt regions with ≥ 1 overlapping non-blank prediction
+  (`gt_has_overlap`). **numerator** `Σ correct_i`. **denominator** `Σ total_i`
+  over those regions.
+- **Measures** read quality *given* the text was localised — isolates OCR /
+  cluster-merge errors from classification misses. The gap between this and
+  `_all_gt` is the wholesale-miss contribution.
+- **`n/a`** when no gt region was overlapped.
 
 ### Word accuracy
 
@@ -297,8 +325,7 @@ demand.
 | name | dimension / layer | one-liner |
 |---|---|---|
 | `page_char_multiset_recall_normalized` | char / bag | recall after `normalize_text` folds confusable case — isolates real misreads |
-| `region_concat_char_accuracy_localized` | char / position-aware | per localized GT: `1 − char_error_rate(gt.text, concat(assigned preds))`, char-weighted |
-| `region_concat_char_accuracy_all_gt` | char / position-aware | same over **every** GT (unlocalized → 0): honest end-to-end |
+| `region_concat_char_accuracy_localized` | char / position-aware | like the shipped `_overlapping` metric but over the N:1 *assigned* preds, not every overlapping pred |
 | `page_reading_order_char_similarity` | char / position-aware | `1 − char_error_rate` of all-GT vs all-pred text, both in reading order |
 | `page_word_count_ratio` | word / bag | predicted token count ÷ GT token count (over/under-read direction) |
 | `page_vocabulary_jaccard` | word / bag | `|set(Wg) ∩ set(Wp)| / |union|` — vocab coverage without repetition |

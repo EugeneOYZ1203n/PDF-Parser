@@ -14,7 +14,10 @@ Two normalisation rules, both documented in full in `EVAL_METRICS.md`:
 1. **Text** -- every gt/prediction string goes through
    `text_metrics.normalize_text` (upper-case, trim, collapse whitespace)
    before any comparison. Character metrics compare `char_multiset`s
-   (spaces dropped); word metrics compare `word_tokens` multisets.
+   (spaces dropped); word metrics compare `word_tokens` multisets; the two
+   `region_concat_char_accuracy_*` metrics are position-aware and use
+   `text_metrics.levenshtein` (character edit distance) on the normalised
+   strings.
 
 2. **Aggregation** -- a page result stores *absolute counts*: every metric
    is a `Ratio(numerator, denominator)`. `aggregate_suite` micro-averages:
@@ -33,7 +36,12 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from rastervec.Evaluation.Evaluate.text_metrics import char_multiset, word_tokens
+from rastervec.Evaluation.Evaluate.text_metrics import (
+    char_multiset,
+    levenshtein,
+    normalize_text,
+    word_tokens,
+)
 from rastervec.helpers.geometry import (
     bbox_area,
     bbox_coverage,
@@ -315,6 +323,59 @@ def gt_text_word_coverage_by_overlapping_preds(graph: OverlapGraph) -> Ratio:
     return Ratio(float(covered), float(total))
 
 
+def _reading_order_key(bbox: Bbox) -> tuple[float, float]:
+    """Top-to-bottom, then left-to-right."""
+    return (bbox[1], bbox[0])
+
+
+def _region_concat_hyp(graph: OverlapGraph, pred_idxs: list[int]) -> str:
+    """The overlapping predictions' text concatenated in reading order."""
+    ordered = sorted(pred_idxs, key=lambda pj: _reading_order_key(graph.preds[pj].bbox))
+    return " ".join(graph.preds[pj].text for pj in ordered)
+
+
+def _region_char_correct(gt_text: str, hyp_text: str) -> tuple[int, int]:
+    """`(chars matched, gt char length)` for one gt region -- character-level
+    Levenshtein after `normalize_text`. Matched is `max(0, gt_len - edit)`,
+    i.e. `1 - CER` clamped at 0; mirrors archive `native_vs_ocr._cer`."""
+    g = normalize_text(gt_text)
+    h = normalize_text(hyp_text)
+    return max(0, len(g) - levenshtein(g, h)), len(g)
+
+
+def region_concat_char_accuracy_all_gt(graph: OverlapGraph) -> Ratio:
+    """Char accuracy over EVERY gt region: hyp = its overlapping predictions'
+    text (empty for a gt nothing overlaps -> counts as a full miss). A global
+    page CER built from per-region localised comparisons, like archive's
+    `cer_percentage`. `n/a` when the page has no gt characters."""
+    num = den = 0
+    for gi, g in enumerate(graph.gt):
+        hyp = _region_concat_hyp(graph, graph.overlapping_preds_by_gt[gi])
+        correct, total = _region_char_correct(g.text, hyp)
+        num += correct
+        den += total
+    if den == 0:
+        return _NA
+    return Ratio(float(num), float(den))
+
+
+def region_concat_char_accuracy_overlapping(graph: OverlapGraph) -> Ratio:
+    """Same, restricted to gt regions with >=1 overlapping non-blank
+    prediction (`gt_has_overlap`). Isolates 'when we found the text, how well
+    did we read it' from wholesale misses. `n/a` when no gt was overlapped."""
+    num = den = 0
+    for gi, g in enumerate(graph.gt):
+        if not graph.gt_has_overlap[gi]:
+            continue
+        hyp = _region_concat_hyp(graph, graph.overlapping_preds_by_gt[gi])
+        correct, total = _region_char_correct(g.text, hyp)
+        num += correct
+        den += total
+    if den == 0:
+        return _NA
+    return Ratio(float(num), float(den))
+
+
 def per_gt_best_single_pred_iou_mean(graph: OverlapGraph) -> Ratio:
     if not graph.gt:
         return _NA
@@ -444,6 +505,39 @@ def attribute_miss(
     return "not_found"
 
 
+# --------------------------------------------------------------------------
+# Pred-vs-GT box overlay (for a visual diff PDF -- data only, no rendering)
+# --------------------------------------------------------------------------
+# (r, g, b) 0..1, matching renderer.render_boxes_pdf's colour param.
+MATCH_BOX_COLOR = (0.0, 0.7, 0.0)  # green -- gt and pred that overlap
+MISSED_GT_BOX_COLOR = (0.85, 0.0, 0.0)  # red -- gt no prediction reached
+SPURIOUS_PRED_BOX_COLOR = (0.95, 0.75, 0.0)  # yellow -- pred over no gt
+
+
+def overlay_boxes(
+    graph: OverlapGraph,
+) -> list[tuple[Bbox, tuple[float, float, float]]]:
+    """`(bbox, rgb)` pairs for a pred-vs-ground-truth visual diff, straight
+    off the same overlap graph the metrics score:
+
+    - **green** -- every gt region that has an overlapping non-blank
+      prediction, and every non-blank prediction that overlaps some gt.
+    - **red** -- gt regions no prediction touched (wholesale misses).
+    - **yellow** -- non-blank predictions sitting over no gt (over-detection).
+
+    Blank OCR predictions are not drawn (they are excluded from `graph.preds`
+    and folded into the drawing-vector layer)."""
+    boxes: list[tuple[Bbox, tuple[float, float, float]]] = []
+    for gi, g in enumerate(graph.gt):
+        color = MATCH_BOX_COLOR if graph.gt_has_overlap[gi] else MISSED_GT_BOX_COLOR
+        boxes.append((g.bbox, color))
+    preds_with_overlap = {e.pred_idx for e in graph.edges}
+    for pj, p in enumerate(graph.preds):
+        color = MATCH_BOX_COLOR if pj in preds_with_overlap else SPURIOUS_PRED_BOX_COLOR
+        boxes.append((p.bbox, color))
+    return boxes
+
+
 _MISS_REASON_FIELDS = {
     "gt_miss_attributed_to_classification_frac": lambda r: r.startswith("classification:"),
     "gt_miss_attributed_to_fast_frac": lambda r: r == "fast_text_detect",
@@ -458,6 +552,8 @@ _MISS_REASON_FIELDS = {
 _RATIO_FIELDS = (
     "page_char_multiset_recall",
     "page_char_multiset_precision",
+    "region_concat_char_accuracy_all_gt",
+    "region_concat_char_accuracy_overlapping",
     "page_word_multiset_recall",
     "page_word_multiset_precision",
     "pred_text_fully_contained_in_overlapping_gt_rate",
@@ -485,7 +581,13 @@ DERIVED_F1_FIELDS = frozenset(_DERIVED_F1)
 METRIC_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "character",
-        ("page_char_multiset_recall", "page_char_multiset_precision", "page_char_multiset_f1"),
+        (
+            "page_char_multiset_recall",
+            "page_char_multiset_precision",
+            "page_char_multiset_f1",
+            "region_concat_char_accuracy_all_gt",
+            "region_concat_char_accuracy_overlapping",
+        ),
     ),
     (
         "word",
@@ -571,6 +673,9 @@ def evaluate_metrics(
     ratios: dict[str, Ratio] = {
         "page_char_multiset_recall": page_char_multiset_recall(cg, cp),
         "page_char_multiset_precision": page_char_multiset_precision(cg, cp),
+        "region_concat_char_accuracy_all_gt": region_concat_char_accuracy_all_gt(graph),
+        "region_concat_char_accuracy_overlapping":
+            region_concat_char_accuracy_overlapping(graph),
         "page_word_multiset_recall": page_word_multiset_recall(wg, wp),
         "page_word_multiset_precision": page_word_multiset_precision(wg, wp),
         "pred_text_fully_contained_in_overlapping_gt_rate":

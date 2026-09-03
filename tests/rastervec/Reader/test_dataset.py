@@ -106,6 +106,65 @@ def test_collect_dataset_mixed_tree(tmp_path, synthetic_pdf_factory):
     assert got == {("has_labels.pdf", 1), ("plain.pdf", 0)}
 
 
+def test_resolve_pdf_path_via_dataset_root(tmp_path, synthetic_pdf_factory):
+    pdf = tmp_path / "root_file.pdf"
+    synthetic_pdf_factory([{}]).save(str(pdf))
+    (tmp_path / "labels").mkdir()
+
+    resolved = resolve_pdf_path(
+        "root_file.pdf", tmp_path / "labels", [pdf], root=tmp_path,
+    )
+
+    assert resolved == pdf.resolve()
+
+
+def test_collect_dataset_label_in_subfolder_names_root_pdf(tmp_path, synthetic_pdf_factory):
+    # PDF sits in the dataset root; label file is nested and refers to it by name.
+    pdf = tmp_path / "drawing.pdf"
+    synthetic_pdf_factory([{}, {}, {}]).save(str(pdf))
+    (tmp_path / "labels").mkdir()
+    save_labels(
+        _label_set("drawing.pdf", [_manual(1, "x")]),
+        str(tmp_path / "labels" / "drawing.json"),
+    )
+
+    dataset = collect_dataset(tmp_path, pages_per_pdf=3)
+
+    # exactly one item, the labelled page -- no auto-only duplicate of pages 0/2
+    assert [(Path(d.pdf_path).name, d.page_index) for d in dataset] == [("drawing.pdf", 1)]
+    assert [e.text for e in dataset[0].manual_entries] == ["x"]
+    assert Path(dataset[0].pdf_path) == pdf.resolve()
+
+
+def test_collect_dataset_label_absolute_path_is_same_identity(tmp_path, synthetic_pdf_factory):
+    pdf = tmp_path / "plan.pdf"
+    synthetic_pdf_factory([{}, {}]).save(str(pdf))
+    save_labels(
+        _label_set(str(pdf.resolve()), [_manual(0, "y")]),
+        str(tmp_path / "plan.json"),
+    )
+
+    dataset = collect_dataset(tmp_path, pages_per_pdf=2)
+
+    assert [(Path(d.pdf_path).name, d.page_index) for d in dataset] == [("plan.pdf", 0)]
+
+
+def test_collect_dataset_duplicate_manual_entry_warns_and_skips(
+    tmp_path, synthetic_pdf_factory, caplog
+):
+    pdf = tmp_path / "dup.pdf"
+    synthetic_pdf_factory([{}]).save(str(pdf))
+    save_labels(_label_set("dup.pdf", [_manual(0, "same")]), str(tmp_path / "a.json"))
+    save_labels(_label_set("dup.pdf", [_manual(0, "same")]), str(tmp_path / "b.json"))
+
+    with caplog.at_level("WARNING"):
+        dataset = collect_dataset(tmp_path)
+
+    assert len(dataset) == 1
+    assert [e.text for e in dataset[0].manual_entries] == ["same"]
+    assert any("duplicate manual label" in r.message for r in caplog.records)
+
+
 def test_collect_dataset_include_unlabelled_false(tmp_path, synthetic_pdf_factory):
     synthetic_pdf_factory([{}]).save(str(tmp_path / "orphan.pdf"))
     labelled = tmp_path / "kept.pdf"

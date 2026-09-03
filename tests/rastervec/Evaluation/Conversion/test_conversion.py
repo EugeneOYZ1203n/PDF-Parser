@@ -45,6 +45,56 @@ def test_convert_page_to_vector_text_preserves_page_size(
     assert converted[0].rect.height == 150
 
 
+def test_convert_page_to_vector_text_preserves_existing_vectors(
+    synthetic_pdf_factory, tmp_pdf_path,
+):
+    doc = synthetic_pdf_factory(
+        [{"width": 300, "height": 200, "texts": [{"point": (20, 100), "text": "LABEL ME", "fontsize": 16}]}]
+    )
+    page = doc[0]
+    shape = page.new_shape()
+    shape.draw_rect(fitz.Rect(40, 40, 120, 80))
+    shape.draw_line(fitz.Point(200, 20), fitz.Point(260, 160))
+    shape.finish(color=(0, 0, 1), width=1.5)
+    shape.commit()
+    original_rects = sorted(tuple(round(c, 3) for c in d["rect"]) for d in page.get_drawings())
+    path = tmp_pdf_path(doc)
+
+    converted = fitz.open("pdf", convert_page_to_vector_text(path, 0))
+    cpage = converted[0]
+    converted_rects = sorted(tuple(round(c, 3) for c in d["rect"]) for d in cpage.get_drawings())
+
+    # every original drawing rect is still present, byte-identical geometry
+    for r in original_rects:
+        assert r in converted_rects
+    # and new glyph-path drawings have appeared over the text region
+    assert len(converted_rects) > len(original_rects)
+    assert cpage.get_text().strip() == ""
+
+
+def test_convert_page_to_vector_text_preserves_rotation(
+    synthetic_pdf_factory, tmp_pdf_path,
+):
+    doc = synthetic_pdf_factory(
+        [{"width": 300, "height": 200, "rotation": 90,
+          "texts": [{"point": (20, 100), "text": "Rot", "fontsize": 16}]}]
+    )
+    page = doc[0]
+    shape = page.new_shape()
+    shape.draw_rect(fitz.Rect(40, 40, 120, 80))
+    shape.finish(color=(0, 0, 1))
+    shape.commit()
+    path = tmp_pdf_path(doc)
+
+    converted = fitz.open("pdf", convert_page_to_vector_text(path, 0))
+    cpage = converted[0]
+
+    assert cpage.rotation == 90
+    rects = [tuple(round(c, 3) for c in d["rect"]) for d in cpage.get_drawings()]
+    # the original rect stays in unrotated MediaBox space, unchanged
+    assert (40.0, 40.0, 120.0, 80.0) in rects
+
+
 def test_convert_page_to_vector_text_writes_output_path(
     synthetic_pdf_factory, tmp_pdf_path, tmp_path,
 ):

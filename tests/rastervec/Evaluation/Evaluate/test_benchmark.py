@@ -12,22 +12,16 @@ from rastervec.Evaluation.Evaluate.benchmark import (
     format_timing_report,
     summarize_stage_timings,
 )
-from rastervec.Evaluation.Evaluate.metrics import MetricCounts, MetricSuiteResult, Ratio
+from rastervec.Evaluation.Evaluate.metrics import (
+    _RATIO_FIELDS,
+    MetricCounts,
+    MetricSuiteResult,
+    Ratio,
+)
 
 
 def _suite(**ratios) -> MetricSuiteResult:
-    base = {name: Ratio(0.0, math.nan) for name in (
-        "page_char_multiset_recall", "page_char_multiset_precision",
-        "page_word_multiset_recall", "page_word_multiset_precision",
-        "pred_text_fully_contained_in_overlapping_gt_rate",
-        "gt_text_word_coverage_by_overlapping_preds",
-        "per_gt_best_single_pred_iou_mean", "per_gt_union_pred_iou_mean",
-        "undetected_gt_area_ratio", "rotation_accuracy_localized_gt",
-        "classification_recall_gt_reached_ocr",
-        "classification_precision_candidate_is_text",
-        "gt_miss_attributed_to_classification_frac", "gt_miss_attributed_to_fast_frac",
-        "gt_miss_attributed_to_ocr_blank_frac", "gt_miss_attributed_to_not_found_frac",
-    )}
+    base = {name: Ratio(0.0, math.nan) for name in _RATIO_FIELDS}
     base.update(ratios)
     return MetricSuiteResult(ratios=base)
 
