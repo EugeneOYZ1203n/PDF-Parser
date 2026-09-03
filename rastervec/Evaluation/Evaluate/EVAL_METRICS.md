@@ -38,6 +38,14 @@ All bboxes are `(x0, y0, x1, y1)` in PDF **unrotated MediaBox** space, y-axis
 down — the same space `LabelEntry.cluster_bbox` and `TextVectorResult.bbox` use,
 so no coordinate transform is needed.
 
+**Auto vs. manual are scored from separate pipeline runs.** The benchmark runs
+each pipeline twice per page — once on `convert_page_text_only` output (native
+text as vectors, no drawings) scored vs the `source="auto"` labels, once on
+`convert_page_drawings_only` output (original drawings only, no native text)
+scored vs the `source="manual"` labels. The two prediction sets are therefore
+physically disjoint, so the suite itself needs no cross-source handling — each
+`evaluate_metrics` call sees only one source's GT and its own run's predictions.
+
 ---
 
 ## 2. Normalization

@@ -2,11 +2,21 @@
 (it was inlined in `notebooks/benchmark_vector_classification.ipynb`), so
 `run_parallel` can fan it across a process pool.
 
-One `PageTask` in -> one `PageResult` out (small, picklable: metric
-suites, timings, a few PNG-bytes showcase samples, formatted report
-text). Reconstruction / input / box-overlay PDFs are written straight to
-`reconstruct_dir` from inside the job (distinct filenames, process-safe).
-Every failure is caught into `PageResult.error` -- the pool never sees an
+Each pipeline (current *and* legacy) is run **twice** per page on disjoint
+inputs, so auto and manual ground truth are scored against physically
+separate runs that cannot contaminate each other:
+
+- **auto run** -- `convert_page_text_only` input (native text as vectors,
+  drawings removed), scored vs the `source="auto"` labels.
+- **manual run** -- `convert_page_drawings_only` input (original drawings
+  only, native text removed), scored vs the `source="manual"` labels. Only
+  fires when the page has manual labels.
+
+One `PageTask` in -> one `PageResult` out (small, picklable). The per-page
+output PDFs go into `RECONSTRUCT_DIR/<stem>_p<N>/`
+(`input_auto.pdf` / `input_manual.pdf` / `current.pdf` / `legacy.pdf` /
+`boxes.pdf`). Every failure -- whole job or one of the runs -- is captured
+into `PageResult.error` / a `report_blocks` line; the pool never sees an
 exception.
 """
 from __future__ import annotations
@@ -21,9 +31,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-import pymupdf as fitz
-
-from rastervec.Evaluation.Conversion.conversion import convert_page_to_vector_text
+from rastervec.Evaluation.Conversion.conversion import (
+    convert_page_drawings_only,
+    convert_page_text_only,
+)
 from rastervec.Evaluation.Evaluate.adapters import (
     build_eval_inputs,
     gt_regions_from_labelset,
@@ -35,9 +46,8 @@ from rastervec.Evaluation.Evaluate.evaluate import split_labelset_by_source
 from rastervec.Evaluation.Evaluate.metrics import (
     MetricConfig,
     MetricSuiteResult,
-    build_overlap_graph,
     evaluate_metrics,
-    overlay_boxes,
+    overlay_boxes_split,
 )
 from rastervec.Evaluation.Labelling.auto_label import auto_label_pdf
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet
@@ -101,19 +111,29 @@ def _ground_truth(task: PageTask) -> LabelSet:
     return labels
 
 
+def _page_inputs(task: PageTask, has_manual: bool) -> tuple[bytes, bytes | None]:
+    """The two disjoint benchmark inputs for this page: text-only (auto) and,
+    when the page has manual labels, drawings-only (manual)."""
+    auto_input = convert_page_text_only(task.pdf_path, task.page_index)
+    manual_input = (
+        convert_page_drawings_only(task.pdf_path, task.page_index)
+        if has_manual else None
+    )
+    return auto_input, manual_input
+
+
+def _run_pipeline(input_bytes: bytes):
+    """Full current-pipeline run on one input PDF -> its PipelineContext."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "in.pdf"
+        path.write_bytes(input_bytes)
+        with Reader(str(path)) as reader:
+            return run_page_context(reader, 0)
+
+
 def _original_page_meta(pdf_path: str, page_index: int) -> PageMeta:
     with Reader(pdf_path) as reader:
         return reader.get_page(page_index).meta
-
-
-def _original_page_bytes(pdf_path: str, page_index: int) -> bytes:
-    src = fitz.open(pdf_path)
-    try:
-        one = fitz.open()
-        one.insert_pdf(src, from_page=page_index, to_page=page_index)
-        return one.tobytes()
-    finally:
-        src.close()
 
 
 def _render_ocr_input(cluster, dpi: int = 300):
@@ -153,144 +173,193 @@ def _showcase(cluster_ocr_results, per_page: int, seed: int) -> list[ShowcaseSam
     return out
 
 
-def _write_pdf(directory: Path, name: str, data: bytes) -> None:
-    (directory / name).write_bytes(data)
-
-
-def _write_outputs(
-    task: PageTask,
-    gt: LabelSet,
-    page_meta: PageMeta,
-    input_pdf: bytes,
-    ocr_results,
-    predictions,
-    cfg: MetricConfig,
-) -> None:
-    """groundtruth / <pipeline> reconstruction (text-only) / <pipeline>
-    input / <pipeline> box-overlay PDFs into `reconstruct_dir`."""
+def _page_dir(task: PageTask) -> Path | None:
     if not task.reconstruct_dir:
-        return
-    directory = Path(task.reconstruct_dir)
+        return None
+    directory = (
+        Path(task.reconstruct_dir)
+        / f"{Path(task.pdf_path).stem}_p{task.page_index}"
+    )
     directory.mkdir(parents=True, exist_ok=True)
-    stem = Path(task.pdf_path).stem
-    tag = f"{stem}_p{task.page_index}"
-
-    _write_pdf(
-        directory, f"{tag}_groundtruth.pdf",
-        render_reconstructed_pdf(
-            page_meta,
-            text_boxes=[(e.text, e.cluster_bbox, e.expected_rotation) for e in gt.entries],
-        ),
-    )
-    _write_pdf(
-        directory, f"{tag}_{task.pipeline}.pdf",
-        render_reconstructed_pdf(page_meta, ocr_results=ocr_results),
-    )
-    _write_pdf(directory, f"{tag}_{task.pipeline}_input.pdf", input_pdf)
-
-    for source, labels in split_labelset_by_source(gt).items():
-        if not labels.entries:
-            continue
-        graph = build_overlap_graph(gt_regions_from_labelset(labels), predictions, cfg)
-        _write_pdf(
-            directory, f"{tag}_{task.pipeline}_boxes_{source}.pdf",
-            render_boxes_pdf(page_meta, overlay_boxes(graph)),
-        )
+    return directory
 
 
 # --------------------------------------------------------------------------
-# the job
+# the job -- current pipeline (run twice)
 # --------------------------------------------------------------------------
 def _run_current(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
-    converted = convert_page_to_vector_text(task.pdf_path, task.page_index)
-    with tempfile.TemporaryDirectory() as tmp:
-        path = str(Path(tmp) / "converted.pdf")
-        Path(path).write_bytes(converted)
-        with Reader(path) as reader:
-            ctx = run_page_context(reader, 0)
-
-    inp = build_eval_inputs(ctx)
     by_src = split_labelset_by_source(gt)
+    auto_gt = gt_regions_from_labelset(by_src["auto"])
+    manual_gt = gt_regions_from_labelset(by_src["manual"])
+    has_manual = bool(by_src["manual"].entries)
+    auto_input, manual_input = _page_inputs(task, has_manual)
+
     result = PageResult(
         pdf_path=task.pdf_path, page_index=task.page_index, pipeline="current",
-        stage_durations=dict(ctx.stage_durations or {}),
     )
-    result.total_seconds = sum(result.stage_durations.values())
+    auto_ctx = manual_ctx = None
+    auto_preds: list = []
+    manual_preds: list = []
+    total = 0.0
 
-    result.auto = evaluate_metrics(
-        gt_regions_from_labelset(by_src["auto"]), inp.predictions,
-        inp.text_candidate_boxes, clustering=inp.clustering,
-        fast_dropped=inp.fast_dropped, ocr_failed=inp.ocr_failed, cfg=cfg,
-    )
-    result.report_blocks.append(
-        format_report(f"[current/auto]   {task.pdf_path}", task.page_index, result.auto)
-    )
-    if by_src["manual"].entries:
-        result.manual = evaluate_metrics(
-            gt_regions_from_labelset(by_src["manual"]), inp.predictions,
-            inp.text_candidate_boxes, clustering=inp.clustering,
-            fast_dropped=inp.fast_dropped, ocr_failed=inp.ocr_failed, cfg=cfg,
+    try:
+        auto_ctx = _run_pipeline(auto_input)
+        inp = build_eval_inputs(auto_ctx)
+        auto_preds = inp.predictions
+        result.auto = evaluate_metrics(
+            auto_gt, inp.predictions, inp.text_candidate_boxes,
+            clustering=inp.clustering, fast_dropped=inp.fast_dropped,
+            ocr_failed=inp.ocr_failed, cfg=cfg,
         )
         result.report_blocks.append(
-            format_report(f"[current/manual] {task.pdf_path}", task.page_index, result.manual)
+            format_report(f"[current/auto]   {task.pdf_path}", task.page_index, result.auto)
+        )
+        total += sum((auto_ctx.stage_durations or {}).values())
+    except Exception as exc:  # noqa: BLE001
+        result.report_blocks.append(
+            f"[current/auto] {task.pdf_path} p{task.page_index}: run failed: {exc}"
         )
 
-    result.showcase = _showcase(
-        ctx.cluster_ocr_results or [], task.showcase_per_page, task.showcase_seed,
-    )
-    _write_outputs(
-        task, gt, ctx.page.meta, converted,
-        ctx.ocr_results or [], inp.predictions, cfg,
+    if has_manual and manual_input is not None:
+        try:
+            manual_ctx = _run_pipeline(manual_input)
+            inp = build_eval_inputs(manual_ctx)
+            manual_preds = inp.predictions
+            result.manual = evaluate_metrics(
+                manual_gt, inp.predictions, inp.text_candidate_boxes,
+                clustering=inp.clustering, fast_dropped=inp.fast_dropped,
+                ocr_failed=inp.ocr_failed, cfg=cfg,
+            )
+            result.report_blocks.append(
+                format_report(f"[current/manual] {task.pdf_path}", task.page_index, result.manual)
+            )
+            total += sum((manual_ctx.stage_durations or {}).values())
+        except Exception as exc:  # noqa: BLE001
+            result.report_blocks.append(
+                f"[current/manual] {task.pdf_path} p{task.page_index}: run failed: {exc}"
+            )
+
+    result.stage_durations = dict((auto_ctx.stage_durations or {}) if auto_ctx else {})
+    result.total_seconds = total
+
+    cocr = list((auto_ctx.cluster_ocr_results or []) if auto_ctx else [])
+    if manual_ctx:
+        cocr += list(manual_ctx.cluster_ocr_results or [])
+    result.showcase = _showcase(cocr, task.showcase_per_page, task.showcase_seed)
+
+    _write_current_outputs(
+        task,
+        page_meta=(
+            (auto_ctx or manual_ctx).page.meta if (auto_ctx or manual_ctx)
+            else _original_page_meta(task.pdf_path, task.page_index)
+        ),
+        auto_input=auto_input,
+        manual_input=manual_input if has_manual else None,
+        merged_ocr_results=(
+            list((auto_ctx.ocr_results or []) if auto_ctx else [])
+            + list(manual_ctx.ocr_results or [] if manual_ctx else [])
+        ),
+        auto_gt=auto_gt, auto_preds=auto_preds,
+        manual_gt=manual_gt if has_manual else [], manual_preds=manual_preds,
+        cfg=cfg,
     )
     return result
 
 
+def _write_current_outputs(
+    task: PageTask, *, page_meta: PageMeta, auto_input: bytes,
+    manual_input: bytes | None, merged_ocr_results, auto_gt, auto_preds,
+    manual_gt, manual_preds, cfg: MetricConfig,
+) -> None:
+    directory = _page_dir(task)
+    if directory is None:
+        return
+    (directory / "input_auto.pdf").write_bytes(auto_input)
+    if manual_input is not None:
+        (directory / "input_manual.pdf").write_bytes(manual_input)
+    (directory / "current.pdf").write_bytes(
+        render_reconstructed_pdf(page_meta, ocr_results=merged_ocr_results)
+    )
+    (directory / "boxes.pdf").write_bytes(
+        render_boxes_pdf(
+            page_meta,
+            overlay_boxes_split(auto_gt, auto_preds, manual_gt, manual_preds, cfg),
+        )
+    )
+
+
+# --------------------------------------------------------------------------
+# the job -- legacy pipeline (run twice)
+# --------------------------------------------------------------------------
 def _run_legacy(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
     from rastervec.Evaluation.Evaluate.legacy_adapter import (
         run_archive_pipeline,
         to_cluster_ocr_results,
     )
 
-    t0 = time.perf_counter()
-    elements = run_archive_pipeline(
-        task.pdf_path, task.page_index,
-        enable_raster_pass=task.enable_archive_raster_pass,
-    )
-    cluster_ocr_results = to_cluster_ocr_results(elements, page_index=task.page_index)
-    elapsed = time.perf_counter() - t0
-
-    predictions = predictions_from_cluster_ocr(cluster_ocr_results)
-    tcb = text_candidate_boxes(None, cluster_ocr_results)
     by_src = split_labelset_by_source(gt)
+    auto_gt = gt_regions_from_labelset(by_src["auto"])
+    manual_gt = gt_regions_from_labelset(by_src["manual"])
+    has_manual = bool(by_src["manual"].entries)
+    auto_input, manual_input = _page_inputs(task, has_manual)
+
     result = PageResult(
         pdf_path=task.pdf_path, page_index=task.page_index, pipeline="legacy",
-        total_seconds=elapsed,
     )
-    result.auto = evaluate_metrics(
-        gt_regions_from_labelset(by_src["auto"]), predictions, tcb, cfg=cfg,
-    )
-    result.report_blocks.append(
-        format_report(f"[legacy/auto]   {task.pdf_path}", task.page_index, result.auto)
-    )
-    if by_src["manual"].entries:
-        result.manual = evaluate_metrics(
-            gt_regions_from_labelset(by_src["manual"]), predictions, tcb, cfg=cfg,
+    merged_ocr: list = []
+    total = 0.0
+
+    def _legacy_run(input_bytes: bytes, gt_regions, label: str) -> MetricSuiteResult:
+        nonlocal total
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "in.pdf"
+            path.write_bytes(input_bytes)
+            t0 = time.perf_counter()
+            elements = run_archive_pipeline(
+                str(path), 0, enable_raster_pass=task.enable_archive_raster_pass,
+            )
+            total += time.perf_counter() - t0
+        cor = to_cluster_ocr_results(elements, page_index=task.page_index)
+        merged_ocr.extend(c.resolved for c in cor)
+        res = evaluate_metrics(
+            gt_regions, predictions_from_cluster_ocr(cor),
+            text_candidate_boxes(None, cor), cfg=cfg,
         )
         result.report_blocks.append(
-            format_report(f"[legacy/manual] {task.pdf_path}", task.page_index, result.manual)
+            format_report(f"[legacy/{label}] {task.pdf_path}", task.page_index, res)
         )
+        return res
 
-    _write_outputs(
-        task, gt, _original_page_meta(task.pdf_path, task.page_index),
-        _original_page_bytes(task.pdf_path, task.page_index),
-        [c.resolved for c in cluster_ocr_results], predictions, cfg,
-    )
+    try:
+        result.auto = _legacy_run(auto_input, auto_gt, "auto")
+    except Exception as exc:  # noqa: BLE001
+        result.report_blocks.append(
+            f"[legacy/auto] {task.pdf_path} p{task.page_index}: run failed: {exc}"
+        )
+    if has_manual and manual_input is not None:
+        try:
+            result.manual = _legacy_run(manual_input, manual_gt, "manual")
+        except Exception as exc:  # noqa: BLE001
+            result.report_blocks.append(
+                f"[legacy/manual] {task.pdf_path} p{task.page_index}: run failed: {exc}"
+            )
+
+    result.total_seconds = total
+    directory = _page_dir(task)
+    if directory is not None:
+        (directory / "legacy.pdf").write_bytes(
+            render_reconstructed_pdf(
+                _original_page_meta(task.pdf_path, task.page_index),
+                ocr_results=merged_ocr,
+            )
+        )
     return result
 
 
 def run_page_task(task: PageTask) -> PageResult:
     """One benchmarked page, end to end. Never raises -- a failure is
-    captured into `PageResult.error`."""
+    captured into `PageResult.error` (a whole-job failure) or a
+    `report_blocks` line (one of the two runs)."""
     cfg = MetricConfig(iou_edge_min=task.iou_edge_min)
     try:
         gt = _ground_truth(task)

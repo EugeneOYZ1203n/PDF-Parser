@@ -46,9 +46,9 @@ def run_one_page(
     iou_threshold: float = MetricConfig().iou_edge_min,
     reconstruct_dir: Path | None = None,
 ) -> MetricSuiteResult:
-    """Ground truth (no pipeline run) -> Conversion -> a real full pipeline
-    run (OCR included) -> `metrics.evaluate_metrics`, for one page (auto
-    labels). `iou_threshold` maps onto `MetricConfig.iou_edge_min`.
+    """Ground truth (no pipeline run) -> `convert_page_text_only` -> a real
+    full pipeline run (OCR included) -> `metrics.evaluate_metrics`, for one
+    page's auto labels. `iou_threshold` maps onto `MetricConfig.iou_edge_min`.
     Delegates to `Reader/Parallel/benchmark_jobs.run_page_task`."""
     from rastervec.Reader.Parallel.benchmark_jobs import PageTask, run_page_task
 
@@ -59,7 +59,10 @@ def run_one_page(
     ))
     if result.error is not None:
         raise RuntimeError(result.error)
-    assert result.auto is not None
+    if result.auto is None:
+        raise RuntimeError(
+            "auto run produced no result: " + " | ".join(result.report_blocks)
+        )
     return result.auto
 
 

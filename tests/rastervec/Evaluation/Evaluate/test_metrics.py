@@ -198,6 +198,28 @@ def test_overlay_boxes_colors():
     assert colors[(500, 0, 510, 10)] == SPURIOUS_PRED_BOX_COLOR
 
 
+def test_overlay_boxes_split_line_styles():
+    from rastervec.Evaluation.Evaluate.metrics import (
+        MATCH_BOX_COLOR,
+        MISSED_GT_BOX_COLOR,
+        SPURIOUS_PRED_BOX_COLOR,
+        overlay_boxes_split,
+    )
+
+    auto_gt = [_gt("A", (0, 0, 20, 10))]
+    auto_preds = [_pred("A", (1, 1, 19, 9)), _pred("SPUR", (500, 0, 510, 10))]
+    manual_gt = [_gt("M", (100, 0, 110, 10))]  # nothing over it in manual run
+    manual_preds: list = []
+
+    boxes = overlay_boxes_split(auto_gt, auto_preds, manual_gt, manual_preds)
+    by_bbox = {bbox: (color, dashes) for bbox, color, dashes in boxes}
+
+    assert by_bbox[(0, 0, 20, 10)] == (MATCH_BOX_COLOR, "[4 3] 0")            # auto GT: dashed, matched
+    assert by_bbox[(1, 1, 19, 9)] == (MATCH_BOX_COLOR, "[1 2] 0")            # auto pred: dotted, matched
+    assert by_bbox[(500, 0, 510, 10)] == (SPURIOUS_PRED_BOX_COLOR, "[1 2] 0")  # pred: dotted, extra
+    assert by_bbox[(100, 0, 110, 10)] == (MISSED_GT_BOX_COLOR, None)          # manual GT: solid, missed
+
+
 # --------------------------------------------------------------------------
 # misses
 # --------------------------------------------------------------------------

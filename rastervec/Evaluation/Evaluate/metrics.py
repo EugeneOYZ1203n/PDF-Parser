@@ -538,6 +538,48 @@ def overlay_boxes(
     return boxes
 
 
+# Line styles for overlay_boxes_split (PyMuPDF dash strings; None = solid).
+_AUTO_GT_DASHES = "[4 3] 0"
+_MANUAL_GT_DASHES = None
+_PRED_DASHES = "[1 2] 0"
+
+
+def overlay_boxes_split(
+    auto_gt: list[GtRegion],
+    auto_preds: list[Prediction],
+    manual_gt: list[GtRegion],
+    manual_preds: list[Prediction],
+    cfg: MetricConfig = MetricConfig(),
+) -> list[tuple[Bbox, tuple[float, float, float], "str | None"]]:
+    """`(bbox, rgb, dashes)` for the combined benchmark box overlay, where the
+    auto and manual ground truth come from two separate pipeline runs on
+    disjoint inputs:
+
+    - **auto GT** -- dashed, green if some `auto_preds` box overlaps it, red
+      otherwise.
+    - **manual GT** -- solid, green/red the same way against `manual_preds`.
+    - **predictions** (both runs, non-blank) -- dotted, green if the prediction
+      overlaps its own run's GT, yellow otherwise.
+    """
+    boxes: list[tuple[Bbox, tuple[float, float, float], "str | None"]] = []
+    for gt, preds, gt_dashes in (
+        (auto_gt, auto_preds, _AUTO_GT_DASHES),
+        (manual_gt, manual_preds, _MANUAL_GT_DASHES),
+    ):
+        graph = build_overlap_graph(gt, preds, cfg)
+        for gi, g in enumerate(graph.gt):
+            color = MATCH_BOX_COLOR if graph.gt_has_overlap[gi] else MISSED_GT_BOX_COLOR
+            boxes.append((g.bbox, color, gt_dashes))
+        preds_with_overlap = {e.pred_idx for e in graph.edges}
+        for pj, p in enumerate(graph.preds):
+            color = (
+                MATCH_BOX_COLOR if pj in preds_with_overlap
+                else SPURIOUS_PRED_BOX_COLOR
+            )
+            boxes.append((p.bbox, color, _PRED_DASHES))
+    return boxes
+
+
 _MISS_REASON_FIELDS = {
     "gt_miss_attributed_to_classification_frac": lambda r: r.startswith("classification:"),
     "gt_miss_attributed_to_fast_frac": lambda r: r == "fast_text_detect",

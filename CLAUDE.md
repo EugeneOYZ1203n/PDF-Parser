@@ -259,20 +259,22 @@ testable independently of the others (every stage's *output* is a plain dataclas
   consolidated text/line objects back into a PDF for evaluation — not yet registered in
   `Pipeline.STAGES`. Distinct from the `Evaluation/Evaluate/` benchmarking subpackage below, which
   is implemented and scores the existing Vector Classification + OCR pipeline, not this stub.
-- **`Evaluation/Conversion/conversion.py` — `convert_page_to_vector_text`** *(implemented)*: copies
-  a page verbatim (`out.insert_pdf` — **every pre-existing vector path keeps its exact original
-  geometry**, which matters because manual `LabelEntry` bboxes are taken against the original), then
-  removes the native text objects (redaction with `PDF_REDACT_LINE_ART_NONE` so line art is
-  untouched) and *adds* that same text back as vector paths: a throwaway page copy has line art +
-  images stripped, its text-only `get_svg_image()` → `fitz.open(filetype="svg")` → `convert_to_pdf()`
-  → `show_pdf_page` overlaid onto the output page. Both the output page and the throwaway are forced
-  to rotation 0 first so the SVG and overlay share the page's canonical unrotated MediaBox space; the
-  original `/Rotate` is re-applied at the end (an earlier version SVG-round-tripped the *whole* page,
-  re-encoding the very CAD-text/drawing vectors a human labelled). PyMuPDF renders text as filled SVG
-  `<path>`s, never an SVG `<text>` element or a raster fallback, so `get_drawings()` on the result
-  holds real vector path content and `get_text()` comes back empty. Turns a native-text PDF into a
-  known-answer test case for Vector_Classification, since the ground-truth text is whatever the
-  original native words said.
+- **`Evaluation/Conversion/conversion.py`** *(implemented)*: three functions, each re-expressing a
+  page's content as vector paths (`get_drawings()`) for a Vector_Classification known-answer test —
+  **none ever rewrites pre-existing vector-path geometry** (an earlier version SVG-round-tripped the
+  *whole* page, re-encoding the very CAD-text/drawing vectors a human labelled). Shared mechanics:
+  `insert_pdf` for a verbatim page copy; `apply_redactions` with `PDF_REDACT_LINE_ART_NONE` to delete
+  native text while leaving line art bit-identical, or `PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED` +
+  `PDF_REDACT_IMAGE_REMOVE` to leave a text-only page; that text-only page's `get_svg_image()` →
+  `fitz.open(filetype="svg")` → `convert_to_pdf()` (PyMuPDF emits each glyph as a filled `<path>`,
+  never an SVG `<text>` or a raster fallback); everything at rotation 0 (canonical unrotated MediaBox
+  space) with the original `/Rotate` re-applied at the end.
+  - `convert_page_text_only` — native text as vector paths, **every drawing + image removed**. The
+    benchmark's **auto**-ground-truth input.
+  - `convert_page_drawings_only` — the original page with native text objects removed, **every
+    drawing kept byte-for-byte** (images removed). The benchmark's **manual**-ground-truth input.
+  - `convert_page_to_vector_text` — both overlaid (text-as-vectors on the untouched drawings). No
+    longer used by the benchmark; kept as a general utility + for its tests.
 - **`Evaluation/Labelling/`** *(implemented)*: ground-truth labelling for vector-text regions.
   `label_schema.py`'s `LabelEntry` (`page_index`, `cluster_bbox`, `cluster_signature`, `text`,
   `source: "manual"|"auto"`, `expected_rotation`) + `LabelSet` are the sidecar JSON format
@@ -344,8 +346,10 @@ testable independently of the others (every stage's *output* is a plain dataclas
   `classification_recall_gt_reached_ocr` / `classification_precision_candidate_is_text`, and
   `gt_miss_attributed_to_{classification,fast,ocr_blank,not_found}_frac` + `per_stage_miss_counts`
   (`attribute_miss`, a port of `evaluate._attribute_miss`). `METRIC_GROUPS` is the display-order source
-  for `benchmark.format_report` + the notebook charts. **`EVAL_METRICS.md`** documents every metric's
-  formula, both normalisation rules (text + aggregation), and the ~36-metric catalogue not yet built.
+  for `benchmark.format_report` + the notebook charts. `overlay_boxes` / `overlay_boxes_split` are
+  data-only helpers (no rendering) returning `(bbox, rgb[, dashes])` for the benchmark's `boxes.pdf`
+  pred-vs-GT overlay. **`EVAL_METRICS.md`** documents every metric's formula, both normalisation
+  rules (text + aggregation), and the ~36-metric catalogue not yet built.
 - **`Evaluation/Evaluate/adapters.py`** *(implemented)*: the only `Evaluation/Evaluate/` module that
   imports `rastervec.pipeline`. `gt_regions_from_labelset` / `predictions_from_cluster_ocr` /
   `text_candidate_boxes` (union bbox per `ctx.regrouped_clusters` cluster, blank OCR included; falls
@@ -396,11 +400,15 @@ testable independently of the others (every stage's *output* is a plain dataclas
   engine + FAST model module caches are unlocked shared singletons and PyMuPDF is not reentrant.
   `benchmark_jobs.py` — the picklable per-page job: `PageTask` (pdf/page/manual entries/pipeline/
   reconstruct dir/…) → `run_page_task` → `PageResult` (auto + manual `MetricSuiteResult`, stage
-  durations, formatted report blocks, a few PNG-bytes `ShowcaseSample`s, `error`). It does the whole
-  page end to end (ground truth, Conversion for `current`, `run_page_context`, `evaluate_metrics`,
-  and the per-page output PDFs) and never raises — a failure lands in `PageResult.error`.
-  `run_benchmark(tasks, *, workers, desc)` is the thin `run_parallel(tasks, run_page_task, …)`
-  wrapper used by both `benchmark.py` and the notebook.
+  durations, formatted report blocks, a few PNG-bytes `ShowcaseSample`s, `error`). **Each pipeline
+  (current *and* legacy) is run twice per page** on disjoint inputs — `convert_page_text_only`
+  scored vs the `auto` labels, `convert_page_drawings_only` scored vs the `manual` labels (the
+  manual run only when the page has manual labels) — so the two GT sources are scored against
+  physically separate runs and can't contaminate each other's precision. Each of the (up to) four
+  runs per page is wrapped in its own `try/except`: a failed run leaves that field `None` + a
+  `report_blocks` line; a whole-job failure lands in `PageResult.error`. `run_benchmark(tasks, *,
+  workers, desc)` is the thin `run_parallel(tasks, run_page_task, …)` wrapper used by both
+  `benchmark.py` and the notebook.
 - **`Evaluation/Evaluate/benchmark.py`** *(implemented)* — the CLI wiring Conversion → auto_label →
   a real full pipeline run → `metrics.evaluate_metrics` together: `python -m
   rastervec.Evaluation.Evaluate.benchmark --pdf PATH [--pdf PATH2 ...] --pages 0,1,2
@@ -419,18 +427,19 @@ testable independently of the others (every stage's *output* is a plain dataclas
   deduped `(pdf, page)`; `run_benchmark(build_tasks(...), workers=BENCH_WORKERS)` runs them;
   `collect_results` splits the `PageResult`s into auto/manual metric lists + stage timings + the
   showcase pool and writes the per-page report `.txt`. Scores auto- and manual-source ground truth
-  separately via `split_labelset_by_source`. Per page (when `RECONSTRUCT_DIR` is set)
-  `benchmark_jobs._write_outputs` writes `<stem>_p<N>_groundtruth.pdf`, `_<pipeline>.pdf` (text
-  reconstruction, **text-only — no drawing layer**), `_<pipeline>_input.pdf` (the exact PDF fed to
-  that pipeline: converted vector-text for `current`, the original page for `legacy`), and
-  `_<pipeline>_boxes_<auto|manual>.pdf` (`metrics.overlay_boxes` → `renderer.render_boxes_pdf`:
-  green = a gt/pred that overlaps, yellow = a predicted box over no gt, red = a gt no prediction
-  reached). A showcase cell plots `SHOWCASE_N` of the `ShowcaseSample` PNGs, sampled ~50/50 between
+  separately via `split_labelset_by_source`. Per page (when `RECONSTRUCT_DIR` is set) the job writes
+  one folder `RECONSTRUCT_DIR/<stem>_p<N>/` with five PDFs: `input_auto.pdf` / `input_manual.pdf`
+  (the two disjoint pipeline inputs), `current.pdf` / `legacy.pdf` (each a text-only reconstruction
+  of that pipeline's two runs merged), and `boxes.pdf` — the current pipeline's pred-vs-GT overlay
+  via `metrics.overlay_boxes_split` → `renderer.render_boxes_pdf`: **dashed** = auto GT, **solid** =
+  manual GT, **dotted** = a prediction; green = matched, red = a GT no prediction reached, yellow =
+  a prediction over no GT. A showcase cell plots `SHOWCASE_N` of the `ShowcaseSample` PNGs, sampled ~50/50 between
   non-blank (PASS) and blank (FAIL) OCR readings.
 - **`renderer/` — module-level functions, no `Renderer` class** *(rendering helpers, not a pipeline
   stage)*: a package split by output concern — `png.py` (rasterize vector paths for OCR / FAST
-  input), `pdf.py` (`render_reconstructed_page`, `render_reconstructed_pdf`, `render_boxes_pdf`),
-  `svg.py` (`render_page_svg`, a thin
+  input), `pdf.py` (`render_reconstructed_page`, `render_reconstructed_pdf`, and `render_boxes_pdf`
+  — colored rectangle outlines, each entry `(bbox, rgb)` or `(bbox, rgb, dashes)` where `dashes` is
+  a PyMuPDF dash string / `None`), `svg.py` (`render_page_svg`, a thin
   `get_svg_image()` wrapper), and `_shapes.py` (shared). Import straight from `rastervec.renderer`
   (`from rastervec.renderer import render_vector_cluster`, etc.).
   `_shapes.path_color_hex(path)` returns a path's real PDF stroke/fill color as hex (used by both the

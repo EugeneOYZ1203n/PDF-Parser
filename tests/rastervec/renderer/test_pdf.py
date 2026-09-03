@@ -3,7 +3,11 @@ from __future__ import annotations
 import pymupdf as fitz
 
 from rastervec.models import DrawingVector, OcrWord, PageMeta, TextVectorResult, TextWord, VectorPath
-from rastervec.renderer import render_reconstructed_page, render_reconstructed_pdf
+from rastervec.renderer import (
+    render_boxes_pdf,
+    render_reconstructed_page,
+    render_reconstructed_pdf,
+)
 
 
 def _make_path(
@@ -182,5 +186,21 @@ def test_render_reconstructed_pdf_page_size_matches_page_meta():
     doc = fitz.open("pdf", render_reconstructed_pdf(meta))
     try:
         assert (round(doc[0].rect.width), round(doc[0].rect.height)) == (200, 100)
+    finally:
+        doc.close()
+
+
+def test_render_boxes_pdf_accepts_2_and_3_tuples():
+    meta = PageMeta(index=0, number=1, mediabox=(0, 0, 200, 100), rotation=0, width=200, height=100)
+    boxes = [
+        ((10, 10, 50, 40), (0.0, 0.7, 0.0), "[4 3] 0"),  # dashed
+        ((60, 10, 100, 40), (0.85, 0.0, 0.0), None),      # solid via explicit None
+        ((110, 10, 150, 40), (0.95, 0.75, 0.0)),          # solid, legacy 2-tuple
+    ]
+
+    doc = fitz.open("pdf", render_boxes_pdf(meta, boxes))
+    try:
+        assert (round(doc[0].rect.width), round(doc[0].rect.height)) == (200, 100)
+        assert len(doc[0].get_drawings()) >= 3
     finally:
         doc.close()

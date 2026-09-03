@@ -208,9 +208,12 @@ def render_reconstructed_pdf(
         doc.close()
 
 
-# One box overlay: a page-space bbox plus the (r, g, b) 0..1 color to
-# outline it in.
-BoxOverlay = tuple[tuple[float, float, float, float], tuple[float, float, float]]
+# One box overlay: a page-space bbox, an (r, g, b) 0..1 outline color, and
+# an optional PyMuPDF dash string (e.g. "[4 3] 0"; omit or None = solid).
+BoxOverlay = (
+    tuple[tuple[float, float, float, float], tuple[float, float, float]]
+    | tuple[tuple[float, float, float, float], tuple[float, float, float], "str | None"]
+)
 
 
 def render_boxes_pdf(
@@ -220,18 +223,20 @@ def render_boxes_pdf(
     width: float = 1.5,
 ) -> bytes:
     """A fresh page sized/rotated to `page_meta`, with each of `boxes`'s
-    (bbox, color) pairs drawn as an unfilled rectangle outline
-    (`page.draw_rect`, no fill -- so overlapping boxes stay legible). Used
-    by `Evaluation/Evaluate/evaluate.py`'s `render_evaluation_pdf` to
-    visualize one `evaluate_pipeline()` call's matched/unmatched-label/
-    unmatched-prediction bboxes; generic otherwise -- it knows nothing
-    about evaluation, just draws colored boxes."""
+    (bbox, color[, dashes]) entries drawn as an unfilled rectangle outline
+    (`page.draw_rect`, no fill -- so overlapping boxes stay legible). A third
+    tuple element, when present, is a PyMuPDF dash string (`None` = solid).
+    Used by `Evaluation/Evaluate/`'s `render_evaluation_pdf` (2-tuples) and
+    `metrics.overlay_boxes_split` (dashed = auto GT, solid = manual GT,
+    dotted = prediction); generic otherwise."""
     doc = fitz.open()
     try:
         page = doc.new_page(width=page_meta.width, height=page_meta.height)
         page.set_rotation(page_meta.rotation)
-        for bbox, color in boxes:
-            page.draw_rect(fitz.Rect(*bbox), color=color, width=width)
+        for spec in boxes:
+            bbox, color = spec[0], spec[1]
+            dashes = spec[2] if len(spec) > 2 else None
+            page.draw_rect(fitz.Rect(*bbox), color=color, width=width, dashes=dashes)
         return doc.tobytes()
     finally:
         doc.close()
