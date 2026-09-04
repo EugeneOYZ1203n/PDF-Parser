@@ -49,15 +49,19 @@ stage on, and find which thresholds transfer.
 | 9 | `measure_width` | — | 2·median(distance transform along chain) |
 | 10 | `regularize` | §2.3/2.5 | endpoint snap, collinear merge, junctions |
 | 11 | `extract_remainder` | — | ink minus rendered geometry |
+| 12 | `staircase.detect` | §3.2 | crude 5..30-tread run-regularity heuristic (dashed-line detector rotated 90°); metrics informational only |
+| 13 | `symbols.recognize` | §3.3 | constraint-propagation network, 2/7 families (door, window); metrics informational only |
 
 Out of scope for the spike (noted in the `rastervec` plan): tiling/merge (§2.1),
-Ah-Soon symbol-recognition constraint network (§3.3), Sánchez staircase texture
-(§3.2), post-vectorization junction-position recompute.
+3D modeling and floor-to-floor matching (§4), post-vectorization junction-position
+recompute.
 
 ## Metrics (`metrics.py`)
 
 `mask_iou`, `coverage_pct`, `endpoint_hausdorff`, `junction_precision/recall/f1`,
-`dashed_precision/recall`, `arc_count_error`, `segment_count_ratio`.
+`dashed_precision/recall`, `arc_count_error`, `segment_count_ratio`,
+`staircase_precision/recall/f1`, `staircase_tread_count_err`,
+`symbol_door_precision/recall/f1`, `symbol_window_precision/recall/f1`.
 Ground truth comes from `synthetic.generate` (exact) or, for real PDFs, is
 visual-only (IoU/coverage vs the input ink mask).
 
@@ -70,7 +74,15 @@ visual-only (IoU/coverage vs the input ink mask).
   - Rosin & West over-splits polylines around junctions
     (`segment_count_ratio` > 2), inflating junction *precision* error;
   - dense full shop-drawing pages (lots of text / tables / hatching) degrade
-    badly — the paper works on single clean drawings + tiling + a human in the loop.
+    badly — the paper works on single clean drawings + tiling + a human in the loop;
+  - staircase/symbol metrics are informational only, not part of the smoke gate
+    (`smoke.py`): the staircase heuristic is a from-scratch stand-in for the
+    paper's own (unavailable) Sánchez texture segmenter, and it itself calls its
+    filter "crude and simplistic"; symbol recognition covers only 2 of the
+    paper's 7 families (door, window), validated on synthetic data only —
+    window recall in particular is fragile, since a jamb tick that crosses a
+    wall gets split at the skeleton-graph junction, same junction-imprecision
+    issue the paper documents in §2.5.
 - `Params.max_work_px` downscales large inputs (the skeleton graph is pure-Python
   O(pixels)); real embedded rasters in `references/*.pdf` are small, whole-page
   renders need the cap.

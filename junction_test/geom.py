@@ -87,6 +87,28 @@ def dedup_points(points: list[Point], tol: float) -> list[Point]:
     return out
 
 
+def classify_junction(arm_angles: list[float], collinear_deg: float = 20.0) -> str:
+    """Junction type from the set of arm headings (degrees, 0..360, one per arm
+    pointing away from the node). L|T|X|Y|star|endpoint (SYNTHETIC_DATA.md)."""
+    a = sorted(float(x) % 360.0 for x in arm_angles)
+    n = len(a)
+    if n <= 1:
+        return "endpoint"
+    if n == 2:
+        return "L"
+
+    def _has_opposite(i):
+        return any(i != j and abs(angle_gap(a[i], a[j], 360.0) - 180.0) <= collinear_deg
+                   for j in range(n))
+
+    opp = sum(1 for i in range(n) if _has_opposite(i))
+    if n == 3:
+        return "T" if opp >= 2 else "Y"
+    if n == 4:
+        return "X" if opp == 4 else "star"
+    return "star"
+
+
 def taubin_circle_fit(pts: np.ndarray) -> tuple[float, float, float, float]:
     """Algebraic circle fit (Taubin). Returns (cx, cy, r, rms_radial_residual)."""
     pts = np.asarray(pts, float)

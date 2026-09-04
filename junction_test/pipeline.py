@@ -11,10 +11,10 @@ import cv2
 import numpy as np
 from skimage.morphology import medial_axis, reconstruction, skeletonize
 
-from . import dashed, polyapprox
-from .geom import angle_gap, dedup_points, dist, heading_deg
+from . import dashed, polyapprox, staircase, symbols
+from .geom import angle_gap, classify_junction, dedup_points, dist, heading_deg
 from .skeleton_graph import build_graph
-from .types_ import Arc, Graph, Junction, PipelineResult, Point, Segment
+from .types_ import Arc, Graph, Junction, PipelineResult, Point, Segment, StaircaseRegion, SymbolInstance
 
 
 @dataclass
@@ -53,6 +53,21 @@ class Params:
     min_segment_px: float = 3.0
     # remainder
     remainder_dilate_px: int = 3
+    # staircase detection (Sec 3.2)
+    detect_staircases: bool = True
+    stair_tread_min_len: float = 10.0
+    stair_tread_max_len: float = 90.0
+    stair_angle_tol_deg: float = 10.0
+    stair_len_ratio_tol: float = 0.35
+    stair_spacing_min: float = 6.0
+    stair_spacing_max: float = 40.0
+    stair_lateral_tol: float = 6.0
+    stair_min_treads: int = 5
+    stair_max_treads: int = 30
+    # symbol recognition (Sec 3.3)
+    detect_symbols: bool = True
+    symbol_families: tuple[str, ...] = ("door", "window")
+    symbol_max_error: float = 1.0
 
 
 # ----------------------------------------------------------------------- stages
@@ -279,10 +294,14 @@ def regularize(segments: list[Segment], p: Params) -> tuple[list[Segment], list[
             incidence.setdefault(key, []).append(heading_deg(ep, other))
     junctions = []
     for k, headings in incidence.items():
-        if len(headings) >= 3:
-            junctions.append(Junction(xy=k, directions=headings))
-        elif len(headings) == 2 and angle_gap(headings[0], headings[1], 360.0) > p.collinear_deg:
-            junctions.append(Junction(xy=k, directions=headings))
+        if len(headings) >= 3 or (
+            len(headings) == 2 and angle_gap(headings[0], headings[1], 360.0) > p.collinear_deg
+        ):
+            junctions.append(Junction(
+                xy=k, directions=headings,
+                jtype=classify_junction(headings, p.collinear_deg * 2.5),
+                arm_angles=sorted(float(h) % 360.0 for h in headings),
+            ))
     return segs, junctions
 
 
@@ -304,6 +323,24 @@ def _oriented(s: Segment, at: Point, away: bool = False):
     else:
         p0, p1 = s.p1, s.p0
     return (p0, p1) if not away else (p0, p1)
+
+
+def detect_staircase_regions(segments: list[Segment], p: Params) -> list[StaircaseRegion]:
+    if not p.detect_staircases:
+        return []
+    return staircase.detect(
+        segments,
+        tread_min_len=p.stair_tread_min_len, tread_max_len=p.stair_tread_max_len,
+        angle_tol_deg=p.stair_angle_tol_deg, len_ratio_tol=p.stair_len_ratio_tol,
+        spacing_min=p.stair_spacing_min, spacing_max=p.stair_spacing_max,
+        lateral_tol=p.stair_lateral_tol, min_treads=p.stair_min_treads, max_treads=p.stair_max_treads,
+    )
+
+
+def recognize_symbols(segments: list[Segment], arcs: list[Arc], p: Params) -> list[SymbolInstance]:
+    if not p.detect_symbols:
+        return []
+    return symbols.recognize(segments, arcs, families=p.symbol_families, max_error=p.symbol_max_error)
 
 
 def render_geometry(shape, segments, arcs, p: Params) -> np.ndarray:
@@ -383,6 +420,8 @@ def run(gray: np.ndarray, params: Params | None = None) -> PipelineResult:
         for ds in reclaimed_dashed:
             if (round(ds.p0[0]), round(ds.p0[1])) not in existing:
                 segments.append(ds)
+    staircases = _t("staircases", lambda: detect_staircase_regions(segments, p))
+    symbols_found = _t("symbols", lambda: recognize_symbols(segments, arcs, p))
     remainder = _t("remainder", lambda: extract_remainder(ink, segments, arcs, p))
     ocr_boxes = ocr_text_boxes(gray, text_mask) if p.run_ocr else []
 
@@ -391,4 +430,5 @@ def run(gray: np.ndarray, params: Params | None = None) -> PipelineResult:
         thick_mask=thick_mask, thin_mask=thin_mask, skeleton=skeleton, dist_map=dist_map,
         graph=graph, polylines=polylines, segments=segments, arcs=arcs, junctions=junctions,
         remainder=remainder, ocr_boxes=ocr_boxes, timings=t,
+        staircases=staircases, symbols=symbols_found,
     )

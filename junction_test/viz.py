@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .types_ import GroundTruth, PipelineResult
+from .types_ import GroundTruth, PipelineResult, StaircaseRegion, SymbolInstance
 
 
 def _ax(ax, title):
@@ -15,7 +15,7 @@ def _ax(ax, title):
 def show_stages(result: PipelineResult, figsize=(15, 10)):
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(3, 3, figsize=figsize)
+    fig, axes = plt.subplots(3, 4, figsize=figsize)
     a = axes.ravel()
 
     a[0].imshow(result.gray, cmap="gray")
@@ -57,8 +57,35 @@ def show_stages(result: PipelineResult, figsize=(15, 10)):
 
     _draw_vectors(a[8], result, "final + junctions", show_junctions=True, base=result.gray)
 
+    _draw_vectors(a[9], result, "staircases + symbols", base=result.gray)
+    _draw_staircases(a[9], result.staircases)
+    _draw_symbols(a[9], result.symbols)
+
+    a[10].axis("off")
+    a[11].axis("off")
+
     fig.tight_layout()
     return fig
+
+
+def _draw_staircases(ax, staircases: list[StaircaseRegion]):
+    for r in staircases:
+        poly = np.asarray(r.polygon + [r.polygon[0]])
+        ax.plot(poly[:, 0], poly[:, 1], c="tab:purple", ls=":", lw=1.2)
+        for t in r.treads:
+            ax.plot([t.p0[0], t.p1[0]], [t.p0[1], t.p1[1]], c="tab:cyan", lw=1.0)
+        cx = (r.axis[0][0] + r.axis[1][0]) / 2
+        cy = (r.axis[0][1] + r.axis[1][1]) / 2
+        ax.annotate(f"n={r.n_treads}", (cx, cy), color="tab:purple", fontsize=7)
+
+
+def _draw_symbols(ax, symbols: list[SymbolInstance]):
+    colors = {"door": "tab:pink", "window": "teal"}
+    for s in symbols:
+        c = colors.get(s.family, "black")
+        x0, y0, x1, y1 = s.bbox
+        ax.plot([x0, x1, x1, x0, x0], [y0, y0, y1, y1, y0], c=c, lw=1.0)
+        ax.annotate(s.family, (x0, y0), color=c, fontsize=7)
 
 
 def _draw_vectors(ax, result: PipelineResult, title, show_junctions=False, base=None):
@@ -87,9 +114,10 @@ def show_vs_ground_truth(result: PipelineResult, gt: GroundTruth, figsize=(12, 6
     import matplotlib.pyplot as plt
 
     fig, (a0, a1) = plt.subplots(1, 2, figsize=figsize)
-    for ax, (title, segs, arcs, juncs) in (
-        (a0, ("ground truth", gt.segments, gt.arcs, gt.junctions)),
-        (a1, ("prediction", result.segments, result.arcs, result.junctions)),
+    for ax, (title, segs, arcs, juncs, stairs, syms) in (
+        (a0, ("ground truth", gt.segments, gt.arcs, gt.junctions, gt.staircases, gt.symbols)),
+        (a1, ("prediction", result.segments, result.arcs, result.junctions,
+              result.staircases, result.symbols)),
     ):
         ax.imshow(np.ones_like(result.gray) * 255, cmap="gray", vmin=0, vmax=255)
         for s in segs:
@@ -103,6 +131,8 @@ def show_vs_ground_truth(result: PipelineResult, gt: GroundTruth, figsize=(12, 6
         if len(jj):
             ax.scatter(jj[:, 0], jj[:, 1], s=26, facecolors="none",
                        edgecolors="magenta", lw=1.4)
+        _draw_staircases(ax, stairs)
+        _draw_symbols(ax, syms)
         ax.set_xlim(0, result.gray.shape[1])
         ax.set_ylim(result.gray.shape[0], 0)
         _ax(ax, title)
