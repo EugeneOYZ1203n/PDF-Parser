@@ -4,7 +4,13 @@ import numpy as np
 import pymupdf as fitz
 import pytest
 
-from rastervec.models import DrawingVector, Page, TextWord, VectorPath
+from rastervec.models import (
+    DrawingVector,
+    Page,
+    TextVectorResult,
+    TextWord,
+    VectorPath,
+)
 from rastervec.pipeline import (
     ClusteringStageResult,
     Pipeline,
@@ -118,7 +124,23 @@ def test_run_page_final_stage_unknown_raises(synthetic_pdf_factory, tmp_pdf_path
             Pipeline().run_page(reader, 0, final_stage="not_a_real_stage")
 
 
-def test_run_page_vector_stages_on_drawing_pdf(tmp_pdf_path):
+class _StubRenderOCR:
+    """Stands in for rastervec.pipeline.RenderOCR -- no real engine, every
+    cluster reads back as "TXT"."""
+
+    def __init__(self, backend=None):
+        self.backend = backend
+
+    def ocr_cluster(self, cluster, page, dpi: int = 300):
+        return TextVectorResult(
+            paths=cluster, text="TXT", confidence=0.9,
+            bbox=(0.0, 0.0, 1.0, 1.0), ocr_bbox=(0.0, 0.0, 1.0, 1.0),
+            rotation_used=0, page_index=page.meta.index, words=None,
+        )
+
+
+def test_run_page_vector_stages_on_drawing_pdf(tmp_pdf_path, monkeypatch):
+    monkeypatch.setattr("rastervec.pipeline.RenderOCR", _StubRenderOCR)
     doc = fitz.open()
     page = doc.new_page(width=200, height=100)
 
@@ -141,7 +163,10 @@ def test_run_page_vector_stages_on_drawing_pdf(tmp_pdf_path):
     path = tmp_pdf_path(doc)
 
     with Reader(path) as reader:
-        outputs = Pipeline().run_page(reader, 0)
+        # enable_fast=False -- this test exercises the clustering / drawing_vectors
+        # stages, not FAST; the passthrough keeps it independent of the
+        # fast_tiny_ic17mlt_640.pth weights file being present.
+        outputs = Pipeline().run_page(reader, 0, enable_fast=False)
 
     by_key = {o.key: o for o in outputs}
     assert all(o.status == "ok" for o in outputs)
@@ -186,6 +211,61 @@ def test_run_page_vector_stages_on_drawing_pdf(tmp_pdf_path):
     assert any(dv.paths[0].kind == "re" for dv in drawing_vectors)
 
 
+def test_run_page_context_enable_fast_false_is_passthrough_and_still_ocrs(
+    tmp_pdf_path, monkeypatch,
+):
+    doc = fitz.open()
+    page = doc.new_page(width=200, height=100)
+    line = page.new_shape()
+    line.draw_line((10, 10), (16, 16))
+    line.finish(color=(0, 0, 0), width=2)
+    line.commit()
+    path = tmp_pdf_path(doc)
+
+    monkeypatch.setattr("rastervec.pipeline.RenderOCR", _StubRenderOCR)
+
+    with Reader(path) as reader:
+        ctx = run_page_context(reader, 0, enable_fast=False)
+
+    # every stage still ran and got timed -- passthrough is a real stage,
+    # not a skip
+    assert list(ctx.stage_durations) == _EXPECTED_STAGE_KEYS
+    # FAST kept every text candidate, dropped none, and never rendered
+    assert ctx.fast_passed == ctx.text_clusters
+    assert ctx.fast_dropped == []
+    assert ctx.fast_result is not None and ctx.fast_result.page_image is None
+    assert ctx.fast_result.detect_seconds is None
+    # OCR still ran over the passed-through candidates
+    assert ctx.text_clusters
+    assert ctx.cluster_ocr_results
+    assert all(r.resolved.text == "TXT" for r in ctx.cluster_ocr_results)
+
+
+def test_run_page_context_threads_explicit_ocr_backend(tmp_pdf_path, monkeypatch):
+    doc = fitz.open()
+    page = doc.new_page(width=200, height=100)
+    line = page.new_shape()
+    line.draw_line((10, 10), (16, 16))
+    line.finish(color=(0, 0, 0), width=2)
+    line.commit()
+    path = tmp_pdf_path(doc)
+
+    seen = {}
+
+    class _Stub(_StubRenderOCR):
+        def __init__(self, backend=None):
+            super().__init__(backend)
+            seen["backend"] = backend
+
+    monkeypatch.setattr("rastervec.pipeline.RenderOCR", _Stub)
+    sentinel = object()
+
+    with Reader(path) as reader:
+        run_page_context(reader, 0, enable_fast=False, ocr_backend=sentinel)
+
+    assert seen["backend"] is sentinel
+
+
 def _make_path(seq: int) -> VectorPath:
     return VectorPath(
         seq=seq, item_index=0, kind="l", fill_rule="s", points=[(0, 0), (1, 1)],
@@ -221,13 +301,16 @@ def test_run_drawing_vectors_restores_original_seq_order_across_groups():
     assert [dv.paths[0].seq for dv in drawing_vectors] == [0, 1, 2, 3]
 
 
-def _make_path_at(seq: int, bbox: tuple[float, float, float, float]) -> VectorPath:
+def _make_path_at(
+    seq: int, bbox: tuple[float, float, float, float], *,
+    stroke_color: tuple | None = (0, 0, 0), layer: str | None = None,
+) -> VectorPath:
     return VectorPath(
         seq=seq, item_index=0, kind="l", fill_rule="s",
         points=[(bbox[0], bbox[1]), (bbox[2], bbox[3])], bbox=bbox,
-        stroke_color=(0, 0, 0), fill_color=None, stroke_opacity=None,
+        stroke_color=stroke_color, fill_color=None, stroke_opacity=None,
         fill_opacity=None, stroke_width=1.0, dashes=None, closed=False,
-        layer=None, page_index=0,
+        layer=layer, page_index=0,
     )
 
 
@@ -254,11 +337,9 @@ def test_sample_mask_returns_zero_for_none_mask():
     assert _sample_mask(None, [_make_path_at(0, (0, 0, 10, 10))], zoom=1.0) == 0.0
 
 
-def test_run_spatial_regroup_merges_clusters_whose_paths_overlap_across_buckets():
-    # cluster_b's path touches cluster_a's path within 1px tolerance
-    # (gap of 0.5pt) -- should merge into one, regardless of which
-    # (layer, color) bucket each came from -- spatial_regroup deliberately
-    # ignores that.
+def test_run_spatial_regroup_merges_overlapping_same_layer_color_clusters():
+    # Aggregate bboxes within the 1px tolerance (gap 0.5pt) and same
+    # (layer, color) -- merge into one.
     cluster_a = [_make_path_at(0, (0, 0, 10, 10))]
     cluster_b = [_make_path_at(1, (10.5, 0, 20, 10))]
     ctx = PipelineContext(reader=None, page_index=0)
@@ -268,15 +349,12 @@ def test_run_spatial_regroup_merges_clusters_whose_paths_overlap_across_buckets(
 
     assert len(regrouped) == 1
     assert {p.seq for p in regrouped[0]} == {0, 1}
-    # word_split reads regrouped_clusters, not fast_passed, after this stage.
+    # ocr_compare reads regrouped_clusters, not fast_passed, after this stage.
     assert ctx.regrouped_clusters == regrouped
 
 
-def test_run_spatial_regroup_keeps_clusters_separate_when_no_path_actually_overlaps():
-    # cluster_a and cluster_b's own paths are 3pt apart -- over the 1px
-    # tolerance -- even though this would have merged under the old
-    # aggregate-bbox-gap threshold (5pt). Only real per-path overlap
-    # should merge clusters now.
+def test_run_spatial_regroup_keeps_clusters_separate_when_bboxes_beyond_tolerance():
+    # Aggregate bboxes 3pt apart -- over the 1px tolerance.
     cluster_a = [_make_path_at(0, (0, 0, 10, 10))]
     cluster_b = [_make_path_at(1, (13, 0, 20, 10))]
     ctx = PipelineContext(reader=None, page_index=0)
@@ -296,6 +374,50 @@ def test_run_spatial_regroup_keeps_far_clusters_separate():
     regrouped = _run_spatial_regroup(ctx)
 
     assert len(regrouped) == 2
+
+
+def test_run_spatial_regroup_keeps_overlapping_clusters_separate_when_different_color():
+    # Overlapping aggregate bboxes but different stroke_color -> different
+    # (layer, color) bucket -> not merged.
+    cluster_a = [_make_path_at(0, (0, 0, 10, 10), stroke_color=(0, 0, 0))]
+    cluster_b = [_make_path_at(1, (2, 0, 12, 10), stroke_color=(1, 0, 0))]
+    ctx = PipelineContext(reader=None, page_index=0)
+    ctx.fast_passed = [cluster_a, cluster_b]
+
+    assert len(_run_spatial_regroup(ctx)) == 2
+
+
+def test_run_spatial_regroup_keeps_overlapping_clusters_separate_when_different_layer():
+    cluster_a = [_make_path_at(0, (0, 0, 10, 10), layer="A")]
+    cluster_b = [_make_path_at(1, (2, 0, 12, 10), layer="B")]
+    ctx = PipelineContext(reader=None, page_index=0)
+    ctx.fast_passed = [cluster_a, cluster_b]
+
+    assert len(_run_spatial_regroup(ctx)) == 2
+
+
+def test_run_spatial_regroup_merges_overlapping_clusters_same_layer_and_color():
+    cluster_a = [_make_path_at(0, (0, 0, 10, 10), stroke_color=(1, 0, 0), layer="A")]
+    cluster_b = [_make_path_at(1, (2, 0, 12, 10), stroke_color=(1, 0, 0), layer="A")]
+    ctx = PipelineContext(reader=None, page_index=0)
+    ctx.fast_passed = [cluster_a, cluster_b]
+
+    regrouped = _run_spatial_regroup(ctx)
+    assert len(regrouped) == 1
+    assert {p.seq for p in regrouped[0]} == {0, 1}
+
+
+def test_cluster_lc_key_matches_on_paint_and_splits_on_opacity():
+    from rastervec.pipeline import _cluster_lc_key
+
+    a = [_make_path_at(0, (0, 0, 10, 10))]
+    b = [_make_path_at(1, (5, 5, 15, 15))]
+    assert _cluster_lc_key(a) == _cluster_lc_key(b)
+
+    faint = _make_path_at(2, (0, 0, 10, 10))
+    faint.stroke_opacity = 0.5
+    assert _cluster_lc_key([faint]) != _cluster_lc_key(a)
+    assert _cluster_lc_key([]) == ("", (None, None, None, None))
 
 
 def test_run_page_stage_error_is_caught(synthetic_pdf_factory, tmp_pdf_path):

@@ -2,9 +2,11 @@
 (it was inlined in `notebooks/benchmark_vector_classification.ipynb`), so
 `run_parallel` can fan it across a process pool.
 
-Each pipeline (current *and* legacy) is run **twice** per page on disjoint
-inputs, so auto and manual ground truth are scored against physically
-separate runs that cannot contaminate each other:
+`PageTask.variant` names a `rastervec.Evaluation.Evaluate.variants.VARIANTS`
+entry (engine current/legacy, `enable_fast`, light/heavy OCR backend).
+Each variant is run **twice** per page on disjoint inputs, so auto and
+manual ground truth are scored against physically separate runs that
+cannot contaminate each other:
 
 - **auto run** -- `convert_page_text_only` input (native text as vectors,
   drawings removed), scored vs the `source="auto"` labels.
@@ -13,7 +15,7 @@ separate runs that cannot contaminate each other:
   fires when the page has manual labels.
 
 One `PageTask` in -> one `PageResult` out (small, picklable). The per-page
-output PDFs go into `RECONSTRUCT_DIR/<stem>_p<N>/`
+output PDFs go into `RECONSTRUCT_DIR/<stem>_p<N>_<variant>/`
 (`input_auto.pdf` / `input_manual.pdf` / `current.pdf` / `legacy.pdf` /
 `boxes.pdf`). Every failure -- whole job or one of the runs -- is captured
 into `PageResult.error` / a `report_blocks` line; the pool never sees an
@@ -29,7 +31,6 @@ import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
 
 from rastervec.Evaluation.Conversion.conversion import (
     convert_page_drawings_only,
@@ -43,6 +44,7 @@ from rastervec.Evaluation.Evaluate.adapters import (
 )
 from rastervec.Evaluation.Evaluate.benchmark import format_report
 from rastervec.Evaluation.Evaluate.evaluate import split_labelset_by_source
+from rastervec.Evaluation.Evaluate.variants import PipelineVariant, resolve_variant
 from rastervec.Evaluation.Evaluate.metrics import (
     MetricConfig,
     MetricSuiteResult,
@@ -65,8 +67,6 @@ from rastervec.renderer import (
 
 _LOG = get_logger("reader.parallel.jobs")
 
-Pipeline_ = Literal["current", "legacy"]
-
 
 @dataclass
 class PageTask:
@@ -74,7 +74,9 @@ class PageTask:
     page_index: int
     manual_entries: list[LabelEntry] = field(default_factory=list)
     iou_edge_min: float = MetricConfig().iou_edge_min
-    pipeline: Pipeline_ = "current"
+    # A name from rastervec.Evaluation.Evaluate.variants.VARIANTS -- selects
+    # the engine (current/legacy), enable_fast, and the OCR backend.
+    variant: str = "current_light"
     reconstruct_dir: str | None = None
     showcase_per_page: int = 4
     enable_archive_raster_pass: bool = False
@@ -92,7 +94,7 @@ class ShowcaseSample:
 class PageResult:
     pdf_path: str
     page_index: int
-    pipeline: Pipeline_
+    variant: str
     auto: MetricSuiteResult | None = None
     manual: MetricSuiteResult | None = None
     stage_durations: dict[str, float] = field(default_factory=dict)
@@ -122,13 +124,22 @@ def _page_inputs(task: PageTask, has_manual: bool) -> tuple[bytes, bytes | None]
     return auto_input, manual_input
 
 
-def _run_pipeline(input_bytes: bytes):
-    """Full current-pipeline run on one input PDF -> its PipelineContext."""
+def _run_pipeline(input_bytes: bytes, *, enable_fast: bool = True, ocr_backend_kind: str = "light"):
+    """Full current-pipeline run on one input PDF -> its PipelineContext.
+    `ocr_backend_kind` is "light" (LightPaddleOcrBackend, built here in the
+    worker) or "heavy" (None -> RenderOCR's PaddleOcrBackend default)."""
+    ocr_backend = None
+    if ocr_backend_kind == "light":
+        from rastervec.OCR.Paddle_OCR.light_backend import LightPaddleOcrBackend
+
+        ocr_backend = LightPaddleOcrBackend()
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "in.pdf"
         path.write_bytes(input_bytes)
         with Reader(str(path)) as reader:
-            return run_page_context(reader, 0)
+            return run_page_context(
+                reader, 0, enable_fast=enable_fast, ocr_backend=ocr_backend,
+            )
 
 
 def _original_page_meta(pdf_path: str, page_index: int) -> PageMeta:
@@ -178,7 +189,7 @@ def _page_dir(task: PageTask) -> Path | None:
         return None
     directory = (
         Path(task.reconstruct_dir)
-        / f"{Path(task.pdf_path).stem}_p{task.page_index}"
+        / f"{Path(task.pdf_path).stem}_p{task.page_index}_{task.variant}"
     )
     directory.mkdir(parents=True, exist_ok=True)
     return directory
@@ -187,7 +198,9 @@ def _page_dir(task: PageTask) -> Path | None:
 # --------------------------------------------------------------------------
 # the job -- current pipeline (run twice)
 # --------------------------------------------------------------------------
-def _run_current(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
+def _run_current(
+    task: PageTask, gt: LabelSet, cfg: MetricConfig, variant: PipelineVariant,
+) -> PageResult:
     by_src = split_labelset_by_source(gt)
     auto_gt = gt_regions_from_labelset(by_src["auto"])
     manual_gt = gt_regions_from_labelset(by_src["manual"])
@@ -195,15 +208,17 @@ def _run_current(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
     auto_input, manual_input = _page_inputs(task, has_manual)
 
     result = PageResult(
-        pdf_path=task.pdf_path, page_index=task.page_index, pipeline="current",
+        pdf_path=task.pdf_path, page_index=task.page_index, variant=task.variant,
     )
     auto_ctx = manual_ctx = None
     auto_preds: list = []
     manual_preds: list = []
     total = 0.0
+    run_kw = dict(enable_fast=variant.enable_fast, ocr_backend_kind=variant.ocr_backend)
+    lbl = task.variant
 
     try:
-        auto_ctx = _run_pipeline(auto_input)
+        auto_ctx = _run_pipeline(auto_input, **run_kw)
         inp = build_eval_inputs(auto_ctx)
         auto_preds = inp.predictions
         result.auto = evaluate_metrics(
@@ -212,17 +227,17 @@ def _run_current(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
             ocr_failed=inp.ocr_failed, cfg=cfg,
         )
         result.report_blocks.append(
-            format_report(f"[current/auto]   {task.pdf_path}", task.page_index, result.auto)
+            format_report(f"[{lbl}/auto]   {task.pdf_path}", task.page_index, result.auto)
         )
         total += sum((auto_ctx.stage_durations or {}).values())
     except Exception as exc:  # noqa: BLE001
         result.report_blocks.append(
-            f"[current/auto] {task.pdf_path} p{task.page_index}: run failed: {exc}"
+            f"[{lbl}/auto] {task.pdf_path} p{task.page_index}: run failed: {exc}"
         )
 
     if has_manual and manual_input is not None:
         try:
-            manual_ctx = _run_pipeline(manual_input)
+            manual_ctx = _run_pipeline(manual_input, **run_kw)
             inp = build_eval_inputs(manual_ctx)
             manual_preds = inp.predictions
             result.manual = evaluate_metrics(
@@ -231,12 +246,12 @@ def _run_current(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
                 ocr_failed=inp.ocr_failed, cfg=cfg,
             )
             result.report_blocks.append(
-                format_report(f"[current/manual] {task.pdf_path}", task.page_index, result.manual)
+                format_report(f"[{lbl}/manual] {task.pdf_path}", task.page_index, result.manual)
             )
             total += sum((manual_ctx.stage_durations or {}).values())
         except Exception as exc:  # noqa: BLE001
             result.report_blocks.append(
-                f"[current/manual] {task.pdf_path} p{task.page_index}: run failed: {exc}"
+                f"[{lbl}/manual] {task.pdf_path} p{task.page_index}: run failed: {exc}"
             )
 
     result.stage_durations = dict((auto_ctx.stage_durations or {}) if auto_ctx else {})
@@ -304,10 +319,11 @@ def _run_legacy(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
     auto_input, manual_input = _page_inputs(task, has_manual)
 
     result = PageResult(
-        pdf_path=task.pdf_path, page_index=task.page_index, pipeline="legacy",
+        pdf_path=task.pdf_path, page_index=task.page_index, variant=task.variant,
     )
     merged_ocr: list = []
     total = 0.0
+    lbl = task.variant
 
     def _legacy_run(input_bytes: bytes, gt_regions, label: str) -> MetricSuiteResult:
         nonlocal total
@@ -326,7 +342,7 @@ def _run_legacy(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
             text_candidate_boxes(None, cor), cfg=cfg,
         )
         result.report_blocks.append(
-            format_report(f"[legacy/{label}] {task.pdf_path}", task.page_index, res)
+            format_report(f"[{lbl}/{label}] {task.pdf_path}", task.page_index, res)
         )
         return res
 
@@ -334,14 +350,14 @@ def _run_legacy(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
         result.auto = _legacy_run(auto_input, auto_gt, "auto")
     except Exception as exc:  # noqa: BLE001
         result.report_blocks.append(
-            f"[legacy/auto] {task.pdf_path} p{task.page_index}: run failed: {exc}"
+            f"[{lbl}/auto] {task.pdf_path} p{task.page_index}: run failed: {exc}"
         )
     if has_manual and manual_input is not None:
         try:
             result.manual = _legacy_run(manual_input, manual_gt, "manual")
         except Exception as exc:  # noqa: BLE001
             result.report_blocks.append(
-                f"[legacy/manual] {task.pdf_path} p{task.page_index}: run failed: {exc}"
+                f"[{lbl}/manual] {task.pdf_path} p{task.page_index}: run failed: {exc}"
             )
 
     result.total_seconds = total
@@ -362,14 +378,15 @@ def run_page_task(task: PageTask) -> PageResult:
     `report_blocks` line (one of the two runs)."""
     cfg = MetricConfig(iou_edge_min=task.iou_edge_min)
     try:
+        variant = resolve_variant(task.variant)
         gt = _ground_truth(task)
-        if task.pipeline == "legacy":
+        if variant.engine == "legacy":
             return _run_legacy(task, gt, cfg)
-        return _run_current(task, gt, cfg)
+        return _run_current(task, gt, cfg, variant)
     except Exception as exc:  # noqa: BLE001 -- keep benchmarking the rest
         _LOG.warning("%s page %d failed: %s", task.pdf_path, task.page_index, exc)
         return PageResult(
-            pdf_path=task.pdf_path, page_index=task.page_index, pipeline=task.pipeline,
+            pdf_path=task.pdf_path, page_index=task.page_index, variant=task.variant,
             error=f"{exc}\n{traceback.format_exc()}",
         )
 

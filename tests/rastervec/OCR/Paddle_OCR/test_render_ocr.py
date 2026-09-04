@@ -189,3 +189,47 @@ def test_ocr_cluster_end_to_end_on_vector_glyphs(tmp_pdf_path):
     assert result.page_index == 0
     assert result.bbox == (0, 0, 30, 30)
     assert 0 <= result.rotation_used < 360
+
+
+def test_render_ocr_with_light_backend_flows_word_boxes(tmp_pdf_path):
+    """A LightPaddleOcrBackend (fake engine) plugged into RenderOCR.ocr_cluster
+    -- word corners map through pixel_to_page_bbox into the cluster page bbox."""
+    import pymupdf as fitz
+
+    from rastervec.OCR.Paddle_OCR.light_backend import LightPaddleOcrBackend
+    from rastervec.Reader.reader import Reader
+
+    class _FakeRec:
+        def predict(self, crops, batch_size: int = 1):
+            return [{"rec_text": "X", "rec_score": 0.8} for _ in crops]
+
+    doc = fitz.open()
+    doc.new_page(width=200, height=100)
+    path = tmp_pdf_path(doc)
+
+    backend = LightPaddleOcrBackend()
+    backend._rec_engine = lambda: _FakeRec()
+    backend._ori_engine = lambda: None
+
+    # a cluster of thin strokes so ink segmentation finds real word boxes
+    cluster = [
+        VectorPath(
+            seq=0, item_index=i, kind="re", fill_rule="f",
+            points=[(x, 10), (x + 1, 25)], bbox=(x, 10, x + 1, 25),
+            stroke_color=None, fill_color=(0, 0, 0), stroke_opacity=None,
+            fill_opacity=None, stroke_width=None, dashes=None, closed=True,
+            layer=None, page_index=0,
+        )
+        for i, x in enumerate((20, 23, 26, 29))
+    ]
+
+    with Reader(path) as reader:
+        rastervec_page = reader.get_page(0)
+        result = RenderOCR(backend=backend).ocr_cluster(cluster, rastervec_page, dpi=200)
+
+    assert result.words is not None
+    px0, py0, px1, py1 = -20.0, -10.0, 60.0, 40.0
+    for w in result.words:
+        wx0, wy0, wx1, wy1 = w.bbox
+        assert px0 <= wx0 <= wx1 <= px1
+        assert py0 <= wy0 <= wy1 <= py1

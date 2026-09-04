@@ -1,14 +1,19 @@
 """Benchmark CLI: wires Conversion -> auto_label -> a real full pipeline
 run -> the independent metric suite (`metrics.py`) together end-to-end,
-over one or more PDF pages, and prints a per-page + aggregate report.
+over one or more PDF pages and one or more pipeline variants, and prints a
+per-page report plus cross-variant accuracy + timing comparison tables.
 
     .venv/Scripts/python.exe -m rastervec.Evaluation.Evaluate.benchmark \
         --pdf path/to.pdf --pages 0,1,2 [--iou-threshold 0.3] \
-        [--reconstruct-dir DIR] [--workers N]
+        [--reconstruct-dir DIR] [--workers N] \
+        [--variants current_heavy,current_light,legacy]
 
-`--reconstruct-dir`, when given, writes per page (see
-`Reader/Parallel/benchmark_jobs._write_outputs`): the ground-truth /
-pipeline text reconstruction, the exact PDF fed to the pipeline, and a
+`--variants` selects which `Evaluation/Evaluate/variants.VARIANTS` to run
+and compare (default `DEFAULT_VARIANTS`).
+
+`--reconstruct-dir`, when given, writes per page x variant (see
+`Reader/Parallel/benchmark_jobs._write_current_outputs`): the ground-truth
+/ pipeline text reconstruction, the exact PDF fed to the pipeline, and a
 green(matched) / yellow(spurious pred) / red(missed gt) box overlay.
 
 `--workers N` (>1) runs the pages across a spawn process pool (`Reader/
@@ -16,8 +21,9 @@ Parallel`); the model caches are warmed once up front so the first run is
 safe. The real `Pipeline.STAGES` chain runs through OCR (PaddleOCR) --
 `main()`'s actual PDF/OCR path is a documented manual smoke test only.
 
-`format_report`/`aggregate_results` are the pure, OCR-free parts (formatting /
-micro-averaging over already-computed `MetricSuiteResult`s) -- those ARE
+`format_report` / `aggregate_results` / `format_aggregate_comparison` /
+`format_variant_timing_comparison` are the pure, OCR-free parts (formatting
+/ micro-averaging over already-computed `MetricSuiteResult`s) -- those ARE
 unit-tested, see `tests/rastervec/Evaluation/Evaluate/test_benchmark.py`.
 """
 from __future__ import annotations
@@ -36,6 +42,7 @@ from rastervec.Evaluation.Evaluate.metrics import (
     MetricSuiteResult,
     aggregate_suite,
 )
+from rastervec.Evaluation.Evaluate.variants import DEFAULT_VARIANTS, resolve_variant
 from rastervec.logging_setup import configure_logging, get_logger
 
 _LOG = get_logger("benchmark")
@@ -45,15 +52,18 @@ def run_one_page(
     pdf_path: str, page_index: int,
     iou_threshold: float = MetricConfig().iou_edge_min,
     reconstruct_dir: Path | None = None,
+    variant: str = "current_light",
 ) -> MetricSuiteResult:
     """Ground truth (no pipeline run) -> `convert_page_text_only` -> a real
     full pipeline run (OCR included) -> `metrics.evaluate_metrics`, for one
-    page's auto labels. `iou_threshold` maps onto `MetricConfig.iou_edge_min`.
+    page's auto labels. `iou_threshold` maps onto `MetricConfig.iou_edge_min`;
+    `variant` is a name from `Evaluation/Evaluate/variants.VARIANTS`.
     Delegates to `Reader/Parallel/benchmark_jobs.run_page_task`."""
     from rastervec.Reader.Parallel.benchmark_jobs import PageTask, run_page_task
 
     result = run_page_task(PageTask(
         pdf_path=pdf_path, page_index=page_index, iou_edge_min=iou_threshold,
+        variant=variant,
         reconstruct_dir=str(reconstruct_dir) if reconstruct_dir else None,
         showcase_per_page=0,
     ))
@@ -184,6 +194,86 @@ def format_timing_report(
     return "\n".join(lines)
 
 
+def format_variant_timing_comparison(
+    summaries_by_variant: dict[str, dict], *,
+    title: str = "Per-stage median wall-clock (seconds) by variant",
+) -> str:
+    """Side-by-side per-stage median timings, one column per variant, plus
+    a `d:<variant>` delta-vs-first column for every variant after the
+    first. Each value in `summaries_by_variant` is a
+    `summarize_stage_timings` result (may be `{}` -- e.g. the legacy
+    variant, which has no per-stage breakdown; its cells show `nan`)."""
+    if not summaries_by_variant:
+        return f"{title}\n  (no timing data)"
+
+    variants = list(summaries_by_variant)
+    base = variants[0]
+    stage_keys: list[str] = []
+    for summary in summaries_by_variant.values():
+        for key in summary:
+            if key != "total" and key not in stage_keys:
+                stage_keys.append(key)
+    stage_keys.append("total")
+
+    name_w = max([len("stage")] + [len(k) for k in stage_keys])
+    col_w = max(9, max(len(v) for v in variants) + 2)
+
+    def _median(variant: str, key: str) -> float:
+        return summaries_by_variant[variant].get(key, {}).get("median", float("nan"))
+
+    header_cols = [f"{v:>{col_w}}" for v in variants]
+    header_cols += [f"{'d:' + v:>{col_w}}" for v in variants[1:]]
+    header = f"  {'stage':<{name_w}}  " + "  ".join(header_cols)
+    lines = [title, header, "  " + "-" * (len(header) - 2)]
+    for key in stage_keys:
+        cells = [f"{_median(v, key):>{col_w}.3f}" for v in variants]
+        cells += [f"{_median(v, key) - _median(base, key):>+{col_w}.3f}" for v in variants[1:]]
+        lines.append(f"  {key:<{name_w}}  " + "  ".join(cells))
+    return "\n".join(lines)
+
+
+def _metric_value(result: MetricSuiteResult, name: str) -> float:
+    if name in DERIVED_F1_FIELDS:
+        return result.get(name)
+    return result.ratios[name].value
+
+
+def format_aggregate_comparison(
+    aggregates_by_variant: dict[str, MetricSuiteResult | None], *,
+    title: str = "Aggregate metrics by variant (micro-averaged)",
+) -> str:
+    """Metric rows (grouped by `METRIC_GROUPS`) x variant columns. A `None`
+    aggregate (a variant that produced no scored page) shows `n/a`."""
+    if not aggregates_by_variant:
+        return f"{title}\n  (no results)"
+
+    variants = list(aggregates_by_variant)
+    col_w = max(9, max(len(v) for v in variants) + 2)
+    name_w = max(
+        (len(n) for _dim, names in METRIC_GROUPS for n in names), default=len("metric"),
+    )
+    lines = [
+        title,
+        f"  {'metric':<{name_w}}  " + "  ".join(f"{v:>{col_w}}" for v in variants),
+        "  " + "-" * (name_w + 2 + len(variants) * (col_w + 2)),
+    ]
+    for dimension, names in METRIC_GROUPS:
+        lines.append(f"  [{dimension}]")
+        for name in names:
+            cells = []
+            for variant in variants:
+                result = aggregates_by_variant[variant]
+                if result is None:
+                    cells.append(f"{'n/a':>{col_w}}")
+                    continue
+                value = _metric_value(result, name)
+                cells.append(
+                    f"{'n/a':>{col_w}}" if math.isnan(value) else f"{value:>{col_w}.3f}"
+                )
+            lines.append(f"  {name:<{name_w}}  " + "  ".join(cells))
+    return "\n".join(lines)
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Benchmark the Vector Classification + OCR pipeline against auto-labelled ground truth."
@@ -209,39 +299,67 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Run pages across a spawn process pool of this size (>1). Default 1 "
         "(serial). See rastervec.Reader.Parallel.",
     )
+    parser.add_argument(
+        "--variants", default=",".join(DEFAULT_VARIANTS),
+        help="Comma-separated pipeline variant names to run and compare "
+        f"(default: {','.join(DEFAULT_VARIANTS)}). See "
+        "rastervec.Evaluation.Evaluate.variants.VARIANTS.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     configure_logging()
-    args = build_arg_parser().parse_args(argv)
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
     pages = [int(p) for p in args.pages.split(",")]
+    variant_names = [name.strip() for name in args.variants.split(",") if name.strip()]
+    for name in variant_names:
+        try:
+            resolve_variant(name)  # validate before any work
+        except ValueError as exc:
+            parser.error(str(exc))
 
+    from rastervec.pipeline import Pipeline
     from rastervec.Reader.Parallel.benchmark_jobs import PageTask, run_benchmark
 
-    tasks = [
-        PageTask(
-            pdf_path=pdf_path, page_index=page_index, iou_edge_min=args.iou_threshold,
-            reconstruct_dir=str(args.reconstruct_dir) if args.reconstruct_dir else None,
-            showcase_per_page=0,
-        )
-        for pdf_path in args.pdf
-        for page_index in pages
-    ]
-    page_results = run_benchmark(tasks, workers=args.workers, desc="benchmark")
+    stage_order = Pipeline.stage_keys()
+    aggregates: dict[str, MetricSuiteResult | None] = {}
+    timings: dict[str, dict] = {}
 
-    results: list[MetricSuiteResult] = []
-    for pr in page_results:
-        if pr.error is not None:
-            _LOG.warning("%s page %d failed: %s", pr.pdf_path, pr.page_index, pr.error)
-            continue
-        results.append(pr.auto)
-        print(format_report(pr.pdf_path, pr.page_index, pr.auto))
-        print()
+    for name in variant_names:
+        tasks = [
+            PageTask(
+                pdf_path=pdf_path, page_index=page_index, iou_edge_min=args.iou_threshold,
+                variant=name,
+                reconstruct_dir=str(args.reconstruct_dir) if args.reconstruct_dir else None,
+                showcase_per_page=0,
+            )
+            for pdf_path in args.pdf
+            for page_index in pages
+        ]
+        page_results = run_benchmark(tasks, workers=args.workers, desc=name)
 
-    if len(results) > 1:
-        print(format_aggregate(aggregate_results(results), len(results)))
+        results: list[MetricSuiteResult] = []
+        per_page_timings: list[dict[str, float]] = []
+        for pr in page_results:
+            if pr.error is not None:
+                _LOG.warning("[%s] %s page %d failed: %s", name, pr.pdf_path, pr.page_index, pr.error)
+                continue
+            if pr.auto is not None:
+                results.append(pr.auto)
+                print(format_report(f"[{name}] {pr.pdf_path}", pr.page_index, pr.auto))
+                print()
+            per_page_timings.append(
+                pr.stage_durations or {"pipeline_total": pr.total_seconds}
+            )
 
+        aggregates[name] = aggregate_results(results)
+        timings[name] = summarize_stage_timings(per_page_timings, stage_order)
+
+    print(format_aggregate_comparison(aggregates))
+    print()
+    print(format_variant_timing_comparison(timings))
     return 0
 
 

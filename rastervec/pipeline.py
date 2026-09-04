@@ -25,6 +25,7 @@ from tqdm import tqdm
 if TYPE_CHECKING:
     from PIL import Image
 
+    from rastervec.OCR.Paddle_OCR.ocr_backend import OcrBackend
     from rastervec.output_types import NativePDFElements
 
 if __name__ == "__main__" and __package__ is None:
@@ -34,7 +35,7 @@ if __name__ == "__main__" and __package__ is None:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rastervec.helpers.clustering import Clustering
-from rastervec.helpers.geometry import rect_gap, union_bbox
+from rastervec.helpers.geometry import union_bbox
 from rastervec.logging_setup import configure_logging, get_logger
 from rastervec.models import (
     ClusterOcrResult,
@@ -48,6 +49,7 @@ from rastervec.models import (
 )
 from rastervec.Native_Text.native import Native
 from rastervec.OCR.FAST_Text_Detect.fast_detect import FastDetector
+from rastervec.OCR.Paddle_OCR.light_backend import LightPaddleOcrBackend
 from rastervec.OCR.Paddle_OCR.render_ocr import RenderOCR
 from rastervec.Reader.reader import Reader
 from rastervec.renderer import render_page_paths
@@ -59,14 +61,22 @@ from rastervec.Vector_Classification.classification import StepResult, VectorCla
 # similarity group (see _run_fast_text_detect).
 FAST_COMBINED_KEEP_THRESHOLD = 0.2
 
-# spatial_regroup stage: per-path overlap tolerance (PDF points) for
-# re-merging FAST-passed clusters into fresh spatial groups before OCR --
-# two clusters only merge if some individual member path of one overlaps,
-# touches, or is within this many points of some individual member path of
-# the other (see _clusters_overlap/_run_spatial_regroup), regardless of
-# which (layer, color) bucket originally produced them or which similarity
-# group FAST scored them under.
+# spatial_regroup stage: aggregate (union) bbox gap tolerance (PDF points)
+# for re-merging FAST-passed clusters before OCR -- two clusters merge only
+# when their union bboxes are within this gap (rect_gap is 0.0 for
+# overlapping/touching boxes) *and* they share the same (layer, color) key
+# (see _cluster_lc_key/_run_spatial_regroup). Unlike the earlier
+# clustering steps this still ignores which unique_clusters similarity
+# group FAST scored a cluster under -- similarity-group boundaries are the
+# only ones spatial_regroup crosses.
 SPATIAL_REGROUP_TOLERANCE_PX = 1.0
+
+# ocr_compare stage: when True, _run_ocr_compare uses LightPaddleOcrBackend
+# (own ink-projection line/word segmentation + PaddleOCR recognition-only +
+# DocImgOrientationClassification rotation) instead of the full PP-OCRv6
+# detect+rec+doc-orient+textline pipeline. A PipelineContext.ocr_backend
+# override always wins over this flag.
+USE_LIGHT_OCR_BACKEND = True
 
 _LOG = get_logger("pipeline")
 
@@ -126,6 +136,14 @@ class PipelineContext:
 
     reader: Reader
     page_index: int
+    # fast_text_detect toggle: when False, _run_fast_text_detect is a
+    # pass-through (every text candidate flows to spatial_regroup/OCR, and
+    # unique_clusters' similarity groups go unused) -- speed testing only,
+    # default keeps FAST on.
+    enable_fast: bool = True
+    # ocr_compare backend override: None -> _run_ocr_compare picks per the
+    # module-level USE_LIGHT_OCR_BACKEND flag.
+    ocr_backend: "OcrBackend | None" = None
     page: Page | None = None
     native_words: list[TextWord] | None = None
     # native: richer, additive counterpart to native_words (see
@@ -166,10 +184,10 @@ class PipelineContext:
     # (see FastPageResult) against FAST_COMBINED_KEEP_THRESHOLD.
     fast_passed: list[list[VectorPath]] | None = None
     fast_dropped: list[list[VectorPath]] | None = None
-    # spatial_regroup: fast_passed re-merged by real per-path overlap alone
-    # (SPATIAL_REGROUP_TOLERANCE_PX), ignoring which (layer, color) bucket or
-    # similarity group each cluster came from -- see _run_spatial_regroup.
-    # This, not fast_passed, is what ocr_compare actually OCRs.
+    # spatial_regroup: fast_passed re-merged where aggregate bboxes are
+    # within SPATIAL_REGROUP_TOLERANCE_PX *and* share a (layer, color) key
+    # (_cluster_lc_key) -- still ignores unique_clusters similarity-group
+    # boundaries. This, not fast_passed, is what ocr_compare actually OCRs.
     regrouped_clusters: list[list[VectorPath]] | None = None
     # ocr_compare: one ClusterOcrResult per regrouped_clusters cluster --
     # a single direct OCR call over the whole cluster, no fallback tiers.
@@ -362,9 +380,25 @@ def _run_fast_text_detect(ctx: PipelineContext) -> FastPageResult:
     drawing content (ctx.fast_dropped, folded into drawing_vectors). A page
     with zero vector paths renders/detects nothing, so FastDetector's
     underlying torch model is never even constructed (see
-    helpers/fast_detect.py)."""
+    helpers/fast_detect.py).
+
+    When ctx.enable_fast is False this is a pass-through: every
+    text-candidate cluster is kept (ctx.fast_passed = ctx.text_clusters),
+    nothing is dropped, and no render/detection runs -- unique_clusters'
+    similarity groups then go unused. Speed-testing toggle only; the
+    default keeps FAST on."""
     clusters = ctx.text_clusters or []
     all_paths = ctx.vector_paths or []
+
+    if not ctx.enable_fast:
+        result = FastPageResult(
+            page_image=None, page_mask=None, detect_seconds=None,
+            scores={}, passed=list(clusters), dropped=[],
+        )
+        ctx.fast_result = result
+        ctx.fast_passed = list(clusters)
+        ctx.fast_dropped = []
+        return result
 
     page_image = page_mask = None
     detect_seconds = None
@@ -407,49 +441,45 @@ def _run_fast_text_detect(ctx: PipelineContext) -> FastPageResult:
     return result
 
 
-def _clusters_overlap(a: list[VectorPath], b: list[VectorPath], tolerance: float) -> bool:
-    """True if any member path of `a` overlaps, touches, or is within
-    `tolerance` of any member path of `b` -- rastervec.helpers.geometry.rect_gap is
-    0.0 for overlapping/touching boxes, so one gap check covers both. Used
-    as spatial_regroup's real merge condition: aggregate-bbox proximity
-    alone isn't a real signal that two clusters are the same piece of
-    text, but an actual path-to-path overlap is."""
-    return any(rect_gap(pa.bbox, pb.bbox) <= tolerance for pa in a for pb in b)
+def _cluster_lc_key(cluster: list[VectorPath]) -> tuple:
+    """A cluster's (layer, color) bucket key, taken from its first member
+    path -- clusters are homogeneous in (layer, color) because
+    classification runs strictly within one Vector.separate_by_layer /
+    separate_by_color bucket and never merges across them, so cluster[0]
+    is representative. Matches Layer_Color_Separation's own keys:
+    separate_by_layer keys on `layer or ""`, separate_by_color on the
+    (stroke_color, fill_color, stroke_opacity, fill_opacity) 4-tuple."""
+    if not cluster:
+        return ("", (None, None, None, None))
+    p = cluster[0]
+    return (p.layer or "", (p.stroke_color, p.fill_color, p.stroke_opacity, p.fill_opacity))
 
 
 def _run_spatial_regroup(ctx: PipelineContext) -> list[list[VectorPath]]:
-    """Re-merges every FAST-passed cluster whose member paths actually
-    overlap (or touch within SPATIAL_REGROUP_TOLERANCE_PX) some other
-    cluster's member paths (_clusters_overlap) -- deliberately ignores
-    which (layer, color) bucket or unique_clusters similarity group a
-    cluster originally came from, unlike every earlier clustering step in
-    this pipeline (see Vector_Classification/classification.py's module
-    docstring: normal classification never merges across (layer, color)
-    buckets). Two nearby FAST-passed
-    clusters that classification/FAST happened to keep as separate pieces
-    (e.g. different colors, or split across similarity groups) are
-    stitched back into one piece here before OCR sees them, since OCR
-    reads better over one merged text region than several adjacent
-    fragments.
+    """Re-merges FAST-passed clusters whose aggregate (union) bboxes
+    overlap or sit within SPATIAL_REGROUP_TOLERANCE_PX of each other
+    (rect_gap is 0.0 for overlapping/touching boxes) *and* which share the
+    same (layer, color) bucket key (_cluster_lc_key). Two nearby
+    same-paint clusters that classification/FAST happened to keep as
+    separate pieces are stitched back into one before OCR sees them, since
+    OCR reads better over one merged text region than several adjacent
+    fragments -- but a nearby cluster in a different layer or a different
+    stroke/fill colour is left alone, matching how every earlier
+    clustering step stays within one (layer, color) bucket (see
+    Vector_Classification/classification.py's module docstring). The only
+    boundary this step still crosses is unique_clusters' similarity
+    groups.
 
-    Clustering.cluster_spatial's own `threshold` (used for its grid-based
-    candidate pruning over each cluster's *aggregate* bbox) is set to the
-    same SPATIAL_REGROUP_TOLERANCE_PX as the real per-path check: since a
-    cluster's aggregate bbox is a superset of every member path's bbox,
-    `rect_gap(unionA, unionB) <= rect_gap(subA, subB)` for any member pair
-    -- so any real per-path match is guaranteed to also pass the grid's
-    own aggregate-bbox candidacy check at this same threshold, meaning no
-    true merge can be pruned away by the outer grid pass.
-
-    Nothing else is tracked onto the merged piece -- ocr_compare OCRs each
-    merged piece directly, with no fallback tier to carry composing-group
-    lineage for."""
+    `extra_close` gates the merge on the shared (layer, color) key;
+    Clustering.cluster_spatial's `threshold` is the aggregate-bbox gap
+    tolerance. Nothing else is tracked onto the merged piece -- ocr_compare
+    OCRs each merged piece directly."""
     passed = ctx.fast_passed or []
 
     merged = Clustering().cluster_spatial(
         passed, get_bbox=lambda c: union_bbox([p.bbox for p in c]),
         threshold=SPATIAL_REGROUP_TOLERANCE_PX,
-        extra_close=lambda a, b: _clusters_overlap(a, b, SPATIAL_REGROUP_TOLERANCE_PX),
+        extra_close=lambda a, b: _cluster_lc_key(a) == _cluster_lc_key(b),
     )
 
     regrouped = [[p for piece in pieces for p in piece] for pieces in merged]
@@ -463,8 +493,16 @@ def _run_ocr_compare(ctx: PipelineContext) -> list[ClusterOcrResult]:
     A cluster's reading counts as failed if its text comes back blank --
     its full path list is collected into ctx.ocr_failed (folded into
     drawing_vectors, same as every other rejection in this pipeline), in
-    addition to being kept (blank) in ctx.ocr_results."""
-    render_ocr = RenderOCR()
+    addition to being kept (blank) in ctx.ocr_results.
+
+    Backend: ctx.ocr_backend if set, else LightPaddleOcrBackend when
+    USE_LIGHT_OCR_BACKEND (the default -- own ink-projection segmentation
+    + PaddleOCR recognition-only), else RenderOCR's own PaddleOcrBackend
+    default (full PP-OCRv6 detect+rec+orientation pipeline)."""
+    backend = ctx.ocr_backend
+    if backend is None and USE_LIGHT_OCR_BACKEND:
+        backend = LightPaddleOcrBackend()
+    render_ocr = RenderOCR(backend=backend)
     clusters = ctx.regrouped_clusters or []
 
     results: list[ClusterOcrResult] = []
@@ -554,6 +592,9 @@ class Pipeline:
         reader: Reader,
         page_index: int,
         final_stage: str | None = None,
+        *,
+        enable_fast: bool = True,
+        ocr_backend: "OcrBackend | None" = None,
     ) -> list[StageOutput]:
         """Runs Pipeline.STAGES in order, stopping after `final_stage`
         (inclusive) instead of running every stage -- e.g. `final_stage=
@@ -561,13 +602,20 @@ class Pipeline:
         entirely, never even constructing a RenderOCR/PaddleOCR engine, so
         it's a real way to skip the OCR round-trip while iterating on
         earlier stages, not just a display-time filter. `None` (default)
-        runs every stage, unchanged from before this parameter existed."""
+        runs every stage, unchanged from before this parameter existed.
+
+        `enable_fast=False` turns fast_text_detect into a pass-through
+        (every text candidate reaches OCR) -- speed-testing toggle.
+        `ocr_backend` overrides the ocr_compare backend (default: light
+        backend per USE_LIGHT_OCR_BACKEND)."""
         if final_stage is not None and final_stage not in self.stage_keys():
             raise ValueError(
                 f"unknown final_stage {final_stage!r}; must be one of {self.stage_keys()}"
             )
 
         ctx = PipelineContext(reader=reader, page_index=page_index)
+        ctx.enable_fast = enable_fast
+        ctx.ocr_backend = ocr_backend
         return self._run_stages(ctx, final_stage)
 
     @classmethod
@@ -601,6 +649,7 @@ class Pipeline:
 
 def run_page_context(
     reader: Reader, page_index: int, final_stage: str | None = None,
+    *, enable_fast: bool = True, ocr_backend: "OcrBackend | None" = None,
 ) -> PipelineContext:
     """Like Pipeline.run_page, but returns the PipelineContext itself
     (every field the run's stages set, e.g. ctx.text_clusters) instead of
@@ -610,12 +659,17 @@ def run_page_context(
     clickable cluster bboxes). Runs the exact same Pipeline.STAGES list/
     order as run_page, so future stage changes never need mirroring at a
     call site that would otherwise hand-roll its own partial stage
-    sequence."""
+    sequence.
+
+    `enable_fast=False` -> fast_text_detect pass-through; `ocr_backend`
+    overrides the ocr_compare backend (see Pipeline.run_page)."""
     if final_stage is not None and final_stage not in Pipeline.stage_keys():
         raise ValueError(
             f"unknown final_stage {final_stage!r}; must be one of {Pipeline.stage_keys()}"
         )
     ctx = PipelineContext(reader=reader, page_index=page_index)
+    ctx.enable_fast = enable_fast
+    ctx.ocr_backend = ocr_backend
     Pipeline._run_stages(ctx, final_stage)
     return ctx
 
@@ -639,6 +693,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--final-stage fast_text_detect skips ocr_compare (and the PaddleOCR "
         "engine it would otherwise build) entirely. Default: run every stage.",
     )
+    parser.add_argument(
+        "--no-fast",
+        action="store_true",
+        help="Turn fast_text_detect into a pass-through (every text candidate "
+        "reaches OCR). Speed-testing toggle. Default: FAST on.",
+    )
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument(
         "-v", "--verbose", action="store_true", help="Enable DEBUG logging."
@@ -661,7 +721,10 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(level)
 
     with Reader(args.pdf) as reader:
-        outputs = Pipeline().run_page(reader, args.page, final_stage=args.final_stage)
+        outputs = Pipeline().run_page(
+            reader, args.page, final_stage=args.final_stage,
+            enable_fast=not args.no_fast,
+        )
 
         for output in outputs:
             if output.status == "error":

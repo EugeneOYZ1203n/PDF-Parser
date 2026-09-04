@@ -8,8 +8,10 @@ from rastervec.Evaluation.Evaluate.benchmark import (
     aggregate_results,
     distribution_stats,
     format_aggregate,
+    format_aggregate_comparison,
     format_report,
     format_timing_report,
+    format_variant_timing_comparison,
     summarize_stage_timings,
 )
 from rastervec.Evaluation.Evaluate.metrics import (
@@ -113,3 +115,45 @@ def test_format_timing_report_has_rows_and_handles_empty():
     report = format_timing_report(summarize_stage_timings([{"reader": 0.5}], ["reader"]))
     assert "reader" in report
     assert "total" in report
+
+
+def test_format_variant_timing_comparison_columns_and_delta():
+    with_fast = {
+        "reader": {"median": 0.1}, "fast_text_detect": {"median": 5.0},
+        "ocr_compare": {"median": 2.0}, "total": {"median": 8.0},
+    }
+    without_fast = {
+        "reader": {"median": 0.1}, "fast_text_detect": {"median": 0.0},
+        "ocr_compare": {"median": 6.0}, "total": {"median": 7.0},
+    }
+    out = format_variant_timing_comparison(
+        {"current_heavy": with_fast, "current_heavy_nofast": without_fast}
+    )
+    assert "current_heavy" in out and "current_heavy_nofast" in out
+    assert "d:current_heavy_nofast" in out
+    # ocr_compare goes up without FAST (+4.000), total goes down (-1.000)
+    ocr_line = next(ln for ln in out.splitlines() if ln.strip().startswith("ocr_compare"))
+    assert "+4.000" in ocr_line
+    total_line = next(ln for ln in out.splitlines() if ln.strip().startswith("total"))
+    assert "-1.000" in total_line
+
+    assert "no timing data" in format_variant_timing_comparison({})
+
+
+def test_format_variant_timing_comparison_tolerates_empty_variant_summary():
+    out = format_variant_timing_comparison(
+        {"current_light": {"reader": {"median": 0.2}, "total": {"median": 0.2}}, "legacy": {}}
+    )
+    assert "legacy" in out
+    assert "nan" in out  # legacy has no per-stage medians
+
+
+def test_format_aggregate_comparison_metric_rows():
+    a = _suite(page_char_multiset_recall=Ratio(9.0, 10.0))
+    b = _suite(page_char_multiset_recall=Ratio(5.0, 10.0))
+    out = format_aggregate_comparison({"current_heavy": a, "current_light": b, "legacy": None})
+    assert "current_heavy" in out and "legacy" in out
+    recall_line = next(
+        ln for ln in out.splitlines() if ln.strip().startswith("page_char_multiset_recall")
+    )
+    assert "0.900" in recall_line and "0.500" in recall_line and "n/a" in recall_line

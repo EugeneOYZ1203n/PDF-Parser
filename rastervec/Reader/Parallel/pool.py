@@ -59,6 +59,12 @@ def warmup() -> None:
     except Exception as exc:  # noqa: BLE001 -- warmup is best-effort
         _LOG.warning("PaddleOCR warmup skipped: %s", exc)
     try:
+        from rastervec.OCR.Paddle_OCR.light_backend import LightPaddleOcrBackend
+
+        LightPaddleOcrBackend.warmup()
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("light OCR warmup skipped: %s", exc)
+    try:
         from rastervec.OCR.FAST_Text_Detect.fast_detect import FastDetector
 
         FastDetector().warmup()
