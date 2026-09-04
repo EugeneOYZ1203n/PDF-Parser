@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import json
 
-from rastervec.models import DrawingVector, TextRecord, TextWord, VectorPath, VectorRecord
+from rastervec.models import DrawingVector, TextWord, VectorPath, VectorRecord
 from rastervec.output_types import NativePDFElements, TextDTO, VectorDTO
 
 
-def _make_word(*, text="Hi", angle=0.0, seq=0) -> TextWord:
+def _make_word(*, text="Hi", angle=0.0, seq=0, block_no=0, line_no=0, word_no=0) -> TextWord:
     return TextWord(
         text=text, bbox=(0, 0, 10, 5), quad=((0, 5), (10, 5), (10, 0), (0, 0)),
         angle=angle, direction=(1, 0), font="helv", font_size=10.0, color=None,
         flags=0, origin=(0, 5), ascender=None, descender=None,
         orientation_source="text-span", page_index=0, seq=seq,
+        block_no=block_no, line_no=line_no, word_no=word_no,
     )
 
 
@@ -86,31 +87,13 @@ def test_native_pdf_elements_from_extract_handles_empty_input():
     assert elements.vectors == []
 
 
-def test_text_dto_get_text_object_round_trips_given_record():
-    word = _make_word(text="Hi", seq=3)
-    record = TextRecord(
-        text=word.text, bbox=word.bbox, quad=word.quad, angle=word.angle,
-        direction=word.direction, font=word.font, font_size=word.font_size,
-        color=word.color, flags=word.flags, origin=word.origin,
-        ascender=word.ascender, descender=word.descender,
-        orientation_source=word.orientation_source, page_index=word.page_index,
-        seq=word.seq, wmode=0, block_no=1, line_no=2, word_no=3,
-    )
-
-    dto = TextDTO.from_text_word(word, record)
-
-    assert dto.get_text_object() is record
-
-
-def test_text_dto_get_text_object_synthesized_when_no_record_given():
-    word = _make_word(text="Hi", seq=3)
+def test_text_dto_get_text_object_returns_the_source_word():
+    word = _make_word(text="Hi", seq=3, block_no=1, line_no=2, word_no=3)
 
     dto = TextDTO.from_text_word(word)
-    source = dto.get_text_object()
 
-    assert isinstance(source, TextRecord)
-    assert source.text == "Hi"
-    assert (source.wmode, source.block_no, source.line_no, source.word_no) == (0, 0, 0, 0)
+    assert dto.get_text_object() is word
+    assert (dto.block_no, dto.line_no, dto.word_no) == (1, 2, 3)
 
 
 def test_vector_dto_get_vector_object_round_trips_given_record():

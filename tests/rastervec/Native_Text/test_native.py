@@ -3,8 +3,17 @@ from __future__ import annotations
 import pymupdf as fitz
 import pytest
 
-from rastervec.Native_Text.native import Native
+from rastervec.Native_Text.native import Native, _Span
 from rastervec.Reader.reader import Reader
+
+
+def _span(bbox: fitz.Rect, **overrides) -> _Span:
+    defaults = dict(
+        bbox=bbox, text="x", font="helv", font_size=10.0, flags=0, color=None,
+        origin=None, direction=(1.0, 0.0), ascender=None, descender=None, wmode=0,
+    )
+    defaults.update(overrides)
+    return _Span(**defaults)
 
 
 def test_extract_text_basic_horizontal(synthetic_pdf_factory, tmp_pdf_path):
@@ -15,7 +24,7 @@ def test_extract_text_basic_horizontal(synthetic_pdf_factory, tmp_pdf_path):
 
     with Reader(path) as reader:
         page = reader.get_page(0)
-        words = Native().extract_text(page)
+        words = Native().extract(page)
 
     assert len(words) == 1
     word = words[0]
@@ -40,7 +49,7 @@ def test_extract_text_multi_word_span_gives_each_word_its_own_origin(
 
     with Reader(path) as reader:
         page = reader.get_page(0)
-        words = Native().extract_text(page)
+        words = Native().extract(page)
 
     assert [w.text for w in words] == ["Hello", "World"]
     hello, world = words
@@ -67,7 +76,7 @@ def test_extract_text_rotated(synthetic_pdf_factory, tmp_pdf_path):
 
     with Reader(path) as reader:
         page = reader.get_page(0)
-        words = Native().extract_text(page)
+        words = Native().extract(page)
 
     assert len(words) == 1
     word = words[0]
@@ -105,12 +114,20 @@ def test_extract_text_rotated(synthetic_pdf_factory, tmp_pdf_path):
 def test_match_word_to_span_prefers_max_overlap():
     native = Native()
     bbox = fitz.Rect(0, 0, 10, 10)
-    low_overlap_span = {"bbox": fitz.Rect(8, 8, 20, 20)}
-    high_overlap_span = {"bbox": fitz.Rect(0, 0, 10, 10)}
+    low_overlap_span = _span(fitz.Rect(8, 8, 20, 20))
+    high_overlap_span = _span(fitz.Rect(0, 0, 10, 10))
 
     result = native._match_word_to_span(bbox, [low_overlap_span, high_overlap_span])
 
     assert result is high_overlap_span
+
+
+def test_match_word_to_span_rejects_tiny_overlap():
+    native = Native()
+    bbox = fitz.Rect(0, 0, 10, 10)  # area 100
+    # overlaps by only a 1x1 corner = 1% of the word's area
+    barely = _span(fitz.Rect(9, 9, 30, 30))
+    assert native._match_word_to_span(bbox, [barely]) is None
 
 
 def test_match_word_to_span_no_spans_returns_none():
@@ -122,7 +139,7 @@ def test_build_oriented_quad_horizontal_matches_bbox_corners():
     native = Native()
     bbox = fitz.Rect(0, 0, 10, 4)
 
-    ul, ur, lr, ll = native._build_oriented_quad(bbox, 1.0, 0.0)
+    ul, ur, lr, ll = native._oriented_quad(bbox, 1.0, 0.0)
 
     assert ul == pytest.approx((0.0, 0.0))
     assert ur == pytest.approx((10.0, 0.0))
@@ -142,7 +159,7 @@ def test_build_oriented_quad_vertical_swaps_extents():
     # direction rather than reusing bbox.width as the along-extent.
     bbox = fitz.Rect(0, 0, 20, 5)
 
-    ul, ur, lr, ll = native._build_oriented_quad(bbox, 0.0, 1.0)
+    ul, ur, lr, ll = native._oriented_quad(bbox, 0.0, 1.0)
 
     # Naive (buggy) horizontal-order corners would be:
     naive_ul = (bbox.x0, bbox.y0)
@@ -171,7 +188,7 @@ def test_seq_assigns_reading_order(synthetic_pdf_factory, tmp_pdf_path):
 
     with Reader(path) as reader:
         page = reader.get_page(0)
-        words = Native().extract_text(page)
+        words = Native().extract(page)
 
     words_by_seq = sorted(words, key=lambda w: w.seq)
     assert [w.text for w in words_by_seq] == ["First", "Second"]
@@ -185,7 +202,7 @@ def test_extract_records_carries_word_and_line_metadata(synthetic_pdf_factory, t
 
     with Reader(path) as reader:
         page = reader.get_page(0)
-        records = Native().extract_records(page)
+        records = Native().extract(page)
 
     assert [r.text for r in records] == ["Hello", "World"]
     hello, world = records
@@ -199,7 +216,10 @@ def test_no_matching_span_falls_back():
     native = Native()
     bbox = fitz.Rect(0, 0, 10, 10)
 
-    word = native._to_text_word((bbox, "orphan"), None, page_index=0, seq=0)
+    word = native._to_word(
+        bbox, "orphan", None, page_index=0, seq=0,
+        block_no=0, line_no=0, word_no=0,
+    )
 
     assert word.angle == 0.0
     assert word.orientation_source == "fallback"

@@ -123,8 +123,8 @@ utilities shared across more than one concern (`geometry.py` — pure tuple math
 independently of the others (every stage's *output* is a plain dataclass from `models.py`, no
 `fitz` objects, except `Page.fitz_page` which `Reader` must hand to `Native`/etc.):
 
-- **`models.py`** — all shared dataclasses (`PageMeta`, `Page`, `TextWord`, `TextRecord`,
-  `VectorPath`, `DrawingVector`, `VectorRecord`, `OcrWord`, `TextVectorResult`, `ClusterOcrResult`).
+- **`models.py`** — all shared dataclasses (`PageMeta`, `Page`, `TextWord`, `VectorPath`,
+  `DrawingVector`, `VectorRecord`, `OcrWord`, `TextVectorResult`, `ClusterOcrResult`).
 - **`output_types.py`** — pydantic DTOs (`TextDTO`, `VectorDTO`, `NativePDFElements`) mirroring what
   a raw PyMuPDF `get_text("words")` word / `get_drawings()` drawing look like, built from the
   dataclasses above — the serialization/export shape for external consumers, not a replacement for
@@ -155,12 +155,13 @@ independently of the others (every stage's *output* is a plain dataclass from `m
 - **`Reader/reader.py` — `Reader`** *(implemented)*: opens a PDF, hands out `Page` objects one at a
   time (`get_page(index)`, `iter_pages(indices=None)`), each carrying a `PageMeta` snapshot
   (mediabox, rotation, dimensions) plus the live `fitz.Page`.
-- **`Native_Text/native.py` — `Native`** *(implemented)*: `extract_text(page) -> list[TextWord]`,
-  via `get_text("dict")` for span metadata (font/size/color/direction) joined to `get_text("words")`
-  geometry by max bbox-overlap (`_match_word_to_span`), producing correctly oriented quads even for
-  rotated text (`_build_oriented_quad`). Split into small private methods
-  (`_extract_spans`/`_extract_words`/`_match_word_to_span`/`_build_oriented_quad`/`_to_text_word`)
-  so each is independently testable against a synthetic `fitz.Page`.
+- **`Native_Text/native.py` — `Native`** *(implemented)*: `extract(page) -> list[TextWord]` — one
+  `TextWord` per `get_text("words")` word (geometry + `block_no`/`line_no`/`word_no`), font/size/
+  colour/direction/`wmode` joined from the best-overlapping `get_text("dict")` span (`_Span`
+  dataclass), above `_MIN_SPAN_OVERLAP`. Produces correctly oriented quads even for rotated text
+  (`_oriented_quad` → `geometry.make_oriented_quad`). Split into small private methods
+  (`_extract_spans`/`_extract_words`/`_match_word_to_span`/`_oriented_quad`/`_to_word`) so each is
+  independently testable against a synthetic `fitz.Page`.
 - **`Vector/vector.py` — `Vector`** *(implemented)*: `extract_paths(page) -> list[VectorPath]` walks
   `page.fitz_page.get_drawings()`, emitting one `VectorPath` per drawing item (`l`/`re`/`qu`/`c`),
   tagged with its parent drawing's `seq` (drawing index) plus stroke/fill color, width, dashes,
@@ -302,10 +303,11 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `f"line:{page_index}:{block_no}:{line_no}"` native-text line-region id instead, since there's no
   clustered run backing them (see below). `auto_label.py`'s `auto_label_pdf` is deliberately
   independent of the pipeline being evaluated — it reads *only* the original PDF's own
-  `Native.extract_records` (never runs Conversion or any classification/clustering), groups words
+  `Native.extract` (never runs Conversion or any classification/clustering), groups words
   by `(block_no, line_no)` into line-level ground-truth regions (bbox via `helpers.geometry.
-  union_bbox`, text joined left-to-right by word `bbox[0]`), and sets `expected_rotation` from each
-  line's own text angle rounded to the nearest quarter-turn. This independence matters: an earlier
+  union_bbox`, text joined in reading-direction order — x for horizontal lines, y for vertical),
+  and sets `expected_rotation` to the most common quarter-turn among the line's words. This
+  independence matters: an earlier
   version derived labels from the *converted* page's own surviving classification clusters, which
   meant a native word the classification chain's own filter steps wrongly dropped never became a
   label at all — silently excluded from ground truth rather than scored as a miss. Ground truth

@@ -13,19 +13,17 @@ from typing import Any, List
 
 from pydantic import BaseModel, Field, PrivateAttr
 
-from rastervec.models import DrawingVector, TextRecord, TextWord, VectorPath, VectorRecord
+from rastervec.models import DrawingVector, TextWord, VectorPath, VectorRecord
 
 
 class TextDTO(BaseModel):
     """Mirrors a pymupdf `get_text("words")` word's shape (x0/y0/x1/y1/
-    word), extended with the extra real fields `TextWord` actually carries
-    (`angle`/`font`/`font_size`/`seq`) that a raw pymupdf word tuple
-    doesn't have. `block_no`/`line_no`/`word_no` are pymupdf-word-shape
-    fields `TextWord` has no equivalent for (Native.extract_text only
-    assigns a flat `seq`, not block/line/word grouping) -- they default to
-    0 rather than being fabricated. `rotate` is `angle` rounded to the
-    nearest quarter-turn, for callers wanting pymupdf's own quantized
-    convention; `angle` carries the exact value."""
+    word/block_no/line_no/word_no), extended with the extra real fields
+    `TextWord` carries (`angle`/`font`/`font_size`/`seq`) that a raw pymupdf
+    word tuple doesn't. `rotate` is `angle` rounded to the nearest
+    quarter-turn, for callers wanting pymupdf's own quantized convention;
+    `angle` carries the exact value. `get_text_object()` returns the source
+    `TextWord`."""
 
     x0: float
     y0: float
@@ -42,35 +40,22 @@ class TextDTO(BaseModel):
     font_size: float = 0.0
     seq: int = 0
 
-    _source: TextRecord = PrivateAttr()
+    _source: TextWord = PrivateAttr()
 
     @classmethod
-    def from_text_word(cls, word: TextWord, record: TextRecord | None = None) -> "TextDTO":
-        """`record`, if given, is the richer TextRecord this word was built
-        alongside (Native.extract_records) -- stashed on `_source` for
-        get_text_object(). If omitted (e.g. from_extract's own call site,
-        which only has TextWords), a TextRecord is synthesized from `word`
-        with the fields TextWord has no equivalent for (wmode/block_no/
-        line_no/word_no) defaulted to 0, so get_text_object() always
-        returns something valid."""
+    def from_text_word(cls, word: TextWord) -> "TextDTO":
         x0, y0, x1, y1 = word.bbox
         dto = cls(
             x0=x0, y0=y0, x1=x1, y1=y1, word=word.text,
+            block_no=word.block_no, line_no=word.line_no, word_no=word.word_no,
             rotate=round(word.angle / 90.0) % 4 * 90,
             glyph_orientation="horizontal" if abs(word.angle % 180) < 45 else "vertical",
             angle=word.angle, font=word.font, font_size=word.font_size, seq=word.seq,
         )
-        dto._source = record if record is not None else TextRecord(
-            text=word.text, bbox=word.bbox, quad=word.quad, angle=word.angle,
-            direction=word.direction, font=word.font, font_size=word.font_size,
-            color=word.color, flags=word.flags, origin=word.origin,
-            ascender=word.ascender, descender=word.descender,
-            orientation_source=word.orientation_source, page_index=word.page_index,
-            seq=word.seq, wmode=0, block_no=0, line_no=0, word_no=0,
-        )
+        dto._source = word
         return dto
 
-    def get_text_object(self) -> TextRecord:
+    def get_text_object(self) -> TextWord:
         return self._source
 
 

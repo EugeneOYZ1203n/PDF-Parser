@@ -15,31 +15,50 @@ matching, see that module's own docstring), so a native word's bbox on the
 original page is already valid ground truth for the converted page too --
 no coordinate transform needed.
 
-Native words are grouped by `(block_no, line_no)` (from `Native.
-extract_records`, richer than `extract_text`) into line-level ground-truth
-regions -- closer to a vector cluster's natural granularity than one word
-each. `expected_rotation` per line is each word's own `angle` rounded to
-the nearest quarter-turn (same convention `output_types.TextDTO.
-from_text_word`'s `rotate` field uses), so `Evaluation/Evaluate/
-evaluate.py`'s rotation-accuracy metric has real ground truth to check
+Native words are grouped by `(block_no, line_no)` (from `Native.extract`)
+into line-level ground-truth regions -- closer to a vector cluster's
+natural granularity than one word each. `expected_rotation` per line is
+the median of its words' own quarter-turn-rounded angles, so
+`metrics.py`'s rotation-accuracy metric has real ground truth to check
 against instead of an always-0 placeholder.
 """
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
+from statistics import median
 
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet
 from rastervec.helpers.geometry import union_bbox
 from rastervec.logging_setup import get_logger
-from rastervec.models import TextRecord
+from rastervec.models import TextWord
 from rastervec.Native_Text.native import Native
 from rastervec.Reader.reader import Reader
 
 _LOG = get_logger("auto_label")
 
 
-def _expected_rotation(words: list[TextRecord]) -> int:
-    return round(words[0].angle / 90.0) % 4 * 90
+def _quarter_turn(angle: float) -> int:
+    return round(angle / 90.0) % 4 * 90
+
+
+def _expected_rotation(words: list[TextWord]) -> int:
+    """Most common quarter-turn among the line's words (median as a
+    tie-break) -- a single stray-angled word no longer mislabels the line."""
+    turns = [_quarter_turn(w.angle) for w in words]
+    counts = Counter(turns)
+    top = max(counts.values())
+    winners = [t for t, c in counts.items() if c == top]
+    if len(winners) == 1:
+        return winners[0]
+    return int(median(sorted(turns)))
+
+
+def _reading_order_key(word: TextWord) -> float:
+    """Sort key along the line's reading direction: x for horizontal text,
+    y for vertical -- so a rotated line's words concatenate in the right
+    order."""
+    dx, dy = word.direction
+    return word.bbox[1] if abs(dy) > abs(dx) else word.bbox[0]
 
 
 def auto_label_pdf(pdf_path: str, page_index: int) -> LabelSet:
@@ -49,15 +68,15 @@ def auto_label_pdf(pdf_path: str, page_index: int) -> LabelSet:
     converted-to-vector counterpart."""
     with Reader(pdf_path) as reader:
         page = reader.get_page(page_index)
-        native_records = Native().extract_records(page)
+        native_words = Native().extract(page)
 
-    lines: dict[tuple[int, int], list[TextRecord]] = defaultdict(list)
-    for record in native_records:
-        lines[(record.block_no, record.line_no)].append(record)
+    lines: dict[tuple[int, int], list[TextWord]] = defaultdict(list)
+    for word in native_words:
+        lines[(word.block_no, word.line_no)].append(word)
 
     entries: list[LabelEntry] = []
     for (block_no, line_no), words in lines.items():
-        words_sorted = sorted(words, key=lambda w: w.bbox[0])
+        words_sorted = sorted(words, key=_reading_order_key)
         bbox = union_bbox([w.bbox for w in words_sorted])
         text = " ".join(w.text for w in words_sorted)
         entries.append(

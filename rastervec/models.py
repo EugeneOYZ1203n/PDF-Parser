@@ -45,45 +45,11 @@ class Page:
 
 @dataclass
 class TextWord:
-    text: str
-    bbox: tuple[float, float, float, float]
-    quad: tuple[
-        tuple[float, float],
-        tuple[float, float],
-        tuple[float, float],
-        tuple[float, float],
-    ]
-    angle: float
-    direction: tuple[float, float]
-    font: str
-    font_size: float
-    color: int | None
-    flags: int
-    origin: tuple[float, float] | None
-    ascender: float | None
-    descender: float | None
-    orientation_source: str  # "text-span" | "fallback"
-    page_index: int
-    seq: int
-
-
-@dataclass
-class TextRecord:
-    """One native-text word, carrying the full PyMuPDF field surface --
-    everything `TextWord` already has, plus fields PyMuPDF's own
-    `get_text("dict")`/`get_text("words")` expose that `TextWord` doesn't:
-    `wmode` (line-level writing mode, from `get_text("dict")`) and
-    `block_no`/`line_no`/`word_no` (from `get_text("words")`'s full 8-tuple,
-    which `Native.extract_text`/`_to_text_word` reads but discards).
-
-    Additive alongside `TextWord` -- existing extraction/consumers keep
-    using `TextWord` unchanged; `TextRecord` is the richer shape external
-    callers (via `output_types.TextDTO.get_text_object()`) get access to.
-
-    Deferred, not in scope here: `get_text("rawdict")`'s per-character
-    quads/origins -- no char-level granularity is captured anywhere in
-    this project yet.
-    """
+    """One native-text word, with the full PyMuPDF field surface joined
+    from `get_text("words")` (geometry + `block_no`/`line_no`/`word_no`) and
+    `get_text("dict")` (font/size/colour/direction/`wmode`, per matching
+    span). `Native.extract` produces these; `output_types.TextDTO` is the
+    serialization shape."""
 
     text: str
     bbox: tuple[float, float, float, float]
@@ -105,10 +71,10 @@ class TextRecord:
     orientation_source: str  # "text-span" | "fallback"
     page_index: int
     seq: int
-    wmode: int
-    block_no: int
-    line_no: int
-    word_no: int
+    wmode: int = 0
+    block_no: int = 0
+    line_no: int = 0
+    word_no: int = 0
 
 
 # ----------------------------------------------------------------------

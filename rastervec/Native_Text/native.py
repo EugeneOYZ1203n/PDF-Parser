@@ -3,6 +3,7 @@ directly from the PDF's own text objects (no OCR/rendering involved).
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from itertools import groupby
 from math import atan2, degrees, hypot
 
@@ -10,169 +11,132 @@ import pymupdf as fitz
 
 from rastervec.helpers.geometry import make_oriented_quad
 from rastervec.logging_setup import get_logger
-from rastervec.models import Page, TextRecord, TextWord
+from rastervec.models import Page, TextWord
 
 _LOG = get_logger("native")
+
+# A word overlapping a span by less than this fraction of the word's own
+# area is treated as unmatched (garbage geometry / stray span) rather than
+# inheriting that span's font metadata.
+_MIN_SPAN_OVERLAP = 0.10
+
+
+@dataclass
+class _Span:
+    """One `get_text("dict")` span, flattened. Field names match `TextWord`
+    so `_to_word` can copy them straight across (no `dir`->`direction` /
+    `size`->`font_size` silent renames)."""
+
+    bbox: "fitz.Rect"
+    text: str
+    font: str
+    font_size: float
+    flags: int
+    color: int | None
+    origin: tuple[float, float] | None
+    direction: tuple[float, float]
+    ascender: float | None
+    descender: float | None
+    wmode: int
 
 
 class Native:
     """Extracts native (non-OCR) text from a page."""
 
-    def extract_text(self, page: Page) -> list[TextWord]:
+    def extract(self, page: Page) -> list[TextWord]:
+        """One `TextWord` per `get_text("words")` word, in reading order,
+        with font/rotation metadata joined from the best-overlapping
+        `get_text("dict")` span."""
         fitz_page = page.fitz_page
         page_index = page.meta.index
 
         spans = self._extract_spans(fitz_page)
         words = self._extract_words(fitz_page)
-
         _LOG.debug(
-            "page %d: %d word(s), %d span(s)",
-            page_index,
-            len(words),
-            len(spans),
+            "page %d: %d word(s), %d span(s)", page_index, len(words), len(spans),
         )
 
         result: list[TextWord] = []
-        seq = 0
-        for x0, y0, x1, y1, text, _block_no, _line_no, _word_no in words:
+        for seq, (x0, y0, x1, y1, text, block_no, line_no, word_no) in enumerate(words):
             bbox = fitz.Rect(x0, y0, x1, y1)
             span = self._match_word_to_span(bbox, spans)
             if span is None:
                 _LOG.warning(
                     "page %d: no matching span for word %r at %s",
-                    page_index,
-                    text,
-                    bbox,
+                    page_index, text, bbox,
                 )
             result.append(
-                self._to_text_word(
-                    (bbox, text), span, page_index, seq
-                )
+                self._to_word(bbox, text, span, page_index, seq, block_no, line_no, word_no)
             )
-            seq += 1
-
         return result
 
-    def extract_records(self, page: Page) -> list[TextRecord]:
-        """Richer, additive counterpart to extract_text -- one TextRecord
-        per word, carrying get_text("words")'s block_no/line_no/word_no and
-        get_text("dict")'s line-level wmode alongside everything TextWord
-        already has. Never replaces extract_text/TextWord for existing
-        consumers (pipeline.py)."""
-        fitz_page = page.fitz_page
-        page_index = page.meta.index
-
-        spans = self._extract_spans(fitz_page)
-        words = self._extract_words(fitz_page)
-
-        result: list[TextRecord] = []
-        seq = 0
-        for x0, y0, x1, y1, text, block_no, line_no, word_no in words:
-            bbox = fitz.Rect(x0, y0, x1, y1)
-            span = self._match_word_to_span(bbox, spans)
-            result.append(
-                self._to_text_record(
-                    (bbox, text), span, page_index, seq,
-                    block_no, line_no, word_no,
-                )
-            )
-            seq += 1
-
-        return result
-
-    def _extract_spans(self, fitz_page: "fitz.Page") -> list[dict]:
-        """Flatten page.get_text('dict') into a list of span dicts."""
-        spans: list[dict] = []
+    def _extract_spans(self, fitz_page: "fitz.Page") -> list[_Span]:
+        """Flatten page.get_text('dict') into a list of `_Span`s."""
+        spans: list[_Span] = []
         text_dict = fitz_page.get_text("dict", sort=False)
 
         for block in text_dict.get("blocks", []):
-            if block.get("type") != 0:
+            if block.get("type") != 0:  # 0 = text block (1 = image)
                 continue
-
             for line in block.get("lines", []):
                 line_dir = line.get("dir", (1.0, 0.0))
                 line_wmode = line.get("wmode", 0)
-
                 for span in line.get("spans", []):
                     text = span.get("text", "")
                     if not text.strip():
                         continue
-
-                    bbox = fitz.Rect(span.get("bbox", (0, 0, 0, 0)))
-
                     spans.append(
-                        {
-                            "bbox": bbox,
-                            "text": text,
-                            "font": span.get("font", ""),
-                            "size": span.get("size", 0),
-                            "flags": span.get("flags", 0),
-                            "color": span.get("color", None),
-                            "origin": span.get("origin", None),
-                            "dir": line_dir,
-                            "ascender": span.get("ascender", None),
-                            "descender": span.get("descender", None),
-                            "wmode": line_wmode,
-                        }
+                        _Span(
+                            bbox=fitz.Rect(span.get("bbox", (0, 0, 0, 0))),
+                            text=text,
+                            font=span.get("font", ""),
+                            font_size=span.get("size", 0.0),
+                            flags=span.get("flags", 0),
+                            color=span.get("color", None),
+                            origin=span.get("origin", None),
+                            direction=line_dir,
+                            ascender=span.get("ascender", None),
+                            descender=span.get("descender", None),
+                            wmode=line_wmode,
+                        )
                     )
-
         return spans
 
     def _extract_words(self, fitz_page: "fitz.Page") -> list[tuple]:
-        """Words from page.get_text('words'), sorted into reading order.
-
-        Bucket by rounded y0 (rows), then sort each row left-to-right by
-        x0 -- a simple top-to-bottom/left-to-right approximation of
-        reading order, good enough as a first pass.
-        """
-        words = fitz_page.get_text("words", sort=False)
-        words = sorted(words, key=lambda w: (round(w[1]), w[0]))
-
+        """Words from page.get_text('words'), sorted into reading order:
+        bucket by rounded y0 (rows), then left-to-right by x0 within each
+        row -- a simple top-to-bottom / left-to-right first pass."""
+        words = sorted(fitz_page.get_text("words", sort=False), key=lambda w: round(w[1]))
         ordered: list[tuple] = []
-        for _, group in groupby(words, key=lambda w: round(w[1])):
-            for word in sorted(group, key=lambda w: w[0]):
-                ordered.append(
-                    (
-                        word[0], word[1], word[2], word[3], word[4],
-                        word[5], word[6], word[7],
-                    )
-                )
+        for _row, group in groupby(words, key=lambda w: round(w[1])):
+            for w in sorted(group, key=lambda w: w[0]):
+                ordered.append((w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]))
         return ordered
 
     def _match_word_to_span(
-        self, bbox: "fitz.Rect", spans: list[dict]
-    ) -> dict | None:
-        """Pick the span with the highest intersection-area/word-area ratio.
-
-        get_text('words') gives geometry but no font/rotation metadata;
-        get_text('dict') gives spans with that metadata but at a coarser
-        (multi-word) granularity, so they must be joined by overlap.
-        """
-        if not spans:
-            return None
-
-        best = None
-        best_score = -1.0
+        self, bbox: "fitz.Rect", spans: list[_Span]
+    ) -> "_Span | None":
+        """Pick the span with the highest intersection-area / word-area
+        ratio, above `_MIN_SPAN_OVERLAP`. `get_text('words')` gives geometry
+        but no font/rotation metadata; `get_text('dict')` gives spans with
+        that metadata at a coarser (multi-word) granularity, so they must be
+        joined by overlap."""
         word_area = max(bbox.get_area(), 1e-9)
-
+        best: "_Span | None" = None
+        best_score = _MIN_SPAN_OVERLAP
         for span in spans:
-            intersection = bbox & span["bbox"]
+            intersection = bbox & span.bbox
             if intersection.is_empty:
                 continue
             score = intersection.get_area() / word_area
             if score > best_score:
                 best_score = score
                 best = span
-
         return best
 
-    def _build_oriented_quad(
-        self, bbox: "fitz.Rect", dx: float, dy: float
-    ) -> tuple:
+    def _oriented_quad(self, bbox: "fitz.Rect", dx: float, dy: float) -> tuple:
         """(ul, ur, lr, ll) as (x, y) tuples, oriented along (dx, dy)."""
-        return make_oriented_quad(
-            (bbox.x0, bbox.y0, bbox.x1, bbox.y1), dx, dy
-        )
+        return make_oriented_quad((bbox.x0, bbox.y0, bbox.x1, bbox.y1), dx, dy)
 
     def _word_origin(
         self, bbox: "fitz.Rect", span_origin: tuple[float, float] | None,
@@ -180,17 +144,12 @@ class Native:
     ) -> tuple[float, float] | None:
         """A per-word insertion point on the span's baseline.
 
-        get_text('dict')'s span-level `origin` is the baseline start of the
-        *whole* span (which can hold several words) -- using it verbatim as
-        every one of that span's words' origin (the previous behavior) gave
-        every word in a line the exact same insertion point, which is why
-        Renderer.render_reconstructed_page drew every word on a line
-        stacked at the same spot instead of spread out. This instead keeps
-        the span's baseline (its perpendicular offset from the direction
-        line, `normal_offset`) but moves along the direction to this word's
-        own leading edge (`along_min`, from its own bbox) -- reusing the
-        same along/normal projection geometry.make_oriented_quad uses, so
-        it's correct for rotated/vertical text too, not just horizontal."""
+        `get_text('dict')`'s span-level `origin` is the baseline start of
+        the *whole* span (which can hold several words). This keeps the
+        span's baseline (its perpendicular offset from the direction line)
+        but moves along the direction to this word's own leading edge, using
+        the same along/normal projection `make_oriented_quad` uses -- so
+        it's correct for rotated/vertical text, not just horizontal."""
         if span_origin is None:
             return None
         length = hypot(dx, dy)
@@ -199,133 +158,47 @@ class Native:
             length = 1.0
         dx, dy = dx / length, dy / length
         nx, ny = -dy, dx
-
         corners = [
             (bbox.x0, bbox.y0), (bbox.x1, bbox.y0),
             (bbox.x1, bbox.y1), (bbox.x0, bbox.y1),
         ]
         along_min = min(x * dx + y * dy for x, y in corners)
         normal_offset = span_origin[0] * nx + span_origin[1] * ny
-
         return (along_min * dx + normal_offset * nx, along_min * dy + normal_offset * ny)
 
-    def _to_text_word(
+    def _to_word(
         self,
-        word: tuple,
-        span: dict | None,
-        page_index: int,
-        seq: int,
-    ) -> TextWord:
-        bbox, text = word
-
-        if span is None:
-            return TextWord(
-                text=text,
-                bbox=(bbox.x0, bbox.y0, bbox.x1, bbox.y1),
-                quad=(
-                    (bbox.x0, bbox.y0),
-                    (bbox.x1, bbox.y0),
-                    (bbox.x1, bbox.y1),
-                    (bbox.x0, bbox.y1),
-                ),
-                angle=0.0,
-                direction=(1.0, 0.0),
-                font="",
-                font_size=0.0,
-                color=None,
-                flags=0,
-                origin=None,
-                ascender=None,
-                descender=None,
-                orientation_source="fallback",
-                page_index=page_index,
-                seq=seq,
-            )
-
-        dx, dy = span["dir"]
-        angle = degrees(atan2(dy, dx))
-        oriented_quad = self._build_oriented_quad(bbox, dx, dy)
-
-        return TextWord(
-            text=text,
-            bbox=(bbox.x0, bbox.y0, bbox.x1, bbox.y1),
-            quad=oriented_quad,
-            angle=angle,
-            direction=(dx, dy),
-            font=span["font"],
-            font_size=span["size"],
-            color=span["color"],
-            flags=span["flags"],
-            origin=self._word_origin(bbox, span["origin"], dx, dy),
-            ascender=span["ascender"],
-            descender=span["descender"],
-            orientation_source="text-span",
-            page_index=page_index,
-            seq=seq,
-        )
-
-    def _to_text_record(
-        self,
-        word: tuple,
-        span: dict | None,
+        bbox: "fitz.Rect",
+        text: str,
+        span: "_Span | None",
         page_index: int,
         seq: int,
         block_no: int,
         line_no: int,
         word_no: int,
-    ) -> TextRecord:
-        bbox, text = word
-
+    ) -> TextWord:
+        bbox_tuple = (bbox.x0, bbox.y0, bbox.x1, bbox.y1)
         if span is None:
-            return TextRecord(
-                text=text,
-                bbox=(bbox.x0, bbox.y0, bbox.x1, bbox.y1),
-                quad=(
-                    (bbox.x0, bbox.y0),
-                    (bbox.x1, bbox.y0),
-                    (bbox.x1, bbox.y1),
-                    (bbox.x0, bbox.y1),
-                ),
-                angle=0.0,
-                direction=(1.0, 0.0),
-                font="",
-                font_size=0.0,
-                color=None,
-                flags=0,
-                origin=None,
-                ascender=None,
-                descender=None,
-                orientation_source="fallback",
-                page_index=page_index,
-                seq=seq,
-                wmode=0,
-                block_no=block_no,
-                line_no=line_no,
-                word_no=word_no,
+            x0, y0, x1, y1 = bbox_tuple
+            return TextWord(
+                text=text, bbox=bbox_tuple,
+                quad=((x0, y0), (x1, y0), (x1, y1), (x0, y1)),
+                angle=0.0, direction=(1.0, 0.0), font="", font_size=0.0,
+                color=None, flags=0, origin=None, ascender=None, descender=None,
+                orientation_source="fallback", page_index=page_index, seq=seq,
+                wmode=0, block_no=block_no, line_no=line_no, word_no=word_no,
             )
 
-        dx, dy = span["dir"]
-        angle = degrees(atan2(dy, dx))
-        oriented_quad = self._build_oriented_quad(bbox, dx, dy)
-
-        return TextRecord(
-            text=text,
-            bbox=(bbox.x0, bbox.y0, bbox.x1, bbox.y1),
-            quad=oriented_quad,
-            angle=angle,
+        dx, dy = span.direction
+        return TextWord(
+            text=text, bbox=bbox_tuple,
+            quad=self._oriented_quad(bbox, dx, dy),
+            angle=degrees(atan2(dy, dx)),
             direction=(dx, dy),
-            font=span["font"],
-            font_size=span["size"],
-            color=span["color"],
-            flags=span["flags"],
-            origin=self._word_origin(bbox, span["origin"], dx, dy),
-            ascender=span["ascender"],
-            descender=span["descender"],
-            orientation_source="text-span",
-            page_index=page_index,
-            seq=seq,
-            wmode=span.get("wmode", 0),
-            block_no=block_no,
-            line_no=line_no,
-            word_no=word_no,
+            font=span.font, font_size=span.font_size, color=span.color,
+            flags=span.flags,
+            origin=self._word_origin(bbox, span.origin, dx, dy),
+            ascender=span.ascender, descender=span.descender,
+            orientation_source="text-span", page_index=page_index, seq=seq,
+            wmode=span.wmode, block_no=block_no, line_no=line_no, word_no=word_no,
         )

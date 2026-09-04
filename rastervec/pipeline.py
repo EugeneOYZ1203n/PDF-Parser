@@ -47,7 +47,6 @@ from rastervec.models import (
     ClusterOcrResult,
     DrawingVector,
     Page,
-    TextRecord,
     TextVectorResult,
     TextWord,
     VectorPath,
@@ -124,10 +123,6 @@ class PipelineContext:
     ocr_backend: "OcrBackend | None" = None
     page: Page | None = None
     native_words: list[TextWord] | None = None
-    # native: richer, additive counterpart to native_words (see
-    # Native.extract_records) -- carries wmode/block_no/line_no/word_no
-    # alongside everything native_words already has.
-    native_records: list[TextRecord] | None = None
     vector_paths: list[VectorPath] | None = None
     # vector_extract: richer, additive counterpart to vector_paths (see
     # Vector.extract_records) -- one VectorRecord per raw get_drawings()
@@ -228,9 +223,7 @@ def _run_reader(ctx: PipelineContext) -> Page:
 
 
 def _run_native(ctx: PipelineContext) -> list[TextWord]:
-    native = Native()
-    ctx.native_words = native.extract_text(ctx.page)
-    ctx.native_records = native.extract_records(ctx.page)
+    ctx.native_words = Native().extract(ctx.page)
     return ctx.native_words
 
 

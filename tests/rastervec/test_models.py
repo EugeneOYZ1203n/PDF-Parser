@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from rastervec.models import TextRecord, VectorRecord
+from rastervec.models import TextWord, VectorRecord
 
 
-def test_text_record_carries_full_pymupdf_word_field_surface():
-    record = TextRecord(
+def test_text_word_carries_full_pymupdf_word_field_surface():
+    word = TextWord(
         text="Hello", bbox=(0, 0, 10, 5),
         quad=((0, 5), (10, 5), (10, 0), (0, 0)),
         angle=0.0, direction=(1.0, 0.0), font="helv", font_size=10.0,
@@ -13,9 +13,19 @@ def test_text_record_carries_full_pymupdf_word_field_surface():
         wmode=0, block_no=1, line_no=2, word_no=3,
     )
 
-    assert record.text == "Hello"
-    assert record.wmode == 0
-    assert (record.block_no, record.line_no, record.word_no) == (1, 2, 3)
+    assert word.text == "Hello"
+    assert word.wmode == 0
+    assert (word.block_no, word.line_no, word.word_no) == (1, 2, 3)
+
+
+def test_text_word_block_line_word_default_to_zero():
+    word = TextWord(
+        text="x", bbox=(0, 0, 1, 1), quad=((0, 0), (1, 0), (1, 1), (0, 1)),
+        angle=0.0, direction=(1.0, 0.0), font="", font_size=0.0, color=None,
+        flags=0, origin=None, ascender=None, descender=None,
+        orientation_source="fallback", page_index=0, seq=0,
+    )
+    assert (word.wmode, word.block_no, word.line_no, word.word_no) == (0, 0, 0, 0)
 
 
 def test_vector_record_carries_full_pymupdf_drawing_field_surface(vector_path):
