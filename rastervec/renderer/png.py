@@ -31,21 +31,14 @@ import io
 import pymupdf as fitz
 from PIL import Image
 
+from rastervec.config import (
+    MIN_CLUSTER_PADDING,
+    OCR_HORIZONTAL_PADDING_FRACTION,
+    OCR_VERTICAL_PADDING_FRACTION,
+)
 from rastervec.helpers.geometry import PDF_POINTS_PER_INCH, union_bbox
 from rastervec.models import PageMeta, VectorPath
 from rastervec.renderer._shapes import replay_drawing_paths
-
-# Minimum padding (in PDF points) added around a cluster's bbox before
-# rendering, so thin strokes right at the bbox edge aren't clipped -- the
-# floor both _OCR_*_PADDING_FRACTION margins below are clamped against.
-_MIN_CLUSTER_PADDING = 4.0
-
-# OCR-specific render-border expansion (see module docstring): fractions of
-# the cluster's own bbox height, applied asymmetrically -- tight vertically
-# (keeps glyphs filling the frame's height) and generous horizontally (keeps
-# glyphs right at the cluster's left/right edge from clipping).
-_OCR_VERTICAL_PADDING_FRACTION = 0.05
-_OCR_HORIZONTAL_PADDING_FRACTION = 0.30
 
 
 def _cluster_frame(paths: list[VectorPath]) -> tuple[float, float, float, float]:
@@ -53,14 +46,14 @@ def _cluster_frame(paths: list[VectorPath]) -> tuple[float, float, float, float]
     `pixel_to_page_bbox`: `(x0, y0, pad_x, pad_y)` where `x0`/`y0` are the
     cluster's own bbox origin (page space) and `pad_x`/`pad_y` are the
     (asymmetric -- see module docstring) margins added around it, each
-    >= `_MIN_CLUSTER_PADDING` or a member's own stroke width if wider. A
+    >= `MIN_CLUSTER_PADDING` or a member's own stroke width if wider. A
     page-space point maps to canvas space via
     `(x - x0 + pad_x, y - y0 + pad_y)`."""
     x0, y0, _x1, y1 = union_bbox([p.bbox for p in paths])
     height = y1 - y0
-    stroke_floor = max(_MIN_CLUSTER_PADDING, max((p.stroke_width or 0.0) for p in paths))
-    pad_y = max(stroke_floor, height * _OCR_VERTICAL_PADDING_FRACTION)
-    pad_x = max(stroke_floor, height * _OCR_HORIZONTAL_PADDING_FRACTION)
+    stroke_floor = max(MIN_CLUSTER_PADDING, max((p.stroke_width or 0.0) for p in paths))
+    pad_y = max(stroke_floor, height * OCR_VERTICAL_PADDING_FRACTION)
+    pad_x = max(stroke_floor, height * OCR_HORIZONTAL_PADDING_FRACTION)
     return x0, y0, pad_x, pad_y
 
 

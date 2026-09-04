@@ -19,6 +19,7 @@ import math
 
 from PIL import Image
 
+from rastervec.config import MIN_RENDER_SIDE_PX
 from rastervec.helpers.geometry import PDF_POINTS_PER_INCH, union_bbox
 from rastervec.models import OcrWord, Page, TextVectorResult, VectorPath
 from rastervec.OCR.Paddle_OCR.ocr_backend import OcrBackend, PaddleOcrBackend
@@ -27,14 +28,6 @@ from rastervec.renderer import (
     pixel_to_page_bbox,
     render_vector_cluster,
 )
-
-# ocr_cluster: a render whose shorter side would fall under this many pixels
-# at the requested dpi gets bumped to a higher effective dpi instead --
-# PaddleOCR's detector does noticeably worse on tiny crops (e.g. a single
-# narrow dimension line's short text), so a small cluster's own bbox
-# shouldn't be allowed to starve it of resolution.
-MIN_RENDER_SIDE_PX = 50
-
 
 class RenderOCR:
     """Render + detect + confidence-voting, shared by the vector-text OCR

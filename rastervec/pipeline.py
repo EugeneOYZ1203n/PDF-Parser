@@ -34,6 +34,12 @@ if __name__ == "__main__" and __package__ is None:
     # the repo root -- the parent of this package -- on sys.path.
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from rastervec.config import (
+    FAST_COMBINED_KEEP_THRESHOLD,
+    FAST_PAGE_RENDER_DPI,
+    SPATIAL_REGROUP_TOLERANCE_PX,
+    USE_LIGHT_OCR_BACKEND,
+)
 from rastervec.helpers.clustering import cluster_spatial
 from rastervec.helpers.geometry import PDF_POINTS_PER_INCH, union_bbox
 from rastervec.logging_setup import configure_logging, get_logger
@@ -56,38 +62,10 @@ from rastervec.renderer import render_page_paths
 from rastervec.Vector.vector import Vector
 from rastervec.Vector_Classification.classification import StepResult, VectorClassifier
 
-# fast_text_detect stage: pass threshold applied to each cluster's
-# candidates-render score, after min-ing it across each cluster's own
-# similarity group (see _run_fast_text_detect).
-FAST_COMBINED_KEEP_THRESHOLD = 0.2
-
-# spatial_regroup stage: aggregate (union) bbox gap tolerance (PDF points)
-# for re-merging FAST-passed clusters before OCR -- two clusters merge only
-# when their union bboxes are within this gap (rect_gap is 0.0 for
-# overlapping/touching boxes) *and* they share the same (layer, color) key
-# (see _cluster_lc_key/_run_spatial_regroup). Unlike the earlier
-# clustering steps this still ignores which unique_clusters similarity
-# group FAST scored a cluster under -- similarity-group boundaries are the
-# only ones spatial_regroup crosses.
-SPATIAL_REGROUP_TOLERANCE_PX = 1.0
-
-# ocr_compare stage: when True, _run_ocr_compare uses LightPaddleOcrBackend
-# (own ink-projection line/word segmentation + PaddleOCR recognition-only +
-# DocImgOrientationClassification rotation) instead of the full PP-OCRv6
-# detect+rec+doc-orient+textline pipeline. A PipelineContext.ocr_backend
-# override always wins over this flag.
-USE_LIGHT_OCR_BACKEND = True
-
 _LOG = get_logger("pipeline")
 
 # (layer, color) -- one Vector.separate_by_color() bucket.
 GroupKey = tuple[str, tuple]
-
-# DPI the whole-page FAST render is rasterized at (fast_text_detect stage),
-# before FastDetector.detect_tiled's own further upscale (see
-# OCR/FAST_Text_Detect/fast_detect.py's TILED_SCALE_FACTOR) -- not full OCR
-# resolution (RenderOCR's own per-cluster/per-group renders use 300 DPI).
-FAST_PAGE_RENDER_DPI = 150
 
 
 @dataclass

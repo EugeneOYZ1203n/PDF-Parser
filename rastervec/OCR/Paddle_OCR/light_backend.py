@@ -40,6 +40,7 @@ from PIL import Image
 # error in this paddlepaddle build). Only set if the caller hasn't.
 os.environ.setdefault("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "False")
 
+from rastervec.config import DOC_ORI_MIN_CONFIDENCE, REC_BATCH_SIZE, VERTICAL_ASPECT
 from rastervec.logging_setup import get_logger
 from rastervec.OCR.Paddle_OCR.crop_normalize import normalize_line_crop
 from rastervec.OCR.Paddle_OCR.ink_segment import (
@@ -54,16 +55,9 @@ _LOG = get_logger("ocr.light")
 # PP-OCRv6 rec model to use (small is ~2x lighter than the medium default
 # TextRecognition ships; PP-OCRv6_tiny_rec is lighter still,
 # PP-OCRv6_medium_rec is the accuracy fallback). Verified present in this
-# paddleocr==3.7.0 install.
+# paddleocr==3.7.0 install. Kept here, not in config.py: it's a model
+# identifier, not a tuning knob.
 LIGHT_REC_MODEL_NAME = "PP-OCRv6_small_rec"
-REC_BATCH_SIZE = 128
-
-# doc-orientation classifier score below this -> ignore it, use aspect
-# gating instead.
-DOC_ORI_MIN_CONFIDENCE = 0.7
-# a crop taller than this multiple of its width is treated as vertical
-# text for the aspect-gating fallback.
-VERTICAL_ASPECT = 1.5
 
 
 def _rec_field(result: object, key: str):

@@ -18,8 +18,8 @@ Step 6's spatial merge also tracks lineage: `cluster()`'s final
 step 3's pre-spatial-clustering "groups" each surviving cluster is
 composed of.
 
-All thresholds are module-level constants below -- tune the pipeline by
-editing them here, not at runtime. Each step's result is wrapped into a
+All thresholds live in `rastervec/config.py` -- tune the pipeline by
+editing them there, not at runtime. Each step's result is wrapped into a
 `StepResult` holding one or more named `CategoryResult`s -- exactly one
 per step has `role="kept"` and feeds the next step; every other category
 is a side-channel for the debug UI (a `role="dropped"` category is folded
@@ -37,6 +37,28 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Literal
 
+from rastervec.config import (
+    DENSITY_DEFAULT_GRID_SIZE,
+    DENSITY_MAX_CELL_PX,
+    DENSITY_MAX_EMPTY_FRACTION,
+    DENSITY_MIN_CELL_PX,
+    DUPLICATE_RUN_MIN_LENGTH,
+    LOW_VARIETY_MAX_MEMBER_COUNT,
+    LOW_VARIETY_MAX_REQUIRED,
+    LOW_VARIETY_MIN_MEMBER_COUNT,
+    LOW_VARIETY_MIN_REQUIRED,
+    MAX_DIMENSION_FRACTION,
+    MIN_GROUP_SIZE_PX,
+    PATTERN_FRACTION_THRESHOLD,
+    PATTERN_MIN_REPEAT_COUNT,
+    PATTERN_SPACING_TOLERANCE,
+    PERIMETER_MARGIN_FRACTION,
+    SEQ_OVERLAP_TOLERANCE_PX,
+    SIGNATURE_ROUND_PX,
+    SPATIAL_CLUSTER_THRESHOLD,
+    SPATIAL_SIZE_TOLERANCE,
+    UNIQUE_CLUSTER_TOLERANCE,
+)
 from rastervec.helpers.geometry import is_dashed, union_bbox
 from rastervec.logging_setup import get_logger
 from rastervec.models import DrawingVector, Page, VectorPath, VectorRecord
@@ -45,29 +67,6 @@ from rastervec.Vector_Classification.groups import group_filters as grf
 from rastervec.Vector_Classification.items import item_filters as itf
 
 _LOG = get_logger("classification")
-
-# Classification pipeline thresholds -- edit these to tune classification;
-# there is no runtime/UI way to change them.
-MAX_DIMENSION_FRACTION = 0.10  # steps 1 & 4: max item/group dimension, as a fraction of the page's smaller side
-SIGNATURE_ROUND_PX = 0.5  # step 2: grid size shape signatures are rounded to
-DUPLICATE_RUN_MIN_LENGTH = 5  # step 3a: min consecutive identical-signature run length to drop
-SEQ_OVERLAP_TOLERANCE_PX = 1.0  # step 3b: bbox gap tolerance when chain-merging by seq order
-MIN_GROUP_SIZE_PX = 1.0  # step 3c: drop a group whose bbox's max dimension is under this many px
-SPATIAL_CLUSTER_THRESHOLD = 10.0  # step 5: bbox gap tolerance for spatial clustering
-SPATIAL_SIZE_TOLERANCE = 0.30  # step 5: max relative difference between a valid pair of parallel sides for two groups to spatially merge
-PERIMETER_MARGIN_FRACTION = 0.1  # step 9: drop a cluster if no member reaches past this fraction of its bbox edges
-DENSITY_DEFAULT_GRID_SIZE = 4  # step 10: default cells per axis, clamped to keep DENSITY_MIN_CELL_PX <= cell side <= DENSITY_MAX_CELL_PX
-DENSITY_MIN_CELL_PX = 5.0  # step 10: each grid cell's side is at least this many px (fewer cells used if needed)
-DENSITY_MAX_CELL_PX = 40.0  # step 10: each grid cell's side is at most this many px (more cells used if needed)
-DENSITY_MAX_EMPTY_FRACTION = 0.70  # step 10: drop a cluster if more than this fraction of grid cells are untouched
-PATTERN_SPACING_TOLERANCE = 0.20  # step 11: max relative deviation between consecutive same-shape gaps
-PATTERN_MIN_REPEAT_COUNT = 3  # step 11: min same-signature members needed to judge spacing consistency
-PATTERN_FRACTION_THRESHOLD = 0.70  # step 11: drop a cluster if at least this fraction of its members belong to a patterned sub-group
-LOW_VARIETY_MIN_MEMBER_COUNT = 5  # step 12: at or under this many members, only LOW_VARIETY_MIN_REQUIRED distinct signatures are required
-LOW_VARIETY_MIN_REQUIRED = 1  # step 12: required distinct signature count for clusters at/under LOW_VARIETY_MIN_MEMBER_COUNT members
-LOW_VARIETY_MAX_MEMBER_COUNT = 300  # step 12: at or over this many members, LOW_VARIETY_MAX_REQUIRED distinct signatures are required
-LOW_VARIETY_MAX_REQUIRED = 10  # step 12: required distinct signature count for clusters at/over LOW_VARIETY_MAX_MEMBER_COUNT members
-UNIQUE_CLUSTER_TOLERANCE = 0.04  # pipeline.py's unique_clusters stage: relative-translation tolerance (fraction of each cluster's own bbox max dimension) for two clusters to be judged the same shape
 
 CategoryRole = Literal["kept", "dropped", "info"]
 

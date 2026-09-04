@@ -44,19 +44,13 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 
-_MODEL_CACHE: dict[str, object] = {}
+from rastervec.config import (
+    FAST_TILE_BLOCK_SIZE as TILED_BLOCK_SIZE,
+    FAST_TILE_ROTATION_COUNT as TILED_ROTATION_COUNT,
+    FAST_TILE_SCALE_FACTOR as TILED_SCALE_FACTOR,
+)
 
-# detect_tiled's own defaults -- pipeline.py's fast_text_detect stage no
-# longer runs FAST on one whole-page image at a time: FAST's own
-# preprocessing (_scale_aligned_short) always downsizes to a 640px short
-# side regardless of input size, so a whole large page loses most of its
-# resolution in one pass. Instead, the render is upscaled by
-# TILED_SCALE_FACTOR, split into TILED_BLOCK_SIZE-square tiles, and each
-# tile is detected at TILED_ROTATION_COUNT evenly-spaced rotations
-# (summed then averaged) for a more robust per-tile score.
-TILED_BLOCK_SIZE = 2048
-TILED_SCALE_FACTOR = 5
-TILED_ROTATION_COUNT = 4
+_MODEL_CACHE: dict[str, object] = {}
 
 _DEFAULT_WEIGHTS_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),

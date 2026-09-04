@@ -56,10 +56,10 @@ from rastervec.Evaluation.Labelling.label_schema import (
     LabelSet,
     split_labelset_by_source,
 )
+from rastervec.config import MIN_RENDER_SIDE_PX
 from rastervec.helpers.geometry import PDF_POINTS_PER_INCH
 from rastervec.logging_setup import get_logger
 from rastervec.models import PageMeta
-from rastervec.OCR.Paddle_OCR.render_ocr import MIN_RENDER_SIDE_PX
 from rastervec.pipeline import run_page_context
 from rastervec.Reader.reader import Reader
 from rastervec.renderer import (
