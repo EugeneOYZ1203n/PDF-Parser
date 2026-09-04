@@ -53,6 +53,7 @@ from rastervec.Evaluation.Evaluate.metrics import (
 )
 from rastervec.Evaluation.Labelling.auto_label import auto_label_pdf
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet
+from rastervec.helpers.geometry import PDF_POINTS_PER_INCH
 from rastervec.logging_setup import get_logger
 from rastervec.models import PageMeta
 from rastervec.OCR.Paddle_OCR.render_ocr import MIN_RENDER_SIDE_PX
@@ -153,7 +154,10 @@ def _render_ocr_input(cluster, dpi: int = 300):
     width_pt, height_pt = cluster_frame_size(cluster)
     min_side_pt = min(width_pt, height_pt)
     if min_side_pt > 0:
-        dpi = max(dpi, math.ceil(MIN_RENDER_SIDE_PX * 72.0 / min_side_pt))
+        dpi = max(
+            dpi,
+            math.ceil(MIN_RENDER_SIDE_PX * PDF_POINTS_PER_INCH / min_side_pt),
+        )
     return render_vector_cluster(cluster, dpi)
 
 

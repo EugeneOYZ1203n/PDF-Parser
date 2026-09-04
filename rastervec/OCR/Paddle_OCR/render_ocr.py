@@ -19,7 +19,7 @@ import math
 
 from PIL import Image
 
-from rastervec.helpers.geometry import union_bbox
+from rastervec.helpers.geometry import PDF_POINTS_PER_INCH, union_bbox
 from rastervec.models import OcrWord, Page, TextVectorResult, VectorPath
 from rastervec.OCR.Paddle_OCR.ocr_backend import OcrBackend, PaddleOcrBackend
 from rastervec.renderer import (
@@ -118,7 +118,9 @@ class RenderOCR:
         width_pt, height_pt = cluster_frame_size(cluster)
         min_side_pt = min(width_pt, height_pt)
         if min_side_pt > 0:
-            needed_dpi = math.ceil(MIN_RENDER_SIDE_PX * 72.0 / min_side_pt)
+            needed_dpi = math.ceil(
+                MIN_RENDER_SIDE_PX * PDF_POINTS_PER_INCH / min_side_pt
+            )
             dpi = max(dpi, needed_dpi)
         image = render_vector_cluster(cluster, dpi)
         bbox = union_bbox([p.bbox for p in cluster])

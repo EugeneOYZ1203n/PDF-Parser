@@ -31,7 +31,7 @@ import io
 import pymupdf as fitz
 from PIL import Image
 
-from rastervec.helpers.geometry import union_bbox
+from rastervec.helpers.geometry import PDF_POINTS_PER_INCH, union_bbox
 from rastervec.models import PageMeta, VectorPath
 from rastervec.renderer._shapes import replay_drawing_paths
 
@@ -100,7 +100,7 @@ def render_vector_cluster(paths: list[VectorPath], dpi: int) -> "Image.Image":
         replay_drawing_paths(shape, paths, dx=dx, dy=dy)
         shape.commit()
 
-        zoom = dpi / 72.0
+        zoom = dpi / PDF_POINTS_PER_INCH
         pixmap = cluster_page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
         image = Image.open(io.BytesIO(pixmap.tobytes("png")))
         image.load()  # decode now -- the backing BytesIO doesn't outlive this call
@@ -120,7 +120,7 @@ def pixel_to_page_bbox(
     page space, returning their bbox. Used by `RenderOCR.ocr_cluster` to
     compute a `TextVectorResult`'s ocr_bbox."""
     x0, y0, pad_x, pad_y = _cluster_frame(paths)
-    zoom = dpi / 72.0
+    zoom = dpi / PDF_POINTS_PER_INCH
     xs = [px / zoom - pad_x + x0 for px, _py in pixel_points]
     ys = [py / zoom - pad_y + y0 for _px, py in pixel_points]
     return (min(xs), min(ys), max(xs), max(ys))
@@ -144,7 +144,7 @@ def render_page_paths(
         replay_drawing_paths(shape, paths)
         shape.commit()
 
-        zoom = dpi / 72.0
+        zoom = dpi / PDF_POINTS_PER_INCH
         pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
         image = Image.open(io.BytesIO(pixmap.tobytes("png")))
         image.load()

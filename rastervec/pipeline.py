@@ -35,7 +35,7 @@ if __name__ == "__main__" and __package__ is None:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rastervec.helpers.clustering import Clustering
-from rastervec.helpers.geometry import union_bbox
+from rastervec.helpers.geometry import PDF_POINTS_PER_INCH, union_bbox
 from rastervec.logging_setup import configure_logging, get_logger
 from rastervec.models import (
     ClusterOcrResult,
@@ -412,7 +412,7 @@ def _run_fast_text_detect(ctx: PipelineContext) -> FastPageResult:
         page_mask = detector.detect_tiled(page_image, desc="FAST text detection")
         detect_seconds = time.perf_counter() - start
 
-    zoom = FAST_PAGE_RENDER_DPI / 72.0
+    zoom = FAST_PAGE_RENDER_DPI / PDF_POINTS_PER_INCH
     score_by_cluster: dict[int, float] = {
         id(cluster): _sample_mask(page_mask, cluster, zoom) for cluster in clusters
     }
