@@ -1,41 +1,8 @@
 from __future__ import annotations
 
-import math
-
-import pymupdf as fitz
 import pytest
 
 from rastervec.helpers import geometry
-
-
-def test_point_angle_horizontal():
-    assert geometry.point_angle(fitz.Point(0, 0), fitz.Point(10, 0)) == pytest.approx(0.0)
-
-
-def test_point_angle_vertical():
-    assert geometry.point_angle(fitz.Point(0, 0), fitz.Point(0, 10)) == pytest.approx(90.0)
-
-
-def test_point_angle_diagonal():
-    assert geometry.point_angle(fitz.Point(0, 0), fitz.Point(10, 10)) == pytest.approx(45.0)
-
-
-def test_point_angle_zero_length():
-    assert geometry.point_angle(fitz.Point(5, 5), fitz.Point(5, 5)) == 0.0
-
-
-def test_line_length():
-    assert geometry.line_length(fitz.Point(0, 0), fitz.Point(3, 4)) == pytest.approx(5.0)
-
-
-def test_quad_angle_horizontal():
-    quad = fitz.Quad(
-        fitz.Point(0, 0),
-        fitz.Point(10, 0),
-        fitz.Point(0, 5),
-        fitz.Point(10, 5),
-    )
-    assert geometry.quad_angle(quad) == pytest.approx(0.0)
 
 
 def test_round_color_none():
@@ -45,29 +12,6 @@ def test_round_color_none():
 
 def test_round_color_rounds():
     assert geometry.round_color((0.123456, 1.0, 0.0)) == (0.123, 1.0, 0.0)
-
-
-def test_matrix_rotation_identity():
-    assert geometry.matrix_rotation(fitz.Matrix(1, 1)) == pytest.approx(0.0)
-
-
-def test_matrix_rotation_90():
-    # rotation matrix for 90 degrees: a=0, b=1, c=-1, d=0
-    m = fitz.Matrix(0, 1, -1, 0, 0, 0)
-    assert geometry.matrix_rotation(m) == pytest.approx(90.0)
-
-
-def test_matrix_scale_known():
-    m = fitz.Matrix(2, 0, 0, 3, 0, 0)
-    sx, sy = geometry.matrix_scale(m)
-    assert sx == pytest.approx(2.0)
-    assert sy == pytest.approx(3.0)
-
-
-def test_format_matrix_rounds():
-    m = fitz.Matrix(1.0000001, 0, 0, 1.0000001, 0, 0)
-    a, b, c, d, e, f = geometry.format_matrix(m)
-    assert a == pytest.approx(1.0)
 
 
 def test_rect_gap_overlapping_is_zero():
@@ -153,3 +97,48 @@ def test_bbox_iou_regression_via_intersection_area():
     # bbox_iou now delegates to bbox_intersection_area; values must be unchanged
     assert geometry.bbox_iou((0, 0, 10, 10), (5, 5, 15, 15)) == pytest.approx(25 / 175)
     assert geometry.bbox_iou((0, 0, 4, 4), (2, 0, 6, 4)) == pytest.approx(8 / 24)
+
+
+def test_dims_and_max_dimension():
+    assert geometry.dims((1, 2, 4, 10)) == (3, 8)
+    assert geometry.max_dimension((1, 2, 4, 10)) == 8
+    assert geometry.max_dimension((5, 5, 3, 3)) == 0.0  # inverted -> clamped
+
+
+def test_bboxes_intersect():
+    assert geometry.bboxes_intersect((0, 0, 10, 10), (5, 5, 15, 15))
+    assert geometry.bboxes_intersect((0, 0, 10, 10), (10, 0, 20, 10))  # touching
+    assert not geometry.bboxes_intersect((0, 0, 10, 10), (11, 0, 20, 10))
+
+
+def test_bbox_contains():
+    assert geometry.bbox_contains((0, 0, 10, 10), 5, 5)
+    assert geometry.bbox_contains((0, 0, 10, 10), 0, 0)  # on edge
+    assert not geometry.bbox_contains((0, 0, 10, 10), 11, 5)
+
+
+def test_bbox_fully_contains():
+    assert geometry.bbox_fully_contains((0, 0, 10, 10), (2, 2, 4, 4))
+    assert geometry.bbox_fully_contains((2, 2, 4, 4), (0, 0, 10, 10))
+    assert geometry.bbox_fully_contains((0, 0, 10, 10), (0, 0, 10, 10))  # equal
+    assert not geometry.bbox_fully_contains((0, 0, 10, 10), (5, 5, 15, 15))  # partial
+    assert not geometry.bbox_fully_contains((0, 0, 10, 10), (20, 20, 30, 30))  # disjoint
+
+
+def test_make_oriented_quad_horizontal_is_the_bbox():
+    ul, ur, lr, ll = geometry.make_oriented_quad((0, 0, 10, 4), 1.0, 0.0)
+    assert ul == pytest.approx((0, 0))
+    assert ur == pytest.approx((10, 0))
+    assert lr == pytest.approx((10, 4))
+    assert ll == pytest.approx((0, 4))
+
+
+def test_make_oriented_quad_vertical_direction():
+    # text direction pointing "down" (0, 1): the along-axis edge (ul->ur)
+    # should run vertically and span the bbox's height (10), not its width.
+    from math import hypot
+
+    ul, ur, lr, ll = geometry.make_oriented_quad((0, 0, 4, 10), 0.0, 1.0)
+    assert hypot(ur[0] - ul[0], ur[1] - ul[1]) == pytest.approx(10.0)
+    assert hypot(ll[0] - ul[0], ll[1] - ul[1]) == pytest.approx(4.0)
+

@@ -122,12 +122,11 @@ def test_build_oriented_quad_horizontal_matches_bbox_corners():
     native = Native()
     bbox = fitz.Rect(0, 0, 10, 4)
 
-    quad = native._build_oriented_quad(bbox, 1.0, 0.0)
+    ul, ur, lr, ll = native._build_oriented_quad(bbox, 1.0, 0.0)
 
-    assert quad.ul.x == pytest.approx(0.0)
-    assert quad.ul.y == pytest.approx(0.0)
-    assert quad.ur.x == pytest.approx(10.0)
-    assert quad.lr.y == pytest.approx(4.0)
+    assert ul == pytest.approx((0.0, 0.0))
+    assert ur == pytest.approx((10.0, 0.0))
+    assert lr == pytest.approx((10.0, 4.0))
 
 
 def test_build_oriented_quad_vertical_swaps_extents():
@@ -143,14 +142,14 @@ def test_build_oriented_quad_vertical_swaps_extents():
     # direction rather than reusing bbox.width as the along-extent.
     bbox = fitz.Rect(0, 0, 20, 5)
 
-    quad = native._build_oriented_quad(bbox, 0.0, 1.0)
+    ul, ur, lr, ll = native._build_oriented_quad(bbox, 0.0, 1.0)
 
     # Naive (buggy) horizontal-order corners would be:
     naive_ul = (bbox.x0, bbox.y0)
     naive_ur = (bbox.x1, bbox.y0)
 
-    quad_ul = (round(quad.ul.x, 3), round(quad.ul.y, 3))
-    quad_ur = (round(quad.ur.x, 3), round(quad.ur.y, 3))
+    quad_ul = (round(ul[0], 3), round(ul[1], 3))
+    quad_ur = (round(ur[0], 3), round(ur[1], 3))
 
     assert (quad_ul, quad_ur) != (naive_ul, naive_ur)
 

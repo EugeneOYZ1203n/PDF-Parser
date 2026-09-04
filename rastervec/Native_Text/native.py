@@ -168,8 +168,11 @@ class Native:
 
     def _build_oriented_quad(
         self, bbox: "fitz.Rect", dx: float, dy: float
-    ) -> "fitz.Quad":
-        return make_oriented_quad(bbox, dx, dy)
+    ) -> tuple:
+        """(ul, ur, lr, ll) as (x, y) tuples, oriented along (dx, dy)."""
+        return make_oriented_quad(
+            (bbox.x0, bbox.y0, bbox.x1, bbox.y1), dx, dy
+        )
 
     def _word_origin(
         self, bbox: "fitz.Rect", span_origin: tuple[float, float] | None,
@@ -241,17 +244,12 @@ class Native:
 
         dx, dy = span["dir"]
         angle = degrees(atan2(dy, dx))
-        quad = self._build_oriented_quad(bbox, dx, dy)
+        oriented_quad = self._build_oriented_quad(bbox, dx, dy)
 
         return TextWord(
             text=text,
             bbox=(bbox.x0, bbox.y0, bbox.x1, bbox.y1),
-            quad=(
-                (quad.ul.x, quad.ul.y),
-                (quad.ur.x, quad.ur.y),
-                (quad.lr.x, quad.lr.y),
-                (quad.ll.x, quad.ll.y),
-            ),
+            quad=oriented_quad,
             angle=angle,
             direction=(dx, dy),
             font=span["font"],
@@ -308,17 +306,12 @@ class Native:
 
         dx, dy = span["dir"]
         angle = degrees(atan2(dy, dx))
-        quad = self._build_oriented_quad(bbox, dx, dy)
+        oriented_quad = self._build_oriented_quad(bbox, dx, dy)
 
         return TextRecord(
             text=text,
             bbox=(bbox.x0, bbox.y0, bbox.x1, bbox.y1),
-            quad=(
-                (quad.ul.x, quad.ul.y),
-                (quad.ur.x, quad.ur.y),
-                (quad.lr.x, quad.lr.y),
-                (quad.ll.x, quad.ll.y),
-            ),
+            quad=oriented_quad,
             angle=angle,
             direction=(dx, dy),
             font=span["font"],
