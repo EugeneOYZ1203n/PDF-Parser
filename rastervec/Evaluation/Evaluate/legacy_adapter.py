@@ -1,8 +1,8 @@
 """Adapter: runs archive's legacy pipeline (`raster_parser.main_pipeline_extract.
 extract`) completely unmodified and reshapes its `NativePDFElements` output into
-rastervec's own `ClusterOcrResult`/`DrawingVector` shapes so `evaluate.
-evaluate_pipeline` can score it on the exact same metrics as the current
-pipeline -- see `rastervec/notebooks/benchmark_vector_classification.ipynb`.
+rastervec's own `ClusterOcrResult`/`DrawingVector` shapes so
+`metrics.evaluate_metrics` can score it on the exact same metrics as the
+current pipeline -- see `rastervec/notebooks/benchmark_vector_classification.ipynb`.
 
 Archive is a plain sibling folder under the repo root (not an installed
 package), so `_ensure_archive_importable` adds its path to `sys.path` lazily,
@@ -11,8 +11,8 @@ archive's own code is touched, copied, or reimplemented here, only its
 *output shape* is translated. `run_archive_pipeline` is a manual smoke test
 only (real archive dependency chain: PaddleOCR, LibreOffice, autotrace --
 same "not unit-testable" convention as `manual_label.py`/`benchmark.py`'s own
-OCR-backed paths); `to_cluster_ocr_results`/`to_drawing_vectors` are pure and
-unit-tested against a hand-built archive-shaped object.
+OCR-backed paths); `to_cluster_ocr_results` is pure and unit-tested
+against a hand-built archive-shaped object.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from rastervec.models import ClusterOcrResult, DrawingVector, TextVectorResult
+from rastervec.models import ClusterOcrResult, TextVectorResult
 
 if TYPE_CHECKING:
     from raster_parser.models import NativePDFElements as ArchiveNativePDFElements
@@ -79,10 +79,10 @@ def to_cluster_ocr_results(
     elements: "_ArchiveNativePDFElements", page_index: int = 0,
 ) -> list[ClusterOcrResult]:
     """Wraps each archive `TextDTO` word as a rastervec `ClusterOcrResult` so
-    `evaluate_pipeline` scores it identically to the current pipeline's own
+    `evaluate_metrics` scores it identically to the current pipeline's own
     OCR readings. `cluster`/`paths` are left empty -- archive's `TextDTO`
     carries no back-reference to source vector geometry, and
-    `evaluate_pipeline` only ever reads `ClusterOcrResult.resolved` for
+    `evaluate_metrics` only ever reads `ClusterOcrResult.resolved` for
     scoring, never `.cluster`. `confidence` defaults to 1.0 since archive's
     `TextDTO` doesn't carry one."""
     results: list[ClusterOcrResult] = []
@@ -100,23 +100,3 @@ def to_cluster_ocr_results(
     return results
 
 
-def to_drawing_vectors(
-    elements: "_ArchiveNativePDFElements", page_index: int = 0,
-) -> list[DrawingVector]:
-    """Archive's own leftover (non-text) vectors, wrapped minimally as
-    `DrawingVector`s -- `evaluate_pipeline` only ever reads
-    `len(drawing_vectors)`, so full path-level fidelity isn't needed here."""
-    results: list[DrawingVector] = []
-    for vector in elements.vectors:
-        results.append(
-            DrawingVector(
-                paths=[],
-                bbox=(vector.x0, vector.y0, vector.x1, vector.y1),
-                stroke_color=vector.color,
-                fill_color=vector.fill,
-                stroke_width=vector.width,
-                dashed=bool(vector.dashes),
-                page_index=page_index,
-            )
-        )
-    return results

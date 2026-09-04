@@ -1,9 +1,9 @@
 # Evaluation metrics (`metrics.py`)
 
 `metrics.py` scores a Vector-Classification + OCR pipeline run against a
-`LabelSet`. Unlike the legacy `evaluate.py::evaluate_pipeline` (every metric
-reduced out of one greedy 1:1 label↔prediction match), here **each metric is an
-independent reduction over one shared overlap graph**, and the graph models
+`LabelSet`. Rather than reduce every metric out of one greedy 1:1
+label↔prediction match, here **each metric is an independent reduction over one
+shared overlap graph**, and the graph models
 many-to-many overlap — the common case where one ground-truth line is covered by
 several predicted OCR clusters.
 
@@ -94,8 +94,7 @@ can exceed 1.0).
 
 `difflib.SequenceMatcher` is **not** used: it scores longest matching blocks, not
 edits, so a transposition or a run of single-character substitutions diverges
-sharply from the intuitive error count. (The frozen legacy `evaluate_pipeline`
-still calls `difflib`; that path is not maintained.)
+sharply from the intuitive error count.
 
 The two `region_concat_char_accuracy_*` metrics below call `levenshtein` (see
 *Character accuracy — position-aware*). Every other metric is a multiset or

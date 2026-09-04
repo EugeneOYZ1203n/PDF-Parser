@@ -16,8 +16,6 @@ Two things live here:
   `difflib.SequenceMatcher` is deliberately *not* used: it measures longest
   matching blocks, not edits, so a transposition or a run of single-char
   substitutions scores very differently from the intuitive error count.
-  (`evaluate.py`'s legacy `evaluate_pipeline` still uses `difflib` -- that
-  path is frozen and not worth changing.)
 """
 from __future__ import annotations
 

@@ -59,6 +59,21 @@ def cluster_signature(cluster: "list[VectorPath]") -> str:
     return f"{len(cluster)}:{x0:.1f}:{y0:.1f}:{x1:.1f}:{y1:.1f}"
 
 
+def split_labelset_by_source(labels: LabelSet) -> dict[LabelSource, LabelSet]:
+    """Split a mixed-source `LabelSet` into one `LabelSet` per `source`
+    ("auto"/"manual"), each key always present (entries may be empty),
+    `pdf_path` preserved -- so a caller can score auto-derived and
+    human-entered ground truth as separate benchmark runs with separate
+    accuracy statistics."""
+    return {
+        source: LabelSet(
+            pdf_path=labels.pdf_path,
+            entries=[e for e in labels.entries if e.source == source],
+        )
+        for source in ("auto", "manual")
+    }
+
+
 def save_labels(labels: LabelSet, path: str) -> None:
     Path(path).write_text(labels.model_dump_json(indent=2), encoding="utf-8")
 

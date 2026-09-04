@@ -7,7 +7,7 @@ Split by output concern:
   `pixel_to_page_bbox` / `cluster_frame_size` transform helpers).
 - `pdf.py`  -- `render_reconstructed_page`, the notebook's reconstruction
   preview, plus `render_boxes_pdf`, a generic colored-bbox-outline
-  primitive used by evaluate.py's `render_evaluation_pdf`.
+  primitive used by the benchmark's pred-vs-GT box overlay.
 - `svg.py`  -- `render_page_svg`, a thin `get_svg_image()` wrapper.
 - `_shapes.py` -- `replay_drawing_paths` (per-drawing composite path replay
   with the even_odd fill rule, so filled glyph counters render as holes)

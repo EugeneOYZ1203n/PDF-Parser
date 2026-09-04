@@ -43,7 +43,6 @@ from rastervec.Evaluation.Evaluate.adapters import (
     text_candidate_boxes,
 )
 from rastervec.Evaluation.Evaluate.benchmark import format_report
-from rastervec.Evaluation.Evaluate.evaluate import split_labelset_by_source
 from rastervec.Evaluation.Evaluate.variants import PipelineVariant, resolve_variant
 from rastervec.Evaluation.Evaluate.metrics import (
     MetricConfig,
@@ -52,7 +51,11 @@ from rastervec.Evaluation.Evaluate.metrics import (
     overlay_boxes_split,
 )
 from rastervec.Evaluation.Labelling.auto_label import auto_label_pdf
-from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet
+from rastervec.Evaluation.Labelling.label_schema import (
+    LabelEntry,
+    LabelSet,
+    split_labelset_by_source,
+)
 from rastervec.helpers.geometry import PDF_POINTS_PER_INCH
 from rastervec.logging_setup import get_logger
 from rastervec.models import PageMeta

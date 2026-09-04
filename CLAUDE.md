@@ -362,7 +362,7 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   mean` / `per_gt_union_pred_iou_mean` / `undetected_gt_area_ratio`, `rotation_accuracy_localized_gt`,
   `classification_recall_gt_reached_ocr` / `classification_precision_candidate_is_text`, and
   `gt_miss_attributed_to_{classification,fast,ocr_blank,not_found}_frac` + `per_stage_miss_counts`
-  (`attribute_miss`, a port of `evaluate._attribute_miss`). `METRIC_GROUPS` is the display-order source
+  (`attribute_miss`). `METRIC_GROUPS` is the display-order source
   for `benchmark.format_report` + the notebook charts. `overlay_boxes` / `overlay_boxes_split` are
   data-only helpers (no rendering) returning `(bbox, rgb[, dashes])` for the benchmark's `boxes.pdf`
   pred-vs-GT overlay. **`EVAL_METRICS.md`** documents every metric's formula, both normalisation
@@ -373,40 +373,13 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   back to resolved bboxes for the archive legacy path) / `build_eval_inputs(ctx)` turn a `LabelSet` +
   `PipelineContext` into `metrics.evaluate_metrics` arguments.
 - **`Evaluation/Evaluate/text_metrics.py`** *(implemented)*: `normalize_text` (upper-case, trim,
-  collapse internal whitespace to one space — replaces `evaluate.normalize_for_cer`, now an alias),
-  `char_multiset` / `word_tokens`, and pure-Python `levenshtein` / `char_error_rate` / `word_error_rate`
-  (the standard text-diff — **not** `difflib.SequenceMatcher`, which `evaluate.evaluate_pipeline` still
-  uses). `levenshtein` is used by `metrics.py`'s two `region_concat_char_accuracy_*` metrics.
-- **`Evaluation/Evaluate/evaluate.py` — `evaluate_pipeline`** *(implemented, legacy 1:1-match scorer —
-  kept for `render_evaluation_pdf` + its own tests; the benchmark no longer calls it)*: scores a completed
-  pipeline run's `ClusterOcrResult`/`DrawingVector` lists against a `LabelSet`.
-  Matches each label to a predicted OCR reading by `bbox_iou` (greedy highest-IoU-first, one-to-one)
-  above `iou_threshold`. Returns an `EvaluationResult`:
-  `characters_found_pct` (char-count-weighted, not label-count-weighted), `character_accuracy`/
-  `character_error_rate` (mean `difflib.SequenceMatcher` ratio per matched pair — stdlib, no
-  string-distance dependency in `requirements.txt`), `rotation_accuracy` (matched-pair rotation, off
-  `ocr_compare`'s own `rotation_used`, vs. `expected_rotation`), `bbox_accuracy` (mean IoU),
-  `classification_precision`/`_recall` (matched =
-  true positive, unmatched label = false negative i.e. text the pipeline dropped as drawing content,
-  unmatched prediction = false positive), `drawing_vector_count`, and
-  `unmatched_prediction_boxes` (each unmatched prediction's own bbox, alongside the
-  `unmatched_predictions` count — feeds `render_evaluation_pdf` below). Deliberately decoupled from
-  `PipelineContext`/a real PDF — callers pass their own OCR/drawing-vector lists, so
-  this module is testable against small hand-built inputs. Optional `clustering`/`fast_dropped`/
-  `ocr_failed` params (the rest of `PipelineContext`, all default `None`) turn on a stage-attributed
-  "loss funnel": `_attribute_miss` checks, in pipeline order, whether an unmatched label's bbox
-  overlaps a `role="dropped"` classification-step category (`"classification:<step label>"`, the
-  *earliest* matching step), else a `fast_dropped` cluster (`"fast_text_detect"`), else an
-  `ocr_failed` cluster (`"ocr_blank"`), else `"not_found"` (never appeared in any known bucket — a
-  Conversion-fidelity gap or extraction issue, not a classification/OCR decision) — populated into
-  `EvaluationResult.miss_attributions` (`list[MissAttribution]`, empty when `clustering` is
-  omitted, so passing none of these three keeps the exact old behavior). `split_labelset_by_source`
-  (pure helper) splits a mixed-source `LabelSet` into `{"auto": …, "manual": …}` so a caller can
-  score auto-derived and human-entered ground truth as separate `evaluate_pipeline` runs (used by
-  the benchmark notebook). `render_evaluation_pdf(result, page_meta)` is a separate, optional visual
-  counterpart (this module stays I/O-free otherwise): matched pairs' label+predicted bboxes in
-  green, unmatched labels in red, unmatched predictions in yellow, drawn onto a fresh page via
-  `renderer.render_boxes_pdf`.
+  collapse internal whitespace to one space), `char_multiset` / `word_tokens`, and pure-Python
+  `levenshtein` / `char_error_rate` / `word_error_rate` (the standard text-diff — **not**
+  `difflib.SequenceMatcher`). `levenshtein` is used by `metrics.py`'s two
+  `region_concat_char_accuracy_*` metrics.
+- **`Evaluation/Labelling/label_schema.py::split_labelset_by_source`** splits a mixed-source
+  `LabelSet` into `{"auto": …, "manual": …}` so the benchmark can score auto-derived and
+  human-entered ground truth as separate runs.
 - **`Evaluation/Evaluate/variants.py`** *(implemented)*: `PipelineVariant` (name, `engine`
   current/legacy, `enable_fast`, `ocr_backend` light/heavy) + the `VARIANTS` registry
   (`current_light` [default], `current_heavy`, `current_light_nofast`, `current_heavy_nofast`,

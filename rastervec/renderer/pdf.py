@@ -8,14 +8,13 @@ this look like the original" for one stage's output at a time.
 `render_reconstructed_pdf` builds the exact same page but hands back the
 PDF bytes instead of a raster, for side-by-side ground-truth-vs-pipeline
 comparison files (see `notebooks/benchmark_vector_classification.ipynb`).
-Both are rough previews, not `Evaluation/evaluation.py`'s real
-(still-unbuilt) reconstruction stage: font family isn't preserved (always
-the base14 "helv"), only size/baseline/rotation are approximated.
+Both are rough previews: font family isn't preserved (always the base14
+"helv"), only size/baseline/rotation are approximated.
 
 `render_boxes_pdf` is unrelated to reconstruction -- a generic "draw these
 colored bbox outlines on a fresh page" primitive, used by
-`Evaluation/Evaluate/evaluate.py`'s `render_evaluation_pdf` to visualize
-matched/unmatched-label/unmatched-prediction bboxes.
+`Evaluation/Evaluate/metrics.py`'s `overlay_boxes_split` for the
+benchmark's pred-vs-GT box-overlay PDF.
 """
 from __future__ import annotations
 
@@ -226,9 +225,9 @@ def render_boxes_pdf(
     (bbox, color[, dashes]) entries drawn as an unfilled rectangle outline
     (`page.draw_rect`, no fill -- so overlapping boxes stay legible). A third
     tuple element, when present, is a PyMuPDF dash string (`None` = solid).
-    Used by `Evaluation/Evaluate/`'s `render_evaluation_pdf` (2-tuples) and
-    `metrics.overlay_boxes_split` (dashed = auto GT, solid = manual GT,
-    dotted = prediction); generic otherwise."""
+    Used by `Evaluation/Evaluate/metrics.py`'s `overlay_boxes_split`
+    (dashed = auto GT, solid = manual GT, dotted = prediction); generic
+    otherwise."""
     doc = fitz.open()
     try:
         page = doc.new_page(width=page_meta.width, height=page_meta.height)

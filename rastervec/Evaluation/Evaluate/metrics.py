@@ -2,12 +2,12 @@
 pipeline, built over one shared many-to-many overlap graph between
 ground-truth text regions and predicted OCR readings.
 
-Why this exists (vs `evaluate.py`): the legacy `evaluate_pipeline` reduces
-*every* metric out of a single greedy 1:1 highest-IoU match, so when one
-ground-truth line is covered by several predicted clusters (the common
-case) all of text / bbox / rotation accuracy corrupt together. Here each
-metric is an independent reduction over `OverlapGraph`, which keeps every
-(gt, prediction) overlap edge and an explicit N:1 assignment.
+Why this shape: a single greedy 1:1 highest-IoU match reduces *every*
+metric out of one assignment, so when one ground-truth line is covered by
+several predicted clusters (the common case) all of text / bbox / rotation
+accuracy corrupt together. Here each metric is an independent reduction
+over `OverlapGraph`, which keeps every (gt, prediction) overlap edge and an
+explicit N:1 assignment.
 
 Two normalisation rules, both documented in full in `EVAL_METRICS.md`:
 

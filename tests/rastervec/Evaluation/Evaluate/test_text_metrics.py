@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from rastervec.Evaluation.Evaluate.evaluate import normalize_for_cer, same_word_bag
 from rastervec.Evaluation.Evaluate.text_metrics import (
     char_error_rate,
     char_multiset,
@@ -19,10 +18,6 @@ def test_normalize_text_uppercases_and_collapses_whitespace():
     assert normalize_text("5 mm") == "5 MM"
     assert normalize_text("") == ""
     assert normalize_text("   ") == ""
-
-
-def test_normalize_for_cer_is_alias_of_normalize_text():
-    assert normalize_for_cer("a  b") == normalize_text("a  b") == "A B"
 
 
 def test_char_multiset_drops_spaces_and_folds_case():
@@ -68,8 +63,3 @@ def test_word_error_rate():
     assert word_error_rate("the quick brown fox", "the quick fox") == pytest.approx(1 / 4)
 
 
-def test_same_word_bag_matches_regardless_of_order():
-    assert same_word_bag("line setback building 5m", "5m building setback line")
-    assert same_word_bag("Hello World", "world hello")
-    assert not same_word_bag("Hello World", "Hello")
-    assert not same_word_bag("", "")
