@@ -110,6 +110,40 @@ def _draw_vectors(ax, result: PipelineResult, title, show_junctions=False, base=
     _ax(ax, title)
 
 
+def compare_methods(results: dict, base=None, ncols: int = 3, figsize=None,
+                    show_junctions: bool = True):
+    """One panel per pipeline variant, extracted vectors drawn over `base`
+    (falls back to each result's own gray). `results` maps label -> PipelineResult
+    (or None / an Exception for a variant that failed)."""
+    import matplotlib.pyplot as plt
+
+    items = list(results.items())
+    n = len(items)
+    ncols = min(ncols, n)
+    nrows = (n + ncols - 1) // ncols
+    figsize = figsize or (5 * ncols, 5 * nrows)
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    axa = axes.ravel()
+    for ax, (label, res) in zip(axa, items):
+        if not isinstance(res, PipelineResult):
+            ax.text(0.5, 0.5, f"{label}\n{res}", ha="center", va="center",
+                    fontsize=8, color="tab:red", transform=ax.transAxes)
+            ax.axis("off")
+            continue
+        b = base if base is not None else res.gray
+        n_dash = sum(s.dashed for s in res.segments)
+        _draw_vectors(
+            ax, res,
+            f"{label}: {len(res.segments)} seg ({n_dash} dash), "
+            f"{len(res.arcs)} arc, {len(res.junctions)} junc",
+            show_junctions=show_junctions, base=b,
+        )
+    for ax in axa[n:]:
+        ax.axis("off")
+    fig.tight_layout()
+    return fig
+
+
 def show_vs_ground_truth(result: PipelineResult, gt: GroundTruth, figsize=(12, 6)):
     import matplotlib.pyplot as plt
 

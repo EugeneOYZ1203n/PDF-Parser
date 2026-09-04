@@ -98,6 +98,21 @@ def run_ablation(quick: bool = False, methods: list[str] | None = None) -> list[
     return rows
 
 
+def run_all_methods(gray, base_params: Params | None = None,
+                    methods: list[str] | None = None) -> dict:
+    """Run every METHODS variant on one raster. Returns label -> PipelineResult,
+    or the Exception raised (so a failing variant still shows up)."""
+    base_params = base_params or Params()
+    out: dict = {}
+    for name in (methods or list(METHODS)):
+        p = dataclasses.replace(base_params, **METHODS[name])
+        try:
+            out[name] = run(gray, p)
+        except Exception as exc:                      # noqa: BLE001 - report, don't abort
+            out[name] = exc
+    return out
+
+
 def bucket_table(rows: list[dict], by: str = "archetype", metric: str = "junction_f1") -> dict:
     """mean(metric) per (method, bucket) -> {method: {bucket: value}}."""
     import numpy as np
