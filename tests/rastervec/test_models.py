@@ -1,16 +1,6 @@
 from __future__ import annotations
 
-from rastervec.models import TextRecord, VectorPath, VectorRecord
-
-
-def _make_path(*, seq=0, item_index=0, bbox=(0, 0, 1, 1)) -> VectorPath:
-    return VectorPath(
-        seq=seq, item_index=item_index, kind="l", fill_rule="s",
-        points=[(bbox[0], bbox[1]), (bbox[2], bbox[3])], bbox=bbox,
-        stroke_color=(0, 0, 0), fill_color=None, stroke_opacity=None,
-        fill_opacity=None, stroke_width=1.0, dashes=None, closed=False,
-        layer=None, page_index=0,
-    )
+from rastervec.models import TextRecord, VectorRecord
 
 
 def test_text_record_carries_full_pymupdf_word_field_surface():
@@ -28,8 +18,8 @@ def test_text_record_carries_full_pymupdf_word_field_surface():
     assert (record.block_no, record.line_no, record.word_no) == (1, 2, 3)
 
 
-def test_vector_record_carries_full_pymupdf_drawing_field_surface():
-    path = _make_path()
+def test_vector_record_carries_full_pymupdf_drawing_field_surface(vector_path):
+    path = vector_path()
     record = VectorRecord(
         items=[path], bbox=path.bbox, stroke_color=(0, 0, 0), fill_color=None,
         stroke_width=1.0, dashed=False, page_index=0,
@@ -45,9 +35,9 @@ def test_vector_record_carries_full_pymupdf_drawing_field_surface():
     assert record.role is None
 
 
-def test_vector_record_optional_group_lineage_fields():
-    path_a = _make_path(seq=0)
-    path_b = _make_path(seq=1, item_index=1, bbox=(2, 2, 3, 3))
+def test_vector_record_optional_group_lineage_fields(vector_path):
+    path_a = vector_path(seq=0)
+    path_b = vector_path(seq=1, item_index=1, bbox=(2, 2, 3, 3))
     record = VectorRecord(
         items=[path_a, path_b], bbox=(0, 0, 3, 3), stroke_color=(0, 0, 0),
         fill_color=None, stroke_width=1.0, dashed=False, page_index=0,
