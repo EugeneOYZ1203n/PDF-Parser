@@ -97,7 +97,12 @@ from rastervec.Evaluation.Labelling.label_schema import (
     load_labels,
     save_labels,
 )
-from rastervec.helpers.geometry import union_bbox
+from rastervec.helpers.geometry import (
+    bbox_area,
+    bbox_contains,
+    bboxes_intersect,
+    union_bbox,
+)
 from rastervec.logging_setup import configure_logging, get_logger
 from rastervec.models import VectorPath
 from rastervec.pipeline import run_page_context
@@ -169,20 +174,8 @@ def _draw_path(canvas: tk.Canvas, matrix: "fitz.Matrix", path: VectorPath, color
         canvas.create_line(*coords, fill=color, width=width, tags=("overlay",))
 
 
-def _bbox_contains(bbox, x: float, y: float) -> bool:
-    return bbox[0] <= x <= bbox[2] and bbox[1] <= y <= bbox[3]
-
-
-def _bboxes_intersect(a, b) -> bool:
-    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
-
-
 # Canvas-pixel movement below which a press/release is treated as a plain click.
 _DRAG_THRESHOLD_PX = 4
-
-
-def _bbox_area(bbox) -> float:
-    return max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
 
 
 class ManualLabelApp:
@@ -531,14 +524,14 @@ class ManualLabelApp:
     def _click_select(self, pt: "fitz.Point") -> None:
         if self.mode == "cluster":
             for idx, cluster in enumerate(self.working_clusters):
-                if cluster and _bbox_contains(self._cluster_bbox(cluster), pt.x, pt.y):
+                if cluster and bbox_contains(self._cluster_bbox(cluster), pt.x, pt.y):
                     self.selected.symmetric_difference_update({idx})
                     break
         else:
             hit = None
             for _ci, path in self._iter_paths():
-                if _bbox_contains(path.bbox, pt.x, pt.y):
-                    if hit is None or _bbox_area(path.bbox) < _bbox_area(hit.bbox):
+                if bbox_contains(path.bbox, pt.x, pt.y):
+                    if hit is None or bbox_area(path.bbox) < bbox_area(hit.bbox):
                         hit = path
             if hit is not None:
                 self.selected.symmetric_difference_update({id(hit)})
@@ -549,11 +542,11 @@ class ManualLabelApp:
         hits: set[int] = set()
         if self.mode == "cluster":
             for idx, cluster in enumerate(self.working_clusters):
-                if cluster and _bboxes_intersect(self._cluster_bbox(cluster), rect):
+                if cluster and bboxes_intersect(self._cluster_bbox(cluster), rect):
                     hits.add(idx)
         else:
             for _ci, path in self._iter_paths():
-                if _bboxes_intersect(path.bbox, rect):
+                if bboxes_intersect(path.bbox, rect):
                     hits.add(id(path))
         return hits
 
@@ -657,7 +650,7 @@ class ManualLabelApp:
         pt = self._page_point(event)
         hit = next(
             (c for c in self.working_clusters
-             if c and _bbox_contains(self._cluster_bbox(c), pt.x, pt.y)),
+             if c and bbox_contains(self._cluster_bbox(c), pt.x, pt.y)),
             None,
         )
         if hit is None:
@@ -745,7 +738,7 @@ class ManualLabelApp:
 
         if self.mode == "cluster":
             for cluster in self.working_clusters:
-                if not cluster or not _bbox_contains(self._cluster_bbox(cluster), pt.x, pt.y):
+                if not cluster or not bbox_contains(self._cluster_bbox(cluster), pt.x, pt.y):
                     continue
                 entry = entries_by_sig.get(cluster_signature(cluster))
                 text = (
@@ -757,15 +750,15 @@ class ManualLabelApp:
         else:
             hit = None
             for _ci, path in self._iter_paths():
-                if _bbox_contains(path.bbox, pt.x, pt.y):
-                    if hit is None or _bbox_area(path.bbox) < _bbox_area(hit.bbox):
+                if bbox_contains(path.bbox, pt.x, pt.y):
+                    if hit is None or bbox_area(path.bbox) < bbox_area(hit.bbox):
                         hit = path
             if hit is not None:
                 self.tooltip.show(event.x_root, event.y_root, f"{hit.kind}  seq={hit.seq}")
                 return
 
         for entry in page_entries:
-            if entry.cluster_signature in entries_by_sig and _bbox_contains(
+            if entry.cluster_signature in entries_by_sig and bbox_contains(
                 entry.cluster_bbox, pt.x, pt.y
             ):
                 self.tooltip.show(

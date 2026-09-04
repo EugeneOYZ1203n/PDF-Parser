@@ -55,13 +55,12 @@ from collections import defaultdict
 from math import atan2, ceil, cos, hypot, log, sin
 
 from rastervec.helpers.clustering import Clustering
-from rastervec.helpers.geometry import union_bbox
+from rastervec.helpers.geometry import bboxes_intersect, dims, union_bbox
 from rastervec.models import VectorPath
 from rastervec.Vector_Classification.groups.group_filters import GroupStats
 from rastervec.Vector_Classification.items.item_filters import (
     VectorSignature,
-    _bbox_of,
-    _dims,
+    bbox_of,
     vector_signature,
 )
 
@@ -73,7 +72,7 @@ def _group_sides(
     "x" if that side is the bbox's horizontal extent, "y" if vertical.
     Both the bbox's longer extent ("length") and shorter extent ("width")
     are included whenever the group has any extent at all."""
-    w, h = _dims(bbox)
+    w, h = dims(bbox)
     if w >= h:
         length, length_axis, width, width_axis = w, "x", h, "y"
     else:
@@ -95,8 +94,8 @@ def _matched_side_value(
     `size_tolerance` of each other, or `None` if no such pair exists. When
     `require_parallel` is set, a candidate pair only counts if the two
     sides also lie on the same axis."""
-    sides_a = _group_sides(_bbox_of(a))
-    sides_b = _group_sides(_bbox_of(b))
+    sides_a = _group_sides(bbox_of(a))
+    sides_b = _group_sides(bbox_of(b))
     for sa, axis_a in sides_a:
         for sb, axis_b in sides_b:
             if require_parallel and axis_a != axis_b:
@@ -141,7 +140,7 @@ def cluster_spatial_groups(
         return _any_side_close(a, b, size_tolerance, require_parallel=True)
 
     constrained = clustering.cluster_spatial(
-        groups, get_bbox=_bbox_of, threshold=threshold, extra_close=_close_parallel,
+        groups, get_bbox=bbox_of, threshold=threshold, extra_close=_close_parallel,
     )
 
     kept: list[list[VectorPath]] = []
@@ -151,14 +150,14 @@ def cluster_spatial_groups(
         kept.append(piece)
         lineage[id(piece)] = list(cluster)
 
-    unconstrained = clustering.cluster_spatial(groups, get_bbox=_bbox_of, threshold=threshold)
+    unconstrained = clustering.cluster_spatial(groups, get_bbox=bbox_of, threshold=threshold)
     debug_unconstrained = [[p for sub in cluster for p in sub] for cluster in unconstrained]
 
     def _close_no_parallel(a: list[VectorPath], b: list[VectorPath]) -> bool:
         return _any_side_close(a, b, size_tolerance, require_parallel=False)
 
     no_parallel = clustering.cluster_spatial(
-        groups, get_bbox=_bbox_of, threshold=threshold, extra_close=_close_no_parallel,
+        groups, get_bbox=bbox_of, threshold=threshold, extra_close=_close_no_parallel,
     )
     debug_no_parallel = [[p for sub in cluster for p in sub] for cluster in no_parallel]
 
@@ -183,14 +182,6 @@ def filter_mixed_fill_rule_clusters(
     return kept, dropped
 
 
-def _bboxes_intersect(
-    a: tuple[float, float, float, float], b: tuple[float, float, float, float],
-) -> bool:
-    ax0, ay0, ax1, ay1 = a
-    bx0, by0, bx1, by1 = b
-    return ax0 <= bx1 and bx0 <= ax1 and ay0 <= by1 and by0 <= ay1
-
-
 def filter_perimeter_only_clusters(
     groups: list[list[VectorPath]], group_stats: dict[int, GroupStats], margin_fraction: float,
 ) -> tuple[list[list[VectorPath]], list[list[VectorPath]]]:
@@ -211,7 +202,7 @@ def filter_perimeter_only_clusters(
             # meaningful to compare against, keep as-is.
             kept.append(g)
             continue
-        if any(_bboxes_intersect(p.bbox, center) for p in g):
+        if any(bboxes_intersect(p.bbox, center) for p in g):
             kept.append(g)
         else:
             dropped.append(g)
@@ -262,7 +253,7 @@ def filter_density_clusters(
                     x0 + col * cell_w, y0 + row * cell_h,
                     x0 + (col + 1) * cell_w, y0 + (row + 1) * cell_h,
                 )
-                if not any(_bboxes_intersect(p.bbox, cell) for p in g):
+                if not any(bboxes_intersect(p.bbox, cell) for p in g):
                     empty += 1
         (dropped if empty / (rows * cols) > max_empty_fraction else kept).append(g)
     return kept, dropped

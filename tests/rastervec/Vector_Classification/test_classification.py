@@ -315,7 +315,7 @@ def test_cluster_spatial_groups_merges_when_matching_sides_are_parallel():
     assert frozenset(id(p) for p in c) in no_parallel_sets
 
     old_threshold_result = Clustering().cluster_spatial(
-        [a, b], get_bbox=itf._bbox_of, threshold=8.0,
+        [a, b], get_bbox=itf.bbox_of, threshold=8.0,
     )
     assert len(old_threshold_result) == 2  # gap (12) exceeds the old threshold (8)
 

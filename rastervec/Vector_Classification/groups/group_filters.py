@@ -25,11 +25,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rastervec.helpers.geometry import rect_gap, union_bbox
+from rastervec.helpers.geometry import max_dimension, rect_gap, union_bbox
 from rastervec.models import Page, VectorPath
 from rastervec.Vector_Classification.items.item_filters import (
-    _bbox_of,
-    _max_dimension,
+    bbox_of,
     vector_signature,
 )
 
@@ -116,7 +115,7 @@ def filter_tiny_groups(
     kept: list[list[VectorPath]] = []
     dropped: list[list[VectorPath]] = []
     for g in groups:
-        if _max_dimension(_bbox_of(g)) < min_size_px:
+        if max_dimension(bbox_of(g)) < min_size_px:
             dropped.append(g)
         else:
             kept.append(g)
@@ -132,7 +131,7 @@ def filter_large_groups(
     page_min = min(page.meta.width, page.meta.height)
     threshold = max_dimension_fraction * page_min if page_min > 0 else float("inf")
 
-    kept = [g for g in groups if _max_dimension(_bbox_of(g)) <= threshold]
+    kept = [g for g in groups if max_dimension(bbox_of(g)) <= threshold]
     kept_ids = {id(g) for g in kept}
     dropped = [g for g in groups if id(g) not in kept_ids]
     return kept, dropped
@@ -152,11 +151,11 @@ def compute_group_stats(
     stats: dict[int, GroupStats] = {}
     for g in groups:
         sigs = {vector_signature(p, round_px) for p in g}
-        bbox = _bbox_of(g)
+        bbox = bbox_of(g)
         stats[id(g)] = GroupStats(
             member_count=len(g),
             unique_signature_count=len(sigs),
             bbox=bbox,
-            max_dimension=_max_dimension(bbox),
+            max_dimension=max_dimension(bbox),
         )
     return groups, stats

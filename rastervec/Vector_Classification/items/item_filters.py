@@ -9,34 +9,23 @@ order these are run in):
    population, consumed by later group/cluster steps (and the debug app's
    "color by vector type" view) -- never drops anything itself.
 
-Also home to `_bbox_of`/`_max_dimension`/`_dims`, the shared bbox-geometry
-helpers reused by the group- and cluster-level filter modules -- these
-operate on the same `list[VectorPath]` unit those higher-level modules
-call a "group"/"cluster", but the math itself has no group/cluster
-semantics of its own, so it lives at this, the lowest level.
+Also home to `bbox_of`, the "union bbox of a group's member paths" helper
+reused by the group- and cluster-level filter modules. The pure bbox math
+(`max_dimension`, `dims`) lives in `helpers/geometry.py`.
 """
 from __future__ import annotations
 
 from collections import Counter
 
-from rastervec.helpers.geometry import union_bbox
+from rastervec.helpers.geometry import BBox, max_dimension, union_bbox
 from rastervec.models import Page, VectorPath
 
 VectorSignature = tuple[str, tuple[tuple[int, int], ...]]
 
 
-def _bbox_of(group: list[VectorPath]) -> tuple[float, float, float, float]:
+def bbox_of(group: list[VectorPath]) -> BBox:
+    """Union bbox of every member path's own bbox."""
     return union_bbox([p.bbox for p in group])
-
-
-def _max_dimension(bbox: tuple[float, float, float, float]) -> float:
-    x0, y0, x1, y1 = bbox
-    return max(x1 - x0, 0.0, y1 - y0)
-
-
-def _dims(bbox: tuple[float, float, float, float]) -> tuple[float, float]:
-    x0, y0, x1, y1 = bbox
-    return (x1 - x0, y1 - y0)
 
 
 def vector_signature(path: VectorPath, round_px: float) -> VectorSignature:
@@ -69,7 +58,7 @@ def filter_large_items(
     kept: list[list[VectorPath]] = []
     dropped: list[list[VectorPath]] = []
     for g in groups:
-        keep = [p for p in g if _max_dimension(p.bbox) <= threshold]
+        keep = [p for p in g if max_dimension(p.bbox) <= threshold]
         keep_ids = {id(p) for p in keep}
         if keep:
             kept.append(keep)
