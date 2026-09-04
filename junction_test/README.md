@@ -27,6 +27,9 @@ stage on, and find which thresholds transfer.
 # fast, no notebook: 5 synthetic drawings + metrics + PASS/FAIL
 .venv/Scripts/python.exe -m junction_test.smoke
 
+# stage-swap ablation (JUNCTION_ABLATION.md) -> ablation_results.csv
+.venv/Scripts/python.exe -m junction_test.ablation [--quick]
+
 # full walk-through with visualisations
 .venv/Scripts/python.exe -m jupyter notebook junction_test/explore.ipynb
 #  or headless:
@@ -62,8 +65,30 @@ recompute.
 `dashed_precision/recall`, `arc_count_error`, `segment_count_ratio`,
 `staircase_precision/recall/f1`, `staircase_tread_count_err`,
 `symbol_door_precision/recall/f1`, `symbol_window_precision/recall/f1`.
+`JUNCTION_ABLATION.md` §5 additions: `junction_type_accuracy` (+
+`junction_type_confusion`), `x_passthrough_accuracy`,
+`coincident_unrelated_false_merge`, `width_mae`, `dash_style_accuracy`,
+`arc_radius_rel_err`, `curve_misfit_count`, `reconstruction_ssim`, `runtime_s`.
 Ground truth comes from `synthetic.generate` (exact) or, for real PDFs, is
 visual-only (IoU/coverage vs the input ink mask).
+
+## Synthetic difficulty knobs (`SYNTHETIC_DATA.md`)
+
+`synthetic.generate` keyword-only args, all default off so `smoke.py` is
+unchanged: `weight_ladder` (AEC mm ladder → px at `dpi`), `color_layers`
+(RGB layers in GT, luma-flattened into the raster), `dash_styles`
+(dashed/hidden/center/phantom + real `dash_array`), `forced_crossings` (true X
+pass-through), `coincident_unrelated` (grazing endpoint, `is_true_connection=False`),
+`curved_walls` (large-radius arc + tangent stub), `residue_level` (white
+rectangular holes punched through strokes + glyph-fragment speckle). GT junctions
+carry `jtype` (L/T/X/Y/star/endpoint/coincident_unrelated), `arm_angles`, `members`.
+
+## Ablation (`ablation.py`, `JUNCTION_ABLATION.md`)
+
+Baseline vs one-stage swaps — `S2_medial_axis`, `S3_junction_repair` (erase disk
+at deg≥3 nodes), `S8_lsd` (OpenCV LSD on the raster), `S9_hough`, `F1_rdp` —
+scored over archetype × overlap-density × clean/noisy buckets → `ablation_results.csv`.
+`explore.ipynb` §7 has the interactive view.
 
 ## Reading the results
 

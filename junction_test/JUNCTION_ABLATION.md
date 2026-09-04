@@ -192,3 +192,17 @@ Add:
 
 Results table + chosen recipe (a single method, or per-regime routing) → drives the real
 `rastervec` raster-stage implementation.
+
+## Implementation status
+
+- Harness: `junction_test/ablation.py` (`METHODS` presets, bucketed `run_ablation`,
+  `bucket_table`, `write_csv` → `ablation_results.csv`); `explore.ipynb` §7.
+- Methods wired as `Params` overrides (no separate `methods/` package):
+  `baseline` (S1), `S2_medial_axis`, `S3_junction_repair`, `S8_lsd`, `S9_hough`,
+  `F1_rdp`. S4–S7, S10, S11 (learned), J2–J5, R1–R7 not yet implemented.
+- Metrics §5: junction-type confusion/accuracy, X pass-through, coincident-unrelated
+  false-merge, width MAE, dash-style accuracy, arc-radius rel-err, curve-misfit count,
+  reconstruction SSIM, runtime — all in `metrics.evaluate`.
+- Buckets §3: archetype (floor_plan / curved / mep_overlay / dimension / residue) ×
+  overlap density (low/med/high, via `forced_crossings`) × clean/noisy × seeds.
+  Not yet: DPI sweep, aspect-ratio > 4:1, per-primitive Bézier archetype.
