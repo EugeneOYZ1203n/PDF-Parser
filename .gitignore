@@ -6,3 +6,6 @@ __pycache__
 /junction_cnn/archive
 /references2
 /rastervec/weights
+
+# ablation harness output
+ablation_results.csv
