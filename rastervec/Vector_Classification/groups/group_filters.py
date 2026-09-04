@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from rastervec.helpers.geometry import max_dimension, rect_gap, union_bbox
+from rastervec.helpers.iterutils import partition
 from rastervec.models import Page, VectorPath
 from rastervec.Vector_Classification.items.item_filters import (
     bbox_of,
@@ -112,14 +113,7 @@ def filter_tiny_groups(
 ) -> tuple[list[list[VectorPath]], list[list[VectorPath]]]:
     """Drops a whole group if its aggregate bbox's max dimension is under
     `min_size_px` -- a leftover speck too small to be a real glyph."""
-    kept: list[list[VectorPath]] = []
-    dropped: list[list[VectorPath]] = []
-    for g in groups:
-        if max_dimension(bbox_of(g)) < min_size_px:
-            dropped.append(g)
-        else:
-            kept.append(g)
-    return kept, dropped
+    return partition(groups, lambda g: max_dimension(bbox_of(g)) >= min_size_px)
 
 
 def filter_large_groups(
@@ -131,10 +125,7 @@ def filter_large_groups(
     page_min = min(page.meta.width, page.meta.height)
     threshold = max_dimension_fraction * page_min if page_min > 0 else float("inf")
 
-    kept = [g for g in groups if max_dimension(bbox_of(g)) <= threshold]
-    kept_ids = {id(g) for g in kept}
-    dropped = [g for g in groups if id(g) not in kept_ids]
-    return kept, dropped
+    return partition(groups, lambda g: max_dimension(bbox_of(g)) <= threshold)
 
 
 def compute_group_stats(

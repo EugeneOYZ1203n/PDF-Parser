@@ -56,6 +56,7 @@ from math import atan2, ceil, cos, hypot, log, sin
 
 from rastervec.helpers.clustering import Clustering
 from rastervec.helpers.geometry import bboxes_intersect, dims, union_bbox
+from rastervec.helpers.iterutils import partition
 from rastervec.models import VectorPath
 from rastervec.Vector_Classification.groups.group_filters import GroupStats
 from rastervec.Vector_Classification.items.item_filters import (
@@ -172,14 +173,7 @@ def filter_mixed_fill_rule_clusters(
     real text glyphs are painted consistently one way; a cluster mixing
     fill-only, stroke-only, and/or fill+stroke members is drawing content,
     not text."""
-    kept: list[list[VectorPath]] = []
-    dropped: list[list[VectorPath]] = []
-    for g in groups:
-        if len({p.fill_rule for p in g}) > 1:
-            dropped.append(g)
-        else:
-            kept.append(g)
-    return kept, dropped
+    return partition(groups, lambda g: len({p.fill_rule for p in g}) <= 1)
 
 
 def filter_perimeter_only_clusters(
@@ -294,22 +288,22 @@ def filter_constant_spacing_clusters(
     whole cluster is dropped if the members belonging to patterned
     sub-groups together make up at least `pattern_fraction_threshold` of
     the cluster's total member count."""
-    kept: list[list[VectorPath]] = []
-    dropped: list[list[VectorPath]] = []
-    for g in groups:
+
+    def _mostly_patterned(g: list[VectorPath]) -> bool:
+        if not g:
+            return False
         by_sig: dict[VectorSignature, list[VectorPath]] = defaultdict(list)
         for p in g:
             by_sig[vector_signature(p, round_px)].append(p)
         patterned_count = sum(
             len(members)
             for members in by_sig.values()
-            if len(members) >= min_repeat_count and _is_constant_spacing(members, spacing_tolerance)
+            if len(members) >= min_repeat_count
+            and _is_constant_spacing(members, spacing_tolerance)
         )
-        if g and (patterned_count / len(g)) >= pattern_fraction_threshold:
-            dropped.append(g)
-        else:
-            kept.append(g)
-    return kept, dropped
+        return (patterned_count / len(g)) >= pattern_fraction_threshold
+
+    return partition(groups, lambda g: not _mostly_patterned(g))
 
 
 def _required_unique_signature_count(
