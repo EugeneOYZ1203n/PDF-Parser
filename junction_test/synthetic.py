@@ -12,11 +12,100 @@ from .types_ import Arc, GroundTruth, Junction, Segment, StaircaseRegion, Symbol
 
 _ANGLES = [0.0, 90.0, 45.0, 135.0, 22.5, 67.5]
 
+# AEC line-weight ladder (mm) -> px at a given DPI (SYNTHETIC_DATA.md).
+_WEIGHTS_MM = (0.13, 0.18, 0.25, 0.35, 0.50, 0.70, 1.00)
 
-def _line(img, p0, p1, thickness):
+# dash_style -> on/off run pattern (px, before DPI scaling); solid handled separately.
+_DASH_PATTERNS = {
+    "dashed": (10.0, 8.0),
+    "hidden": (6.0, 4.0),
+    "center": (18.0, 4.0, 3.0, 4.0),           # dash-dot
+    "phantom": (24.0, 4.0, 3.0, 4.0, 3.0, 4.0),  # dash-dot-dot
+}
+
+# named colour layers (RGB). near-black default plus MEP/annotation hues.
+_LAYERS = {
+    "ink": (40, 40, 40),
+    "mep_supply": (30, 90, 200),
+    "mep_return": (200, 40, 40),
+    "site": (30, 150, 60),
+    "annotation": (170, 40, 170),
+}
+
+
+def mm_to_px(mm: float, dpi: int) -> float:
+    return mm / 25.4 * dpi
+
+
+def _gray_of(rgb: tuple[int, int, int]) -> int:
+    """ITU-R 601 luma; the spike raster is single-channel so coloured ink is
+    flattened here while the true RGB is kept in ground truth."""
+    r, g, b = rgb
+    return int(round(0.299 * r + 0.587 * g + 0.114 * b))
+
+
+def _weights_px(rng, dpi: int) -> tuple[int, int, int]:
+    """heavy / medium / light stroke widths, px, three distinct ladder rungs."""
+    idx = sorted(rng.choice(len(_WEIGHTS_MM), size=3, replace=False).tolist())
+    w = [max(1, int(round(mm_to_px(_WEIGHTS_MM[i], dpi)))) for i in idx]
+    if w[0] == w[1]:
+        w[1] += 1
+    if w[1] >= w[2]:
+        w[2] = w[1] + 1
+    return w[2], w[1], w[0]
+
+
+def _line(img, p0, p1, thickness, val: int = 40):
     import cv2
     cv2.line(img, (int(round(p0[0])), int(round(p0[1]))),
-             (int(round(p1[0])), int(round(p1[1]))), 40, thickness, cv2.LINE_AA)
+             (int(round(p1[0])), int(round(p1[1]))), val, thickness, cv2.LINE_AA)
+
+
+def _styled_dash(img, p0, p1, thickness, pattern, val: int = 40):
+    """Render an arbitrary on/off dash pattern along p0->p1."""
+    p0 = np.array(p0, float)
+    p1 = np.array(p1, float)
+    total = float(np.hypot(*(p1 - p0)))
+    if total < 1e-6:
+        return
+    d = (p1 - p0) / total
+    s, k, on = 0.0, 0, True
+    while s < total:
+        run = pattern[k % len(pattern)]
+        e = min(s + run, total)
+        if on:
+            _line(img, p0 + d * s, p0 + d * e, thickness, val)
+        s = e
+        k += 1
+        on = not on
+
+
+def _punch_holes(img, rng, segs, level: float):
+    """Simulate imperfect text removal: white axis-aligned rectangles through
+    strokes (bridge targets) + stray short strokes not in GT (reject targets)."""
+    if level <= 0:
+        return
+    import cv2
+    h, w = img.shape
+    n_holes = int(level * 8)
+    for _ in range(n_holes):
+        if not segs:
+            break
+        s = segs[int(rng.integers(len(segs)))]
+        t = rng.random()
+        cx = s.p0[0] + t * (s.p1[0] - s.p0[0])
+        cy = s.p0[1] + t * (s.p1[1] - s.p0[1])
+        bw = int(rng.integers(8, 22))
+        bh = int(rng.integers(8, 16))
+        x = int(np.clip(cx - bw / 2, 0, w - 1))
+        y = int(np.clip(cy - bh / 2, 0, h - 1))
+        img[y:y + bh, x:x + bw] = 255
+    for _ in range(int(level * 6)):                 # glyph-fragment speckle
+        gx = int(rng.integers(0, w - 12))
+        gy = int(rng.integers(0, h - 12))
+        a = (gx, gy)
+        b = (gx + int(rng.integers(-6, 7)), gy + int(rng.integers(-6, 7)))
+        _line(img, a, b, 1)
 
 
 def _dashed(img, p0, p1, thickness, dash=10, gap=8):
@@ -86,13 +175,31 @@ def _window(img, wall_p0, wall_p1, t_along, gap, jamb_len, thin_t, wall_t):
 
 
 def generate(seed: int = 0, size: int = 512, noise: float = 3.0,
-             rotate: bool = False) -> tuple[np.ndarray, GroundTruth]:
+             rotate: bool = False, *,
+             dpi: int = 150,
+             weight_ladder: bool = False,
+             color_layers: bool = False,
+             dash_styles: bool = False,
+             forced_crossings: int = 0,
+             coincident_unrelated: int = 0,
+             curved_walls: bool = False,
+             residue_level: float = 0.0,
+             archetype: str = "floor_plan") -> tuple[np.ndarray, GroundTruth]:
+    """Procedural AEC drawing + exact ground truth.
+
+    The keyword-only knobs add the SYNTHETIC_DATA.md difficulty axes; all default
+    to off/neutral so existing callers (smoke.py) get the original archetype #1.
+    """
     import cv2
     rng = np.random.default_rng(seed)
     img = np.full((size, size), 255, np.uint8)
 
-    wall_t = int(rng.integers(5, 9))
-    thin_t = int(rng.integers(1, 3))
+    if weight_ladder:
+        wall_t, mid_t, thin_t = _weights_px(rng, dpi)
+    else:
+        wall_t = int(rng.integers(5, 9))
+        thin_t = int(rng.integers(1, 3))
+        mid_t = max(thin_t + 1, wall_t - 2)
     m = int(size * 0.08)
 
     gt_segments: list[Segment] = []
@@ -157,8 +264,10 @@ def generate(seed: int = 0, size: int = 512, noise: float = 3.0,
         _line(img, a, b, thin_t)
         gt_segments.append(Segment(p0=a, p1=(float(b[0]), float(b[1])), width=float(thin_t)))
 
-    # dashed lines
-    for _ in range(int(rng.integers(1, 3))):
+    # dashed lines (optionally with the full hidden/center/phantom vocabulary
+    # and coloured MEP layers)
+    style_pool = list(_DASH_PATTERNS) if dash_styles else ["dashed"]
+    for _ in range(int(rng.integers(1, 3)) + (2 if dash_styles else 0)):
         horiz = rng.random() < 0.5
         if horiz:
             yv = int(rng.integers(y0 + 30, y1 - 30))
@@ -166,10 +275,18 @@ def generate(seed: int = 0, size: int = 512, noise: float = 3.0,
         else:
             xv = int(rng.integers(x0 + 30, x1 - 30))
             a, b = (xv, y0 + 15), (xv, y1 - 15)
-        _dashed(img, a, b, thin_t)
-        gt_segments.append(Segment(p0=(float(a[0]), float(a[1])),
-                                   p1=(float(b[0]), float(b[1])),
-                                   width=float(thin_t), dashed=True))
+        style = str(rng.choice(style_pool))
+        pattern = tuple(round(v * dpi / 150.0, 1) for v in _DASH_PATTERNS[style])
+        layer = "ink"
+        color = _LAYERS["ink"]
+        if color_layers and rng.random() < 0.6:
+            layer = str(rng.choice(["mep_supply", "mep_return", "site", "annotation"]))
+            color = _LAYERS[layer]
+        _styled_dash(img, a, b, thin_t, pattern, val=_gray_of(color))
+        gt_segments.append(Segment(
+            p0=(float(a[0]), float(a[1])), p1=(float(b[0]), float(b[1])),
+            width=float(thin_t), dashed=True, dash_style=style,
+            dash_array=pattern, color=color, layer=layer, role="hidden_edge"))
 
     # door arcs (quarter circles) + hinge leaf
     for _ in range(int(rng.integers(1, 4))):
@@ -232,6 +349,62 @@ def generate(seed: int = 0, size: int = 512, noise: float = 3.0,
                 spacing=spacing, n_treads=n_treads,
             ))
 
+    # ---- forced X crossings: two long strokes that both continue through ----
+    cu_points: list[tuple[float, float]] = []
+    for _ in range(forced_crossings):
+        cx = float(rng.uniform(x0 + 60, x1 - 60))
+        cy = float(rng.uniform(y0 + 60, y1 - 60))
+        a1 = np.radians(float(rng.choice(_ANGLES)))
+        a2 = a1 + np.radians(float(rng.uniform(50, 130)))
+        L = float(rng.uniform(50, 110))
+        for ang in (a1, a2):
+            dvec = np.array([np.cos(ang), np.sin(ang)])
+            p = (cx - dvec[0] * L, cy - dvec[1] * L)
+            q = (cx + dvec[0] * L, cy + dvec[1] * L)
+            _line(img, p, q, mid_t)
+            gt_segments.append(Segment(p0=(float(p[0]), float(p[1])),
+                                       p1=(float(q[0]), float(q[1])),
+                                       width=float(mid_t), role="structure"))
+
+    # ---- coincident-but-unrelated: an endpoint just grazes another stroke ----
+    for _ in range(coincident_unrelated):
+        host = gt_segments[int(rng.integers(len(gt_segments)))]
+        t = float(rng.uniform(0.3, 0.7))
+        hx = host.p0[0] + t * (host.p1[0] - host.p0[0])
+        hy = host.p0[1] + t * (host.p1[1] - host.p0[1])
+        ang = np.radians(float(rng.uniform(0, 360)))
+        far = (hx + 40 * np.cos(ang), hy + 40 * np.sin(ang))
+        _line(img, (hx, hy), far, thin_t)
+        gt_segments.append(Segment(p0=(float(hx), float(hy)),
+                                   p1=(float(far[0]), float(far[1])),
+                                   width=float(thin_t), role="annotation"))
+        cu_points.append((float(hx), float(hy)))
+
+    # ---- large-radius curved wall, tangent to a straight wall stub ----
+    if curved_walls:
+        r = float(rng.uniform(size * 0.35, size * 0.6))
+        cx = float(rng.uniform(x0, x1))
+        cy = y1 + r * 0.4                       # centre below the sheet -> gentle arc across it
+        a0 = float(np.degrees(np.arctan2(y0 - cy, x0 - cx)))
+        a1d = float(np.degrees(np.arctan2(y0 - cy, x1 - cx)))
+        lo, hi = sorted((a0, a1d))
+        _arc(img, (cx, cy), r, lo, hi, wall_t)
+        t = np.radians(np.linspace(lo, hi, 40))
+        poly = [(float(cx + r * np.cos(tt)), float(cy + r * np.sin(tt))) for tt in t]
+        gt_arcs.append(Arc(center=(cx, cy), radius=r, a0=lo, a1=hi, polyline=poly,
+                           width=float(wall_t), role="curved_wall"))
+        # tangent straight stub at the arc start
+        p_start = np.array(poly[0])
+        tang = p_start - np.array(poly[1])
+        tang = tang / (np.hypot(*tang) + 1e-9)
+        stub_end = p_start + tang * 60.0
+        _line(img, tuple(p_start), tuple(stub_end), wall_t)
+        gt_segments.append(Segment(p0=(float(p_start[0]), float(p_start[1])),
+                                   p1=(float(stub_end[0]), float(stub_end[1])),
+                                   width=float(wall_t), thick=True, role="wall"))
+
+    _punch_holes(img, rng, gt_segments, residue_level)
+
     if rotate:
         ang = float(rng.uniform(-8, 8))
         m2 = cv2.getRotationMatrix2D((size / 2, size / 2), ang, 1.0)
@@ -261,10 +434,19 @@ def generate(seed: int = 0, size: int = 512, noise: float = 3.0,
     if noise > 0:
         img = np.clip(img.astype(float) + rng.normal(0, noise, img.shape), 0, 255).astype(np.uint8)
 
-    gt_junctions = _ground_truth_junctions(gt_segments, size)
+    if rotate and cu_points:
+        cu_points = [_rot_pt(p, m2) for p in cu_points]
+    gt_junctions = _ground_truth_junctions(gt_segments, size, cu_points)
+    meta = {
+        "archetype": archetype, "dpi": dpi, "seed": seed,
+        "weight_ladder": weight_ladder, "color_layers": color_layers,
+        "dash_styles": dash_styles, "forced_crossings": forced_crossings,
+        "coincident_unrelated": coincident_unrelated, "curved_walls": curved_walls,
+        "residue_level": residue_level, "rotate": rotate,
+    }
     return img, GroundTruth(segments=gt_segments, arcs=gt_arcs,
                             junctions=gt_junctions, size=(size, size),
-                            staircases=gt_staircases, symbols=gt_symbols)
+                            staircases=gt_staircases, symbols=gt_symbols, meta=meta)
 
 
 def _rot_pt(p, m):
@@ -273,12 +455,14 @@ def _rot_pt(p, m):
 
 
 def _rot_seg(s: Segment, m) -> Segment:
-    return Segment(_rot_pt(s.p0, m), _rot_pt(s.p1, m), s.width, s.thick, s.dashed)
+    return Segment(_rot_pt(s.p0, m), _rot_pt(s.p1, m), s.width, s.thick, s.dashed,
+                   s.color, s.dash_style, s.dash_array, s.role, s.layer)
 
 
 def _rot_arc(a: Arc, m) -> Arc:
     return Arc(_rot_pt(a.center, m), a.radius, a.a0, a.a1,
-              [_rot_pt(p, m) for p in a.polyline], a.closed, a.width)
+              [_rot_pt(p, m) for p in a.polyline], a.closed, a.width,
+              a.color, a.dash_style, a.role, a.layer)
 
 
 def _rot_bbox(bbox, m):
@@ -289,9 +473,11 @@ def _rot_bbox(bbox, m):
     return (min(xs), min(ys), max(xs), max(ys))
 
 
-def _ground_truth_junctions(segs: list[Segment], size: int) -> list[Junction]:
+def _ground_truth_junctions(segs: list[Segment], size: int,
+                            cu_points: list[tuple[float, float]] | None = None) -> list[Junction]:
     from .geom import classify_junction, heading_deg, point_to_segment_dist
 
+    cu_points = cu_points or []
     walls = [(i, s) for i, s in enumerate(segs) if not s.dashed]
     cand = []
     for _, s in walls:
@@ -324,8 +510,16 @@ def _ground_truth_junctions(segs: list[Segment], size: int) -> list[Junction]:
             members.append(idx)
         if len(members) < 2 and len(arms) < 3:
             continue
+        is_cu = any(dist(p, c) <= 6.0 for c in cu_points)
         out.append(Junction(
             xy=p, directions=list(arms), arm_angles=sorted(arms),
-            jtype=classify_junction(arms), members=members,
+            jtype="coincident_unrelated" if is_cu else classify_junction(arms),
+            members=members, is_true_connection=not is_cu,
         ))
+    # CU points that produced no wall-wall candidate (endpoint grazing an interior)
+    have = {(round(j.xy[0]), round(j.xy[1])) for j in out}
+    for c in cu_points:
+        if (round(c[0]), round(c[1])) not in have and all(dist(c, j.xy) > 6.0 for j in out):
+            out.append(Junction(xy=c, directions=[], arm_angles=[],
+                                jtype="coincident_unrelated", is_true_connection=False))
     return out
