@@ -152,9 +152,11 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   "keep as one cluster" (logged) instead of hanging — verified against a 78k-path reference PDF in
   ~3.5s. `cluster_by_dimension`/`cluster_by_seq`/`group_by_overlap` aren't currently called by the
   fixed Vector Classification chain below, kept for reuse (own tests, own callers).
-- **`Reader/reader.py` — `Reader`** *(implemented)*: opens a PDF, hands out `Page` objects one at a
-  time (`get_page(index)`, `iter_pages(indices=None)`), each carrying a `PageMeta` snapshot
-  (mediabox, rotation, dimensions) plus the live `fitz.Page`.
+- **`Reader/reader.py` — `Reader`** *(implemented)*: opens a PDF (a bad path raises `ValueError`,
+  not a raw fitz error), hands out `Page` objects one at a time (`get_page(index)`,
+  `iter_pages(indices=None)`), each carrying a `PageMeta` snapshot (mediabox, rotation normalised to
+  [0,360), dimensions) plus the live `fitz.Page`. `page.meta.index` is always the source-PDF page
+  index and round-trips through `get_page`.
 - **`Native_Text/native.py` — `Native`** *(implemented)*: `extract(page) -> list[TextWord]` — one
   `TextWord` per `get_text("words")` word (geometry + `block_no`/`line_no`/`word_no`), font/size/
   colour/direction/`wmode` joined from the best-overlapping `get_text("dict")` span (`_Span`

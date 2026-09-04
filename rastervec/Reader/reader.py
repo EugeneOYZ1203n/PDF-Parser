@@ -16,6 +16,7 @@ def _page_meta(fitz_page: "fitz.Page", index: int) -> PageMeta:
 
     A free function (not a method) so it's testable directly against a
     synthetic fitz.Page without needing a full Reader/open document.
+    `rotation` is normalised to [0, 360).
     """
     mediabox = fitz_page.mediabox
     return PageMeta(
@@ -29,35 +30,17 @@ def _page_meta(fitz_page: "fitz.Page", index: int) -> PageMeta:
 
 
 class Reader:
-    """Consumes a PDF and splits it into pages.
+    """Opens a PDF and yields `Page` objects one at a time. `page.meta.index`
+    is always the source-PDF page index -- pass that same value back to
+    `get_page` and you get the same page."""
 
-    Pass `page_index` to restrict the opened document to just that one page
-    (via `fitz.Document.select`, which drops every other page from the
-    document's own page tree) -- useful for tools like the debug app that
-    only ever need one page at a time and shouldn't pay to load the rest of
-    a large PDF. `original_page_count` still reports the source PDF's full
-    page count for display purposes even when restricted.
-    """
-
-    def __init__(self, path: str, page_index: int | None = None) -> None:
+    def __init__(self, path: str) -> None:
         self.path = path
-        self._doc = fitz.open(path)
-        self.original_page_count = self._doc.page_count
-        self._page_offset = 0
-
-        if page_index is not None:
-            if not (0 <= page_index < self.original_page_count):
-                raise IndexError(
-                    f"page index {page_index} out of range for document "
-                    f"with {self.original_page_count} page(s)"
-                )
-            self._doc.select([page_index])
-            self._page_offset = page_index
-
-        _LOG.info(
-            "opened %s (%d/%d page(s) loaded)",
-            path, self._doc.page_count, self.original_page_count,
-        )
+        try:
+            self._doc = fitz.open(path)
+        except Exception as exc:  # noqa: BLE001 -- surface a clear message, not a raw fitz error
+            raise ValueError(f"could not open PDF {path!r}: {exc}") from exc
+        _LOG.info("opened %s (%d page(s))", path, self._doc.page_count)
 
     def page_count(self) -> int:
         return self._doc.page_count
@@ -66,24 +49,17 @@ class Reader:
         count = self.page_count()
         if not (0 <= index < count):
             raise IndexError(
-                f"page index {index} out of range for document with "
-                f"{count} page(s)"
+                f"page index {index} out of range for document with {count} page(s)"
             )
-
         fitz_page = self._doc[index]
-        meta = _page_meta(fitz_page, index + self._page_offset)
+        meta = _page_meta(fitz_page, index)
         _LOG.debug(
-            "page %d: rotation=%d mediabox=%s",
-            index,
-            meta.rotation,
-            meta.mediabox,
+            "page %d: rotation=%d mediabox=%s", index, meta.rotation, meta.mediabox,
         )
         return Page(doc_path=self.path, meta=meta, fitz_page=fitz_page)
 
     def iter_pages(self, indices: list[int] | None = None) -> Iterator[Page]:
-        if indices is None:
-            indices = range(self.page_count())
-        for index in indices:
+        for index in range(self.page_count()) if indices is None else indices:
             yield self.get_page(index)
 
     def close(self) -> None:
