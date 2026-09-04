@@ -48,34 +48,6 @@ from rastervec.logging_setup import configure_logging, get_logger
 _LOG = get_logger("benchmark")
 
 
-def run_one_page(
-    pdf_path: str, page_index: int,
-    iou_threshold: float = MetricConfig().iou_edge_min,
-    reconstruct_dir: Path | None = None,
-    variant: str = "current_light",
-) -> MetricSuiteResult:
-    """Ground truth (no pipeline run) -> `convert_page_text_only` -> a real
-    full pipeline run (OCR included) -> `metrics.evaluate_metrics`, for one
-    page's auto labels. `iou_threshold` maps onto `MetricConfig.iou_edge_min`;
-    `variant` is a name from `Evaluation/Evaluate/variants.VARIANTS`.
-    Delegates to `Reader/Parallel/benchmark_jobs.run_page_task`."""
-    from rastervec.Reader.Parallel.benchmark_jobs import PageTask, run_page_task
-
-    result = run_page_task(PageTask(
-        pdf_path=pdf_path, page_index=page_index, iou_edge_min=iou_threshold,
-        variant=variant,
-        reconstruct_dir=str(reconstruct_dir) if reconstruct_dir else None,
-        showcase_per_page=0,
-    ))
-    if result.error is not None:
-        raise RuntimeError(result.error)
-    if result.auto is None:
-        raise RuntimeError(
-            "auto run produced no result: " + " | ".join(result.report_blocks)
-        )
-    return result.auto
-
-
 def _fmt_metric_line(name: str, result: MetricSuiteResult) -> str:
     if name in DERIVED_F1_FIELDS:
         v = result.get(name)
