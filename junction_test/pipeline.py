@@ -33,6 +33,14 @@ class Params:
     run_ocr: bool = False
     # thick / thin
     thick_min_px: int | None = None      # None -> auto from distance transform
+    # centerline / primitive extraction (JUNCTION_ABLATION.md Sec 2 "S")
+    centerline_method: str = "skeleton"  # skeleton | lsd | hough
+    skeleton_method: str = "skeletonize"  # skeletonize (S1) | medial_axis (S2)
+    junction_repair: bool = False        # S3: erase disk at deg>=3 nodes, re-pair stubs
+    lsd_min_len_px: float = 12.0
+    hough_thresh: int = 40
+    hough_min_len_px: float = 20.0
+    hough_max_gap_px: float = 6.0
     # skeleton graph
     barb_min_px: float = 9.0
     # polygonal approximation
@@ -170,11 +178,90 @@ def thick_thin(graphics: np.ndarray, p: Params) -> tuple[np.ndarray, np.ndarray,
     return thick, thin, w
 
 
-def skeleton_and_dt(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def skeleton_and_dt(mask: np.ndarray, method: str = "skeletonize") -> tuple[np.ndarray, np.ndarray]:
     m = mask.astype(bool)
-    sk = skeletonize(m)
+    if method == "medial_axis":            # S2: subpixel-width medial axis
+        sk = medial_axis(m)
+    else:                                  # S1: Zhang-Suen / Lee thinning
+        sk = skeletonize(m)
     dt = cv2.distanceTransform(m.astype(np.uint8), cv2.DIST_L2, 5)
     return sk, dt
+
+
+def repair_junctions(skeleton: np.ndarray, dist_map: np.ndarray, p: Params) -> np.ndarray:
+    """S3: erase a disk (r ~ local stroke half-width) around every degree>=3
+    skeleton node so the graph builder re-pairs the stubs by direction instead
+    of collapsing the crossing to one distorted node."""
+    from .skeleton_graph import _degree_map
+    sk = skeleton.astype(bool).copy()
+    deg = _degree_map(sk)
+    ys, xs = np.nonzero(sk & (deg >= 3))
+    h, w = sk.shape
+    for y, x in zip(ys.tolist(), xs.tolist()):
+        r = int(max(2, round(dist_map[y, x])))
+        y0, y1 = max(0, y - r), min(h, y + r + 1)
+        x0, x1 = max(0, x - r), min(w, x + r + 1)
+        yy, xx = np.ogrid[y0:y1, x0:x1]
+        sk[y0:y1, x0:x1] &= ((yy - y) ** 2 + (xx - x) ** 2) > r * r
+    return sk
+
+
+def _seg_width(p0: Point, p1: Point, dt: np.ndarray) -> float:
+    n = max(2, int(dist(p0, p1)))
+    xs = np.linspace(p0[0], p1[0], n)
+    ys = np.linspace(p0[1], p1[1], n)
+    h, w = dt.shape
+    xi = np.clip(np.round(xs).astype(int), 0, w - 1)
+    yi = np.clip(np.round(ys).astype(int), 0, h - 1)
+    v = dt[yi, xi]
+    v = v[v > 0]
+    return float(np.median(v) * 2.0) if v.size else 1.0
+
+
+def detect_segments_lsd(graphics: np.ndarray, dt: np.ndarray, p: Params) -> list[Segment]:
+    """S8: LSD straight-segment detector directly on the raster (skip skeleton)."""
+    g = (graphics.astype(np.uint8)) * 255
+    try:
+        lsd = cv2.createLineSegmentDetector()
+        lines = lsd.detect(g)[0]
+    except Exception:
+        lines = None
+    segs: list[Segment] = []
+    if lines is not None:
+        for ln in lines.reshape(-1, 4):
+            p0, p1 = (float(ln[0]), float(ln[1])), (float(ln[2]), float(ln[3]))
+            if dist(p0, p1) >= p.lsd_min_len_px:
+                segs.append(Segment(p0=p0, p1=p1, width=_seg_width(p0, p1, dt)))
+    else:                                  # LSD unavailable in this opencv build
+        segs = detect_lines_hough(graphics, dt, p)
+    return segs
+
+
+def detect_lines_hough(graphics: np.ndarray, dt: np.ndarray, p: Params) -> list[Segment]:
+    """S9: progressive probabilistic Hough lines."""
+    g = (graphics.astype(np.uint8)) * 255
+    lines = cv2.HoughLinesP(g, 1, np.pi / 360, p.hough_thresh,
+                            minLineLength=p.hough_min_len_px, maxLineGap=p.hough_max_gap_px)
+    segs: list[Segment] = []
+    if lines is not None:
+        for ln in lines.reshape(-1, 4):
+            p0, p1 = (float(ln[0]), float(ln[1])), (float(ln[2]), float(ln[3]))
+            segs.append(Segment(p0=p0, p1=p1, width=_seg_width(p0, p1, dt)))
+    return segs
+
+
+def detect_circles_hough(graphics: np.ndarray, p: Params) -> list[Arc]:
+    g = (graphics.astype(np.uint8)) * 255
+    circ = cv2.HoughCircles(g, cv2.HOUGH_GRADIENT, dp=1.5, minDist=20,
+                            param1=120, param2=40, minRadius=int(p.arc_min_radius), maxRadius=0)
+    arcs: list[Arc] = []
+    if circ is not None:
+        for cx, cy, r in circ.reshape(-1, 3):
+            t = np.linspace(0, 2 * np.pi, 64)
+            poly = [(float(cx + r * np.cos(a)), float(cy + r * np.sin(a))) for a in t]
+            arcs.append(Arc(center=(float(cx), float(cy)), radius=float(r),
+                            a0=0.0, a1=360.0, polyline=poly, closed=True))
+    return arcs
 
 
 def _polyline_of(chain: list[Point], p: Params) -> list[Point]:
@@ -405,9 +492,25 @@ def run(gray: np.ndarray, params: Params | None = None) -> PipelineResult:
         "reclaim_dashed", lambda: reclaim_dashed_from_text(text_mask, graphics_mask, p)
     )
     thick_mask, thin_mask, _w = _t("thick_thin", lambda: thick_thin(graphics_mask, p))
-    skeleton, dist_map = _t("skeleton", lambda: skeleton_and_dt(graphics_mask))
-    graph = _t("graph", lambda: build_graph(skeleton, p.barb_min_px))
-    segments, arcs, polylines = _t("vectorize", lambda: vectorize(graph, dist_map, thick_mask, p))
+    skeleton, dist_map = _t("skeleton", lambda: skeleton_and_dt(graphics_mask, p.skeleton_method))
+    if p.junction_repair:
+        skeleton = _t("junction_repair", lambda: repair_junctions(skeleton, dist_map, p))
+
+    if p.centerline_method == "skeleton":
+        graph = _t("graph", lambda: build_graph(skeleton, p.barb_min_px))
+        segments, arcs, polylines = _t("vectorize", lambda: vectorize(graph, dist_map, thick_mask, p))
+    elif p.centerline_method == "lsd":
+        graph = Graph(nodes=[], chains=[])
+        segments = _t("lsd", lambda: detect_segments_lsd(graphics_mask, dist_map, p))
+        arcs = _t("circles", lambda: detect_circles_hough(graphics_mask, p))
+        polylines = [[s.p0, s.p1] for s in segments]
+    elif p.centerline_method == "hough":
+        graph = Graph(nodes=[], chains=[])
+        segments = _t("hough", lambda: detect_lines_hough(graphics_mask, dist_map, p))
+        arcs = _t("circles", lambda: detect_circles_hough(graphics_mask, p))
+        polylines = [[s.p0, s.p1] for s in segments]
+    else:
+        raise ValueError(f"unknown centerline_method: {p.centerline_method}")
     segments = _t("dashed", lambda: dashed.detect(
         segments,
         dash_max_len=p.dash_max_len,
