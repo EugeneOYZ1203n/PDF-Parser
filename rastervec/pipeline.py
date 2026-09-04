@@ -85,8 +85,8 @@ GroupKey = tuple[str, tuple]
 
 # DPI the whole-page FAST render is rasterized at (fast_text_detect stage),
 # before FastDetector.detect_tiled's own further upscale (see
-# helpers/fast_detect.py's TILED_SCALE_FACTOR) -- not full OCR resolution
-# (RenderOCR's own per-cluster/per-group renders use 300 DPI).
+# OCR/FAST_Text_Detect/fast_detect.py's TILED_SCALE_FACTOR) -- not full OCR
+# resolution (RenderOCR's own per-cluster/per-group renders use 300 DPI).
 FAST_PAGE_RENDER_DPI = 150
 
 
@@ -367,7 +367,7 @@ def _run_fast_text_detect(ctx: PipelineContext) -> FastPageResult:
     page (ctx.vector_paths -- drawing content included, not just surviving
     text-candidate clusters) via renderer.render_page_paths, and runs
     FastDetector.detect_tiled once over it -- `detect_tiled` upscales the
-    render and tiles/rotates it (see helpers/fast_detect.py) for a more
+    render and tiles/rotates it (see OCR/FAST_Text_Detect/fast_detect.py) for a more
     robust per-region score than one downsized whole-page pass would give.
     Each text-candidate cluster's own score is `_sample_mask` over the
     resulting mask (sampled at its own bbox region, whether or not that
@@ -380,7 +380,7 @@ def _run_fast_text_detect(ctx: PipelineContext) -> FastPageResult:
     drawing content (ctx.fast_dropped, folded into drawing_vectors). A page
     with zero vector paths renders/detects nothing, so FastDetector's
     underlying torch model is never even constructed (see
-    helpers/fast_detect.py).
+    OCR/FAST_Text_Detect/fast_detect.py).
 
     When ctx.enable_fast is False this is a pass-through: every
     text-candidate cluster is kept (ctx.fast_passed = ctx.text_clusters),

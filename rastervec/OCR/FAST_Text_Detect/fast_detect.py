@@ -369,7 +369,7 @@ def _score_map(det_out: "torch.Tensor", out_hw: tuple[int, int], pooling_size: i
 
 class FastDetector:
     """Lazily-built, path-keyed-cached FAST text detector -- mirrors
-    RenderOCR's PaddleOCR engine caching (helpers/render_ocr.py)."""
+    PaddleOcrBackend's engine caching (OCR/Paddle_OCR/ocr_backend.py)."""
 
     def __init__(self, weights_path: str | None = None) -> None:
         self.weights_path = weights_path or os.environ.get(

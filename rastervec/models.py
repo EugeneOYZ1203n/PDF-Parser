@@ -92,7 +92,7 @@ class TextRecord:
     `get_text("dict")`/`get_text("words")` expose that `TextWord` doesn't:
     `wmode` (line-level writing mode, from `get_text("dict")`) and
     `block_no`/`line_no`/`word_no` (from `get_text("words")`'s full 8-tuple,
-    which `Native._extract_words` currently truncates to 5 fields).
+    which `Native.extract_text`/`_to_text_word` reads but discards).
 
     Additive alongside `TextWord` -- existing extraction/consumers keep
     using `TextWord` unchanged; `TextRecord` is the richer shape external
