@@ -37,7 +37,6 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Literal
 
-from rastervec.helpers.clustering import Clustering
 from rastervec.helpers.geometry import is_dashed, union_bbox
 from rastervec.logging_setup import get_logger
 from rastervec.models import DrawingVector, Page, VectorPath, VectorRecord
@@ -110,9 +109,6 @@ class VectorClassifier:
     """Classifies extracted vector paths into text candidates vs. drawing
     content, and re-aggregates paths back into DrawingVectors."""
 
-    def __init__(self) -> None:
-        self._clustering = Clustering()
-
     def cluster(self, paths: list[VectorPath], page: Page) -> list[StepResult]:
         """Runs the fixed pipeline (see this module's docstring) in order,
         each step's input being the previous step's `"kept"` category.
@@ -157,7 +153,7 @@ class VectorClassifier:
 
         groups, debug_unconstrained, debug_no_parallel, lineage = (
             clf.cluster_spatial_groups(
-                groups, self._clustering, SPATIAL_CLUSTER_THRESHOLD, SPATIAL_SIZE_TOLERANCE,
+                groups, SPATIAL_CLUSTER_THRESHOLD, SPATIAL_SIZE_TOLERANCE,
             )
         )
         steps.append(StepResult("Spatial cluster", {

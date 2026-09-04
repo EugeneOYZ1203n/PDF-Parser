@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from rastervec.helpers.clustering import Clustering
+from rastervec.helpers.clustering import cluster_spatial
 from rastervec.models import VectorPath
 from rastervec.Vector_Classification.classification import VectorClassifier
 from rastervec.Vector_Classification.clusters import cluster_filters as clf
@@ -294,7 +294,7 @@ def test_cluster_spatial_groups_merges_when_matching_sides_are_parallel():
     c = [_make_path(seq=2, kind="l", bbox=(22, 40, 82, 100), stroke_color=(0, 0, 0))]
 
     kept, debug_unconstrained, debug_no_parallel, _lineage = clf.cluster_spatial_groups(
-        [a, b, c], Clustering(), threshold=16.0, size_tolerance=0.10,
+        [a, b, c], threshold=16.0, size_tolerance=0.10,
     )
 
     kept_sets = {frozenset(id(p) for p in g) for g in kept}
@@ -314,7 +314,7 @@ def test_cluster_spatial_groups_merges_when_matching_sides_are_parallel():
     assert frozenset(id(p) for p in a + b) in no_parallel_sets
     assert frozenset(id(p) for p in c) in no_parallel_sets
 
-    old_threshold_result = Clustering().cluster_spatial(
+    old_threshold_result = cluster_spatial(
         [a, b], get_bbox=itf.bbox_of, threshold=8.0,
     )
     assert len(old_threshold_result) == 2  # gap (12) exceeds the old threshold (8)
@@ -331,7 +331,7 @@ def test_cluster_spatial_groups_parallel_constraint_blocks_cross_axis_match():
     b = [_make_path(seq=1, kind="l", bbox=(30, 0, 35, 25), stroke_color=(0, 0, 0))]
 
     kept, _debug_unconstrained, debug_no_parallel, _lineage = clf.cluster_spatial_groups(
-        [a, b], Clustering(), threshold=16.0, size_tolerance=0.10,
+        [a, b], threshold=16.0, size_tolerance=0.10,
     )
 
     kept_sets = {frozenset(id(p) for p in g) for g in kept}
@@ -353,7 +353,7 @@ def test_cluster_spatial_groups_merges_bridged_groups_into_one_cluster():
     d = [_make_path(seq=3, kind="l", bbox=(-1, -8, 11, -6), stroke_color=(0, 0, 0))]
 
     kept, _debug_unconstrained, _debug_no_parallel, lineage = clf.cluster_spatial_groups(
-        [a, b, e, d], Clustering(), threshold=6.0, size_tolerance=0.10,
+        [a, b, e, d], threshold=6.0, size_tolerance=0.10,
     )
 
     assert len(kept) == 1
@@ -369,7 +369,7 @@ def test_cluster_spatial_groups_lineage_for_single_merge():
     b = [_make_path(seq=1, kind="l", bbox=(6, 0, 11, 5), stroke_color=(0, 0, 0))]
 
     kept, _debug_unconstrained, _debug_no_parallel, lineage = clf.cluster_spatial_groups(
-        [a, b], Clustering(), threshold=6.0, size_tolerance=0.10,
+        [a, b], threshold=6.0, size_tolerance=0.10,
     )
 
     assert len(kept) == 1

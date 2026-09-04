@@ -54,7 +54,7 @@ from __future__ import annotations
 from collections import defaultdict
 from math import atan2, ceil, cos, hypot, log, sin
 
-from rastervec.helpers.clustering import Clustering
+from rastervec.helpers.clustering import cluster_spatial
 from rastervec.helpers.geometry import bboxes_intersect, dims, union_bbox
 from rastervec.helpers.iterutils import partition
 from rastervec.models import VectorPath
@@ -124,7 +124,6 @@ def _any_side_close(
 
 def cluster_spatial_groups(
     groups: list[list[VectorPath]],
-    clustering: Clustering,
     threshold: float,
     size_tolerance: float,
 ) -> tuple[
@@ -132,15 +131,15 @@ def cluster_spatial_groups(
     dict[int, list[list[VectorPath]]],
 ]:
     """Single-linkage spatial merge of the incoming groups (by each
-    group's own aggregate bbox), via `Clustering.cluster_spatial` reused at
-    the group level, constrained by `_any_side_close` (with
+    group's own aggregate bbox), via `helpers.clustering.cluster_spatial`
+    reused at the group level, constrained by `_any_side_close` (with
     `require_parallel=True`). Returns `(kept, debug_unconstrained,
     debug_no_parallel, lineage)` -- see this module's docstring."""
 
     def _close_parallel(a: list[VectorPath], b: list[VectorPath]) -> bool:
         return _any_side_close(a, b, size_tolerance, require_parallel=True)
 
-    constrained = clustering.cluster_spatial(
+    constrained = cluster_spatial(
         groups, get_bbox=bbox_of, threshold=threshold, extra_close=_close_parallel,
     )
 
@@ -151,13 +150,13 @@ def cluster_spatial_groups(
         kept.append(piece)
         lineage[id(piece)] = list(cluster)
 
-    unconstrained = clustering.cluster_spatial(groups, get_bbox=bbox_of, threshold=threshold)
+    unconstrained = cluster_spatial(groups, get_bbox=bbox_of, threshold=threshold)
     debug_unconstrained = [[p for sub in cluster for p in sub] for cluster in unconstrained]
 
     def _close_no_parallel(a: list[VectorPath], b: list[VectorPath]) -> bool:
         return _any_side_close(a, b, size_tolerance, require_parallel=False)
 
-    no_parallel = clustering.cluster_spatial(
+    no_parallel = cluster_spatial(
         groups, get_bbox=bbox_of, threshold=threshold, extra_close=_close_no_parallel,
     )
     debug_no_parallel = [[p for sub in cluster for p in sub] for cluster in no_parallel]

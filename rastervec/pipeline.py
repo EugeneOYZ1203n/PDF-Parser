@@ -34,7 +34,7 @@ if __name__ == "__main__" and __package__ is None:
     # the repo root -- the parent of this package -- on sys.path.
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from rastervec.helpers.clustering import Clustering
+from rastervec.helpers.clustering import cluster_spatial
 from rastervec.helpers.geometry import PDF_POINTS_PER_INCH, union_bbox
 from rastervec.logging_setup import configure_logging, get_logger
 from rastervec.models import (
@@ -471,12 +471,12 @@ def _run_spatial_regroup(ctx: PipelineContext) -> list[list[VectorPath]]:
     groups.
 
     `extra_close` gates the merge on the shared (layer, color) key;
-    Clustering.cluster_spatial's `threshold` is the aggregate-bbox gap
-    tolerance. Nothing else is tracked onto the merged piece -- ocr_compare
-    OCRs each merged piece directly."""
+    `helpers.clustering.cluster_spatial`'s `threshold` is the aggregate-bbox
+    gap tolerance. Nothing else is tracked onto the merged piece --
+    ocr_compare OCRs each merged piece directly."""
     passed = ctx.fast_passed or []
 
-    merged = Clustering().cluster_spatial(
+    merged = cluster_spatial(
         passed, get_bbox=lambda c: union_bbox([p.bbox for p in c]),
         threshold=SPATIAL_REGROUP_TOLERANCE_PX,
         extra_close=lambda a, b: _cluster_lc_key(a) == _cluster_lc_key(b),
