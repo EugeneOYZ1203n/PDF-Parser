@@ -15,12 +15,12 @@ objects and reassembled into a PDF for evaluation. Built stage by stage (Reader 
 Vector → Vector Classification → OCR); currently Reader, Native Text, Vector, and Vector
 Classification are implemented, including OCR (`renderer.render_vector_cluster` +
 `RenderOCR`/`OcrBackend`, PaddleOCR-only — see `OCR/Paddle_OCR/ocr_backend.py`). A raster-image
-line-diagram stage (CNN junction detector + line tracing) was scoped out for now — no `Raster`
-module exists in the current tree. The `Evaluation/` package holds the pipeline's still-unbuilt
-final reconstruction stage (`evaluation.py`, interface-only), a benchmarking suite for the Vector
-Classification + OCR pipeline (`Conversion/` — native text → vector-text PDF; `Labelling/` —
-manual + automatic ground-truth labelling; `Evaluate/` — accuracy metrics against those labels;
-all three implemented), and the inspector tool — see "rastervec architecture" below.
+line-diagram stage (CNN junction detector + line tracing) was scoped out — no `Raster` module,
+`helpers/masking.py`, `helpers/junction.py`, or their `models.py` dataclasses exist; recover them
+from git history if that work ever starts. The `Evaluation/` package holds a benchmarking suite
+for the Vector Classification + OCR pipeline (`Conversion/` — native text → vector-text PDF;
+`Labelling/` — manual + automatic ground-truth labelling; `Evaluate/` — accuracy metrics against
+those labels; all three implemented) plus the inspector tool — see "rastervec architecture" below.
 `junction_cnn/` and `hawp/` at the repo root are unrelated, independent experiments; nothing in
 `rastervec/` imports from them.
 
@@ -118,14 +118,13 @@ terminology used throughout this section. `rastervec/` is organized into one fol
 concern (`Reader/`, `Native_Text/`, `Vector/`, `Vector_Classification/`, `OCR/`, `Evaluation/`),
 plus cross-cutting modules that don't belong to one concern (`models.py`, `output_types.py`,
 `logging_setup.py`, `pipeline.py`, `renderer/`) and a `helpers/` package for
-utilities shared across more than one concern (`geometry.py`, `clustering.py`). Every stage is
-testable independently of the others (every stage's *output* is a plain dataclass from
-`models.py`, no `fitz` objects, except `Page.fitz_page` which `Reader` must hand to `Native`/etc.):
+utilities shared across more than one concern (`geometry.py` — pure tuple math; `fitz_geometry.py`
+— the same for live `fitz` objects; `clustering.py`; `iterutils.py`). Every stage is testable
+independently of the others (every stage's *output* is a plain dataclass from `models.py`, no
+`fitz` objects, except `Page.fitz_page` which `Reader` must hand to `Native`/etc.):
 
-- **`models.py`** — all shared dataclasses (`PageMeta`, `Page`, `TextWord`, `TextRun`, `VectorPath`,
-  `DrawingVector`, `OcrWord`, `TextVectorResult`, `ClusterOcrResult`, and forward-declared
-  `RasterImage`/`JunctionPoint`/`LineVector`/`ReconstructedPage` for the pipeline's still-unbuilt
-  final reconstruction stage, see `Evaluation/evaluation.py` below).
+- **`models.py`** — all shared dataclasses (`PageMeta`, `Page`, `TextWord`, `TextRecord`,
+  `VectorPath`, `DrawingVector`, `VectorRecord`, `OcrWord`, `TextVectorResult`, `ClusterOcrResult`).
 - **`output_types.py`** — pydantic DTOs (`TextDTO`, `VectorDTO`, `NativePDFElements`) mirroring what
   a raw PyMuPDF `get_text("words")` word / `get_drawings()` drawing look like, built from the
   dataclasses above — the serialization/export shape for external consumers, not a replacement for
@@ -277,11 +276,6 @@ testable independently of the others (every stage's *output* is a plain dataclas
   `None` when nothing was detected, and whose `words: list[OcrWord] | None` field (models.py) is one
   `OcrWord` per individually detected box, each independently mapped through `pixel_to_page_bbox`
   (line-granularity, since Paddle is the only backend); `None` when nothing was detected.
-- **`Evaluation/evaluation.py` — `Evaluation`** *(interface stub, not yet implemented)*: the
-  pipeline's actual intended final stage — `reconstruct_page`/`build_pdf` will reassemble
-  consolidated text/line objects back into a PDF for evaluation — not yet registered in
-  `Pipeline.STAGES`. Distinct from the `Evaluation/Evaluate/` benchmarking subpackage below, which
-  is implemented and scores the existing Vector Classification + OCR pipeline, not this stub.
 - **`Evaluation/Conversion/conversion.py`** *(implemented)*: three functions, each re-expressing a
   page's content as vector paths (`get_drawings()`) for a Vector_Classification known-answer test —
   **none ever rewrites pre-existing vector-path geometry** (an earlier version SVG-round-tripped the

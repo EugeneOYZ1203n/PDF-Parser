@@ -68,24 +68,6 @@ class TextWord:
 
 
 @dataclass
-class TextRun:
-    """Line/span-level grouping of TextWords. Not produced by Phase 1 yet."""
-
-    words: list[TextWord]
-    bbox: tuple[float, float, float, float]
-    quad: tuple[
-        tuple[float, float],
-        tuple[float, float],
-        tuple[float, float],
-        tuple[float, float],
-    ]
-    font: str
-    font_size: float
-    color: int | None
-    page_index: int
-
-
-@dataclass
 class TextRecord:
     """One native-text word, carrying the full PyMuPDF field surface --
     everything `TextWord` already has, plus fields PyMuPDF's own
@@ -130,8 +112,7 @@ class TextRecord:
 
 
 # ----------------------------------------------------------------------
-# Vector stage (implemented) and Raster/Renderer phases (interface only,
-# those fields may still change once those stages are actually implemented).
+# Vector stage
 # ----------------------------------------------------------------------
 
 
@@ -282,37 +263,3 @@ class ClusterOcrResult:
     cluster: list[VectorPath]
     resolved: TextVectorResult
     ocr_seconds: float
-
-
-@dataclass
-class RasterImage:
-    xref: int
-    bbox: tuple[float, float, float, float]
-    width_px: int
-    height_px: int
-    image_bytes: bytes
-    page_index: int
-
-
-@dataclass
-class JunctionPoint:
-    xy: tuple[float, float]
-    directions: list[float]
-    page_index: int
-
-
-@dataclass
-class LineVector:
-    start: tuple[float, float]
-    end: tuple[float, float]
-    width: float
-    color: tuple[float, ...] | None
-    page_index: int
-
-
-@dataclass
-class ReconstructedPage:
-    page_index: int
-    text_items: list  # TextWord | TextVectorResult
-    line_items: list[LineVector]
-    remainder_image: bytes | None
