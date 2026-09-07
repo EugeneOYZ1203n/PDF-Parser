@@ -14,7 +14,7 @@ from rastervec.Evaluation.Evaluate.metrics import (
     build_overlap_graph,
     evaluate_metrics,
 )
-from rastervec.pipeline import ClusteringStageResult
+from rastervec.pipelines.result import ClusteringStageResult
 from rastervec.Vector_Classification.classification import CategoryResult, StepResult
 
 

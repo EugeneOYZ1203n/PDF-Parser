@@ -20,14 +20,12 @@ def test_default_variants_are_all_registered():
 
 def test_engines_and_flags():
     assert VARIANTS["legacy"].engine == "legacy"
-    assert VARIANTS["current_heavy"].engine == "current"
-    assert VARIANTS["current_heavy"].ocr_backend == "heavy"
-    assert VARIANTS["current_light"].ocr_backend == "light"
-    assert VARIANTS["current_light_nofast"].enable_fast is False
-    assert VARIANTS["current_heavy"].enable_fast is True
+    assert VARIANTS["current"].engine == "current"
+    assert VARIANTS["current"].enable_fast is True
+    assert VARIANTS["current_nofast"].enable_fast is False
 
 
 def test_resolve_variant_rejects_unknown():
-    assert resolve_variant("current_light") is VARIANTS["current_light"]
+    assert resolve_variant("current") is VARIANTS["current"]
     with pytest.raises(ValueError, match="unknown pipeline variant"):
         resolve_variant("does_not_exist")

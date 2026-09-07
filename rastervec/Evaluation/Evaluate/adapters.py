@@ -1,10 +1,8 @@
 """Bridge from a real pipeline run to the pure `metrics.py` inputs.
 
 `metrics.py` is deliberately pipeline-agnostic (plain `GtRegion` /
-`Prediction` / bbox lists). This module -- the only one in
-`Evaluation/Evaluate/` that imports `rastervec.pipeline` -- turns a
-`LabelSet` and a `PipelineContext` (or the loose dict the benchmark
-notebook carries) into those inputs.
+`Prediction` / bbox lists). This module turns a `LabelSet` and a
+`PipelineResult` into those inputs.
 """
 from __future__ import annotations
 
@@ -17,7 +15,7 @@ from rastervec.helpers.geometry import union_bbox
 from rastervec.models import ClusterOcrResult
 
 if TYPE_CHECKING:
-    from rastervec.pipeline import ClusteringStageResult, GroupKey, PipelineContext
+    from rastervec.pipelines.result import ClusteringStageResult, GroupKey, PipelineResult
 
 
 def gt_regions_from_labelset(labels: LabelSet) -> list[GtRegion]:
@@ -83,15 +81,15 @@ class EvalInputs:
     ocr_failed: list | None
 
 
-def build_eval_inputs(ctx: "PipelineContext") -> EvalInputs:
+def build_eval_inputs(res: "PipelineResult") -> EvalInputs:
     """The pipeline-derived half of the metric inputs (everything except
     the ground truth, which varies by label source)."""
     return EvalInputs(
-        predictions=predictions_from_cluster_ocr(ctx.cluster_ocr_results or []),
+        predictions=predictions_from_cluster_ocr(res.cluster_ocr_results or []),
         text_candidate_boxes=text_candidate_boxes(
-            getattr(ctx, "regrouped_clusters", None), ctx.cluster_ocr_results
+            res.regrouped_clusters, res.cluster_ocr_results
         ),
-        clustering=ctx.clustering,
-        fast_dropped=ctx.fast_dropped,
-        ocr_failed=ctx.ocr_failed,
+        clustering=res.clustering,
+        fast_dropped=res.fast_dropped,
+        ocr_failed=res.ocr_failed,
     )

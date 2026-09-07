@@ -2,7 +2,7 @@
 map (`pool.py`) and the benchmark's picklable per-page job
 (`benchmark_jobs.py`).
 
-Why processes, never threads: `PaddleOcrBackend._ENGINE_CACHE` and
+Why processes, never threads: `PaddleRecBackend._ENGINE_CACHE` and
 `FastDetector._MODEL_CACHE` are unlocked module-level singletons holding
 engines that are not safe to call from multiple threads, and PyMuPDF is
 not reentrant. Each worker process gets its own copies. Every worker pins

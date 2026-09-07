@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pymupdf as fitz
 
-from rastervec.Evaluation.Conversion.conversion import (
+from rastervec.Evaluation.conversion import (
     convert_page_drawings_only,
     convert_page_text_only,
     convert_page_to_vector_text,

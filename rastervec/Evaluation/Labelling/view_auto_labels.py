@@ -21,19 +21,19 @@ Not unit-testable (a real Tk event loop). Smoke-test manually:
 
 A window opens with a dashed grey box over every native-text line, each
 showing its auto-derived text on hover. `--out` controls where the label
-JSON is written (default: a temp file); pass an existing path to append
-manual edits to a file you're already building.
+JSON is written (default: `outputs/labels/<pdf stem>_p<N>_auto_labels.json`);
+pass an existing path to append manual edits to a file you're already building.
 """
 from __future__ import annotations
 
 import argparse
-import tempfile
 from pathlib import Path
 
 from rastervec.Evaluation.Labelling.auto_label import auto_label_pdf
 from rastervec.Evaluation.Labelling.label_schema import LabelSet, load_labels, save_labels
 from rastervec.Evaluation.Labelling.manual_label import ManualLabelApp
 from rastervec.logging_setup import configure_logging, get_logger
+from rastervec.paths import output_dir
 
 _LOG = get_logger("view_auto_labels")
 
@@ -44,8 +44,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--page", type=int, default=0, help="0-based page index.")
     parser.add_argument(
         "--out", default=None,
-        help="Where to write the label JSON (default: a temp file). An existing file is loaded "
-             "first, so manual edits accumulate.",
+        help="Where to write the label JSON (default: outputs/labels/<pdf stem>_p<N>_auto_labels.json). "
+             "An existing file is loaded first, so manual edits accumulate.",
     )
     return parser
 
@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
 
     auto = auto_label_pdf(args.pdf, args.page)
     out_path = args.out or str(
-        Path(tempfile.gettempdir()) / f"{Path(args.pdf).stem}_p{args.page}_auto_labels.json"
+        output_dir("labels") / f"{Path(args.pdf).stem}_p{args.page}_auto_labels.json"
     )
 
     # Merge onto any existing file so re-running never drops manual edits;

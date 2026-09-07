@@ -18,7 +18,7 @@ def test_pagetask_pickle_round_trip():
 
 def test_pageresult_pickle_round_trip():
     r = PageResult(
-        pdf_path="x.pdf", page_index=0, variant="current_light",
+        pdf_path="x.pdf", page_index=0, variant="current",
         auto=MetricSuiteResult(ratios={"page_char_multiset_recall": Ratio(1.0, 2.0)}),
         showcase=[ShowcaseSample(png=b"\x89PNG", text="HI", passed=True)],
         stage_durations={"reader": 0.1},
@@ -29,11 +29,11 @@ def test_pageresult_pickle_round_trip():
 
 
 def test_run_page_task_missing_pdf_captures_error():
-    task = PageTask(pdf_path="does_not_exist.pdf", page_index=0, variant="current_light")
+    task = PageTask(pdf_path="does_not_exist.pdf", page_index=0, variant="current")
     result = run_page_task(task)
     assert result.error is not None
     assert result.auto is None
-    assert result.variant == "current_light"
+    assert result.variant == "current"
 
 
 def test_run_page_task_unknown_variant_captures_error():
@@ -44,6 +44,6 @@ def test_run_page_task_unknown_variant_captures_error():
 
 def test_pagetask_defaults():
     task = PageTask(pdf_path="a.pdf", page_index=0)
-    assert task.variant == "current_light"
+    assert task.variant == "current"
     assert task.iou_edge_min == MetricConfig().iou_edge_min
     assert task.manual_entries == []

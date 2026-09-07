@@ -15,7 +15,7 @@ Three modes, none of which ever rewrites pre-existing vector-path geometry:
   "how is this text drawn" utility and for its tests.
 
 Verified API sequence (installed pymupdf 1.28.2, see
-`tests/rastervec/Evaluation/Conversion/test_conversion.py`):
+`tests/rastervec/Evaluation/test_conversion.py`):
 
 1. `out.insert_pdf(src, from_page=n, to_page=n)` copies the source page
    exactly -- every drawing / image / path object carried over unchanged

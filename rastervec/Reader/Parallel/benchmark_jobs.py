@@ -32,7 +32,7 @@ import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from rastervec.Evaluation.Conversion.conversion import (
+from rastervec.Evaluation.conversion import (
     convert_page_drawings_only,
     convert_page_text_only,
 )
@@ -60,7 +60,7 @@ from rastervec.config import MIN_RENDER_SIDE_PX
 from rastervec.helpers.geometry import PDF_POINTS_PER_INCH
 from rastervec.logging_setup import get_logger
 from rastervec.models import PageMeta
-from rastervec.pipeline import run_page_context
+from rastervec.pipelines.current import run_pipeline
 from rastervec.Reader.reader import Reader
 from rastervec.renderer import (
     cluster_frame_size,
@@ -80,7 +80,7 @@ class PageTask:
     iou_edge_min: float = MetricConfig().iou_edge_min
     # A name from rastervec.Evaluation.Evaluate.variants.VARIANTS -- selects
     # the engine (current/legacy), enable_fast, and the OCR backend.
-    variant: str = "current_light"
+    variant: str = "current"
     reconstruct_dir: str | None = None
     showcase_per_page: int = 4
     enable_archive_raster_pass: bool = False
@@ -128,22 +128,12 @@ def _page_inputs(task: PageTask, has_manual: bool) -> tuple[bytes, bytes | None]
     return auto_input, manual_input
 
 
-def _run_pipeline(input_bytes: bytes, *, enable_fast: bool = True, ocr_backend_kind: str = "light"):
-    """Full current-pipeline run on one input PDF -> its PipelineContext.
-    `ocr_backend_kind` is "light" (LightPaddleOcrBackend, built here in the
-    worker) or "heavy" (None -> RenderOCR's PaddleOcrBackend default)."""
-    ocr_backend = None
-    if ocr_backend_kind == "light":
-        from rastervec.OCR.Paddle_OCR.light_backend import LightPaddleOcrBackend
-
-        ocr_backend = LightPaddleOcrBackend()
+def _run_pipeline(input_bytes: bytes, *, enable_fast: bool = True):
+    """Full current-pipeline run on one input PDF -> its PipelineResult."""
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "in.pdf"
         path.write_bytes(input_bytes)
-        with Reader(str(path)) as reader:
-            return run_page_context(
-                reader, 0, enable_fast=enable_fast, ocr_backend=ocr_backend,
-            )
+        return run_pipeline(str(path), 0, enable_fast=enable_fast)
 
 
 def _original_page_meta(pdf_path: str, page_index: int) -> PageMeta:
@@ -221,7 +211,7 @@ def _run_current(
     auto_preds: list = []
     manual_preds: list = []
     total = 0.0
-    run_kw = dict(enable_fast=variant.enable_fast, ocr_backend_kind=variant.ocr_backend)
+    run_kw = dict(enable_fast=variant.enable_fast)
     lbl = task.variant
 
     try:
@@ -236,7 +226,7 @@ def _run_current(
         result.report_blocks.append(
             format_report(f"[{lbl}/auto]   {task.pdf_path}", task.page_index, result.auto)
         )
-        total += sum((auto_ctx.stage_durations or {}).values())
+        total += sum((auto_ctx.step_durations or {}).values())
     except Exception as exc:  # noqa: BLE001
         result.report_blocks.append(
             f"[{lbl}/auto] {task.pdf_path} p{task.page_index}: run failed: {exc}"
@@ -255,13 +245,13 @@ def _run_current(
             result.report_blocks.append(
                 format_report(f"[{lbl}/manual] {task.pdf_path}", task.page_index, result.manual)
             )
-            total += sum((manual_ctx.stage_durations or {}).values())
+            total += sum((manual_ctx.step_durations or {}).values())
         except Exception as exc:  # noqa: BLE001
             result.report_blocks.append(
                 f"[{lbl}/manual] {task.pdf_path} p{task.page_index}: run failed: {exc}"
             )
 
-    result.stage_durations = dict((auto_ctx.stage_durations or {}) if auto_ctx else {})
+    result.stage_durations = dict((auto_ctx.step_durations or {}) if auto_ctx else {})
     result.total_seconds = total
 
     cocr = list((auto_ctx.cluster_ocr_results or []) if auto_ctx else [])

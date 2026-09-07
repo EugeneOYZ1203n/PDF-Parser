@@ -8,7 +8,7 @@ chain on the converted page and only emitted a label for a cluster that
 chain's own filter steps wrongly dropped silently vanished from the
 ground-truth set instead of becoming a scored false negative. This version
 reads only the *original* PDF's native text and needs no Conversion/
-pipeline run at all: `Evaluation/Conversion/conversion.py`'s
+pipeline run at all: `Evaluation/conversion.py`'s
 `convert_page_to_vector_text` places its converted content onto a page
 sized from the source's own `PageMeta.mediabox` (confirmed exactly
 matching, see that module's own docstring), so a native word's bbox on the
@@ -31,7 +31,7 @@ from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet
 from rastervec.helpers.geometry import union_bbox
 from rastervec.logging_setup import get_logger
 from rastervec.models import TextWord
-from rastervec.Native_Text.native import extract as extract_native_words
+from rastervec.native_text import extract_native_text as extract_native_words
 from rastervec.Reader.reader import Reader
 
 _LOG = get_logger("auto_label")

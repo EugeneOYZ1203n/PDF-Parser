@@ -3,7 +3,7 @@ rendered page and typing their ground-truth text, saved via
 `label_schema.save_labels`. `_get_display_matrix` (the page-space ->
 canvas-space transform rule, see `rastervec/models.py`'s coordinate-space
 docstring) and the `Tooltip` class were ported from the former
-`debug_app.py` when it was removed. `pipeline.run_page_context` gets the
+`debug_app.py` when it was removed. `classify_vectors` (sub_pipelines) gets the
 same text-candidate clusters the pipeline's "Text Candidates" stage
 produces, rather than re-implementing extraction/clustering/rendering
 here.
@@ -105,7 +105,9 @@ from rastervec.helpers.geometry import (
 )
 from rastervec.logging_setup import configure_logging, get_logger
 from rastervec.models import VectorPath
-from rastervec.pipeline import run_page_context
+from rastervec.paths import output_dir
+from rastervec.pipelines._steps import extract_vectors
+from rastervec.pipelines.sub_pipelines.vector_classification import classify_vectors
 from rastervec.Reader.reader import Reader
 
 _LOG = get_logger("manual_label")
@@ -216,25 +218,25 @@ class ManualLabelApp:
         rebuild every per-page working structure. `self.reader`, `self.labels`
         and the Tk widgets outlive this."""
         self.page_index = max(0, min(self.reader.page_count() - 1, page_index))
-        self.ctx = run_page_context(
-            self.reader, self.page_index, final_stage="text_candidates"
-        )
+        self.page = self.reader.get_page(self.page_index)
+        vectors = extract_vectors(self.page)
+        self.classification = classify_vectors(vectors.paths, self.page, verbose=True)
 
         # Mutable working list -- all rendering/hit-testing/labelling uses this.
-        # The pipeline's own cluster lists are referenced directly (never
+        # classify_vectors' own cluster lists are referenced directly (never
         # mutated in place -- every edit builds new lists) so their id() still
-        # matches ctx.cluster_groups keys for Ungroup.
+        # matches classification.cluster_groups keys for Ungroup.
         self.working_clusters: list[list[VectorPath]] = [
-            cluster for cluster in (self.ctx.text_clusters or []) if cluster
+            cluster for cluster in (self.classification.text_clusters or []) if cluster
         ]
         # id(original cluster) -> its pre-spatial "groups", for Ungroup.
         self._lineage: dict[int, list[list[VectorPath]]] = dict(
-            self.ctx.cluster_groups or {}
+            self.classification.cluster_groups or {}
         )
 
         self.selected.clear()
         self._undo_stack.clear()
-        self.matrix = _get_display_matrix(self.ctx.page.fitz_page, self.zoom)
+        self.matrix = _get_display_matrix(self.page.fitz_page, self.zoom)
 
         self.root.title(
             f"Manual Label -- {Path(self.pdf_path).name} "
@@ -363,7 +365,7 @@ class ManualLabelApp:
 
     def _render(self) -> None:
         self.canvas.delete("all")
-        pix = self.ctx.page.fitz_page.get_pixmap(matrix=self.matrix)
+        pix = self.page.fitz_page.get_pixmap(matrix=self.matrix)
         self._photo = tk.PhotoImage(data=pix.tobytes("ppm"))
         self.canvas.create_image(0, 0, anchor="nw", image=self._photo)
         self.canvas.config(scrollregion=(0, 0, pix.width, pix.height))
@@ -429,7 +431,7 @@ class ManualLabelApp:
             self.zoom = min(MAX_ZOOM, self.zoom * ZOOM_STEP)
         else:
             self.zoom = max(MIN_ZOOM, self.zoom / ZOOM_STEP)
-        self.matrix = _get_display_matrix(self.ctx.page.fitz_page, self.zoom)
+        self.matrix = _get_display_matrix(self.page.fitz_page, self.zoom)
         self._render()
 
     def _on_wheel(self, event: "tk.Event") -> None:
@@ -786,14 +788,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manually label vector-text clusters.")
     parser.add_argument("pdf", help="Path to the input PDF.")
     parser.add_argument("--page", type=int, default=0, help="0-based page index.")
-    parser.add_argument("--out", required=True, help="Path to save/load the label JSON file.")
+    parser.add_argument(
+        "--out", default=None,
+        help="Path to save/load the label JSON file "
+        "(default: outputs/labels/<pdf stem>.json).",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     configure_logging()
     args = build_arg_parser().parse_args(argv)
-    app = ManualLabelApp(args.pdf, args.page, args.out)
+    out = args.out or str(output_dir("labels") / f"{Path(args.pdf).stem}.json")
+    app = ManualLabelApp(args.pdf, args.page, out)
     app.run()
     return 0
 

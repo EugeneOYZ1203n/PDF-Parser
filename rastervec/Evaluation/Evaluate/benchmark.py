@@ -6,12 +6,13 @@ per-page report plus cross-variant accuracy + timing comparison tables.
     .venv/Scripts/python.exe -m rastervec.Evaluation.Evaluate.benchmark \
         --pdf path/to.pdf --pages 0,1,2 [--iou-threshold 0.3] \
         [--reconstruct-dir DIR] [--workers N] \
-        [--variants current_heavy,current_light,legacy]
+        [--variants current,current_nofast,legacy]
 
 `--variants` selects which `Evaluation/Evaluate/variants.VARIANTS` to run
 and compare (default `DEFAULT_VARIANTS`).
 
-`--reconstruct-dir`, when given, writes per page x variant (see
+`--reconstruct-dir` (default `outputs/benchmark_cli/reconstructions/`)
+writes per page x variant (see
 `Reader/Parallel/benchmark_jobs._write_current_outputs`): the ground-truth
 / pipeline text reconstruction, the exact PDF fed to the pipeline, and a
 green(matched) / yellow(spurious pred) / red(missed gt) box overlay.
@@ -44,6 +45,7 @@ from rastervec.Evaluation.Evaluate.metrics import (
 )
 from rastervec.Evaluation.Evaluate.variants import DEFAULT_VARIANTS, resolve_variant
 from rastervec.logging_setup import configure_logging, get_logger
+from rastervec.paths import output_dir
 
 _LOG = get_logger("benchmark")
 
@@ -104,7 +106,7 @@ def format_aggregate(
 # Timing statistics -- pure, unit-tested. Used by
 # notebooks/benchmark_vector_classification.ipynb to summarize the per-stage
 # and per-page wall-clock times a run records in
-# `PipelineContext.stage_durations` (see pipeline.py).
+# `PipelineResult.step_durations`.
 # ---------------------------------------------------------------------------
 
 _TIMING_STAT_COLUMNS = ("n", "min", "q1", "median", "mean", "q3", "max")
@@ -264,7 +266,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reconstruct-dir", type=Path, default=None,
         help="Write per-page reconstruction / pipeline-input / green-yellow-red "
-        "box-overlay PDFs here (see Reader/Parallel/benchmark_jobs._write_outputs).",
+        "box-overlay PDFs here (see Reader/Parallel/benchmark_jobs._write_outputs). "
+        "Default: outputs/benchmark_cli/reconstructions/.",
     )
     parser.add_argument(
         "--workers", type=int, default=1,
@@ -284,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging()
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    reconstruct_dir = args.reconstruct_dir or output_dir("benchmark_cli", "reconstructions")
     pages = [int(p) for p in args.pages.split(",")]
     variant_names = [name.strip() for name in args.variants.split(",") if name.strip()]
     for name in variant_names:
@@ -292,10 +296,10 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             parser.error(str(exc))
 
-    from rastervec.pipeline import stage_keys
+    from rastervec.pipelines.current import STEP_NAMES
     from rastervec.Reader.Parallel.benchmark_jobs import PageTask, run_benchmark
 
-    stage_order = stage_keys()
+    stage_order = [*STEP_NAMES]
     aggregates: dict[str, MetricSuiteResult | None] = {}
     timings: dict[str, dict] = {}
 
@@ -304,7 +308,7 @@ def main(argv: list[str] | None = None) -> int:
             PageTask(
                 pdf_path=pdf_path, page_index=page_index, iou_edge_min=args.iou_threshold,
                 variant=name,
-                reconstruct_dir=str(args.reconstruct_dir) if args.reconstruct_dir else None,
+                reconstruct_dir=str(reconstruct_dir),
                 showcase_per_page=0,
             )
             for pdf_path in args.pdf

@@ -53,19 +53,13 @@ def warmup() -> None:
     races the first-run download) and every worker's own engine build is
     just a load. Cheap no-op once the caches / on-disk models exist."""
     try:
-        from rastervec.OCR.Paddle_OCR.ocr_backend import PaddleOcrBackend
+        from rastervec.OCR.Paddle_OCR.ocr_backend import PaddleRecBackend
 
-        PaddleOcrBackend.warmup()
+        PaddleRecBackend.warmup()
     except Exception as exc:  # noqa: BLE001 -- warmup is best-effort
-        _LOG.warning("PaddleOCR warmup skipped: %s", exc)
+        _LOG.warning("PaddleOCR rec warmup skipped: %s", exc)
     try:
-        from rastervec.OCR.Paddle_OCR.light_backend import LightPaddleOcrBackend
-
-        LightPaddleOcrBackend.warmup()
-    except Exception as exc:  # noqa: BLE001
-        _LOG.warning("light OCR warmup skipped: %s", exc)
-    try:
-        from rastervec.OCR.FAST_Text_Detect.fast_detect import FastDetector
+        from rastervec.OCR.fast_detect import FastDetector
 
         FastDetector().warmup()
     except Exception as exc:  # noqa: BLE001

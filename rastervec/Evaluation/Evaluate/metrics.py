@@ -26,8 +26,8 @@ Two normalisation rules, both documented in full in `EVAL_METRICS.md`:
    misses, `clustering=None`) is "not applicable" and simply excluded from
    that metric's aggregate.
 
-This module is pure and does not import `rastervec.pipeline` -- callers
-pass plain lists (`adapters.py` builds them from a `PipelineContext`).
+This module is pure and does not import the pipeline -- callers
+pass plain lists (`adapters.py` builds them from a `PipelineResult`).
 """
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ from rastervec.helpers.geometry import (
 )
 
 if TYPE_CHECKING:
-    from rastervec.pipeline import ClusteringStageResult, GroupKey
+    from rastervec.pipelines.result import ClusteringStageResult, GroupKey
 
 Bbox = tuple[float, float, float, float]
 
