@@ -2,8 +2,8 @@
 in this file, `run_page_context`, and
 `rastervec/notebooks/pipeline_stage_visualization.ipynb`.
 
-Only calls high-level class methods -- no inline extraction logic. A stage
-is a (key, label, run) triple appended to Pipeline.STAGES; run(ctx) mutates
+Only calls high-level stage-module functions -- no inline extraction logic.
+A stage is a (key, label, run) triple appended to STAGES; run(ctx) mutates
 the shared PipelineContext and returns this stage's output data. Adding a
 new stage once it's actually implemented means adding one StageSpec here;
 the CLI picks it up automatically, and the visualization notebook gets a
@@ -52,14 +52,15 @@ from rastervec.models import (
     VectorPath,
     VectorRecord,
 )
-from rastervec.Native_Text.native import Native
+from rastervec.Native_Text.native import extract as extract_native_words
 from rastervec.OCR.FAST_Text_Detect.fast_detect import FastDetector
 from rastervec.OCR.Paddle_OCR.light_backend import LightPaddleOcrBackend
 from rastervec.OCR.Paddle_OCR.render_ocr import RenderOCR
 from rastervec.Reader.reader import Reader
 from rastervec.renderer import render_page_paths
-from rastervec.Vector.vector import Vector
-from rastervec.Vector_Classification.classification import StepResult, VectorClassifier
+from rastervec.Vector import vector
+from rastervec.Vector_Classification import classification as vclass
+from rastervec.Vector_Classification.classification import StepResult
 
 _LOG = get_logger("pipeline")
 
@@ -71,7 +72,7 @@ GroupKey = tuple[str, tuple]
 class ClusteringStageResult:
     """One (layer, color) group's result from the Vector Classification
     pipeline (see Vector_Classification/classification.py's module
-    docstring): `steps` is exactly `VectorClassifier.cluster()`'s return
+    docstring): `steps` is exactly `classification.cluster()`'s return
     value -- one `StepResult` per step, each holding every named
     `CategoryResult` that step produced.
     `steps[-1].categories["kept"]` is the final surviving clusters, handed
@@ -129,7 +130,7 @@ class PipelineContext:
     # drawing, carrying every drawing-level field vector_paths drops.
     vector_records: list[VectorRecord] | None = None
     # text_candidates: one VectorRecord per final surviving "kept" cluster
-    # (see VectorClassifier.build_vector_records), role="kept", groups set
+    # (see classification.build_vector_records), role="kept", groups set
     # from that cluster's own StepResult.cluster_groups lineage.
     text_candidate_records: list[VectorRecord] | None = None
     paths_by_layer: dict[str, list[VectorPath]] | None = None
@@ -146,7 +147,7 @@ class PipelineContext:
     # StepResult.cluster_groups.
     cluster_groups: dict[int, list[list[VectorPath]]] | None = None
     # unique_clusters: text_clusters grouped by whole-page geometric
-    # similarity (see VectorClassifier.group_similar_clusters);
+    # similarity (see classification.group_similar_clusters);
     # cluster_similarity_id is id(cluster) -> index into similarity_groups,
     # for O(1) lookup.
     similarity_groups: list[list[list[VectorPath]]] | None = None
@@ -162,6 +163,7 @@ class PipelineContext:
     # (_cluster_lc_key) -- still ignores unique_clusters similarity-group
     # boundaries. This, not fast_passed, is what ocr_compare actually OCRs.
     regrouped_clusters: list[list[VectorPath]] | None = None
+    # ocr_compare: one ClusterOcrResult per regrouped_clusters cluster --
     # ocr_compare: one ClusterOcrResult per regrouped_clusters cluster --
     # a single direct OCR call over the whole cluster, no fallback tiers.
     cluster_ocr_results: list[ClusterOcrResult] | None = None
@@ -223,24 +225,22 @@ def _run_reader(ctx: PipelineContext) -> Page:
 
 
 def _run_native(ctx: PipelineContext) -> list[TextWord]:
-    ctx.native_words = Native().extract(ctx.page)
+    ctx.native_words = extract_native_words(ctx.page)
     return ctx.native_words
 
 
 def _run_vector_extract(ctx: PipelineContext) -> list[VectorPath]:
-    vector = Vector()
     ctx.vector_paths = vector.extract_paths(ctx.page)
     ctx.vector_records = vector.extract_records(ctx.page)
     return ctx.vector_paths
 
 
 def _run_layer_separation(ctx: PipelineContext) -> dict[str, list[VectorPath]]:
-    ctx.paths_by_layer = Vector().separate_by_layer(ctx.vector_paths)
+    ctx.paths_by_layer = vector.separate_by_layer(ctx.vector_paths)
     return ctx.paths_by_layer
 
 
 def _run_color_separation(ctx: PipelineContext) -> dict[str, dict[tuple, list[VectorPath]]]:
-    vector = Vector()
     ctx.paths_by_layer_color = {
         layer: vector.separate_by_color(paths)
         for layer, paths in ctx.paths_by_layer.items()
@@ -259,11 +259,10 @@ def _iter_groups(
 
 
 def _run_clustering(ctx: PipelineContext) -> dict[GroupKey, ClusteringStageResult]:
-    classifier = VectorClassifier()
     result: dict[GroupKey, ClusteringStageResult] = {}
 
     for key, paths in _iter_groups(ctx.paths_by_layer_color):
-        result[key] = ClusteringStageResult(steps=classifier.cluster(paths, ctx.page))
+        result[key] = ClusteringStageResult(steps=vclass.cluster(paths, ctx.page))
 
     ctx.clustering = result
     return result
@@ -279,7 +278,6 @@ def _run_text_candidates(ctx: PipelineContext) -> list[list[VectorPath]]:
     text_clusters: list[list[VectorPath]] = []
     cluster_groups: dict[int, list[list[VectorPath]]] = {}
     text_candidate_records: list[VectorRecord] = []
-    classifier = VectorClassifier()
     for cluster_result in ctx.clustering.values():
         if not cluster_result.steps:
             continue
@@ -287,7 +285,7 @@ def _run_text_candidates(ctx: PipelineContext) -> list[list[VectorPath]]:
         text_clusters.extend(last.categories["kept"].groups)
         if last.cluster_groups:
             cluster_groups.update(last.cluster_groups)
-        text_candidate_records.extend(classifier.build_vector_records(cluster_result.steps))
+        text_candidate_records.extend(vclass.build_vector_records(cluster_result.steps))
 
     ctx.text_clusters = text_clusters
     ctx.cluster_groups = cluster_groups
@@ -297,10 +295,10 @@ def _run_text_candidates(ctx: PipelineContext) -> list[list[VectorPath]]:
 
 def _run_unique_clusters(ctx: PipelineContext) -> list[list[list[VectorPath]]]:
     """Whole-page geometric similarity grouping of text_clusters (see
-    VectorClassifier.group_similar_clusters/Glossary.md's "similarity
+    classification.group_similar_clusters/Glossary.md's "similarity
     group" entry) -- run before fast_text_detect so its scoring can be
     min'd across each similarity group."""
-    groups = VectorClassifier().group_similar_clusters(ctx.text_clusters or [])
+    groups = vclass.group_similar_clusters(ctx.text_clusters or [])
     ctx.similarity_groups = groups
     ctx.cluster_similarity_id = {
         id(cluster): gi for gi, group in enumerate(groups) for cluster in group
@@ -469,7 +467,7 @@ def _run_ocr_compare(ctx: PipelineContext) -> list[ClusterOcrResult]:
     Backend: ctx.ocr_backend if set, else LightPaddleOcrBackend when
     USE_LIGHT_OCR_BACKEND (the default -- own ink-projection segmentation
     + PaddleOCR recognition-only), else RenderOCR's own PaddleOcrBackend
-    default (full PP-OCRv6 detect+rec+orientation pipeline)."""
+    default (full PP-OCRv5 detect+rec+orientation pipeline)."""
     backend = ctx.ocr_backend
     if backend is None and USE_LIGHT_OCR_BACKEND:
         backend = LightPaddleOcrBackend()
@@ -506,7 +504,6 @@ def _run_drawing_vectors(ctx: PipelineContext) -> list[DrawingVector]:
     ocr_failed), both reclassified as drawing content for the same reason.
     Whatever ocr_results still holds text for is the only content that
     doesn't end up in drawing_vectors."""
-    classifier = VectorClassifier()
     all_drawing_paths: list[VectorPath] = []
 
     for cluster_result in ctx.clustering.values():
@@ -530,118 +527,118 @@ def _run_drawing_vectors(ctx: PipelineContext) -> list[DrawingVector]:
     # path was classified into during clustering.
     all_drawing_paths.sort(key=lambda p: (p.seq, p.item_index))
 
-    ctx.drawing_vectors = classifier.build_drawing_vectors(all_drawing_paths)
+    ctx.drawing_vectors = vclass.build_drawing_vectors(all_drawing_paths)
     return ctx.drawing_vectors
 
 
-class Pipeline:
-    """Runs Pipeline.STAGES in order for one page, collecting each
-    stage's output. A stage that raises does not stop the run or crash a
-    caller (e.g. the debug app) -- it's recorded as status="error"."""
+STAGES: list[StageSpec] = [
+    StageSpec(key="reader", label="Reader", run=_run_reader),
+    StageSpec(key="native", label="Native Text", run=_run_native),
+    StageSpec(key="vector_extract", label="Vector Extraction", run=_run_vector_extract),
+    StageSpec(key="layer_separation", label="Layer Separation", run=_run_layer_separation),
+    StageSpec(key="color_separation", label="Color Separation", run=_run_color_separation),
+    StageSpec(key="clustering", label="Clustering", run=_run_clustering),
+    StageSpec(key="text_candidates", label="Text Candidates", run=_run_text_candidates),
+    StageSpec(key="unique_clusters", label="Unique Clusters", run=_run_unique_clusters),
+    StageSpec(key="fast_text_detect", label="FAST: Text Detect", run=_run_fast_text_detect),
+    StageSpec(key="spatial_regroup", label="Spatial Regroup", run=_run_spatial_regroup),
+    StageSpec(key="ocr_compare", label="OCR Compare", run=_run_ocr_compare),
+    StageSpec(key="drawing_vectors", label="Drawing Vectors", run=_run_drawing_vectors),
+]
 
-    STAGES: list[StageSpec] = [
-        StageSpec(key="reader", label="Reader", run=_run_reader),
-        StageSpec(key="native", label="Native Text", run=_run_native),
-        StageSpec(key="vector_extract", label="Vector Extraction", run=_run_vector_extract),
-        StageSpec(key="layer_separation", label="Layer Separation", run=_run_layer_separation),
-        StageSpec(key="color_separation", label="Color Separation", run=_run_color_separation),
-        StageSpec(key="clustering", label="Clustering", run=_run_clustering),
-        StageSpec(key="text_candidates", label="Text Candidates", run=_run_text_candidates),
-        StageSpec(key="unique_clusters", label="Unique Clusters", run=_run_unique_clusters),
-        StageSpec(key="fast_text_detect", label="FAST: Text Detect", run=_run_fast_text_detect),
-        StageSpec(key="spatial_regroup", label="Spatial Regroup", run=_run_spatial_regroup),
-        StageSpec(key="ocr_compare", label="OCR Compare", run=_run_ocr_compare),
-        StageSpec(key="drawing_vectors", label="Drawing Vectors", run=_run_drawing_vectors),
-    ]
 
-    @classmethod
-    def stage_keys(cls) -> list[str]:
-        return [spec.key for spec in cls.STAGES]
+def stage_keys(stages: list[StageSpec] = STAGES) -> list[str]:
+    return [spec.key for spec in stages]
 
-    def run_page(
-        self,
-        reader: Reader,
-        page_index: int,
-        final_stage: str | None = None,
-        *,
-        enable_fast: bool = True,
-        ocr_backend: "OcrBackend | None" = None,
-    ) -> list[StageOutput]:
-        """Runs Pipeline.STAGES in order, stopping after `final_stage`
-        (inclusive) instead of running every stage -- e.g. `final_stage=
-        "fast_text_detect"` skips ocr_compare (and any later stage)
-        entirely, never even constructing a RenderOCR/PaddleOCR engine, so
-        it's a real way to skip the OCR round-trip while iterating on
-        earlier stages, not just a display-time filter. `None` (default)
-        runs every stage, unchanged from before this parameter existed.
 
-        `enable_fast=False` turns fast_text_detect into a pass-through
-        (every text candidate reaches OCR) -- speed-testing toggle.
-        `ocr_backend` overrides the ocr_compare backend (default: light
-        backend per USE_LIGHT_OCR_BACKEND)."""
-        if final_stage is not None and final_stage not in self.stage_keys():
-            raise ValueError(
-                f"unknown final_stage {final_stage!r}; must be one of {self.stage_keys()}"
+def _run_stages(
+    ctx: PipelineContext, final_stage: str | None, *, stages: list[StageSpec] = STAGES,
+) -> list[StageOutput]:
+    """Runs `stages` in order, collecting each stage's output. A stage that
+    raises does not stop the run or crash a caller (e.g. the debug app) --
+    it's recorded as status="error". `stages` defaults to the real STAGES
+    list; tests substitute a short custom list to exercise error handling
+    without running the real pipeline."""
+    outputs: list[StageOutput] = []
+    ctx.stage_durations = {}
+    for spec in stages:
+        start = time.perf_counter()
+        try:
+            data = spec.run(ctx)
+            elapsed = time.perf_counter() - start
+            outputs.append(
+                StageOutput(spec.key, spec.label, "ok", data, duration_seconds=elapsed)
             )
-
-        ctx = PipelineContext(reader=reader, page_index=page_index)
-        ctx.enable_fast = enable_fast
-        ctx.ocr_backend = ocr_backend
-        return self._run_stages(ctx, final_stage)
-
-    @classmethod
-    def _run_stages(
-        cls, ctx: PipelineContext, final_stage: str | None,
-    ) -> list[StageOutput]:
-        outputs: list[StageOutput] = []
-        ctx.stage_durations = {}
-        for spec in cls.STAGES:
-            start = time.perf_counter()
-            try:
-                data = spec.run(ctx)
-                elapsed = time.perf_counter() - start
-                outputs.append(
-                    StageOutput(spec.key, spec.label, "ok", data, duration_seconds=elapsed)
+        except Exception as exc:  # noqa: BLE001 -- debug tool: surface, don't crash
+            elapsed = time.perf_counter() - start
+            _LOG.exception("stage %s failed", spec.key)
+            outputs.append(
+                StageOutput(
+                    spec.key, spec.label, "error", None, str(exc),
+                    duration_seconds=elapsed,
                 )
-            except Exception as exc:  # noqa: BLE001 -- debug tool: surface, don't crash
-                elapsed = time.perf_counter() - start
-                _LOG.exception("stage %s failed", spec.key)
-                outputs.append(
-                    StageOutput(
-                        spec.key, spec.label, "error", None, str(exc),
-                        duration_seconds=elapsed,
-                    )
-                )
-            ctx.stage_durations[spec.key] = elapsed
-            if spec.key == final_stage:
-                break
-        return outputs
+            )
+        ctx.stage_durations[spec.key] = elapsed
+        if spec.key == final_stage:
+            break
+    return outputs
+
+
+def run_page(
+    reader: Reader,
+    page_index: int,
+    final_stage: str | None = None,
+    *,
+    enable_fast: bool = True,
+    ocr_backend: "OcrBackend | None" = None,
+    stages: list[StageSpec] = STAGES,
+) -> list[StageOutput]:
+    """Runs `stages` (default: STAGES) in order, stopping after
+    `final_stage` (inclusive) instead of running every stage -- e.g.
+    `final_stage="fast_text_detect"` skips ocr_compare (and any later
+    stage) entirely, never even constructing a RenderOCR/PaddleOCR engine,
+    so it's a real way to skip the OCR round-trip while iterating on
+    earlier stages, not just a display-time filter. `None` (default) runs
+    every stage.
+
+    `enable_fast=False` turns fast_text_detect into a pass-through
+    (every text candidate reaches OCR) -- speed-testing toggle.
+    `ocr_backend` overrides the ocr_compare backend (default: light
+    backend per USE_LIGHT_OCR_BACKEND)."""
+    if final_stage is not None and final_stage not in stage_keys(stages):
+        raise ValueError(
+            f"unknown final_stage {final_stage!r}; must be one of {stage_keys(stages)}"
+        )
+
+    ctx = PipelineContext(reader=reader, page_index=page_index)
+    ctx.enable_fast = enable_fast
+    ctx.ocr_backend = ocr_backend
+    return _run_stages(ctx, final_stage, stages=stages)
 
 
 def run_page_context(
     reader: Reader, page_index: int, final_stage: str | None = None,
     *, enable_fast: bool = True, ocr_backend: "OcrBackend | None" = None,
 ) -> PipelineContext:
-    """Like Pipeline.run_page, but returns the PipelineContext itself
+    """Like run_page, but returns the PipelineContext itself
     (every field the run's stages set, e.g. ctx.text_clusters) instead of
     the list[StageOutput] -- for callers that want to read pipeline state
     directly rather than each stage's StageOutput.data (e.g. Evaluation/
     Labelling/manual_label.py, which needs ctx.text_clusters to draw
-    clickable cluster bboxes). Runs the exact same Pipeline.STAGES list/
-    order as run_page, so future stage changes never need mirroring at a
-    call site that would otherwise hand-roll its own partial stage
-    sequence.
+    clickable cluster bboxes). Runs the exact same STAGES list/order as
+    run_page, so future stage changes never need mirroring at a call site
+    that would otherwise hand-roll its own partial stage sequence.
 
     `enable_fast=False` -> fast_text_detect pass-through; `ocr_backend`
-    overrides the ocr_compare backend (see Pipeline.run_page)."""
-    if final_stage is not None and final_stage not in Pipeline.stage_keys():
+    overrides the ocr_compare backend (see run_page)."""
+    if final_stage is not None and final_stage not in stage_keys():
         raise ValueError(
-            f"unknown final_stage {final_stage!r}; must be one of {Pipeline.stage_keys()}"
+            f"unknown final_stage {final_stage!r}; must be one of {stage_keys()}"
         )
     ctx = PipelineContext(reader=reader, page_index=page_index)
     ctx.enable_fast = enable_fast
     ctx.ocr_backend = ocr_backend
-    Pipeline._run_stages(ctx, final_stage)
+    _run_stages(ctx, final_stage)
     return ctx
 
 
@@ -658,7 +655,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--final-stage",
-        choices=Pipeline.stage_keys(),
+        choices=stage_keys(),
         default=None,
         help="Stop after this stage instead of running the whole pipeline -- e.g. "
         "--final-stage fast_text_detect skips ocr_compare (and the PaddleOCR "
@@ -692,7 +689,7 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(level)
 
     with Reader(args.pdf) as reader:
-        outputs = Pipeline().run_page(
+        outputs = run_page(
             reader, args.page, final_stage=args.final_stage,
             enable_fast=not args.no_fast,
         )

@@ -3,7 +3,8 @@ from __future__ import annotations
 import pymupdf as fitz
 import pytest
 
-from rastervec.Native_Text.native import Native, _Span
+from rastervec.Native_Text import native
+from rastervec.Native_Text.native import _Span
 from rastervec.Reader.reader import Reader
 
 
@@ -24,7 +25,7 @@ def test_extract_text_basic_horizontal(synthetic_pdf_factory, tmp_pdf_path):
 
     with Reader(path) as reader:
         page = reader.get_page(0)
-        words = Native().extract(page)
+        words = native.extract(page)
 
     assert len(words) == 1
     word = words[0]
@@ -49,7 +50,7 @@ def test_extract_text_multi_word_span_gives_each_word_its_own_origin(
 
     with Reader(path) as reader:
         page = reader.get_page(0)
-        words = Native().extract(page)
+        words = native.extract(page)
 
     assert [w.text for w in words] == ["Hello", "World"]
     hello, world = words
@@ -76,7 +77,7 @@ def test_extract_text_rotated(synthetic_pdf_factory, tmp_pdf_path):
 
     with Reader(path) as reader:
         page = reader.get_page(0)
-        words = Native().extract(page)
+        words = native.extract(page)
 
     assert len(words) == 1
     word = words[0]
@@ -112,7 +113,6 @@ def test_extract_text_rotated(synthetic_pdf_factory, tmp_pdf_path):
 
 
 def test_match_word_to_span_prefers_max_overlap():
-    native = Native()
     bbox = fitz.Rect(0, 0, 10, 10)
     low_overlap_span = _span(fitz.Rect(8, 8, 20, 20))
     high_overlap_span = _span(fitz.Rect(0, 0, 10, 10))
@@ -123,7 +123,6 @@ def test_match_word_to_span_prefers_max_overlap():
 
 
 def test_match_word_to_span_rejects_tiny_overlap():
-    native = Native()
     bbox = fitz.Rect(0, 0, 10, 10)  # area 100
     # overlaps by only a 1x1 corner = 1% of the word's area
     barely = _span(fitz.Rect(9, 9, 30, 30))
@@ -131,12 +130,10 @@ def test_match_word_to_span_rejects_tiny_overlap():
 
 
 def test_match_word_to_span_no_spans_returns_none():
-    native = Native()
     assert native._match_word_to_span(fitz.Rect(0, 0, 10, 10), []) is None
 
 
 def test_build_oriented_quad_horizontal_matches_bbox_corners():
-    native = Native()
     bbox = fitz.Rect(0, 0, 10, 4)
 
     ul, ur, lr, ll = native._oriented_quad(bbox, 1.0, 0.0)
@@ -153,7 +150,6 @@ def test_build_oriented_quad_vertical_swaps_extents():
     still come out oriented along (dx, dy), not simply matching bbox
     corners in the naive horizontal order.
     """
-    native = Native()
     # A bbox that is wide (20) and short (5) -- but the text direction is
     # vertical, so a correct implementation reorients around that
     # direction rather than reusing bbox.width as the along-extent.
@@ -188,7 +184,7 @@ def test_seq_assigns_reading_order(synthetic_pdf_factory, tmp_pdf_path):
 
     with Reader(path) as reader:
         page = reader.get_page(0)
-        words = Native().extract(page)
+        words = native.extract(page)
 
     words_by_seq = sorted(words, key=lambda w: w.seq)
     assert [w.text for w in words_by_seq] == ["First", "Second"]
@@ -202,7 +198,7 @@ def test_extract_records_carries_word_and_line_metadata(synthetic_pdf_factory, t
 
     with Reader(path) as reader:
         page = reader.get_page(0)
-        records = Native().extract(page)
+        records = native.extract(page)
 
     assert [r.text for r in records] == ["Hello", "World"]
     hello, world = records
@@ -213,7 +209,6 @@ def test_extract_records_carries_word_and_line_metadata(synthetic_pdf_factory, t
 
 
 def test_no_matching_span_falls_back():
-    native = Native()
     bbox = fitz.Rect(0, 0, 10, 10)
 
     word = native._to_word(

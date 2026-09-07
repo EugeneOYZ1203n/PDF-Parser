@@ -18,7 +18,7 @@ green(matched) / yellow(spurious pred) / red(missed gt) box overlay.
 
 `--workers N` (>1) runs the pages across a spawn process pool (`Reader/
 Parallel`); the model caches are warmed once up front so the first run is
-safe. The real `Pipeline.STAGES` chain runs through OCR (PaddleOCR) --
+safe. The real `pipeline.STAGES` chain runs through OCR (PaddleOCR) --
 `main()`'s actual PDF/OCR path is a documented manual smoke test only.
 
 `format_report` / `aggregate_results` / `format_aggregate_comparison` /
@@ -292,10 +292,10 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             parser.error(str(exc))
 
-    from rastervec.pipeline import Pipeline
+    from rastervec.pipeline import stage_keys
     from rastervec.Reader.Parallel.benchmark_jobs import PageTask, run_benchmark
 
-    stage_order = Pipeline.stage_keys()
+    stage_order = stage_keys()
     aggregates: dict[str, MetricSuiteResult | None] = {}
     timings: dict[str, dict] = {}
 

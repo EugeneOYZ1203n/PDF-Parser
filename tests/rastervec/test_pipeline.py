@@ -13,12 +13,13 @@ from rastervec.models import (
 )
 from rastervec.pipeline import (
     ClusteringStageResult,
-    Pipeline,
     PipelineContext,
     StageSpec,
     _run_drawing_vectors,
     _run_spatial_regroup,
+    _run_stages,
     _sample_mask,
+    run_page,
     run_page_context,
 )
 from rastervec.Reader.reader import Reader
@@ -47,7 +48,7 @@ def test_run_page_reader_and_native_ok(synthetic_pdf_factory, tmp_pdf_path):
     path = tmp_pdf_path(doc)
 
     with Reader(path) as reader:
-        outputs = Pipeline().run_page(reader, 0)
+        outputs = run_page(reader, 0)
 
     assert [o.key for o in outputs] == _EXPECTED_STAGE_KEYS
     assert all(o.status == "ok" for o in outputs)
@@ -83,7 +84,7 @@ def test_run_page_final_stage_stops_early_and_skips_ocr_engine(
     monkeypatch.setattr("rastervec.pipeline.RenderOCR", _boom)
 
     with Reader(path) as reader:
-        outputs = Pipeline().run_page(reader, 0, final_stage="fast_text_detect")
+        outputs = run_page(reader, 0, final_stage="fast_text_detect")
 
     # everything up to and including fast_text_detect, but not
     # spatial_regroup, ocr_compare (which would construct RenderOCR), or
@@ -98,7 +99,7 @@ def test_run_page_records_stage_durations(synthetic_pdf_factory, tmp_pdf_path):
 
     with Reader(path) as reader:
         ctx = PipelineContext(reader=reader, page_index=0)
-        outputs = Pipeline._run_stages(ctx, final_stage=None)
+        outputs = _run_stages(ctx, final_stage=None)
 
     assert list(ctx.stage_durations) == _EXPECTED_STAGE_KEYS
     assert all(isinstance(v, float) and v >= 0.0 for v in ctx.stage_durations.values())
@@ -121,7 +122,7 @@ def test_run_page_final_stage_unknown_raises(synthetic_pdf_factory, tmp_pdf_path
 
     with Reader(path) as reader:
         with pytest.raises(ValueError):
-            Pipeline().run_page(reader, 0, final_stage="not_a_real_stage")
+            run_page(reader, 0, final_stage="not_a_real_stage")
 
 
 class _StubRenderOCR:
@@ -166,7 +167,7 @@ def test_run_page_vector_stages_on_drawing_pdf(tmp_pdf_path, monkeypatch):
         # enable_fast=False -- this test exercises the clustering / drawing_vectors
         # stages, not FAST; the passthrough keeps it independent of the
         # fast_tiny_ic17mlt_640.pth weights file being present.
-        outputs = Pipeline().run_page(reader, 0, enable_fast=False)
+        outputs = run_page(reader, 0, enable_fast=False)
 
     by_key = {o.key: o for o in outputs}
     assert all(o.status == "ok" for o in outputs)
@@ -427,11 +428,10 @@ def test_run_page_stage_error_is_caught(synthetic_pdf_factory, tmp_pdf_path):
     def _boom(ctx: PipelineContext):
         raise RuntimeError("stage exploded")
 
-    class _FailingPipeline(Pipeline):
-        STAGES = [StageSpec(key="boom", label="Boom", run=_boom)]
+    stages = [StageSpec(key="boom", label="Boom", run=_boom)]
 
     with Reader(path) as reader:
-        outputs = _FailingPipeline().run_page(reader, 0)
+        outputs = run_page(reader, 0, stages=stages)
 
     assert len(outputs) == 1
     assert outputs[0].status == "error"
@@ -449,16 +449,14 @@ def test_run_page_stage_after_error_still_runs(synthetic_pdf_factory, tmp_pdf_pa
     def _ok(ctx: PipelineContext):
         return "fine"
 
-    class _MixedPipeline(Pipeline):
-        STAGES = [
-            StageSpec(key="boom", label="Boom", run=_boom),
-            StageSpec(key="ok", label="Ok", run=_ok),
-        ]
+    stages = [
+        StageSpec(key="boom", label="Boom", run=_boom),
+        StageSpec(key="ok", label="Ok", run=_ok),
+    ]
 
     with Reader(path) as reader:
-        outputs = _MixedPipeline().run_page(reader, 0)
+        outputs = run_page(reader, 0, stages=stages)
 
     assert [o.status for o in outputs] == ["error", "ok"]
     assert outputs[1].data == "fine"
-
 

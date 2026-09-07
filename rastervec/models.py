@@ -48,7 +48,7 @@ class TextWord:
     """One native-text word, with the full PyMuPDF field surface joined
     from `get_text("words")` (geometry + `block_no`/`line_no`/`word_no`) and
     `get_text("dict")` (font/size/colour/direction/`wmode`, per matching
-    span). `Native.extract` produces these; `output_types.TextDTO` is the
+    span). `native.extract` produces these; `output_types.TextDTO` is the
     serialization shape."""
 
     text: str

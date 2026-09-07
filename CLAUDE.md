@@ -157,14 +157,14 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `iter_pages(indices=None)`), each carrying a `PageMeta` snapshot (mediabox, rotation normalised to
   [0,360), dimensions) plus the live `fitz.Page`. `page.meta.index` is always the source-PDF page
   index and round-trips through `get_page`.
-- **`Native_Text/native.py` — `Native`** *(implemented)*: `extract(page) -> list[TextWord]` — one
+- **`Native_Text/native.py`** *(implemented)*: `extract(page) -> list[TextWord]` — one
   `TextWord` per `get_text("words")` word (geometry + `block_no`/`line_no`/`word_no`), font/size/
   colour/direction/`wmode` joined from the best-overlapping `get_text("dict")` span (`_Span`
   dataclass), above `_MIN_SPAN_OVERLAP`. Produces correctly oriented quads even for rotated text
-  (`_oriented_quad` → `geometry.make_oriented_quad`). Split into small private methods
+  (`_oriented_quad` → `geometry.make_oriented_quad`). Split into small private module functions
   (`_extract_spans`/`_extract_words`/`_match_word_to_span`/`_oriented_quad`/`_to_word`) so each is
   independently testable against a synthetic `fitz.Page`.
-- **`Vector/vector.py` — `Vector`** *(implemented)*: `extract_paths(page) -> list[VectorPath]` walks
+- **`Vector/vector.py`** *(implemented)*: `extract_paths(page) -> list[VectorPath]` walks
   `page.fitz_page.get_drawings()`, emitting one `VectorPath` per drawing item (`l`/`re`/`qu`/`c`),
   tagged with its parent drawing's `seq` (drawing index) plus stroke/fill color, width, dashes,
   closed, layer, and item-level `bbox`/`points`. `separate_by_layer`/`separate_by_color` delegate to
@@ -172,7 +172,7 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   name, which group paths by `layer` (`""` for none) / by `stroke_color` if set else `fill_color`
   else `None`.
 - **`Vector_Classification/`** — classification of extracted paths into text candidates vs. drawing
-  content. `classification.py`'s `VectorClassifier` is the orchestrator (`cluster`, `classify`,
+  content. `classification.py`'s module functions are the orchestrator (`cluster`, `classify`,
   `build_drawing_vectors`, plus `CategoryResult`/`StepResult` and every threshold constant); the
   fixed 12-step chain itself is split by processing level into three submodules (each step
   implemented as a plain function; see each submodule's own docstring for the exhaustive per-step
@@ -203,7 +203,7 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   whole chain is a *text candidate*, handed to `unique_clusters`/`fast_text_detect`/`ocr_compare` —
   OCR success/failure is the actual signal for whether a cluster was text, not a pre-filter guess.
 
-  `VectorClassifier.cluster(paths, page) -> list[StepResult]` runs the fixed chain in order; each
+  `cluster(paths, page) -> list[StepResult]` runs the fixed chain in order; each
   `StepResult` holds every named `CategoryResult` that step produced (`role="kept"` always present
   and fed to the next step; `role="dropped"` is a side channel folded into `drawing_vectors`;
   `role="info"` is display-only). `steps[-1].categories["kept"]` is the final surviving clusters.
@@ -221,7 +221,7 @@ independently of the others (every stage's *output* is a plain dataclass from `m
 
   **Clustering/filtering always operates within one `(layer, color)` bucket, never across buckets**:
   `pipeline.py`'s `_iter_groups`/`_run_clustering` key the whole chain's work by `GroupKey = (layer,
-  color)` (from `color_separation`'s output), and `VectorClassifier.cluster()` is only ever called
+  color)` (from `color_separation`'s output), and `classification.cluster()` is only ever called
   with one bucket's paths at a time — two paths in different layers, or with different stroke/fill
   colors, are never spatially merged together, regardless of how close they are on the page.
 - **`OCR/FAST_Text_Detect/fast_detect.py` — `FastDetector`** *(implemented)*: see the `pipeline.py`
@@ -241,7 +241,7 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   light 0/90/180/270 classifier, when it loads and clears `DOC_ORI_MIN_CONFIDENCE`; else aspect-gated
   0-vs-90/270 retry keeping the higher length-weighted rec confidence) → `split_lines_by_ink` then
   per line `split_words_by_ink` → `normalize_line_crop` each word → one batched
-  `paddleocr.TextRecognition.predict` (rec-only, `LIGHT_REC_MODEL_NAME = "PP-OCRv6_small_rec"`) →
+  `paddleocr.TextRecognition.predict` (rec-only, `LIGHT_REC_MODEL_NAME = "PP-OCRv5_mobile_rec"`) →
   `OcrBox(is_word=True)` per word, corners mapped back through `_unrotate_box` to the passed image's
   own pixel space. Engines cached at class scope (`_REC_ENGINE_CACHE` / `_ORI_ENGINE_CACHE`,
   `warmup()`), like `PaddleOcrBackend`. `aspect-gating` never emits `180` — flagged in EVAL_METRICS.md.
@@ -250,7 +250,9 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `OcrBox` (one detected text box: `text`/`confidence`/`corners`/`is_word`, always already mapped
   into the *caller's* original image pixel space), `OcrDetection` (`boxes` + page-level `rotation`).
   `PaddleOcrBackend` (the heavy backend, kept selectable — `LightPaddleOcrBackend` above is the
-  pipeline default via `pipeline.USE_LIGHT_OCR_BACKEND`): PP-OCRv6 via PaddleOCR, orientation
+  pipeline default via `pipeline.USE_LIGHT_OCR_BACKEND`): PP-OCRv5 via PaddleOCR (`config.OCR_VERSION`,
+  shared with `LightPaddleOcrBackend` so the two backends can't drift onto different OCR versions),
+  orientation
   classifiers on
   (`use_doc_orientation_classify=use_textline_orientation=True, use_doc_unwarping=False`), engine
   lazily built and cached per `lang` at class scope (`_ENGINE_CACHE`). Detected boxes are
@@ -305,7 +307,7 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `f"line:{page_index}:{block_no}:{line_no}"` native-text line-region id instead, since there's no
   clustered run backing them (see below). `auto_label.py`'s `auto_label_pdf` is deliberately
   independent of the pipeline being evaluated — it reads *only* the original PDF's own
-  `Native.extract` (never runs Conversion or any classification/clustering), groups words
+  `native.extract` (never runs Conversion or any classification/clustering), groups words
   by `(block_no, line_no)` into line-level ground-truth regions (bbox via `helpers.geometry.
   union_bbox`, text joined in reading-direction order — x for horizontal lines, y for vertical),
   and sets `expected_rotation` to the most common quarter-turn among the line's words. This
@@ -467,7 +469,7 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   regardless of `color`, falling back to the default-black graphics state instead of staying
   invisible. `even_odd` / `line_cap` / `line_join` are drawing-level fields now copied onto every
   `VectorPath` of a drawing (like `fill_rule`), defaulted so existing constructions are unaffected;
-  `Vector.extract_records` normalises a tuple `lineCap` from `get_drawings()` to a plain int.
+  `vector.extract_records` normalises a tuple `lineCap` from `get_drawings()` to a plain int.
   `png.render_vector_cluster(paths, dpi)` *(implemented)*
   isolates a cluster onto a fresh single-page PyMuPDF document sized to the cluster's own bbox plus
   an asymmetric OCR render border, computed by the private `_cluster_frame` helper: each side is at
@@ -531,21 +533,21 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   stages for one page run: `page`,
   `native_words`, `vector_paths`, `paths_by_layer`, `paths_by_layer_color`, `clustering` (`dict
   [GroupKey, ClusteringStageResult]`, `GroupKey = (layer, color)`; `ClusteringStageResult.steps` is
-  exactly `VectorClassifier.cluster()`'s return value), `text_clusters` + `cluster_groups` (every
+  exactly `classification.cluster()`'s return value), `text_clusters` + `cluster_groups` (every
   bucket's final "kept" clusters flattened, plus their merged group lineage), `similarity_groups` +
   `cluster_similarity_id` (whole-page similarity grouping, see "similarity group" in Glossary.md),
   `fast_result` + `fast_passed`/`fast_dropped`, `regrouped_clusters`, `cluster_ocr_results` +
   `ocr_results` + `ocr_failed`, `drawing_vectors`. `StageSpec(key, label, run)` is
-  one stage; `Pipeline.STAGES` is the ordered list: `reader`, `native`, `vector_extract`,
+  one stage; `STAGES` is the ordered list: `reader`, `native`, `vector_extract`,
   `layer_separation`, `color_separation`, `clustering`, `text_candidates`, `unique_clusters`,
   `fast_text_detect`, `spatial_regroup`, `ocr_compare`, `drawing_vectors` (12
   stages total).
 
-  `_run_clustering` calls `VectorClassifier().cluster(paths, ctx.page)` per `(layer, color)` bucket
+  `_run_clustering` calls `classification.cluster(paths, ctx.page)` per `(layer, color)` bucket
   from `_iter_groups(ctx.paths_by_layer_color)`. `_run_text_candidates` gathers every bucket's final
   "kept" clusters into `ctx.text_clusters` and merges every bucket's `StepResult.cluster_groups`
   into `ctx.cluster_groups`. `_run_unique_clusters` groups `ctx.text_clusters` by whole-page
-  geometric similarity (`VectorClassifier.group_similar_clusters`) into `ctx.similarity_groups`/
+  geometric similarity (`classification.group_similar_clusters`) into `ctx.similarity_groups`/
   `ctx.cluster_similarity_id`.
 
   `_run_fast_text_detect` renders **one** whole-page image (`renderer.render_page_paths`) of every
@@ -567,7 +569,7 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   cluster passes if its final score exceeds `FAST_COMBINED_KEEP_THRESHOLD` (0.2); `FastPageResult`
   carries the render/mask, the final `scores`, `passed`/`dropped`, and `detect_seconds` timing. A
   page with zero vector paths never even constructs `FastDetector`'s underlying torch model.
-  **`enable_fast` toggle** (kw-only param on `Pipeline.run_page` / `run_page_context`, `--no-fast`
+  **`enable_fast` toggle** (kw-only param on `run_page` / `run_page_context`, `--no-fast`
   CLI, `PipelineContext.enable_fast`, default `True`): when `False`, `_run_fast_text_detect` is a
   pass-through — `ctx.fast_passed = ctx.text_clusters`, `ctx.fast_dropped = []`, no render/detection,
   and `unique_clusters`' similarity groups go unused (the stage still runs, so all 12 stage keys and
@@ -596,10 +598,10 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   records `cluster`, `resolved`, and the OCR call's wall-clock duration (`ocr_seconds`).
 
   `_run_drawing_vectors` folds three sources into one `drawing_paths` list before calling
-  `VectorClassifier.build_drawing_vectors`: every `role="dropped"` category from every
+  `classification.build_drawing_vectors`: every `role="dropped"` category from every
   classification-chain step, `ctx.fast_dropped` (FAST found no text signal), and `ctx.ocr_failed`
   (OCR resolution failed) — whatever `ctx.ocr_results` still holds real text for is the only
-  content that doesn't end up in `drawing_vectors`. `Pipeline.run_page(reader, page_index,
+  content that doesn't end up in `drawing_vectors`. `run_page(reader, page_index,
   final_stage=None, *, enable_fast=True, ocr_backend=None)` wraps each stage in `try/except`
   (`StageOutput(status="error", ...)` on failure, never crashing the run) and, if `final_stage` is
   given, stops right after that stage's output is appended — e.g. `--final-stage fast_text_detect`
@@ -610,11 +612,14 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   of the `list[StageOutput]`, for callers that want to read pipeline state directly (e.g.
   `ctx.text_clusters`) rather than each stage's `StageOutput.data` — used by `Evaluation/
   Labelling/manual_label.py` and `Evaluation/Evaluate/benchmark.py` instead of either hand-rolling
-  a partial `Pipeline.STAGES` sequence themselves.
+  a partial `STAGES` sequence themselves.
 - **`notebooks/pipeline_stage_visualization.ipynb`** — the static replacement for the former
-  `debug_app.py` Tk GUI (deleted). One `Pipeline._run_stages(ctx, FINAL_STAGE)` run on a single
+  `debug_app.py` Tk GUI (deleted). One `_run_stages(ctx, FINAL_STAGE)` run on a single
   configured `(PDF_PATH, PAGE_INDEX)` gives both the accumulated `ctx.*` fields and each stage's
-  `StageOutput` (`status`/`error`). A `visualize(stage_key, categories)` helper renders, per stage:
+  `StageOutput` (`status`/`error`). `VARIANT` selects one of the benchmark's `current_*`
+  `Evaluation/Evaluate/variants.py` variants (`legacy` is rejected — not this pipeline), setting
+  `ctx.enable_fast` + `ctx.ocr_backend` (light `LightPaddleOcrBackend` vs heavy `None`) exactly as
+  the benchmark runs them. A `visualize(stage_key, categories)` helper renders, per stage:
   one **original page** raster, then for **every** overlay category a pair — the category's geometry
   drawn alone on white (**isolated**) and the same geometry on the original page (**overlay**) — so
   a single-overlay stage is 3 images and an N-overlay stage is `1 + 2N`. `clustering` expands every
@@ -650,7 +655,7 @@ Three things, all following the existing stage folders' pattern:
    its own folder under `rastervec/` (or a new file inside an existing one, e.g. a new submodule
    under `Vector_Classification/`) with real logic split into small private methods per sub-step
    (e.g. `_extract_x`/`_match_y`) so each is independently testable.
-2. Add one `StageSpec` to `Pipeline.STAGES` in `pipeline.py` (a `_run_<stage>(ctx)` function that
+2. Add one `StageSpec` to `STAGES` in `pipeline.py` (a `_run_<stage>(ctx)` function that
    reads whatever `PipelineContext` fields it needs and stores its own result back onto `ctx`).
 3. Add a per-stage cell to `notebooks/pipeline_stage_visualization.ipynb` — a markdown header plus
    a code cell that builds the stage's overlay `categories` list from `ctx` / `outputs[<key>].data`

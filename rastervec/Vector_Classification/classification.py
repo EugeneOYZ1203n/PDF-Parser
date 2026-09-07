@@ -1,6 +1,6 @@
 """Vector Classification: a single fixed, non-configurable 12-step
 pipeline that classifies extracted VectorPaths into text candidates vs.
-drawing content, run in order by `VectorClassifier.cluster()`. Each step
+drawing content, run in order by `cluster()`. Each step
 is implemented as a plain function in this package's items/groups/
 clusters submodules (see each submodule's own docstring for its steps'
 descriptions):
@@ -104,199 +104,199 @@ class StepResult:
     cluster_groups: dict[int, list[list[VectorPath]]] | None = None
 
 
-class VectorClassifier:
-    """Classifies extracted vector paths into text candidates vs. drawing
-    content, and re-aggregates paths back into DrawingVectors."""
+def cluster(paths: list[VectorPath], page: Page) -> list[StepResult]:
+    """Runs the fixed pipeline (see this module's docstring) in order,
+    each step's input being the previous step's `"kept"` category.
+    Returns one `StepResult` per step; `steps[-1].categories["kept"]`
+    is the final surviving groups, handed to text_candidates (see
+    pipeline.py's `_run_text_candidates`)."""
+    groups: list[list[VectorPath]] = [[p] for p in paths]
+    steps: list[StepResult] = []
 
-    def cluster(self, paths: list[VectorPath], page: Page) -> list[StepResult]:
-        """Runs the fixed pipeline (see this module's docstring) in order,
-        each step's input being the previous step's `"kept"` category.
-        Returns one `StepResult` per step; `steps[-1].categories["kept"]`
-        is the final surviving groups, handed to text_candidates (see
-        pipeline.py's `_run_text_candidates`)."""
-        groups: list[list[VectorPath]] = [[p] for p in paths]
-        steps: list[StepResult] = []
+    groups, dropped = itf.filter_large_items(groups, page, MAX_DIMENSION_FRACTION)
+    steps.append(StepResult("Large items", {
+        "kept": CategoryResult(groups, "kept"),
+        "dropped_oversized": CategoryResult(dropped, "dropped"),
+    }))
 
-        groups, dropped = itf.filter_large_items(groups, page, MAX_DIMENSION_FRACTION)
-        steps.append(StepResult("Large items", {
-            "kept": CategoryResult(groups, "kept"),
-            "dropped_oversized": CategoryResult(dropped, "dropped"),
-        }))
+    groups, signature_counts = itf.compute_vector_signatures(groups, SIGNATURE_ROUND_PX)
+    steps.append(StepResult(
+        "Vector signatures", {"kept": CategoryResult(groups, "kept")},
+        signature_counts=signature_counts,
+    ))
 
-        groups, signature_counts = itf.compute_vector_signatures(groups, SIGNATURE_ROUND_PX)
-        steps.append(StepResult(
-            "Vector signatures", {"kept": CategoryResult(groups, "kept")},
-            signature_counts=signature_counts,
-        ))
+    groups, duplicate_runs = grf.remove_duplicate_runs(
+        groups, SIGNATURE_ROUND_PX, DUPLICATE_RUN_MIN_LENGTH
+    )
+    groups, _ = grf.combine_overlapping_seq(groups, SEQ_OVERLAP_TOLERANCE_PX)
+    steps.append(StepResult("Seq dedupe + overlap merge", {
+        "kept": CategoryResult(groups, "kept"),
+        "duplicate_runs": CategoryResult(duplicate_runs, "dropped"),
+    }))
 
-        groups, duplicate_runs = grf.remove_duplicate_runs(
-            groups, SIGNATURE_ROUND_PX, DUPLICATE_RUN_MIN_LENGTH
+    groups, dropped = grf.filter_tiny_groups(groups, MIN_GROUP_SIZE_PX)
+    steps.append(StepResult("Tiny groups", {
+        "kept": CategoryResult(groups, "kept"),
+        "dropped_tiny": CategoryResult(dropped, "dropped"),
+    }))
+
+    groups, dropped = grf.filter_large_groups(groups, page, MAX_DIMENSION_FRACTION)
+    steps.append(StepResult("Large groups", {
+        "kept": CategoryResult(groups, "kept"),
+        "dropped_oversized": CategoryResult(dropped, "dropped"),
+    }))
+
+    groups, debug_unconstrained, debug_no_parallel, lineage = (
+        clf.cluster_spatial_groups(
+            groups, SPATIAL_CLUSTER_THRESHOLD, SPATIAL_SIZE_TOLERANCE,
         )
-        groups, _ = grf.combine_overlapping_seq(groups, SEQ_OVERLAP_TOLERANCE_PX)
-        steps.append(StepResult("Seq dedupe + overlap merge", {
-            "kept": CategoryResult(groups, "kept"),
-            "duplicate_runs": CategoryResult(duplicate_runs, "dropped"),
-        }))
+    )
+    steps.append(StepResult("Spatial cluster", {
+        "kept": CategoryResult(groups, "kept"),
+        "debug_unconstrained": CategoryResult(debug_unconstrained, "info"),
+        "debug_no_parallel": CategoryResult(debug_no_parallel, "info"),
+    }))
 
-        groups, dropped = grf.filter_tiny_groups(groups, MIN_GROUP_SIZE_PX)
-        steps.append(StepResult("Tiny groups", {
-            "kept": CategoryResult(groups, "kept"),
-            "dropped_tiny": CategoryResult(dropped, "dropped"),
-        }))
+    groups, dropped = clf.filter_mixed_fill_rule_clusters(groups)
+    steps.append(StepResult("Mixed fill-rule clusters", {
+        "kept": CategoryResult(groups, "kept"),
+        "dropped_mixed_fill_rule": CategoryResult(dropped, "dropped"),
+    }))
 
-        groups, dropped = grf.filter_large_groups(groups, page, MAX_DIMENSION_FRACTION)
-        steps.append(StepResult("Large groups", {
-            "kept": CategoryResult(groups, "kept"),
-            "dropped_oversized": CategoryResult(dropped, "dropped"),
-        }))
+    groups, group_stats = grf.compute_group_stats(groups, SIGNATURE_ROUND_PX)
+    steps.append(StepResult(
+        "Group stats", {"kept": CategoryResult(groups, "kept")},
+        group_stats=group_stats,
+    ))
 
-        groups, debug_unconstrained, debug_no_parallel, lineage = (
-            clf.cluster_spatial_groups(
-                groups, SPATIAL_CLUSTER_THRESHOLD, SPATIAL_SIZE_TOLERANCE,
+    groups, dropped = clf.filter_perimeter_only_clusters(groups, group_stats, PERIMETER_MARGIN_FRACTION)
+    steps.append(StepResult("Perimeter-only clusters", {
+        "kept": CategoryResult(groups, "kept"),
+        "dropped_perimeter": CategoryResult(dropped, "dropped"),
+    }))
+
+    groups, dropped = clf.filter_density_clusters(
+        groups, group_stats, DENSITY_DEFAULT_GRID_SIZE, DENSITY_MIN_CELL_PX, DENSITY_MAX_CELL_PX,
+        DENSITY_MAX_EMPTY_FRACTION,
+    )
+    steps.append(StepResult("Density clusters", {
+        "kept": CategoryResult(groups, "kept"),
+        "dropped_low_density": CategoryResult(dropped, "dropped"),
+    }))
+
+    groups, dropped = clf.filter_constant_spacing_clusters(
+        groups, SIGNATURE_ROUND_PX, PATTERN_SPACING_TOLERANCE, PATTERN_MIN_REPEAT_COUNT,
+        PATTERN_FRACTION_THRESHOLD,
+    )
+    steps.append(StepResult("Constant-spacing clusters", {
+        "kept": CategoryResult(groups, "kept"),
+        "dropped_constant_spacing": CategoryResult(dropped, "dropped"),
+    }))
+
+    groups, dropped = clf.filter_low_variety_clusters(
+        groups, group_stats,
+        LOW_VARIETY_MIN_MEMBER_COUNT, LOW_VARIETY_MIN_REQUIRED,
+        LOW_VARIETY_MAX_MEMBER_COUNT, LOW_VARIETY_MAX_REQUIRED,
+    )
+    cluster_groups = {id(g): lineage.get(id(g), [g]) for g in groups}
+    steps.append(StepResult(
+        "Low-variety clusters", {
+            "kept": CategoryResult(groups, "kept"),
+            "dropped_low_variety": CategoryResult(dropped, "dropped"),
+        },
+        cluster_groups=cluster_groups,
+    ))
+
+    return steps
+
+
+def group_similar_clusters(
+    clusters: list[list[VectorPath]],
+) -> list[list[list[VectorPath]]]:
+    """Whole-page similarity grouping of text-candidate clusters -- see
+    `clf.group_similar_clusters` and Glossary.md's "similarity group"
+    entry. Uses `UNIQUE_CLUSTER_TOLERANCE`."""
+    return clf.group_similar_clusters(clusters, UNIQUE_CLUSTER_TOLERANCE)
+
+
+def classify(paths: list[VectorPath], page: Page) -> list[list[VectorPath]]:
+    """Runs cluster() and returns just the final surviving groups -- a
+    convenience wrapper for callers that don't need the per-step/
+    per-category bookkeeping (pipeline.py's own stage wiring calls
+    cluster() directly instead, to keep every step's categories for the
+    debug app and drawing_vectors)."""
+    steps = cluster(paths, page)
+    return steps[-1].categories["kept"].groups if steps else []
+
+
+def _bbox_and_representative(paths: list[VectorPath]) -> dict:
+    """Shared by build_vector_records/build_drawing_vectors: a group's
+    own union bbox, plus style fields read off its first member as a
+    representative value (paths within one group/cluster share the
+    same drawing-level style in practice)."""
+    first = paths[0]
+    return dict(
+        bbox=union_bbox([p.bbox for p in paths]),
+        stroke_color=first.stroke_color,
+        fill_color=first.fill_color,
+        stroke_width=first.stroke_width,
+        dashed=is_dashed(first.dashes),
+        page_index=first.page_index,
+    )
+
+
+def build_vector_records(steps: list[StepResult]) -> list[VectorRecord]:
+    """Wires the final step's `cluster_groups` lineage into one
+    `VectorRecord` per surviving (role="kept") text-candidate cluster --
+    built right here, where the lineage is already known, rather than
+    reconstructed after the fact from a flattened list. Drawing-level
+    fields VectorPath doesn't carry (even_odd/line_cap/line_join/
+    scissor/blendmode/isolated/knockout/opacity) fall back to
+    false/0/None -- a cluster can merge paths from several different
+    original drawings, so there's no single drawing left to read them
+    from; `seqno` uses the cluster's first member's synthetic `seq` as
+    a representative value instead."""
+    if not steps:
+        return []
+    last = steps[-1]
+    kept = last.categories["kept"].groups
+    lineage = last.cluster_groups or {}
+
+    records: list[VectorRecord] = []
+    for cluster_ in kept:
+        if not cluster_:
+            continue
+        common = _bbox_and_representative(cluster_)
+        first = cluster_[0]
+        records.append(
+            VectorRecord(
+                items=cluster_,
+                even_odd=False,
+                line_cap=0,
+                line_join=0,
+                seqno=first.seq,
+                rect=common["bbox"],
+                scissor=None,
+                blendmode=None,
+                isolated=False,
+                knockout=False,
+                opacity=None,
+                groups=lineage.get(id(cluster_), [cluster_]),
+                role="kept",
+                **common,
             )
         )
-        steps.append(StepResult("Spatial cluster", {
-            "kept": CategoryResult(groups, "kept"),
-            "debug_unconstrained": CategoryResult(debug_unconstrained, "info"),
-            "debug_no_parallel": CategoryResult(debug_no_parallel, "info"),
-        }))
+    return records
 
-        groups, dropped = clf.filter_mixed_fill_rule_clusters(groups)
-        steps.append(StepResult("Mixed fill-rule clusters", {
-            "kept": CategoryResult(groups, "kept"),
-            "dropped_mixed_fill_rule": CategoryResult(dropped, "dropped"),
-        }))
 
-        groups, group_stats = grf.compute_group_stats(groups, SIGNATURE_ROUND_PX)
-        steps.append(StepResult(
-            "Group stats", {"kept": CategoryResult(groups, "kept")},
-            group_stats=group_stats,
-        ))
+def build_drawing_vectors(paths: list[VectorPath]) -> list[DrawingVector]:
+    groups: dict[int, list[VectorPath]] = defaultdict(list)
+    for path in paths:
+        groups[path.seq].append(path)
 
-        groups, dropped = clf.filter_perimeter_only_clusters(groups, group_stats, PERIMETER_MARGIN_FRACTION)
-        steps.append(StepResult("Perimeter-only clusters", {
-            "kept": CategoryResult(groups, "kept"),
-            "dropped_perimeter": CategoryResult(dropped, "dropped"),
-        }))
+    result = []
+    for group in groups.values():
+        result.append(DrawingVector(paths=group, **_bbox_and_representative(group)))
 
-        groups, dropped = clf.filter_density_clusters(
-            groups, group_stats, DENSITY_DEFAULT_GRID_SIZE, DENSITY_MIN_CELL_PX, DENSITY_MAX_CELL_PX,
-            DENSITY_MAX_EMPTY_FRACTION,
-        )
-        steps.append(StepResult("Density clusters", {
-            "kept": CategoryResult(groups, "kept"),
-            "dropped_low_density": CategoryResult(dropped, "dropped"),
-        }))
-
-        groups, dropped = clf.filter_constant_spacing_clusters(
-            groups, SIGNATURE_ROUND_PX, PATTERN_SPACING_TOLERANCE, PATTERN_MIN_REPEAT_COUNT,
-            PATTERN_FRACTION_THRESHOLD,
-        )
-        steps.append(StepResult("Constant-spacing clusters", {
-            "kept": CategoryResult(groups, "kept"),
-            "dropped_constant_spacing": CategoryResult(dropped, "dropped"),
-        }))
-
-        groups, dropped = clf.filter_low_variety_clusters(
-            groups, group_stats,
-            LOW_VARIETY_MIN_MEMBER_COUNT, LOW_VARIETY_MIN_REQUIRED,
-            LOW_VARIETY_MAX_MEMBER_COUNT, LOW_VARIETY_MAX_REQUIRED,
-        )
-        cluster_groups = {id(g): lineage.get(id(g), [g]) for g in groups}
-        steps.append(StepResult(
-            "Low-variety clusters", {
-                "kept": CategoryResult(groups, "kept"),
-                "dropped_low_variety": CategoryResult(dropped, "dropped"),
-            },
-            cluster_groups=cluster_groups,
-        ))
-
-        return steps
-
-    def group_similar_clusters(
-        self, clusters: list[list[VectorPath]],
-    ) -> list[list[list[VectorPath]]]:
-        """Whole-page similarity grouping of text-candidate clusters -- see
-        `clf.group_similar_clusters` and Glossary.md's "similarity group"
-        entry. Uses `UNIQUE_CLUSTER_TOLERANCE`."""
-        return clf.group_similar_clusters(clusters, UNIQUE_CLUSTER_TOLERANCE)
-
-    def classify(self, paths: list[VectorPath], page: Page) -> list[list[VectorPath]]:
-        """Runs cluster() and returns just the final surviving groups -- a
-        convenience wrapper for callers that don't need the per-step/
-        per-category bookkeeping (pipeline.py's own stage wiring calls
-        cluster() directly instead, to keep every step's categories for the
-        debug app and drawing_vectors)."""
-        steps = self.cluster(paths, page)
-        return steps[-1].categories["kept"].groups if steps else []
-
-    @staticmethod
-    def _bbox_and_representative(paths: list[VectorPath]) -> dict:
-        """Shared by build_vector_records/build_drawing_vectors: a group's
-        own union bbox, plus style fields read off its first member as a
-        representative value (paths within one group/cluster share the
-        same drawing-level style in practice)."""
-        first = paths[0]
-        return dict(
-            bbox=union_bbox([p.bbox for p in paths]),
-            stroke_color=first.stroke_color,
-            fill_color=first.fill_color,
-            stroke_width=first.stroke_width,
-            dashed=is_dashed(first.dashes),
-            page_index=first.page_index,
-        )
-
-    def build_vector_records(self, steps: list[StepResult]) -> list[VectorRecord]:
-        """Wires the final step's `cluster_groups` lineage into one
-        `VectorRecord` per surviving (role="kept") text-candidate cluster --
-        built right here, where the lineage is already known, rather than
-        reconstructed after the fact from a flattened list. Drawing-level
-        fields VectorPath doesn't carry (even_odd/line_cap/line_join/
-        scissor/blendmode/isolated/knockout/opacity) fall back to
-        false/0/None -- a cluster can merge paths from several different
-        original drawings, so there's no single drawing left to read them
-        from; `seqno` uses the cluster's first member's synthetic `seq` as
-        a representative value instead."""
-        if not steps:
-            return []
-        last = steps[-1]
-        kept = last.categories["kept"].groups
-        lineage = last.cluster_groups or {}
-
-        records: list[VectorRecord] = []
-        for cluster in kept:
-            if not cluster:
-                continue
-            common = self._bbox_and_representative(cluster)
-            first = cluster[0]
-            records.append(
-                VectorRecord(
-                    items=cluster,
-                    even_odd=False,
-                    line_cap=0,
-                    line_join=0,
-                    seqno=first.seq,
-                    rect=common["bbox"],
-                    scissor=None,
-                    blendmode=None,
-                    isolated=False,
-                    knockout=False,
-                    opacity=None,
-                    groups=lineage.get(id(cluster), [cluster]),
-                    role="kept",
-                    **common,
-                )
-            )
-        return records
-
-    def build_drawing_vectors(self, paths: list[VectorPath]) -> list[DrawingVector]:
-        groups: dict[int, list[VectorPath]] = defaultdict(list)
-        for path in paths:
-            groups[path.seq].append(path)
-
-        result = []
-        for group in groups.values():
-            result.append(DrawingVector(paths=group, **self._bbox_and_representative(group)))
-
-        _LOG.debug("build_drawing_vectors: %d path(s) -> %d drawing(s)", len(paths), len(result))
-        return result
+    _LOG.debug("build_drawing_vectors: %d path(s) -> %d drawing(s)", len(paths), len(result))
+    return result

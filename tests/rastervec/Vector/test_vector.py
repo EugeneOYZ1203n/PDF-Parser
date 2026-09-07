@@ -5,7 +5,7 @@ import pytest
 
 from rastervec.models import VectorPath
 from rastervec.Reader.reader import Reader
-from rastervec.Vector.vector import Vector
+from rastervec.Vector import vector
 
 
 def _make_path(
@@ -71,7 +71,7 @@ def _build_test_page(tmp_pdf_path) -> "Reader":
 def test_extract_paths_basic(tmp_pdf_path):
     with _build_test_page(tmp_pdf_path) as reader:
         page = reader.get_page(0)
-        paths = Vector().extract_paths(page)
+        paths = vector.extract_paths(page)
 
     assert len(paths) > 0
     kinds = {p.kind for p in paths}
@@ -82,7 +82,7 @@ def test_extract_paths_basic(tmp_pdf_path):
 def test_extract_paths_rect_bbox_matches(tmp_pdf_path):
     with _build_test_page(tmp_pdf_path) as reader:
         page = reader.get_page(0)
-        paths = Vector().extract_paths(page)
+        paths = vector.extract_paths(page)
 
     small_rects = [p for p in paths if p.kind == "re" and (p.bbox[2] - p.bbox[0]) < 10]
     assert len(small_rects) == 4
@@ -94,7 +94,7 @@ def test_extract_paths_rect_bbox_matches(tmp_pdf_path):
 def test_extract_records_carries_drawing_level_fields(tmp_pdf_path):
     with _build_test_page(tmp_pdf_path) as reader:
         page = reader.get_page(0)
-        records = Vector().extract_records(page)
+        records = vector.extract_records(page)
 
     assert len(records) > 0
     assert all(isinstance(r.items, list) and r.items for r in records)
@@ -114,7 +114,7 @@ def test_separate_by_layer_groups_by_layer_field():
         _make_path(layer=None),
     ]
 
-    groups = Vector().separate_by_layer(paths)
+    groups = vector.separate_by_layer(paths)
 
     assert set(groups.keys()) == {"A", "B", ""}
     assert len(groups["A"]) == 2
@@ -131,7 +131,7 @@ def test_separate_by_color_groups_by_stroke_fill_and_opacity():
         _make_path(stroke_color=(1, 0, 0), fill_color=(0, 1, 0), stroke_opacity=0.5),
     ]
 
-    groups = Vector().separate_by_color(paths)
+    groups = vector.separate_by_color(paths)
 
     assert groups[(1, 0, 0), (0, 1, 0), None, None] == [paths[0]]
     assert groups[None, (0, 1, 0), None, None] == [paths[1]]

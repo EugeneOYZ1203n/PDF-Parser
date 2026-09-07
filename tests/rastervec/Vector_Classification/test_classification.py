@@ -4,7 +4,7 @@ import pytest
 
 from rastervec.helpers.clustering import cluster_spatial
 from rastervec.models import VectorPath
-from rastervec.Vector_Classification.classification import VectorClassifier
+from rastervec.Vector_Classification import classification as vclass
 from rastervec.Vector_Classification.clusters import cluster_filters as clf
 from rastervec.Vector_Classification.groups import group_filters as grf
 from rastervec.Vector_Classification.items import item_filters as itf
@@ -56,14 +56,14 @@ class _Page:
 
 
 # ----------------------------------------------------------------------
-# VectorClassifier.cluster() -- pipeline shape / step-level behavior.
+# classification.cluster() -- pipeline shape / step-level behavior.
 # ----------------------------------------------------------------------
 
 
 def test_cluster_step_count_and_labels():
     lone = _make_path(kind="l", bbox=(0, 0, 3, 6), fill_color=(0, 0, 0))
 
-    steps = VectorClassifier().cluster([lone], _Page())
+    steps = vclass.cluster([lone], _Page())
 
     assert [s.label for s in steps] == [
         "Large items",
@@ -84,8 +84,8 @@ def test_cluster_step_count_and_labels():
 def test_classify_is_cluster_final_kept_category():
     lone = _make_path(kind="l", bbox=(0, 0, 3, 6), fill_color=(0, 0, 0))
 
-    steps = VectorClassifier().cluster([lone], _Page())
-    assert steps[-1].categories["kept"].groups == VectorClassifier().classify([lone], _Page())
+    steps = vclass.cluster([lone], _Page())
+    assert steps[-1].categories["kept"].groups == vclass.classify([lone], _Page())
 
 
 def test_classify_keeps_lone_cluster_with_no_high_frequency_filter():
@@ -97,7 +97,7 @@ def test_classify_keeps_lone_cluster_with_no_high_frequency_filter():
     # and it's not perimeter-only/too-sparse/patterned on its own.
     lone = _make_path(kind="l", bbox=(0, 0, 3, 6), fill_color=(0, 0, 0))
 
-    clusters = VectorClassifier().classify([lone], _Page())
+    clusters = vclass.classify([lone], _Page())
 
     assert clusters == [[lone]]
 
@@ -108,7 +108,7 @@ def test_cluster_drops_oversized_item_and_group():
     oversized = _make_path(kind="l", bbox=(0, 0, 40, 40), stroke_color=(0, 0, 0))
     small = _make_path(seq=50, kind="l", bbox=(150, 150, 152, 152), stroke_color=(0, 0, 0))
 
-    steps = VectorClassifier().cluster([oversized, small], _Page())
+    steps = vclass.cluster([oversized, small], _Page())
 
     dropped_at_large_items = steps[0].categories["dropped_oversized"].groups
     assert any(oversized in g for g in dropped_at_large_items)
@@ -128,7 +128,7 @@ def test_cluster_drops_duplicate_run_of_five_or_more():
     ]
     other = _make_path(seq=50, kind="l", bbox=(150, 150, 158, 158), stroke_color=(0, 0, 0))
 
-    steps = VectorClassifier().cluster(duplicates + [other], _Page())
+    steps = vclass.cluster(duplicates + [other], _Page())
     dedupe_step = steps[2]
     assert dedupe_step.label == "Seq dedupe + overlap merge"
 
@@ -146,7 +146,7 @@ def test_cluster_keeps_duplicate_run_under_minimum():
         for i in range(4)
     ]
 
-    steps = VectorClassifier().cluster(quad, _Page())
+    steps = vclass.cluster(quad, _Page())
     dedupe_step = steps[2]
 
     assert dedupe_step.categories["duplicate_runs"].groups == []
@@ -164,7 +164,7 @@ def test_cluster_drops_entire_run_longer_than_minimum():
     ]
     trailing = _make_path(seq=50, kind="l", bbox=(300, 0, 308, 8), stroke_color=(0, 0, 0))
 
-    steps = VectorClassifier().cluster(duplicates + [trailing], _Page())
+    steps = vclass.cluster(duplicates + [trailing], _Page())
     dedupe_step = steps[2]
 
     dropped_paths = [p for g in dedupe_step.categories["duplicate_runs"].groups for p in g]
@@ -187,7 +187,7 @@ def test_cluster_spatial_step_reports_debug_categories():
     a = _make_path(seq=0, kind="l", bbox=(0, 0, 18, 4), stroke_color=(0, 0, 0))
     b = _make_path(seq=1, kind="l", bbox=(22, 0, 26, 18), stroke_color=(0, 0, 0))
 
-    steps = VectorClassifier().cluster([a, b], _Page())
+    steps = vclass.cluster([a, b], _Page())
     spatial_step = next(s for s in steps if s.label == "Spatial cluster")
 
     kept_groups = spatial_step.categories["kept"].groups
@@ -209,7 +209,7 @@ def test_cluster_group_stats_step_is_pass_through_with_stats():
     a = _make_path(seq=0, kind="l", bbox=(0, 0, 3, 6), stroke_color=(0, 0, 0))
     b = _make_path(seq=1, kind="re", bbox=(2, 0, 6, 6), fill_color=(0, 0, 0))
 
-    steps = VectorClassifier().cluster([a, b], _Page())
+    steps = vclass.cluster([a, b], _Page())
     stats_step = next(s for s in steps if s.label == "Group stats")
 
     # Pure pass-through: the same groups as the previous step's kept category.
@@ -238,7 +238,7 @@ def test_cluster_drops_perimeter_only_cluster():
     ]
     centered = _make_path(seq=50, kind="l", bbox=(150, 150, 154, 154), stroke_color=(0, 0, 0))
 
-    steps = VectorClassifier().cluster(ring + [centered], _Page())
+    steps = vclass.cluster(ring + [centered], _Page())
     perimeter_step = next(s for s in steps if s.label == "Perimeter-only clusters")
 
     kept_paths = [p for g in perimeter_step.categories["kept"].groups for p in g]
@@ -260,7 +260,7 @@ def test_build_drawing_vectors_aggregates_by_seq():
     b = _make_path(seq=5, kind="l", bbox=(10, 0, 10, 10), stroke_color=(0, 0, 0), stroke_width=2)
     c = _make_path(seq=9, kind="re", bbox=(50, 50, 60, 60), fill_color=(1, 0, 0))
 
-    result = VectorClassifier().build_drawing_vectors([a, b, c])
+    result = vclass.build_drawing_vectors([a, b, c])
 
     by_seq = {dv.paths[0].seq: dv for dv in result}
     assert set(by_seq) == {5, 9}

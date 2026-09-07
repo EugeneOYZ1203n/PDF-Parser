@@ -15,7 +15,7 @@ matching, see that module's own docstring), so a native word's bbox on the
 original page is already valid ground truth for the converted page too --
 no coordinate transform needed.
 
-Native words are grouped by `(block_no, line_no)` (from `Native.extract`)
+Native words are grouped by `(block_no, line_no)` (from `native.extract`)
 into line-level ground-truth regions -- closer to a vector cluster's
 natural granularity than one word each. `expected_rotation` per line is
 the median of its words' own quarter-turn-rounded angles, so
@@ -31,7 +31,7 @@ from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet
 from rastervec.helpers.geometry import union_bbox
 from rastervec.logging_setup import get_logger
 from rastervec.models import TextWord
-from rastervec.Native_Text.native import Native
+from rastervec.Native_Text.native import extract as extract_native_words
 from rastervec.Reader.reader import Reader
 
 _LOG = get_logger("auto_label")
@@ -68,7 +68,7 @@ def auto_label_pdf(pdf_path: str, page_index: int) -> LabelSet:
     converted-to-vector counterpart."""
     with Reader(pdf_path) as reader:
         page = reader.get_page(page_index)
-        native_words = Native().extract(page)
+        native_words = extract_native_words(page)
 
     lines: dict[tuple[int, int], list[TextWord]] = defaultdict(list)
     for word in native_words:
