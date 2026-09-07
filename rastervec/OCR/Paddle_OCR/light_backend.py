@@ -1,6 +1,6 @@
 """Light OCR backend -- own ink-projection segmentation + PaddleOCR
 recognition-only, an `OcrBackend` (see `ocr_backend.py`) drop-in for
-`RenderOCR` that skips the full PP-OCRv6 detection + doc-unwarping +
+`RenderOCR` that skips the full PP-OCRv5 detection + doc-unwarping +
 textline-orientation pipeline the heavy `PaddleOcrBackend` runs per
 cluster.
 
@@ -40,7 +40,12 @@ from PIL import Image
 # error in this paddlepaddle build). Only set if the caller hasn't.
 os.environ.setdefault("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "False")
 
-from rastervec.config import DOC_ORI_MIN_CONFIDENCE, REC_BATCH_SIZE, VERTICAL_ASPECT
+from rastervec.config import (
+    DOC_ORI_MIN_CONFIDENCE,
+    OCR_VERSION,
+    REC_BATCH_SIZE,
+    VERTICAL_ASPECT,
+)
 from rastervec.logging_setup import get_logger
 from rastervec.OCR.Paddle_OCR.crop_normalize import normalize_line_crop
 from rastervec.OCR.Paddle_OCR.ink_segment import (
@@ -52,12 +57,12 @@ from rastervec.OCR.Paddle_OCR.ocr_backend import OcrBox, OcrDetection
 
 _LOG = get_logger("ocr.light")
 
-# PP-OCRv6 rec model to use (small is ~2x lighter than the medium default
-# TextRecognition ships; PP-OCRv6_tiny_rec is lighter still,
-# PP-OCRv6_medium_rec is the accuracy fallback). Verified present in this
-# paddleocr==3.7.0 install. Kept here, not in config.py: it's a model
-# identifier, not a tuning knob.
-LIGHT_REC_MODEL_NAME = "PP-OCRv6_small_rec"
+# PP-OCRv5's lightweight rec model (no small/tiny/medium tiers like v6 --
+# just mobile/server; mobile is the lightweight one). Built off the shared
+# config.OCR_VERSION so this backend and PaddleOcrBackend can't drift onto
+# different OCR versions. Verified present in this paddleocr install. Kept
+# here, not in config.py: it's a model identifier, not a tuning knob.
+LIGHT_REC_MODEL_NAME = f"{OCR_VERSION}_mobile_rec"
 
 
 def _rec_field(result: object, key: str):

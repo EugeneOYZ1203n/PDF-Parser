@@ -85,6 +85,10 @@ def test_spatial_regroup_tolerance_px():
     assert config.SPATIAL_REGROUP_TOLERANCE_PX == 1.0
 
 
+def test_ocr_version():
+    assert config.OCR_VERSION == "PP-OCRv5"
+
+
 def test_ocr_backend_default_is_light():
     assert config.USE_LIGHT_OCR_BACKEND is True
 

@@ -126,8 +126,15 @@ SPATIAL_REGROUP_TOLERANCE_PX = 1.0
 # ocr_compare stage (pipeline.py)
 # ======================================================================
 
+# PaddleOCR model family both PaddleOcrBackend (heavy) and
+# LightPaddleOcrBackend (light) build against, so the two variants can't
+# silently drift onto different OCR versions. Pinned to PP-OCRv5, not the
+# newer PP-OCRv6, because this venv's paddleocr/paddlex install (see
+# requirements.txt) doesn't have PP-OCRv6 models registered.
+OCR_VERSION = "PP-OCRv5"
+
 # Default OCR backend: True -> LightPaddleOcrBackend (own ink-projection
-# segmentation + PaddleOCR recognition-only); False -> the full PP-OCRv6
+# segmentation + PaddleOCR recognition-only); False -> the full PP-OCRv5
 # detect+rec+orient pipeline. A PipelineContext.ocr_backend override wins.
 USE_LIGHT_OCR_BACKEND = True
 

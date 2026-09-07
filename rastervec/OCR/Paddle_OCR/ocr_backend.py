@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 # hasn't already configured this themselves.
 os.environ.setdefault("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "False")
 
+from rastervec.config import OCR_VERSION
+
 
 @dataclass
 class OcrBox:
@@ -94,7 +96,7 @@ def _undo_doc_rotation(
 
 
 class PaddleOcrBackend:
-    """PaddleOCR (PP-OCRv6, text-detection + text-recognition, with doc/
+    """PaddleOCR (PP-OCRv5, text-detection + text-recognition, with doc/
     textline orientation classification enabled). Detected boxes are
     line/region-level, not word-level. Engines are expensive to construct
     (they load model weights), so one is built lazily per `lang` and
@@ -119,6 +121,7 @@ class PaddleOcrBackend:
             from paddleocr import PaddleOCR
 
             PaddleOcrBackend._ENGINE_CACHE[self.lang] = PaddleOCR(
+                ocr_version=OCR_VERSION,
                 use_doc_orientation_classify=True,
                 use_doc_unwarping=False,
                 use_textline_orientation=True,

@@ -6,10 +6,15 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from rastervec.OCR.Paddle_OCR.light_backend import LightPaddleOcrBackend
+from rastervec.config import OCR_VERSION
+from rastervec.OCR.Paddle_OCR.light_backend import LIGHT_REC_MODEL_NAME, LightPaddleOcrBackend
 from rastervec.OCR.Paddle_OCR.ocr_backend import OcrBox
 
 _RUN_OCR_TESTS = os.environ.get("RASTERVEC_RUN_OCR_TESTS") == "1"
+
+
+def test_light_rec_model_matches_shared_ocr_version():
+    assert LIGHT_REC_MODEL_NAME == f"{OCR_VERSION}_mobile_rec" == "PP-OCRv5_mobile_rec"
 
 
 class _FakeRec:

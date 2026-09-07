@@ -51,3 +51,21 @@ def test_undo_doc_rotation_round_trips_corners(angle):
 
 def test_undo_doc_rotation_point_unknown_angle_is_identity():
     assert _undo_doc_rotation_point(5.0, 6.0, 45, 100.0, 50.0) == (5.0, 6.0)
+
+
+def test_engine_pins_shared_ocr_version(monkeypatch):
+    import paddleocr
+
+    from rastervec.config import OCR_VERSION
+
+    calls = []
+
+    class _FakePaddleOCR:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(paddleocr, "PaddleOCR", _FakePaddleOCR)
+    PaddleOcrBackend._ENGINE_CACHE.clear()
+    PaddleOcrBackend()._engine()
+
+    assert calls[0]["ocr_version"] == OCR_VERSION == "PP-OCRv5"
