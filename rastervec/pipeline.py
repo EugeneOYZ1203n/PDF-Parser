@@ -160,10 +160,15 @@ class PipelineContext:
     fast_dropped: list[list[VectorPath]] | None = None
     # spatial_regroup: fast_passed re-merged where aggregate bboxes are
     # within SPATIAL_REGROUP_TOLERANCE_PX *and* share a (layer, color) key
-    # (_cluster_lc_key) -- still ignores unique_clusters similarity-group
-    # boundaries. This, not fast_passed, is what ocr_compare actually OCRs.
+    # (_cluster_lc_key). This, not fast_passed, is what ocr_compare actually
+    # OCRs.
     regrouped_clusters: list[list[VectorPath]] | None = None
-    # ocr_compare: one ClusterOcrResult per regrouped_clusters cluster --
+    # spatial_regroup: id(regrouped cluster) -> its unique_clusters
+    # similarity-group id, carried forward from cluster_similarity_id when a
+    # merge's input clusters all shared one id -- a merge with no id or with
+    # inputs from two different groups has no entry here. ocr_compare uses
+    # this to OCR only one representative per similarity group.
+    regrouped_cluster_similarity_id: dict[int, int] | None = None
     # ocr_compare: one ClusterOcrResult per regrouped_clusters cluster --
     # a single direct OCR call over the whole cluster, no fallback tiers.
     cluster_ocr_results: list[ClusterOcrResult] | None = None
@@ -435,15 +440,19 @@ def _run_spatial_regroup(ctx: PipelineContext) -> list[list[VectorPath]]:
     fragments -- but a nearby cluster in a different layer or a different
     stroke/fill colour is left alone, matching how every earlier
     clustering step stays within one (layer, color) bucket (see
-    Vector_Classification/classification.py's module docstring). The only
-    boundary this step still crosses is unique_clusters' similarity
-    groups.
+    Vector_Classification/classification.py's module docstring).
 
     `extra_close` gates the merge on the shared (layer, color) key;
     `helpers.clustering.cluster_spatial`'s `threshold` is the aggregate-bbox
-    gap tolerance. Nothing else is tracked onto the merged piece --
-    ocr_compare OCRs each merged piece directly."""
+    gap tolerance. Also carries unique_clusters' similarity-group id
+    forward onto each merged piece (ctx.regrouped_cluster_similarity_id,
+    keyed by id(regrouped cluster)) -- consumed by _run_ocr_compare to OCR
+    only one representative per similarity group. A merge that combines
+    input clusters from two *different* similarity groups (or from one with
+    no group at all) loses the id (None) rather than guessing which one
+    applies."""
     passed = ctx.fast_passed or []
+    similarity_id = ctx.cluster_similarity_id or {}
 
     merged = cluster_spatial(
         passed, get_bbox=lambda c: union_bbox([p.bbox for p in c]),
@@ -451,18 +460,38 @@ def _run_spatial_regroup(ctx: PipelineContext) -> list[list[VectorPath]]:
         extra_close=lambda a, b: _cluster_lc_key(a) == _cluster_lc_key(b),
     )
 
-    regrouped = [[p for piece in pieces for p in piece] for pieces in merged]
+    regrouped: list[list[VectorPath]] = []
+    regrouped_similarity_id: dict[int, int] = {}
+    for pieces in merged:
+        flat = [p for piece in pieces for p in piece]
+        ids = {similarity_id[id(piece)] for piece in pieces if id(piece) in similarity_id}
+        if len(ids) == 1:
+            regrouped_similarity_id[id(flat)] = next(iter(ids))
+        regrouped.append(flat)
+
     ctx.regrouped_clusters = regrouped
+    ctx.regrouped_cluster_similarity_id = regrouped_similarity_id
     return regrouped
 
 
 def _run_ocr_compare(ctx: PipelineContext) -> list[ClusterOcrResult]:
-    """Cluster OCR only: one direct RenderOCR.ocr_cluster call per
-    spatial_regroup cluster, no fallback tiers, no similarity-group reuse.
-    A cluster's reading counts as failed if its text comes back blank --
-    its full path list is collected into ctx.ocr_failed (folded into
-    drawing_vectors, same as every other rejection in this pipeline), in
-    addition to being kept (blank) in ctx.ocr_results.
+    """Cluster OCR, deduped by similarity group: one direct
+    RenderOCR.ocr_cluster call per *similarity group* (see
+    unique_clusters/_run_spatial_regroup), reused for every other
+    spatial_regroup cluster sharing that group id, instead of one call per
+    cluster -- two geometrically-identical clusters elsewhere on the page
+    (e.g. a repeated title block field) read the same text without a second
+    render+OCR round-trip. Only `text`/`confidence`/`rotation_used` are
+    copied onto a reused result -- `ocr_bbox`/`words` are per-instance
+    detection geometry that can't be safely reused across clusters sitting
+    at different positions, so they're left None (same as a "nothing
+    detected" result); `bbox` is still computed fresh from that cluster's
+    own paths, as ocr_cluster itself does. A cluster with no similarity
+    group (regrouped_cluster_similarity_id has no entry for it) is always
+    OCR'd individually. A cluster's reading counts as failed if its text
+    comes back blank -- its full path list is collected into ctx.ocr_failed
+    (folded into drawing_vectors, same as every other rejection in this
+    pipeline), in addition to being kept (blank) in ctx.ocr_results.
 
     Backend: ctx.ocr_backend if set, else LightPaddleOcrBackend when
     USE_LIGHT_OCR_BACKEND (the default -- own ink-projection segmentation
@@ -473,15 +502,35 @@ def _run_ocr_compare(ctx: PipelineContext) -> list[ClusterOcrResult]:
         backend = LightPaddleOcrBackend()
     render_ocr = RenderOCR(backend=backend)
     clusters = ctx.regrouped_clusters or []
+    similarity_id = ctx.regrouped_cluster_similarity_id or {}
 
     results: list[ClusterOcrResult] = []
     ocr_results: list[TextVectorResult] = []
     ocr_failed: list[list[VectorPath]] = []
+    resolved_by_similarity_id: dict[int, TextVectorResult] = {}
 
     for cluster in tqdm(clusters, desc="OCR compare", unit="cluster"):
-        start = time.perf_counter()
-        resolved = render_ocr.ocr_cluster(cluster, ctx.page)
-        ocr_seconds = time.perf_counter() - start
+        group_id = similarity_id.get(id(cluster))
+        representative = resolved_by_similarity_id.get(group_id) if group_id is not None else None
+
+        if representative is not None:
+            resolved = TextVectorResult(
+                paths=cluster,
+                text=representative.text,
+                confidence=representative.confidence,
+                bbox=union_bbox([p.bbox for p in cluster]),
+                ocr_bbox=None,
+                rotation_used=representative.rotation_used,
+                page_index=ctx.page.meta.index,
+                words=None,
+            )
+            ocr_seconds = 0.0
+        else:
+            start = time.perf_counter()
+            resolved = render_ocr.ocr_cluster(cluster, ctx.page)
+            ocr_seconds = time.perf_counter() - start
+            if group_id is not None:
+                resolved_by_similarity_id[group_id] = resolved
 
         results.append(ClusterOcrResult(cluster=cluster, resolved=resolved, ocr_seconds=ocr_seconds))
         ocr_results.append(resolved)

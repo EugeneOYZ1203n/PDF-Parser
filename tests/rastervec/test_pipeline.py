@@ -16,6 +16,7 @@ from rastervec.pipeline import (
     PipelineContext,
     StageSpec,
     _run_drawing_vectors,
+    _run_ocr_compare,
     _run_spatial_regroup,
     _run_stages,
     _sample_mask,
@@ -459,4 +460,120 @@ def test_run_page_stage_after_error_still_runs(synthetic_pdf_factory, tmp_pdf_pa
 
     assert [o.status for o in outputs] == ["error", "ok"]
     assert outputs[1].data == "fine"
+
+
+# ----------------------------------------------------------------------
+# _run_ocr_compare -- similarity-group OCR dedup.
+# ----------------------------------------------------------------------
+
+
+class _FakePage:
+    def __init__(self, index: int = 0):
+        self.meta = type("Meta", (), {"index": index})()
+
+
+class _CountingRenderOCR:
+    """Stands in for rastervec.pipeline.RenderOCR -- records every cluster
+    it's actually asked to OCR (so dedup can be checked by call count) and
+    returns a distinct reading per call."""
+
+    calls: list[list[VectorPath]] = []
+
+    def __init__(self, backend=None):
+        self.backend = backend
+
+    def ocr_cluster(self, cluster, page, dpi: int = 300):
+        type(self).calls.append(cluster)
+        return TextVectorResult(
+            paths=cluster, text=f"CALL{len(type(self).calls)}", confidence=0.7,
+            bbox=(0.0, 0.0, 1.0, 1.0), ocr_bbox=(0.0, 0.0, 1.0, 1.0),
+            rotation_used=0, page_index=page.meta.index, words=None,
+        )
+
+
+def test_ocr_compare_reuses_reading_across_shared_similarity_group(monkeypatch):
+    _CountingRenderOCR.calls = []
+    monkeypatch.setattr("rastervec.pipeline.RenderOCR", _CountingRenderOCR)
+
+    a = [_make_path_at(0, (0, 0, 10, 10))]
+    b = [_make_path_at(1, (100, 100, 110, 110))]
+
+    ctx = PipelineContext(reader=None, page_index=0)
+    ctx.page = _FakePage()
+    ctx.regrouped_clusters = [a, b]
+    ctx.regrouped_cluster_similarity_id = {id(a): 0, id(b): 0}
+
+    _run_ocr_compare(ctx)
+
+    # only the first (representative) cluster was actually OCR'd.
+    assert _CountingRenderOCR.calls == [a]
+    assert [r.resolved.text for r in ctx.cluster_ocr_results] == ["CALL1", "CALL1"]
+    # the reused result's bbox comes from b's own geometry, not a's.
+    assert ctx.cluster_ocr_results[1].resolved.bbox == pytest.approx((100, 100, 110, 110))
+    assert ctx.cluster_ocr_results[1].resolved.ocr_bbox is None
+    assert ctx.cluster_ocr_results[1].resolved.words is None
+    assert ctx.cluster_ocr_results[1].ocr_seconds == 0.0
+
+
+def test_ocr_compare_does_not_reuse_across_different_similarity_groups(monkeypatch):
+    _CountingRenderOCR.calls = []
+    monkeypatch.setattr("rastervec.pipeline.RenderOCR", _CountingRenderOCR)
+
+    a = [_make_path_at(0, (0, 0, 10, 10))]
+    b = [_make_path_at(1, (100, 100, 110, 110))]
+
+    ctx = PipelineContext(reader=None, page_index=0)
+    ctx.page = _FakePage()
+    ctx.regrouped_clusters = [a, b]
+    ctx.regrouped_cluster_similarity_id = {id(a): 0, id(b): 1}
+
+    _run_ocr_compare(ctx)
+
+    assert _CountingRenderOCR.calls == [a, b]
+    assert [r.resolved.text for r in ctx.cluster_ocr_results] == ["CALL1", "CALL2"]
+
+
+def test_ocr_compare_clusters_with_no_similarity_group_always_ocr_individually(monkeypatch):
+    _CountingRenderOCR.calls = []
+    monkeypatch.setattr("rastervec.pipeline.RenderOCR", _CountingRenderOCR)
+
+    a = [_make_path_at(0, (0, 0, 10, 10))]
+    b = [_make_path_at(1, (100, 100, 110, 110))]
+
+    ctx = PipelineContext(reader=None, page_index=0)
+    ctx.page = _FakePage()
+    ctx.regrouped_clusters = [a, b]
+    ctx.regrouped_cluster_similarity_id = {}  # neither cluster belongs to a group
+
+    _run_ocr_compare(ctx)
+
+    assert _CountingRenderOCR.calls == [a, b]
+    assert [r.resolved.text for r in ctx.cluster_ocr_results] == ["CALL1", "CALL2"]
+
+
+def test_spatial_regroup_carries_similarity_id_when_merged_inputs_agree():
+    a = [_make_path_at(0, (0, 0, 10, 10))]
+    b = [_make_path_at(1, (10.5, 0, 20, 10))]
+    ctx = PipelineContext(reader=None, page_index=0)
+    ctx.fast_passed = [a, b]
+    ctx.cluster_similarity_id = {id(a): 5, id(b): 5}
+
+    regrouped = _run_spatial_regroup(ctx)
+
+    assert len(regrouped) == 1
+    assert ctx.regrouped_cluster_similarity_id[id(regrouped[0])] == 5
+
+
+def test_spatial_regroup_drops_similarity_id_when_merged_inputs_disagree():
+    a = [_make_path_at(0, (0, 0, 10, 10))]
+    b = [_make_path_at(1, (10.5, 0, 20, 10))]
+    ctx = PipelineContext(reader=None, page_index=0)
+    ctx.fast_passed = [a, b]
+    ctx.cluster_similarity_id = {id(a): 5, id(b): 6}
+
+    regrouped = _run_spatial_regroup(ctx)
+
+    assert len(regrouped) == 1
+    assert id(regrouped[0]) not in ctx.regrouped_cluster_similarity_id
+
 
