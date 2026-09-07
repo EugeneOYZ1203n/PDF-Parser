@@ -119,6 +119,21 @@ def pixel_to_page_bbox(
     return (min(xs), min(ys), max(xs), max(ys))
 
 
+def page_points_to_pixel(
+    paths: list[VectorPath],
+    dpi: int,
+    page_points: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Map page-space points into the pixel space of
+    `render_vector_cluster(paths, dpi)` -- the exact inverse of
+    `pixel_to_page_bbox` (same `_cluster_frame` + `zoom`). Lets the
+    visualization notebook draw PaddleOCR's returned page-space boxes back
+    onto the rendered cluster image the backend actually saw."""
+    x0, y0, pad_x, pad_y = _cluster_frame(paths)
+    zoom = dpi / PDF_POINTS_PER_INCH
+    return [((px - x0 + pad_x) * zoom, (py - y0 + pad_y) * zoom) for px, py in page_points]
+
+
 def render_page_paths(
     paths: list[VectorPath], page_meta: PageMeta, dpi: int
 ) -> "Image.Image":

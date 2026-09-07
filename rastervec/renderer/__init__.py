@@ -26,6 +26,7 @@ from rastervec.renderer.pdf import (
 )
 from rastervec.renderer.png import (
     cluster_frame_size,
+    page_points_to_pixel,
     pixel_to_page_bbox,
     render_page_paths,
     render_vector_cluster,
@@ -41,6 +42,7 @@ __all__ = [
     "render_vector_cluster",
     "render_page_paths",
     "pixel_to_page_bbox",
+    "page_points_to_pixel",
     "cluster_frame_size",
     "render_page_svg",
 ]

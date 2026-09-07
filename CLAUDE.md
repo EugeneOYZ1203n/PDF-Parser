@@ -251,7 +251,10 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   into the *caller's* original image pixel space), `OcrDetection` (`boxes` + page-level `rotation`).
   `PaddleOcrBackend` (the heavy backend, kept selectable — `LightPaddleOcrBackend` above is the
   pipeline default via `pipeline.USE_LIGHT_OCR_BACKEND`): PP-OCRv5 via PaddleOCR (`config.OCR_VERSION`,
-  shared with `LightPaddleOcrBackend` so the two backends can't drift onto different OCR versions),
+  shared with `LightPaddleOcrBackend` so the two backends can't drift onto different OCR versions;
+  deliberately newer than `archive/raster_parser`, which pinned **no** model — it just called
+  `PaddleOCR(lang="en", ...)` with detection-threshold / side-length / `drop_score` overrides only
+  and rode PaddleOCR's `lang="en"` defaults, PP-OCRv3-era at the time),
   orientation
   classifiers on
   (`use_doc_orientation_classify=use_textline_orientation=True, use_doc_unwarping=False`), engine
@@ -280,7 +283,11 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   (union of every detected box, mapped back to page space via `renderer.pixel_to_page_bbox`) is
   `None` when nothing was detected, and whose `words: list[OcrWord] | None` field (models.py) is one
   `OcrWord` per individually detected box, each independently mapped through `pixel_to_page_bbox`
-  (line-granularity, since Paddle is the only backend); `None` when nothing was detected.
+  (line-granularity, since Paddle is the only backend); `None` when nothing was detected. The
+  render + dpi-bump step (bump `dpi` up, never down, so the render's shorter side ≥
+  `MIN_RENDER_SIDE_PX`) is the module function `render_cluster_for_ocr(cluster, dpi=300) -> (image,
+  dpi_used)` — `ocr_cluster` calls it, and the visualization notebook calls the same function to
+  show the exact image the backend saw (with the same `dpi_used` reused for the pixel↔page mapping).
 - **`Evaluation/Conversion/conversion.py`** *(implemented)*: three functions, each re-expressing a
   page's content as vector paths (`get_drawings()`) for a Vector_Classification known-answer test —
   **none ever rewrites pre-existing vector-path geometry** (an earlier version SVG-round-tripped the
@@ -392,6 +399,19 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `legacy`) + `DEFAULT_VARIANTS` + `resolve_variant`. Adding an ablation = one `VARIANTS` entry;
   `benchmark_jobs.run_page_task` reads it and threads `enable_fast` / a `LightPaddleOcrBackend`
   into `pipeline.run_page_context`.
+- **`Evaluation/Evaluate/legacy_adapter.py`** *(implemented)*: runs archive's
+  `raster_parser.main_pipeline_extract.extract` unmodified and reshapes its output into
+  `ClusterOcrResult`s for `metrics.evaluate_metrics` (the `legacy` variant). Archive's OCR code
+  targets **PaddleOCR 2.x** but the venv ships **paddleocr 3.4.x** (needed by the current
+  pipeline's PP-OCRv5), so `_ensure_archive_importable` also installs
+  `Evaluation/Evaluate/_paddle_compat.py`'s shim: it swaps `paddleocr.PaddleOCR` for
+  `_PaddleOCRv2Compat`, which translates archive's removed ctor kwargs (`use_gpu`/`show_log`
+  dropped; `drop_score`→`text_rec_score_thresh`, `det_limit_side_len`→`text_det_limit_side_len`,
+  `det_limit_type`→`text_det_limit_type`, `use_angle_cls`→`use_textline_orientation`), reshapes
+  3.x `predict()` results back to 2.x `[[[box,(text,conf)],...]]`, and exposes a
+  `text_recognizer` callable over `paddleocr.TextRecognition` for `region_ocr._batch_recognize`.
+  Nothing in `archive/` is touched — only the symbol it imports. Shim install is idempotent and
+  scoped to a legacy run.
 - **`Reader/Parallel/`** *(implemented)*: parallelism for the benchmark. `pool.py` — `worker_init`
   (pins `OMP`/`MKL`/`OPENBLAS` to 1 per worker), `default_worker_count`, `warmup` (builds the
   PaddleOCR heavy + light-rec + FAST caches in the *calling* process, so a spawn pool started next
@@ -486,7 +506,10 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `png.pixel_to_page_bbox(paths, dpi, pixel_points)` inverts
   `_cluster_frame`'s same transform to map pixel-space points (e.g. Paddle's detected text-region
   corners, from a render of that exact `paths`/`dpi`) back into PDF page space — used by
-  `RenderOCR.ocr_cluster` to compute a `TextVectorResult.ocr_bbox`. `png.render_page_paths(paths,
+  `RenderOCR.ocr_cluster` to compute a `TextVectorResult.ocr_bbox`.
+  `png.page_points_to_pixel(paths, dpi, page_points)` is its exact forward inverse (page space →
+  that render's pixel space) — used by the visualization notebook to draw Paddle's returned
+  page-space boxes back onto the rendered cluster image. `png.render_page_paths(paths,
   page_meta, dpi)` is the whole-page counterpart (every given path drawn onto one page-sized canvas,
   no isolation/padding, no rotation applied) — used as FAST's own detection input by
   `fast_text_detect` (see below).

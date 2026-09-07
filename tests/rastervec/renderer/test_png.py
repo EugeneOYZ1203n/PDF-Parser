@@ -3,7 +3,11 @@ from __future__ import annotations
 import pytest
 
 from rastervec.models import VectorPath
-from rastervec.renderer import pixel_to_page_bbox, render_vector_cluster
+from rastervec.renderer import (
+    page_points_to_pixel,
+    pixel_to_page_bbox,
+    render_vector_cluster,
+)
 from rastervec.renderer.png import _cluster_frame
 
 
@@ -117,6 +121,17 @@ def test_pixel_to_page_bbox_round_trips_cluster_frame():
         [path], dpi, [(pad_x * zoom, pad_y * zoom), ((pad_x + 20) * zoom, (pad_y + 10) * zoom)],
     )
     assert page_bbox == pytest.approx((x0, y0, x0 + 20, y0 + 10))
+
+
+def test_page_points_to_pixel_inverts_pixel_to_page_bbox():
+    path = _make_path(kind="re", bbox=(3, 7, 23, 17), fill_color=(0, 0, 0))
+    dpi = 200
+    corners = [(5.0, 9.0), (21.0, 9.0), (21.0, 15.0), (5.0, 15.0)]
+
+    pixel = page_points_to_pixel([path], dpi, corners)
+    back = pixel_to_page_bbox([path], dpi, pixel)
+
+    assert back == pytest.approx((5.0, 9.0, 21.0, 15.0))
 
 
 def test_cluster_frame_horizontal_padding_more_generous_than_vertical():

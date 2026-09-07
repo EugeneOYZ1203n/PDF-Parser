@@ -56,10 +56,20 @@ class _ArchiveNativePDFElements(Protocol):
 def _ensure_archive_importable() -> None:
     """Adds the repo-root `archive/` folder to `sys.path` (once), so
     `import raster_parser...` resolves against archive's own tree -- archive
-    has no `setup.py`/`pyproject.toml`, it's imported as a plain path root."""
+    has no `setup.py`/`pyproject.toml`, it's imported as a plain path root.
+
+    Also installs the PaddleOCR 2.x->3.x compat shim (`_paddle_compat`):
+    archive's OCR code targets PaddleOCR 2.x but the venv ships 3.4.x, so
+    archive's `PaddleOCR(use_gpu=..., drop_score=..., ...)` constructions
+    would otherwise raise `Unknown argument`. Nothing in `archive/` is
+    modified -- only the `paddleocr.PaddleOCR` symbol it imports."""
     root_str = str(_ARCHIVE_ROOT)
     if root_str not in sys.path:
         sys.path.insert(0, root_str)
+
+    from rastervec.Evaluation.Evaluate import _paddle_compat
+
+    _paddle_compat.install()
 
 
 def run_archive_pipeline(

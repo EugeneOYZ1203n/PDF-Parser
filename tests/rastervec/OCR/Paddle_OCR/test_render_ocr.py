@@ -6,7 +6,7 @@ import pytest
 from PIL import Image
 
 from rastervec.OCR.Paddle_OCR.ocr_backend import OcrBox, OcrDetection
-from rastervec.OCR.Paddle_OCR.render_ocr import RenderOCR
+from rastervec.OCR.Paddle_OCR.render_ocr import RenderOCR, render_cluster_for_ocr
 from rastervec.models import VectorPath
 
 # A real PaddleOCR round-trip needs its model weights (downloaded to
@@ -39,6 +39,18 @@ def _rect_cluster(bbox=(0, 0, 40, 20)) -> list[VectorPath]:
             dashes=None, closed=True, layer=None, page_index=0,
         )
     ]
+
+
+def test_render_cluster_for_ocr_bumps_dpi_for_tiny_cluster():
+    image, dpi = render_cluster_for_ocr(_rect_cluster(bbox=(0, 0, 3, 2)), dpi=72)
+    assert dpi > 72
+    assert min(image.size) >= 50
+
+
+def test_render_cluster_for_ocr_leaves_large_cluster_dpi_unchanged():
+    image, dpi = render_cluster_for_ocr(_rect_cluster(bbox=(0, 0, 400, 300)), dpi=300)
+    assert dpi == 300
+    assert min(image.size) >= 50
 
 
 def test_ocr_cluster_builds_words_from_backend_boxes(tmp_pdf_path):

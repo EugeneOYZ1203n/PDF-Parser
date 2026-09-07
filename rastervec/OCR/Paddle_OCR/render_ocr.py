@@ -29,6 +29,25 @@ from rastervec.renderer import (
     render_vector_cluster,
 )
 
+def render_cluster_for_ocr(
+    cluster: list[VectorPath], dpi: int = 300
+) -> tuple["Image.Image", int]:
+    """Render `cluster` exactly as `RenderOCR.ocr_cluster` feeds it to the
+    backend: `dpi` is bumped upward (never down) so the rendered image's
+    shorter side is at least `MIN_RENDER_SIDE_PX`. Returns
+    `(image, dpi_used)` so callers (the visualization notebook) can
+    reproduce the backend's exact input and reuse the same dpi for the
+    pixel<->page-space mapping (`pixel_to_page_bbox` / `page_points_to_pixel`)."""
+    width_pt, height_pt = cluster_frame_size(cluster)
+    min_side_pt = min(width_pt, height_pt)
+    if min_side_pt > 0:
+        needed_dpi = math.ceil(
+            MIN_RENDER_SIDE_PX * PDF_POINTS_PER_INCH / min_side_pt
+        )
+        dpi = max(dpi, needed_dpi)
+    return render_vector_cluster(cluster, dpi), dpi
+
+
 class RenderOCR:
     """Render + detect + confidence-voting, shared by the vector-text OCR
     steps. `backend` defaults to PaddleOcrBackend -- pass any other
@@ -108,14 +127,7 @@ class RenderOCR:
         the OCR backend reads poorly. The same (possibly bumped) dpi is
         reused below for pixel_to_page_bbox, so the pixel<->page-space
         mapping always matches the image actually rendered."""
-        width_pt, height_pt = cluster_frame_size(cluster)
-        min_side_pt = min(width_pt, height_pt)
-        if min_side_pt > 0:
-            needed_dpi = math.ceil(
-                MIN_RENDER_SIDE_PX * PDF_POINTS_PER_INCH / min_side_pt
-            )
-            dpi = max(dpi, needed_dpi)
-        image = render_vector_cluster(cluster, dpi)
+        image, dpi = render_cluster_for_ocr(cluster, dpi)
         bbox = union_bbox([p.bbox for p in cluster])
 
         detection = self.backend.detect(image)
