@@ -1,175 +1,112 @@
-"""PaddleOCR backend -- the strategy-pattern split behind RenderOCR
-(rastervec/OCR/Paddle_OCR/render_ocr.py). An OcrBackend takes one rendered
-PIL image and returns every detected text box (line/region-level) plus the
-page's own detected orientation, already in the *caller's* original image
-pixel space -- callers never need to know about PaddleOCR's own internal
-preprocessing/rotation quirks. RenderOCR stays the single public
-orchestration class (render once, detect once, build a TextVectorResult);
-only the raw-detection step is swappable here.
+"""The OCR recognition backend behind `RenderOCR`.
+
+Text *detection* is not PaddleOCR's job in this pipeline -- the Radon
+segmentation step (`pipelines/sub_pipelines/radon.py`) deskews each cluster
+render and splits it into word crops. A backend only has to *recognise*
+those pre-segmented crops, so the whole `OcrBackend` contract is one
+method: `recognize_crops(crops) -> list[OcrBox]`, one `OcrBox` per input
+crop (blank text allowed, in input order).
+
+`PaddleRecBackend` is the only implementation: PaddleOCR's standalone
+`TextRecognition` predictor (`config.OCR_REC_MODEL`), engine built lazily
+and cached at class scope so a spawn pool started next finds the weights on
+disk.
 """
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol
+from dataclasses import dataclass
+from typing import Protocol
 
-if TYPE_CHECKING:
-    from PIL import Image
+import numpy as np
 
-# Must be set before paddlex reads its flags on import (which happens the
-# first time PaddleOcrBackend._engine() lazily imports paddleocr below) --
-# on this project's dev environment, the default (mkldnn-accelerated) CPU
-# inference path hits an unimplemented PIR attribute-conversion error in
-# this paddlepaddle build; plain "paddle" run mode works fine and is plenty
-# fast for small, pre-cropped cluster renders. Only set if the caller
-# hasn't already configured this themselves.
+# Must be set before paddlex reads its flags on the first lazy `paddleocr`
+# import below -- on this dev environment the default mkldnn CPU inference
+# path hits an unimplemented PIR attribute-conversion error; plain "paddle"
+# run mode is fine for small pre-cropped word renders. Only set if the
+# caller hasn't already.
 os.environ.setdefault("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "False")
 
-from rastervec.config import OCR_VERSION
+from rastervec.config import OCR_REC_MODEL, REC_BATCH_SIZE
+from rastervec.logging_setup import get_logger
+from rastervec.OCR.Paddle_OCR.crop_normalize import normalize_line_crop
+
+_LOG = get_logger("ocr.backend")
 
 
 @dataclass
 class OcrBox:
-    """One detected text box, in the caller's original image pixel space.
-    `is_word` is False for PaddleOCR's line/region-level boxes -- a box may
-    cover several words."""
+    """One recognised word. `corners` is filled in by `RenderOCR` from the
+    Radon segmentation (the backend itself never sees page geometry), so a
+    freshly recognised box carries an empty `corners`."""
 
     text: str
     confidence: float
     corners: list[tuple[float, float]]
-    is_word: bool
-
-
-@dataclass
-class OcrDetection:
-    """One backend's full result for one rendered image."""
-
-    boxes: list[OcrBox] = field(default_factory=list)
-    rotation: int = 0  # 0/90/180/270, page-level orientation
+    is_word: bool = True
 
 
 class OcrBackend(Protocol):
-    def detect(self, image: "Image.Image") -> OcrDetection: ...
+    def recognize_crops(self, crops: list[np.ndarray]) -> list[OcrBox]: ...
 
 
-def _undo_doc_rotation_point(
-    x: float, y: float, angle: int, orig_w: float, orig_h: float,
-) -> tuple[float, float]:
-    """Inverts PaddleOCR's own internal doc-orientation rotation for one
-    point -- see `_undo_doc_rotation`'s docstring for why this exists."""
-    if angle == 90:
-        return orig_w - y, x
-    if angle == 180:
-        return orig_w - x, orig_h - y
-    if angle == 270:
-        return y, orig_h - x
-    return x, y
+def _rec_field(result: object, key: str):
+    """Pull one field out of a paddlex predictor result (dict-like or
+    attribute-style), tolerating either shape across versions."""
+    try:
+        return result[key]  # type: ignore[index]
+    except (TypeError, KeyError, IndexError):
+        return getattr(result, key, None)
 
 
-def _undo_doc_rotation(
-    points: list[tuple[float, float]], angle: int, orig_size: tuple[float, float],
-) -> list[tuple[float, float]]:
-    """When `use_doc_orientation_classify=True`, PaddleOCR's doc-preprocessor
-    sub-pipeline actually rotates the input image by `doc_preprocessor_res
-    .angle` degrees *before* running text detection (confirmed by reading
-    paddlex's own `doc_preprocessor/pipeline.py` -- `output_img =
-    rotate_image(image_array, angle)` -- and `ocr/pipeline.py`, which runs
-    `text_det_model` on that same rotated `doc_preprocessor_images`, not
-    the original input). So every `rec_poly`/`dt_poly` PaddleOCR returns is
-    in that ROTATED image's pixel space, not the space of the image we
-    actually passed to `predict()` -- for a 90/270 angle the rotated
-    image's width and height are even swapped. Left uncorrected, mapping
-    those corners back into PDF page space (`Renderer.pixel_to_page_bbox`)
-    produces a wrong-sized, wrong-position `ocr_bbox` whenever Paddle's doc
-    classifier decides the upright cluster render itself needs further
-    correction (i.e. whenever `angle != 0`) -- this is the actual bug
-    behind observed bad OCR bboxes/angles, not a mistake in our own
-    geometry math. `rotate_image`'s rotation is derived exactly (via
-    `cv2.getRotationMatrix2D`) for each of the four possible angles
-    (0/90/180/270, the only values PaddleOCR's doc-orientation classifier
-    ever predicts) and inverted here, per-point, back into the original
-    image's own `orig_size` (width, height) pixel space."""
-    if angle == 0 or not points:
-        return points
-    orig_w, orig_h = orig_size
-    return [_undo_doc_rotation_point(x, y, angle, orig_w, orig_h) for x, y in points]
+class PaddleRecBackend:
+    """PaddleOCR `TextRecognition` (recognition only). One engine per
+    `model_name`, cached at class scope -- every instance shares it."""
 
+    _ENGINE_CACHE: dict[str, object] = {}
 
-class PaddleOcrBackend:
-    """PaddleOCR (PP-OCRv5, text-detection + text-recognition, with doc/
-    textline orientation classification enabled). Detected boxes are
-    line/region-level, not word-level. Engines are expensive to construct
-    (they load model weights), so one is built lazily per `lang` and
-    cached at module scope -- every PaddleOcrBackend for the same lang
-    shares it."""
-
-    _ENGINE_CACHE: dict[str, "paddleocr.PaddleOCR"] = {}
-
-    def __init__(self, lang: str = "en") -> None:
-        self.lang = lang
+    def __init__(self, model_name: str = OCR_REC_MODEL) -> None:
+        self.model_name = model_name
 
     @classmethod
-    def warmup(cls, lang: str = "en") -> None:
-        """Force the (expensive, model-downloading on first ever call)
-        engine build now, in the calling process -- so a process pool
-        spawned next finds the models on disk and no worker races the
-        download. Safe to call repeatedly."""
-        cls(lang)._engine()
+    def warmup(cls, model_name: str = OCR_REC_MODEL) -> None:
+        """Force the (model-downloading on first ever call) engine build
+        now, in the calling process. Safe to call repeatedly."""
+        cls(model_name)._engine()
 
-    def _engine(self) -> "paddleocr.PaddleOCR":
-        if self.lang not in PaddleOcrBackend._ENGINE_CACHE:
-            from paddleocr import PaddleOCR
+    def _engine(self):
+        if self.model_name not in PaddleRecBackend._ENGINE_CACHE:
+            from paddleocr import TextRecognition
 
-            PaddleOcrBackend._ENGINE_CACHE[self.lang] = PaddleOCR(
-                ocr_version=OCR_VERSION,
-                use_doc_orientation_classify=True,
-                use_doc_unwarping=False,
-                use_textline_orientation=True,
-                lang=self.lang,
+            PaddleRecBackend._ENGINE_CACHE[self.model_name] = TextRecognition(
+                model_name=self.model_name
             )
-        return PaddleOcrBackend._ENGINE_CACHE[self.lang]
+        return PaddleRecBackend._ENGINE_CACHE[self.model_name]
 
-    def _predict_page(self, image: "Image.Image") -> dict:
-        """Runs PaddleOCR's `predict()` once on one rendered image and
-        returns its single-page result dict (`{}` if PaddleOCR returned
-        nothing for it) -- the raw dict carries `rec_texts`/`rec_scores`/
-        `rec_polys` (detected text boxes), `doc_preprocessor_res.angle`
-        (document-orientation classification) and
-        `textline_orientation_angles` (per-line 0/180 flip correction)."""
-        import numpy as np
+    def recognize_crops(self, crops: list[np.ndarray]) -> list[OcrBox]:
+        """One `OcrBox` per crop, in input order. A crop that recognises to
+        blank text still gets a box (empty text, 0.0 confidence) so callers
+        can zip results back to `word_corners` positionally."""
+        if not crops:
+            return []
+        norm = [
+            np.asarray(
+                normalize_line_crop(_as_pil(c)).convert("RGB")
+            )
+            for c in crops
+        ]
+        results = self._engine().predict(norm, batch_size=REC_BATCH_SIZE)
+        out: list[OcrBox] = []
+        for r in results:
+            text = str(_rec_field(r, "rec_text") or "").strip()
+            score = float(_rec_field(r, "rec_score") or 0.0)
+            out.append(OcrBox(text=text, confidence=score if text else 0.0, corners=[]))
+        return out
 
-        array = np.asarray(image.convert("RGB"))
-        pages = self._engine().predict(array)
-        return pages[0] if pages else {}
 
-    def _page_rotation(self, page: dict) -> int:
-        """Reads PaddleOCR's own orientation classifiers off one
-        `_predict_page` result dict -- `doc_preprocessor_res.angle` (its
-        0/90/180/270 document-orientation classification) combined with
-        the majority vote of `textline_orientation_angles` (each entry 0
-        or 1, meaning a 0/180 per-line flip correction) turned into 0 or
-        180 -- added together mod 360."""
-        doc_angle = int(page.get("doc_preprocessor_res", {}).get("angle", 0) or 0)
-        line_angles = list(page.get("textline_orientation_angles") or [])
-        flip = 0
-        if line_angles:
-            ones = sum(1 for a in line_angles if a == 1)
-            flip = 180 if ones * 2 >= len(line_angles) else 0
-        return (doc_angle + flip) % 360
+def _as_pil(arr: np.ndarray):
+    from PIL import Image
 
-    def detect(self, image: "Image.Image") -> OcrDetection:
-        page = self._predict_page(image)
-        angle = int(page.get("doc_preprocessor_res", {}).get("angle", 0) or 0)
-        texts = list(page.get("rec_texts") or [])
-        scores = list(page.get("rec_scores") or [])
-        polys = list(page.get("rec_polys") or [])
-
-        boxes: list[OcrBox] = []
-        for i, text in enumerate(texts):
-            score = float(scores[i]) if i < len(scores) else 0.0
-            poly = polys[i] if i < len(polys) else None
-            corners = [(float(x), float(y)) for x, y in poly] if poly is not None else []
-            corners = _undo_doc_rotation(corners, angle, image.size)
-            boxes.append(OcrBox(text=text, confidence=score, corners=corners, is_word=False))
-
-        return OcrDetection(boxes=boxes, rotation=self._page_rotation(page))
+    if arr.ndim == 2:
+        return Image.fromarray(arr.astype(np.uint8), mode="L")
+    return Image.fromarray(arr.astype(np.uint8))

@@ -12,8 +12,13 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 import pymupdf as fitz
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from rastervec.paths import output_dir
 
 
 def rasterize_pdf(src_path: str, dst_path: str, dpi: int = 300) -> None:
@@ -36,7 +41,11 @@ def rasterize_pdf(src_path: str, dst_path: str, dpi: int = 300) -> None:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("src", help="Path to the source PDF.")
-    parser.add_argument("dst", help="Path to write the raster-only PDF to.")
+    parser.add_argument(
+        "dst", nargs="?", default=None,
+        help="Path to write the raster-only PDF to "
+        "(default: outputs/rasterize/<src stem>_raster.pdf).",
+    )
     parser.add_argument(
         "--dpi", type=int, default=300, help="Render resolution (default: 300)."
     )
@@ -45,8 +54,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    rasterize_pdf(args.src, args.dst, dpi=args.dpi)
-    print(f"wrote {args.dst}")
+    dst = args.dst or str(output_dir("rasterize") / f"{Path(args.src).stem}_raster.pdf")
+    rasterize_pdf(args.src, dst, dpi=args.dpi)
+    print(f"wrote {dst}")
     return 0
 
 

@@ -126,17 +126,32 @@ SPATIAL_REGROUP_TOLERANCE_PX = 1.0
 # ocr_compare stage (pipeline.py)
 # ======================================================================
 
-# PaddleOCR model family both PaddleOcrBackend (heavy) and
-# LightPaddleOcrBackend (light) build against, so the two variants can't
-# silently drift onto different OCR versions. Pinned to PP-OCRv5, not the
-# newer PP-OCRv6, because this venv's paddleocr/paddlex install (see
-# requirements.txt) doesn't have PP-OCRv6 models registered.
+# PaddleOCR model family the single OCR backend builds against. Pinned to
+# PP-OCRv5, not the newer PP-OCRv6, because this venv's paddleocr/paddlex
+# install (see requirements.txt) doesn't have PP-OCRv6 models registered.
 OCR_VERSION = "PP-OCRv5"
 
-# Default OCR backend: True -> LightPaddleOcrBackend (own ink-projection
-# segmentation + PaddleOCR recognition-only); False -> the full PP-OCRv5
-# detect+rec+orient pipeline. A PipelineContext.ocr_backend override wins.
-USE_LIGHT_OCR_BACKEND = True
+# The one recognition model the pipeline's OCR backend runs (recognition
+# only -- text detection is the Radon segmentation step, not PaddleOCR).
+# `_mobile_rec` is PP-OCRv5's lightweight rec model; swap to
+# `f"{OCR_VERSION}_server_rec"` for the larger, slower one.
+OCR_REC_MODEL = f"{OCR_VERSION}_mobile_rec"
+
+# ======================================================================
+# Radon text segmentation (pipelines/sub_pipelines/radon.py)
+# ======================================================================
+
+# Fine skew sweep half-range (degrees) around the coarse Radon peak.
+RADON_SKEW_LIMIT_DEG = 15.0
+# Fine skew sweep step (degrees).
+RADON_ANGLE_STEP_DEG = 0.25
+# A deskewed row-projection value below this fraction of the profile's
+# peak is an inter-line gap, not part of a text line.
+RADON_LINE_BAND_MIN_FRAC = 0.10
+# Cap (px) on a cluster render's long side before the Radon sweep -- angle
+# estimation is scale-invariant, so a big merged bbox is downscaled to
+# this first to keep the O(pixels * angles) transform fast.
+RADON_MAX_RENDER_SIDE_PX = 1000
 
 # RenderOCR: a cluster render whose shorter side would fall under this many
 # pixels at the requested dpi is bumped to a higher effective dpi instead
@@ -163,14 +178,8 @@ REC_LINE_HEIGHT_PX = 48
 REC_LINE_MAX_WIDTH_PX = 1024
 
 # ======================================================================
-# LightPaddleOcrBackend (OCR/Paddle_OCR/light_backend.py)
+# PaddleRecBackend (OCR/Paddle_OCR/ocr_backend.py)
 # ======================================================================
 
-# doc-orientation classifier score below this -> ignore it, fall back to
-# aspect gating for the 0/90/270 decision.
-DOC_ORI_MIN_CONFIDENCE = 0.7
-# a crop taller than this multiple of its width is treated as vertical
-# text for the aspect-gating fallback.
-VERTICAL_ASPECT = 1.5
-# batch size for the one recognition-only TextRecognition.predict call.
+# batch size for the recognition-only TextRecognition.predict call.
 REC_BATCH_SIZE = 128

@@ -89,8 +89,15 @@ def test_ocr_version():
     assert config.OCR_VERSION == "PP-OCRv5"
 
 
-def test_ocr_backend_default_is_light():
-    assert config.USE_LIGHT_OCR_BACKEND is True
+def test_ocr_rec_model_pinned_to_ocr_version():
+    assert config.OCR_REC_MODEL == "PP-OCRv5_mobile_rec"
+
+
+def test_radon_constants():
+    assert config.RADON_SKEW_LIMIT_DEG == 15.0
+    assert config.RADON_ANGLE_STEP_DEG == 0.25
+    assert config.RADON_LINE_BAND_MIN_FRAC == 0.10
+    assert config.RADON_MAX_RENDER_SIDE_PX == 1000
 
 
 def test_min_render_side_px():
@@ -110,7 +117,5 @@ def test_rec_line_geometry():
     assert config.REC_LINE_MAX_WIDTH_PX == 1024
 
 
-def test_light_backend_knobs():
-    assert config.DOC_ORI_MIN_CONFIDENCE == 0.7
-    assert config.VERTICAL_ASPECT == 1.5
+def test_rec_batch_size():
     assert config.REC_BATCH_SIZE == 128

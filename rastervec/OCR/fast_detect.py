@@ -53,7 +53,7 @@ from rastervec.config import (
 _MODEL_CACHE: dict[str, object] = {}
 
 _DEFAULT_WEIGHTS_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "weights",
     "fast_tiny_ic17mlt_640.pth",
 )
@@ -363,7 +363,7 @@ def _score_map(det_out: "torch.Tensor", out_hw: tuple[int, int], pooling_size: i
 
 class FastDetector:
     """Lazily-built, path-keyed-cached FAST text detector -- mirrors
-    PaddleOcrBackend's engine caching (OCR/Paddle_OCR/ocr_backend.py)."""
+    PaddleRecBackend's engine caching (OCR/Paddle_OCR/ocr_backend.py)."""
 
     def __init__(self, weights_path: str | None = None) -> None:
         self.weights_path = weights_path or os.environ.get(

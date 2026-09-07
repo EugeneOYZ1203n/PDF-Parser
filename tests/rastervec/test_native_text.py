@@ -3,8 +3,8 @@ from __future__ import annotations
 import pymupdf as fitz
 import pytest
 
-from rastervec.Native_Text import native
-from rastervec.Native_Text.native import _Span
+from rastervec import native_text as native
+from rastervec.native_text import _Span
 from rastervec.Reader.reader import Reader
 
 
@@ -25,7 +25,7 @@ def test_extract_text_basic_horizontal(synthetic_pdf_factory, tmp_pdf_path):
 
     with Reader(path) as reader:
         page = reader.get_page(0)
-        words = native.extract(page)
+        words = native.extract_native_text(page)
 
     assert len(words) == 1
     word = words[0]
@@ -50,7 +50,7 @@ def test_extract_text_multi_word_span_gives_each_word_its_own_origin(
 
     with Reader(path) as reader:
         page = reader.get_page(0)
-        words = native.extract(page)
+        words = native.extract_native_text(page)
 
     assert [w.text for w in words] == ["Hello", "World"]
     hello, world = words
@@ -77,7 +77,7 @@ def test_extract_text_rotated(synthetic_pdf_factory, tmp_pdf_path):
 
     with Reader(path) as reader:
         page = reader.get_page(0)
-        words = native.extract(page)
+        words = native.extract_native_text(page)
 
     assert len(words) == 1
     word = words[0]
@@ -184,7 +184,7 @@ def test_seq_assigns_reading_order(synthetic_pdf_factory, tmp_pdf_path):
 
     with Reader(path) as reader:
         page = reader.get_page(0)
-        words = native.extract(page)
+        words = native.extract_native_text(page)
 
     words_by_seq = sorted(words, key=lambda w: w.seq)
     assert [w.text for w in words_by_seq] == ["First", "Second"]
@@ -198,7 +198,7 @@ def test_extract_records_carries_word_and_line_metadata(synthetic_pdf_factory, t
 
     with Reader(path) as reader:
         page = reader.get_page(0)
-        records = native.extract(page)
+        records = native.extract_native_text(page)
 
     assert [r.text for r in records] == ["Hello", "World"]
     hello, world = records

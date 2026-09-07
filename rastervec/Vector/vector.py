@@ -1,6 +1,6 @@
 """Vector stage: extracts vector drawing paths from a page.
 
-extract_paths (plus layer/color separation, in Layer_Color_Separation/) is
+extract_paths (plus layer/color separation, in layer_color_separation.py) is
 this module's concern. Classification of extracted paths into text
 candidates vs. drawing content lives in rastervec/Vector_Classification/
 instead -- see that package's classification.py for the fixed 12-step
@@ -8,12 +8,14 @@ pipeline and Glossary.md for group/cluster terminology.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pymupdf as fitz
 
 from rastervec.helpers.geometry import is_dashed, round_color, union_bbox
 from rastervec.logging_setup import get_logger
 from rastervec.models import Page, VectorPath, VectorRecord
-from rastervec.Vector.Layer_Color_Separation.layer_color_separation import (  # noqa: F401 -- re-exported for callers
+from rastervec.Vector.layer_color_separation import (  # noqa: F401 -- re-exported for callers
     separate_by_color,
     separate_by_layer,
 )
@@ -24,6 +26,26 @@ _LOG = get_logger("vector")
 # ------------------------------------------------------------------
 # Extraction
 # ------------------------------------------------------------------
+
+
+@dataclass
+class VectorExtraction:
+    """This folder's high-level entrypoint output: both the flat path list
+    and the richer per-drawing records from one page, extracted once."""
+
+    paths: list[VectorPath]
+    records: list[VectorRecord]
+
+
+def extract_vectors(page: Page) -> VectorExtraction:
+    """The Vector folder's single high-level entrypoint -- one
+    get_drawings() walk, returning both `paths` (flat) and `records`
+    (per-drawing). Pipelines call this; `extract_paths` / `extract_records`
+    stay for callers that want only one half."""
+    records = extract_records(page)
+    paths = [p for record in records for p in record.items]
+    _LOG.debug("page %d: extracted %d vector path(s)", page.meta.index, len(paths))
+    return VectorExtraction(paths=paths, records=records)
 
 
 def extract_paths(page: Page) -> list[VectorPath]:

@@ -1,71 +1,39 @@
 from __future__ import annotations
 
-import pytest
+import numpy as np
 
-from rastervec.OCR.Paddle_OCR.ocr_backend import (
-    PaddleOcrBackend,
-    _undo_doc_rotation,
-    _undo_doc_rotation_point,
-)
+from rastervec.config import OCR_REC_MODEL, OCR_VERSION
+from rastervec.OCR.Paddle_OCR.ocr_backend import OcrBox, PaddleRecBackend, _rec_field
 
 
-def test_page_rotation_combines_doc_angle_and_textline_flip():
-    backend = PaddleOcrBackend()
-    assert backend._page_rotation({}) == 0
-    assert backend._page_rotation({"doc_preprocessor_res": {"angle": 90}}) == 90
-    assert backend._page_rotation({"textline_orientation_angles": [1, 1, 0]}) == 180
-    assert backend._page_rotation({"textline_orientation_angles": [1, 0, 0]}) == 0
-    assert backend._page_rotation(
-        {"doc_preprocessor_res": {"angle": 90}, "textline_orientation_angles": [1, 1]}
-    ) == 270
+def test_rec_field_handles_dict_and_attr_shapes():
+    assert _rec_field({"rec_text": "hi"}, "rec_text") == "hi"
+
+    class _R:
+        rec_text = "yo"
+
+    assert _rec_field(_R(), "rec_text") == "yo"
+    assert _rec_field({}, "missing") is None
 
 
-def test_undo_doc_rotation_zero_angle_is_identity():
-    points = [(1.0, 2.0), (3.0, 4.0)]
-    assert _undo_doc_rotation(points, 0, (100.0, 50.0)) == points
+def test_rec_model_pinned_to_ocr_version():
+    assert OCR_REC_MODEL == f"{OCR_VERSION}_mobile_rec"
 
 
-@pytest.mark.parametrize("angle", [90, 180, 270])
-def test_undo_doc_rotation_round_trips_corners(angle):
-    # Paddle's doc-preprocessor rotates the WxH original into a
-    # doc-corrected image (swapped to HxW for 90/270) via
-    # cv2.getRotationMatrix2D before detection ever runs; _undo_doc_rotation
-    # must invert that exactly. Verify by rotating the four corners of a
-    # WxH image forward (via the same matrix rastervec's docstring derives)
-    # and checking the inverse recovers the originals.
-    w, h = 40.0, 20.0
-    corners = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]
+def test_recognize_crops_maps_engine_results_to_boxes(monkeypatch):
+    class _FakeRec:
+        def predict(self, crops, batch_size=1):
+            return [{"rec_text": "AB", "rec_score": 0.7}, {"rec_text": "", "rec_score": 0.0}]
 
-    if angle == 90:
-        rotated = [(y, w - x) for x, y in corners]
-    elif angle == 180:
-        rotated = [(w - x, h - y) for x, y in corners]
-    else:  # 270
-        rotated = [(h - y, x) for x, y in corners]
+    backend = PaddleRecBackend()
+    monkeypatch.setattr(backend, "_engine", lambda: _FakeRec())
 
-    recovered = _undo_doc_rotation(rotated, angle, (w, h))
-    for (ox, oy), (rx, ry) in zip(corners, recovered):
-        assert rx == pytest.approx(ox)
-        assert ry == pytest.approx(oy)
+    boxes = backend.recognize_crops([np.zeros((8, 10), np.uint8), np.zeros((8, 10), np.uint8)])
+    assert [b.text for b in boxes] == ["AB", ""]
+    assert isinstance(boxes[0], OcrBox)
+    assert boxes[0].confidence == 0.7
+    assert boxes[1].confidence == 0.0
 
 
-def test_undo_doc_rotation_point_unknown_angle_is_identity():
-    assert _undo_doc_rotation_point(5.0, 6.0, 45, 100.0, 50.0) == (5.0, 6.0)
-
-
-def test_engine_pins_shared_ocr_version(monkeypatch):
-    import paddleocr
-
-    from rastervec.config import OCR_VERSION
-
-    calls = []
-
-    class _FakePaddleOCR:
-        def __init__(self, **kwargs):
-            calls.append(kwargs)
-
-    monkeypatch.setattr(paddleocr, "PaddleOCR", _FakePaddleOCR)
-    PaddleOcrBackend._ENGINE_CACHE.clear()
-    PaddleOcrBackend()._engine()
-
-    assert calls[0]["ocr_version"] == OCR_VERSION == "PP-OCRv5"
+def test_recognize_crops_empty_input():
+    assert PaddleRecBackend().recognize_crops([]) == []

@@ -40,7 +40,7 @@ class _Span:
     wmode: int
 
 
-def extract(page: Page) -> list[TextWord]:
+def extract_native_text(page: Page) -> list[TextWord]:
     """One `TextWord` per `get_text("words")` word, in reading order,
     with font/rotation metadata joined from the best-overlapping
     `get_text("dict")` span."""

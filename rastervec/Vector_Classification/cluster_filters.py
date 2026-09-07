@@ -58,8 +58,8 @@ from rastervec.helpers.clustering import cluster_spatial
 from rastervec.helpers.geometry import bboxes_intersect, dims, union_bbox
 from rastervec.helpers.iterutils import partition
 from rastervec.models import VectorPath
-from rastervec.Vector_Classification.groups.group_filters import GroupStats
-from rastervec.Vector_Classification.items.item_filters import (
+from rastervec.Vector_Classification.group_filters import GroupStats
+from rastervec.Vector_Classification.item_filters import (
     VectorSignature,
     bbox_of,
     vector_signature,

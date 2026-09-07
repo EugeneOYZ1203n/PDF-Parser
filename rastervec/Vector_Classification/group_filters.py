@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from rastervec.helpers.geometry import max_dimension, rect_gap, union_bbox
 from rastervec.helpers.iterutils import partition
 from rastervec.models import Page, VectorPath
-from rastervec.Vector_Classification.items.item_filters import (
+from rastervec.Vector_Classification.item_filters import (
     bbox_of,
     vector_signature,
 )

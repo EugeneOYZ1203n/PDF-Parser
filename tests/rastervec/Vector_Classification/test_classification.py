@@ -5,9 +5,9 @@ import pytest
 from rastervec.helpers.clustering import cluster_spatial
 from rastervec.models import VectorPath
 from rastervec.Vector_Classification import classification as vclass
-from rastervec.Vector_Classification.clusters import cluster_filters as clf
-from rastervec.Vector_Classification.groups import group_filters as grf
-from rastervec.Vector_Classification.items import item_filters as itf
+from rastervec.Vector_Classification import cluster_filters as clf
+from rastervec.Vector_Classification import group_filters as grf
+from rastervec.Vector_Classification import item_filters as itf
 
 
 def _make_path(

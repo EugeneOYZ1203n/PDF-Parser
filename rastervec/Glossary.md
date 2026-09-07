@@ -2,7 +2,7 @@
 
 Standardized terminology for `rastervec`'s vector-classification pipeline
 (`rastervec/Vector/vector.py`, `rastervec/Vector_Classification/classification.py`,
-`rastervec/pipeline.py`). Every term below is scoped to one page's run
+`rastervec/pipelines/`). Every term below is scoped to one page's run
 unless stated otherwise.
 
 ## Group
@@ -50,10 +50,10 @@ candidate is just "whatever wasn't filtered out."
 ## Drawing vector
 
 Anything that did *not* end up as real recognized text, reassembled into
-`DrawingVector`s by `_run_drawing_vectors` (`pipeline.py`). This includes,
+`DrawingVector`s by `build_drawing_output` (`pipelines/_steps.py`). This includes,
 without distinction: every `role="dropped"` category any classification
 filter step produced, every cluster FAST found no text signal in
 (`fast_dropped`), and every cluster whose OCR resolution failed
-(`ocr_failed`, see `pipeline.py`'s `_run_ocr_compare`). OCR success/failure
+(`ocr_failed`, see `pipelines/sub_pipelines/ocr.py`). OCR success/failure
 is the real, final signal for whether a given cluster was actually text --
 everything else is drawing content.

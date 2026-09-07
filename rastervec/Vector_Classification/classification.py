@@ -37,34 +37,13 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Literal
 
-from rastervec.config import (
-    DENSITY_DEFAULT_GRID_SIZE,
-    DENSITY_MAX_CELL_PX,
-    DENSITY_MAX_EMPTY_FRACTION,
-    DENSITY_MIN_CELL_PX,
-    DUPLICATE_RUN_MIN_LENGTH,
-    LOW_VARIETY_MAX_MEMBER_COUNT,
-    LOW_VARIETY_MAX_REQUIRED,
-    LOW_VARIETY_MIN_MEMBER_COUNT,
-    LOW_VARIETY_MIN_REQUIRED,
-    MAX_DIMENSION_FRACTION,
-    MIN_GROUP_SIZE_PX,
-    PATTERN_FRACTION_THRESHOLD,
-    PATTERN_MIN_REPEAT_COUNT,
-    PATTERN_SPACING_TOLERANCE,
-    PERIMETER_MARGIN_FRACTION,
-    SEQ_OVERLAP_TOLERANCE_PX,
-    SIGNATURE_ROUND_PX,
-    SPATIAL_CLUSTER_THRESHOLD,
-    SPATIAL_SIZE_TOLERANCE,
-    UNIQUE_CLUSTER_TOLERANCE,
-)
+from rastervec.config import UNIQUE_CLUSTER_TOLERANCE
 from rastervec.helpers.geometry import is_dashed, union_bbox
 from rastervec.logging_setup import get_logger
 from rastervec.models import DrawingVector, Page, VectorPath, VectorRecord
-from rastervec.Vector_Classification.clusters import cluster_filters as clf
-from rastervec.Vector_Classification.groups import group_filters as grf
-from rastervec.Vector_Classification.items import item_filters as itf
+from rastervec.Vector_Classification import cluster_filters as clf
+from rastervec.Vector_Classification import group_filters as grf  # noqa: F401 -- re-exported
+from rastervec.Vector_Classification import item_filters as itf  # noqa: F401 -- re-exported
 
 _LOG = get_logger("classification")
 
@@ -105,109 +84,14 @@ class StepResult:
 
 
 def cluster(paths: list[VectorPath], page: Page) -> list[StepResult]:
-    """Runs the fixed pipeline (see this module's docstring) in order,
-    each step's input being the previous step's `"kept"` category.
-    Returns one `StepResult` per step; `steps[-1].categories["kept"]`
-    is the final surviving groups, handed to text_candidates (see
-    pipeline.py's `_run_text_candidates`)."""
-    groups: list[list[VectorPath]] = [[p] for p in paths]
-    steps: list[StepResult] = []
+    """The fixed classification chain for one (layer, color) bucket. The
+    chain itself -- one named step call per step -- now lives in
+    `rastervec/pipelines/sub_pipelines/vector_classification.py` so the
+    pipeline reads top-down; this stays as a thin entrypoint for callers
+    that only want one bucket's `StepResult` list."""
+    from rastervec.pipelines.sub_pipelines.vector_classification import _classify_bucket
 
-    groups, dropped = itf.filter_large_items(groups, page, MAX_DIMENSION_FRACTION)
-    steps.append(StepResult("Large items", {
-        "kept": CategoryResult(groups, "kept"),
-        "dropped_oversized": CategoryResult(dropped, "dropped"),
-    }))
-
-    groups, signature_counts = itf.compute_vector_signatures(groups, SIGNATURE_ROUND_PX)
-    steps.append(StepResult(
-        "Vector signatures", {"kept": CategoryResult(groups, "kept")},
-        signature_counts=signature_counts,
-    ))
-
-    groups, duplicate_runs = grf.remove_duplicate_runs(
-        groups, SIGNATURE_ROUND_PX, DUPLICATE_RUN_MIN_LENGTH
-    )
-    groups, _ = grf.combine_overlapping_seq(groups, SEQ_OVERLAP_TOLERANCE_PX)
-    steps.append(StepResult("Seq dedupe + overlap merge", {
-        "kept": CategoryResult(groups, "kept"),
-        "duplicate_runs": CategoryResult(duplicate_runs, "dropped"),
-    }))
-
-    groups, dropped = grf.filter_tiny_groups(groups, MIN_GROUP_SIZE_PX)
-    steps.append(StepResult("Tiny groups", {
-        "kept": CategoryResult(groups, "kept"),
-        "dropped_tiny": CategoryResult(dropped, "dropped"),
-    }))
-
-    groups, dropped = grf.filter_large_groups(groups, page, MAX_DIMENSION_FRACTION)
-    steps.append(StepResult("Large groups", {
-        "kept": CategoryResult(groups, "kept"),
-        "dropped_oversized": CategoryResult(dropped, "dropped"),
-    }))
-
-    groups, debug_unconstrained, debug_no_parallel, lineage = (
-        clf.cluster_spatial_groups(
-            groups, SPATIAL_CLUSTER_THRESHOLD, SPATIAL_SIZE_TOLERANCE,
-        )
-    )
-    steps.append(StepResult("Spatial cluster", {
-        "kept": CategoryResult(groups, "kept"),
-        "debug_unconstrained": CategoryResult(debug_unconstrained, "info"),
-        "debug_no_parallel": CategoryResult(debug_no_parallel, "info"),
-    }))
-
-    groups, dropped = clf.filter_mixed_fill_rule_clusters(groups)
-    steps.append(StepResult("Mixed fill-rule clusters", {
-        "kept": CategoryResult(groups, "kept"),
-        "dropped_mixed_fill_rule": CategoryResult(dropped, "dropped"),
-    }))
-
-    groups, group_stats = grf.compute_group_stats(groups, SIGNATURE_ROUND_PX)
-    steps.append(StepResult(
-        "Group stats", {"kept": CategoryResult(groups, "kept")},
-        group_stats=group_stats,
-    ))
-
-    groups, dropped = clf.filter_perimeter_only_clusters(groups, group_stats, PERIMETER_MARGIN_FRACTION)
-    steps.append(StepResult("Perimeter-only clusters", {
-        "kept": CategoryResult(groups, "kept"),
-        "dropped_perimeter": CategoryResult(dropped, "dropped"),
-    }))
-
-    groups, dropped = clf.filter_density_clusters(
-        groups, group_stats, DENSITY_DEFAULT_GRID_SIZE, DENSITY_MIN_CELL_PX, DENSITY_MAX_CELL_PX,
-        DENSITY_MAX_EMPTY_FRACTION,
-    )
-    steps.append(StepResult("Density clusters", {
-        "kept": CategoryResult(groups, "kept"),
-        "dropped_low_density": CategoryResult(dropped, "dropped"),
-    }))
-
-    groups, dropped = clf.filter_constant_spacing_clusters(
-        groups, SIGNATURE_ROUND_PX, PATTERN_SPACING_TOLERANCE, PATTERN_MIN_REPEAT_COUNT,
-        PATTERN_FRACTION_THRESHOLD,
-    )
-    steps.append(StepResult("Constant-spacing clusters", {
-        "kept": CategoryResult(groups, "kept"),
-        "dropped_constant_spacing": CategoryResult(dropped, "dropped"),
-    }))
-
-    groups, dropped = clf.filter_low_variety_clusters(
-        groups, group_stats,
-        LOW_VARIETY_MIN_MEMBER_COUNT, LOW_VARIETY_MIN_REQUIRED,
-        LOW_VARIETY_MAX_MEMBER_COUNT, LOW_VARIETY_MAX_REQUIRED,
-    )
-    cluster_groups = {id(g): lineage.get(id(g), [g]) for g in groups}
-    steps.append(StepResult(
-        "Low-variety clusters", {
-            "kept": CategoryResult(groups, "kept"),
-            "dropped_low_variety": CategoryResult(dropped, "dropped"),
-        },
-        cluster_groups=cluster_groups,
-    ))
-
-    return steps
+    return _classify_bucket(paths, page)
 
 
 def group_similar_clusters(

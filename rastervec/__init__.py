@@ -1,5 +1,5 @@
 from rastervec.models import Page, PageMeta, TextWord
-from rastervec.Native_Text.native import extract as extract_native_words
+from rastervec.native_text import extract_native_text as extract_native_words
 from rastervec.Reader.reader import Reader
 
 __all__ = [

@@ -1,7 +1,7 @@
 """Spatial connected-components clustering.
 
 `cluster_spatial` is the one function here -- used by the Vector
-Classification pipeline (`Vector_Classification/clusters/cluster_filters.py`'s
+Classification pipeline (`Vector_Classification/cluster_filters.py`'s
 `cluster_spatial_groups` and `pipeline.py`'s `_run_spatial_regroup`). No
 scikit-learn/scipy dependency: it uses a plain spatial hash grid +
 union-find, which stays fast even on pages with tens of thousands of path

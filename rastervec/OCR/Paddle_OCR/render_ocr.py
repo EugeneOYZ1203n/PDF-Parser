@@ -1,157 +1,132 @@
-"""RenderOCR helper: render + OCR, backend-agnostic (see ocr_backend.py in
-this same package for the pluggable OcrBackend strategy pattern -- boxes
-are always returned already mapped into the caller's original image pixel
-space).
+"""RenderOCR: render a vector-text cluster, deskew + segment it (Radon),
+recognise the word crops, and assemble a `TextVectorResult`.
 
-Vector-stage only: renders + OCRs a text-classified vector cluster via
-ocr_cluster. The Raster stage (rendering + OCR'ing raster image regions)
-isn't part of this project's current scope -- ocr_cluster only ever
-handles `list[VectorPath]` clusters.
-
-A cluster render is upright to begin with (there's no manual rotation
-search -- ocr_cluster renders once and calls backend.detect() once);
-`rotation_used` is instead read directly off the backend's own detected
-`OcrDetection.rotation`.
+Detection is the Radon segmentation step, not PaddleOCR -- the backend
+(`ocr_backend.OcrBackend`) only recognises pre-cropped words. The 0-vs-180
+flip Radon cannot resolve is settled here: every word crop is recognised
+upright and rotated 180, and the higher length-weighted-confidence set
+wins.
 """
 from __future__ import annotations
 
 import math
 
+import numpy as np
 from PIL import Image
 
 from rastervec.config import MIN_RENDER_SIDE_PX
 from rastervec.helpers.geometry import PDF_POINTS_PER_INCH, union_bbox
 from rastervec.models import OcrWord, Page, TextVectorResult, VectorPath
-from rastervec.OCR.Paddle_OCR.ocr_backend import OcrBackend, PaddleOcrBackend
+from rastervec.OCR.Paddle_OCR.ocr_backend import OcrBackend, OcrBox, PaddleRecBackend
+from rastervec.pipelines.sub_pipelines.radon import ClusterSegmentation, segment_cluster
 from rastervec.renderer import (
     cluster_frame_size,
     pixel_to_page_bbox,
     render_vector_cluster,
 )
 
+
 def render_cluster_for_ocr(
     cluster: list[VectorPath], dpi: int = 300
 ) -> tuple["Image.Image", int]:
-    """Render `cluster` exactly as `RenderOCR.ocr_cluster` feeds it to the
-    backend: `dpi` is bumped upward (never down) so the rendered image's
-    shorter side is at least `MIN_RENDER_SIDE_PX`. Returns
-    `(image, dpi_used)` so callers (the visualization notebook) can
-    reproduce the backend's exact input and reuse the same dpi for the
-    pixel<->page-space mapping (`pixel_to_page_bbox` / `page_points_to_pixel`)."""
+    """Render `cluster` as OCR sees it: `dpi` bumped upward (never down) so
+    the rendered image's shorter side is at least `MIN_RENDER_SIDE_PX`.
+    Returns `(image, dpi_used)`."""
     width_pt, height_pt = cluster_frame_size(cluster)
     min_side_pt = min(width_pt, height_pt)
     if min_side_pt > 0:
-        needed_dpi = math.ceil(
-            MIN_RENDER_SIDE_PX * PDF_POINTS_PER_INCH / min_side_pt
-        )
+        needed_dpi = math.ceil(MIN_RENDER_SIDE_PX * PDF_POINTS_PER_INCH / min_side_pt)
         dpi = max(dpi, needed_dpi)
     return render_vector_cluster(cluster, dpi), dpi
 
 
+def _len_weighted_conf(boxes: list[OcrBox]) -> float:
+    real = [b for b in boxes if b.text]
+    total = sum(len(b.text) for b in real)
+    if total == 0:
+        return 0.0
+    return sum(len(b.text) * b.confidence for b in real) / total
+
+
 class RenderOCR:
-    """Render + detect + confidence-voting, shared by the vector-text OCR
-    steps. `backend` defaults to PaddleOcrBackend -- pass any other
-    OcrBackend to swap engines without touching this class."""
+    """Render + segment + recognise. `backend` defaults to
+    `PaddleRecBackend`; pass any `OcrBackend` to swap the recogniser."""
 
     def __init__(self, backend: OcrBackend | None = None) -> None:
-        self.backend = backend if backend is not None else PaddleOcrBackend()
+        self.backend = backend if backend is not None else PaddleRecBackend()
 
-    def ocr_boxes(
-        self, image: "Image.Image"
-    ) -> list[tuple[str, float, list[tuple[float, float]]]]:
-        """Runs the backend on one rendered image and returns every
-        detected text box separately (text, confidence, quad corners),
-        left as the backend found them -- unlike ocr() below, nothing is
-        joined into one string. Used by ocr() (joins these into one
-        reading) and the debug app's OCR inspector (`_ocr_cluster_preview`,
-        via ocr()), which needs the detected-text bbox in the rendered
-        image's own pixel space."""
-        detection = self.backend.detect(image)
-        return [(b.text, b.confidence, b.corners) for b in detection.boxes]
-
-    def ocr(
-        self, image: "Image.Image"
-    ) -> tuple[str, float, list[tuple[float, float]]]:
-        """Run the backend on one rendered image; returns (text,
-        confidence, bbox corners). A cluster render can produce more than
-        one detected text box -- these are joined left-to-right into one
-        string, with confidence averaged and the bbox corners covering
-        all of them."""
-        boxes = self.ocr_boxes(image)
-        return self._join_boxes(boxes)
-
-    def _join_boxes(
-        self, boxes: list[tuple[str, float, list[tuple[float, float]]]],
-    ) -> tuple[str, float, list[tuple[float, float]]]:
-        if not boxes:
-            return "", 0.0, []
-
-        order = sorted(
-            range(len(boxes)),
-            key=lambda i: min((x for x, _y in boxes[i][2]), default=i),
-        )
-        text = " ".join(boxes[i][0] for i in order)
-        scores = [boxes[i][1] for i in order]
-        confidence = (sum(scores) / len(scores)) if scores else 0.0
-
-        available = [boxes[i][2] for i in order if boxes[i][2]]
-        if available:
-            xs = [x for poly in available for x, _y in poly]
-            ys = [y for poly in available for _x, y in poly]
-            x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
-            corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
-        else:
-            corners = []
-
-        return text, float(confidence), corners
-
-    def ocr_cluster(
-        self,
-        cluster: list[VectorPath],
-        page: Page,
-        dpi: int = 300,
+    # -- primitives -----------------------------------------------------
+    def recognize_segmented(
+        self, seg: ClusterSegmentation, cluster: list[VectorPath], page: Page,
     ) -> TextVectorResult:
-        """Render (via rastervec.renderer) once, upright, and run one
-        backend.detect() call over the cluster's render. `rotation_used`
-        comes from the backend's own detected orientation, not a manual
-        rotation search. `words` is one OcrWord per detected box, each
-        mapped from pixel space to page space via
-        renderer.pixel_to_page_bbox -- used by
-        renderer.render_reconstructed_page to place/scale each word into
-        its own bbox instead of stretching one string across the whole
-        cluster bbox. `ocr_bbox` is the union of every detected box, in
-        page space (only when something was detected). `dpi` is bumped
-        upward (never down) if needed so the rendered image's shorter side
-        is at least MIN_RENDER_SIDE_PX -- a small cluster's own bbox
-        otherwise renders to a handful of pixels at the default dpi, which
-        the OCR backend reads poorly. The same (possibly bumped) dpi is
-        reused below for pixel_to_page_bbox, so the pixel<->page-space
-        mapping always matches the image actually rendered."""
-        image, dpi = render_cluster_for_ocr(cluster, dpi)
+        """Recognise `seg`'s word crops and map each back to page space."""
         bbox = union_bbox([p.bbox for p in cluster])
+        quarter = int(round(seg.skew_deg / 90.0)) * 90
 
-        detection = self.backend.detect(image)
-        raw_boxes = [(b.text, b.confidence, b.corners) for b in detection.boxes]
-        text, confidence, pixel_corners = self._join_boxes(raw_boxes)
-        rotation_used = detection.rotation
+        if not seg.word_crops:
+            return TextVectorResult(
+                paths=cluster, text="", confidence=0.0, bbox=bbox, ocr_bbox=None,
+                rotation_used=quarter % 360, page_index=page.meta.index, words=None,
+            )
 
-        ocr_bbox = None
-        words: list[OcrWord] = []
-        if pixel_corners:
-            ocr_bbox = pixel_to_page_bbox(cluster, dpi, pixel_corners)
-        for b in detection.boxes:
-            if not b.corners:
+        up = self.backend.recognize_crops(seg.word_crops)
+        flipped = self.backend.recognize_crops([np.rot90(c, 2) for c in seg.word_crops])
+        if _len_weighted_conf(flipped) > _len_weighted_conf(up):
+            boxes, flip = flipped, 180
+        else:
+            boxes, flip = up, 0
+
+        detected: list[tuple[str, float, list[tuple[float, float]], tuple]] = []
+        for box, corners in zip(boxes, seg.word_corners):
+            if not box.text:
                 continue
-            word_bbox = pixel_to_page_bbox(cluster, dpi, b.corners)
-            words.append(OcrWord(text=b.text, confidence=b.confidence, bbox=word_bbox))
+            page_bbox = pixel_to_page_bbox(cluster, seg.render_dpi, corners)
+            detected.append((box.text, box.confidence, corners, page_bbox))
+
+        detected.sort(key=lambda d: min((x for x, _y in d[2]), default=0.0))
+        text = " ".join(d[0] for d in detected)
+        confidence = float(np.mean([d[1] for d in detected])) if detected else 0.0
+        words = [OcrWord(text=d[0], confidence=d[1], bbox=d[3]) for d in detected]
+        ocr_bbox = union_bbox([d[3] for d in detected]) if detected else None
 
         return TextVectorResult(
-            paths=cluster,
-            text=text,
-            confidence=confidence,
-            bbox=bbox,
-            ocr_bbox=ocr_bbox,
-            rotation_used=rotation_used,
-            page_index=page.meta.index,
-            words=words or None,
+            paths=cluster, text=text, confidence=confidence, bbox=bbox,
+            ocr_bbox=ocr_bbox, rotation_used=(quarter + flip) % 360,
+            page_index=page.meta.index, words=words or None,
         )
+
+    def ocr_cluster(
+        self, cluster: list[VectorPath], page: Page, dpi: int = 300,
+    ) -> TextVectorResult:
+        """Render `cluster`, Radon-segment it, recognise -- the whole
+        vector-text OCR path for one cluster."""
+        image, dpi_used = render_cluster_for_ocr(cluster, dpi)
+        seg = segment_cluster(image, dpi_used)
+        return self.recognize_segmented(seg, cluster, page)
+
+    # -- convenience for the inspector / debug previews ----------------
+    def ocr(self, image: "Image.Image") -> tuple[str, float, list[tuple[float, float]]]:
+        """OCR one already-rendered image; returns `(text, confidence,
+        pixel-space bbox corners)`. Segmentation + recognition, no page
+        mapping."""
+        seg = segment_cluster(image, 300)
+        if not seg.word_crops:
+            return "", 0.0, []
+        up = self.backend.recognize_crops(seg.word_crops)
+        flipped = self.backend.recognize_crops([np.rot90(c, 2) for c in seg.word_crops])
+        boxes = flipped if _len_weighted_conf(flipped) > _len_weighted_conf(up) else up
+
+        found = [
+            (b.text, b.confidence, corners)
+            for b, corners in zip(boxes, seg.word_corners)
+            if b.text
+        ]
+        if not found:
+            return "", 0.0, []
+        found.sort(key=lambda d: min(x for x, _y in d[2]))
+        text = " ".join(d[0] for d in found)
+        confidence = float(np.mean([d[1] for d in found]))
+        xs = [x for _t, _c, poly in found for x, _y in poly]
+        ys = [y for _t, _c, poly in found for _x, y in poly]
+        corners = [(min(xs), min(ys)), (max(xs), min(ys)), (max(xs), max(ys)), (min(xs), max(ys))]
+        return text, confidence, corners
