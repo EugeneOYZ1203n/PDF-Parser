@@ -105,7 +105,10 @@ def test_run_benchmark_compute_workers_wires_a_starmap_capable_proxy(monkeypatch
         captured["compute"] = compute
         return PageResult(pdf_path=task.pdf_path, page_index=task.page_index, variant=task.variant)
 
+    from rastervec.Reader.Parallel import pool as pool_mod
+
     monkeypatch.setattr(bj, "run_page_task", fake_run_page_task)
+    monkeypatch.setattr(pool_mod, "warmup", lambda: None)
     tasks = [PageTask(pdf_path="x.pdf", page_index=0)]
 
     results = run_benchmark(tasks, workers=1, compute_workers=1, desc="")

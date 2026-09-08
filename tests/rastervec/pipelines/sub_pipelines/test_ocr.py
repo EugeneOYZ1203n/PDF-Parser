@@ -133,7 +133,7 @@ def test_recognize_fn_closure_dispatches_through_compute_apply(monkeypatch):
 
     crops = [np.zeros((4, 4), dtype=np.uint8)]
     monkeypatch.setattr(
-        ocr_mod, "_recognize_crops_job", lambda c, model_name=None: [f"got {len(c)}"],
+        ocr_mod, "_recognize_crops_job", lambda c, *a, **k: [f"got {len(c)}"],
     )
     result = captured["recognize_fn"](crops)
     assert compute.calls == 1

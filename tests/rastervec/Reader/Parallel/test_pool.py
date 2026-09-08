@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 
+from rastervec.Reader.Parallel import pool as pool_mod
 from rastervec.Reader.Parallel.pool import (
     _WORKER_ENV,
+    compute_pool,
     default_worker_count,
     run_parallel,
     worker_init,
@@ -40,3 +42,18 @@ def test_worker_init_does_not_override_explicit(monkeypatch):
 def test_default_worker_count_is_sane():
     n = default_worker_count()
     assert 1 <= n <= 4
+
+
+def test_compute_pool_zero_yields_none():
+    with compute_pool(0) as compute:
+        assert compute is None
+
+
+def test_compute_pool_builds_and_tears_down_a_usable_proxy(monkeypatch):
+    # keep the model warmup out of a pool-plumbing test
+    monkeypatch.setattr(pool_mod, "warmup", lambda: None)
+    with compute_pool(1) as compute:
+        assert compute is not None
+        assert hasattr(compute, "starmap") and hasattr(compute, "apply")
+        assert compute.apply(abs, (-3,)) == 3
+        assert compute.starmap(pow, [(2, 3), (3, 2)]) == [8, 9]

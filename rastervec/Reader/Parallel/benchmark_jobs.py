@@ -344,19 +344,13 @@ def _run_legacy(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
         )
         return res
 
-    try:
-        result.auto = _legacy_run(auto_input, auto_gt, "auto")
-    except Exception as exc:  # noqa: BLE001
-        result.report_blocks.append(
-            f"[{lbl}/auto] {task.pdf_path} p{task.page_index}: run failed: {exc}"
-        )
+    # No per-run try/except here: a legacy failure (archive import, LibreOffice,
+    # PaddleOCR) must propagate to `run_page_task`'s outer boundary -- which
+    # logs it and records `PageResult.error` -- rather than be swallowed into a
+    # `report_blocks` line with `None` metrics (a silent near-zero score).
+    result.auto = _legacy_run(auto_input, auto_gt, "auto")
     if has_manual and manual_input is not None:
-        try:
-            result.manual = _legacy_run(manual_input, manual_gt, "manual")
-        except Exception as exc:  # noqa: BLE001
-            result.report_blocks.append(
-                f"[{lbl}/manual] {task.pdf_path} p{task.page_index}: run failed: {exc}"
-            )
+        result.manual = _legacy_run(manual_input, manual_gt, "manual")
 
     result.total_seconds = total
     directory = _page_dir(task)
@@ -400,26 +394,20 @@ def run_benchmark(
     otherwise a spawn process pool -- Pool 1), results in input order.
 
     `compute_workers > 0` additionally starts a `multiprocessing.Manager`
-    -hosted `Pool` (Pool 2) sized `compute_workers`, shared by every page
-    job regardless of which Pool-1 worker runs it -- a complex page's many
-    FAST/OCR jobs and simple pages' few jobs all queue into this one pool,
-    so idle capacity is never stranded on a page that finished early. Pool
-    2 never imports `fitz`/`pymupdf`. `compute_workers=0` (the default)
-    preserves today's fully-local-per-page behavior."""
-    from rastervec.Reader.Parallel.pool import run_parallel
+    -hosted `Pool` (Pool 2) sized `compute_workers` (via `pool.compute_pool`),
+    shared by every page job regardless of which Pool-1 worker runs it -- a
+    complex page's many FAST/OCR jobs and simple pages' few jobs all queue
+    into this one pool, so idle capacity is never stranded on a page that
+    finished early. Pool 2 never imports `fitz`/`pymupdf`. `compute_workers=0`
+    (the default) preserves today's fully-local-per-page behavior."""
+    import functools
 
-    if compute_workers > 0:
-        import functools
-        import multiprocessing
+    from rastervec.Reader.Parallel.pool import compute_pool, run_parallel
 
-        manager = multiprocessing.Manager()
-        compute = manager.Pool(processes=compute_workers)
-        try:
-            fn = functools.partial(run_page_task, compute=compute)
-            return run_parallel(tasks, fn, workers=workers, desc=desc)
-        finally:
-            compute.close()
-            compute.join()
-            manager.shutdown()
-
-    return run_parallel(tasks, run_page_task, workers=workers, desc=desc)
+    with compute_pool(compute_workers) as compute:
+        fn = (
+            run_page_task
+            if compute is None
+            else functools.partial(run_page_task, compute=compute)
+        )
+        return run_parallel(tasks, fn, workers=workers, desc=desc)

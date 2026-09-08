@@ -85,11 +85,11 @@ def test_spatial_regroup_tolerance_px():
 
 
 def test_ocr_version():
-    assert config.OCR_VERSION == "PP-OCRv5"
+    assert config.OCR_VERSION == "PP-OCRv4"
 
 
-def test_ocr_rec_model_pinned_to_ocr_version():
-    assert config.OCR_REC_MODEL == "PP-OCRv5_mobile_rec"
+def test_ocr_lang():
+    assert config.OCR_LANG == "en"
 
 
 def test_radon_constants():

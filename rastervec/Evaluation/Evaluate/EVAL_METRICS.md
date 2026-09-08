@@ -273,12 +273,10 @@ levenshtein(norm(gt_i), norm(hyp_i)))` (i.e. `1 − CER` clamped at 0);
   found — N:1-aware replacement for the legacy `rotation_accuracy`.
 - **`n/a`** when no GT is localized.
 - **Rotation signal** is `TextVectorResult.rotation_used ∈ {0, 90, 180, 270}`.
-  (There is no rotation-correction stage in the current pipeline.)
-  With the default light OCR backend (`pipeline.USE_LIGHT_OCR_BACKEND`), `rotation_used` comes from
-  PaddleOCR's standalone `DocImgOrientationClassification` on the cluster render when it loads and is
-  confident, else an aspect-gated confidence-max retry over `{0, 90, 270}` — the aspect-gating
-  fallback path **never emits `180`** (a near-absent case on shop drawings). The heavy
-  `PaddleOcrBackend` still produces `180` via its doc/textline-orientation classifiers.
+  (There is no rotation-correction stage in the current pipeline.) It is
+  `round(Radon skew / 90) * 90` plus the 0-vs-180 flip `RenderOCR.recognize_segmented`
+  resolves by re-recognising the 180-rotated crops and keeping the higher
+  length-weighted-confidence set (`OCR/radon.py` + `render_ocr.py`).
 
 ### Vector-classification accuracy
 

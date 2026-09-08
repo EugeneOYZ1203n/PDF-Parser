@@ -182,5 +182,7 @@ def test_ocr_cluster_reads_rendered_text(tmp_pdf_path):
         image = Image.open(BytesIO(pixmap.tobytes("png")))
         text, confidence, _bbox = RenderOCR().ocr(image)
 
-    assert "HELLO" in text.upper()
+    # spacing varies by rec model / word-split (PP-OCRv4 mobile reads this
+    # synthetic wide-spaced render as "H E LLO"); the point is the glyphs.
+    assert "HELLO" in text.upper().replace(" ", "")
     assert confidence > 0.5

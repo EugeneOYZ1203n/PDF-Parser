@@ -1,33 +1,29 @@
 """The OCR recognition backend behind `RenderOCR`.
 
 Text *detection* is not PaddleOCR's job in this pipeline -- the Radon
-segmentation step (`OCR/radon.py`) deskews each cluster
-render and splits it into word crops. A backend only has to *recognise*
-those pre-segmented crops, so the whole `OcrBackend` contract is one
-method: `recognize_crops(crops) -> list[OcrBox]`, one `OcrBox` per input
-crop (blank text allowed, in input order).
+segmentation step (`OCR/radon.py`) deskews each cluster render and splits
+it into word crops. A backend only has to *recognise* those pre-segmented
+crops, so the whole `OcrBackend` contract is one method:
+`recognize_crops(crops) -> list[OcrBox]`, one `OcrBox` per input crop
+(blank text allowed, in input order).
 
-`PaddleRecBackend` is the only implementation: PaddleOCR's standalone
-`TextRecognition` predictor (`config.OCR_REC_MODEL`), engine built lazily
-and cached at class scope so a spawn pool started next finds the weights on
-disk.
+`PaddleRecBackend` is the only implementation: paddleocr 2.x's
+recognition-only path. It builds a `paddleocr.PaddleOCR` engine
+(`config.OCR_VERSION` = PP-OCRv4, `config.OCR_LANG`) and calls its batch
+`text_recognizer` directly on the normalised crops -- the detector is
+never invoked. The engine is built lazily and cached at class scope so a
+spawn pool started next finds the weights on disk. This is the same API
+surface `archive/`'s `raster_parser` OCR uses, so the `legacy` benchmark
+variant needs no compatibility shim.
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Protocol
 
 import numpy as np
 
-# Must be set before paddlex reads its flags on the first lazy `paddleocr`
-# import below -- on this dev environment the default mkldnn CPU inference
-# path hits an unimplemented PIR attribute-conversion error; plain "paddle"
-# run mode is fine for small pre-cropped word renders. Only set if the
-# caller hasn't already.
-os.environ.setdefault("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "False")
-
-from rastervec.config import OCR_REC_MODEL, REC_BATCH_SIZE
+from rastervec.config import OCR_LANG, OCR_VERSION, REC_BATCH_SIZE
 from rastervec.logging_setup import get_logger
 from rastervec.OCR.Paddle_OCR.crop_normalize import normalize_line_crop
 
@@ -50,38 +46,40 @@ class OcrBackend(Protocol):
     def recognize_crops(self, crops: list[np.ndarray]) -> list[OcrBox]: ...
 
 
-def _rec_field(result: object, key: str):
-    """Pull one field out of a paddlex predictor result (dict-like or
-    attribute-style), tolerating either shape across versions."""
-    try:
-        return result[key]  # type: ignore[index]
-    except (TypeError, KeyError, IndexError):
-        return getattr(result, key, None)
-
-
 class PaddleRecBackend:
-    """PaddleOCR `TextRecognition` (recognition only). One engine per
-    `model_name`, cached at class scope -- every instance shares it."""
+    """paddleocr 2.x recognition only. One engine per `(ocr_version, lang)`,
+    cached at class scope -- every instance shares it."""
 
-    _ENGINE_CACHE: dict[str, object] = {}
+    _ENGINE_CACHE: dict[tuple[str, str], object] = {}
 
-    def __init__(self, model_name: str = OCR_REC_MODEL) -> None:
-        self.model_name = model_name
+    def __init__(self, ocr_version: str = OCR_VERSION, lang: str = OCR_LANG) -> None:
+        self.key = (ocr_version, lang)
 
     @classmethod
-    def warmup(cls, model_name: str = OCR_REC_MODEL) -> None:
+    def warmup(cls, ocr_version: str = OCR_VERSION, lang: str = OCR_LANG) -> None:
         """Force the (model-downloading on first ever call) engine build
         now, in the calling process. Safe to call repeatedly."""
-        cls(model_name)._engine()
+        cls(ocr_version, lang)._engine()
 
     def _engine(self):
-        if self.model_name not in PaddleRecBackend._ENGINE_CACHE:
-            from paddleocr import TextRecognition
+        if self.key not in PaddleRecBackend._ENGINE_CACHE:
+            # torch must load before paddle on Windows: paddleocr 2.x pulls
+            # paddle (and, via albumentations, torch) at import, and a
+            # paddle-first process then fails torch's DLL load (shm.dll,
+            # WinError 127 -- clashing OpenMP runtimes). FAST already relies on
+            # this order; make the OCR path self-sufficient too.
+            import torch  # noqa: F401
+            from paddleocr import PaddleOCR
 
-            PaddleRecBackend._ENGINE_CACHE[self.model_name] = TextRecognition(
-                model_name=self.model_name
+            ocr_version, lang = self.key
+            PaddleRecBackend._ENGINE_CACHE[self.key] = PaddleOCR(
+                ocr_version=ocr_version,
+                lang=lang,
+                use_angle_cls=False,  # the Radon step resolves the 180-degree flip
+                show_log=False,
+                rec_batch_num=REC_BATCH_SIZE,
             )
-        return PaddleRecBackend._ENGINE_CACHE[self.model_name]
+        return PaddleRecBackend._ENGINE_CACHE[self.key]
 
     def recognize_crops(self, crops: list[np.ndarray]) -> list[OcrBox]:
         """One `OcrBox` per crop, in input order. A crop that recognises to
@@ -89,17 +87,19 @@ class PaddleRecBackend:
         can zip results back to `word_corners` positionally."""
         if not crops:
             return []
-        norm = [
-            np.asarray(
-                normalize_line_crop(_as_pil(c)).convert("RGB")
+        # normalise -> RGB -> BGR (paddleocr 2.x's TextRecognizer is cv2/BGR).
+        bgr = [
+            np.ascontiguousarray(
+                np.asarray(normalize_line_crop(_as_pil(c)).convert("RGB"))[:, :, ::-1]
             )
             for c in crops
         ]
-        results = self._engine().predict(norm, batch_size=REC_BATCH_SIZE)
+        rec = self._engine().text_recognizer(bgr)
+        rows = rec[0] if isinstance(rec, tuple) else rec
         out: list[OcrBox] = []
-        for r in results:
-            text = str(_rec_field(r, "rec_text") or "").strip()
-            score = float(_rec_field(r, "rec_score") or 0.0)
+        for row in rows:
+            text = str(row[0] or "").strip()
+            score = float(row[1] or 0.0)
             out.append(OcrBox(text=text, confidence=score if text else 0.0, corners=[]))
         return out
 
@@ -113,10 +113,12 @@ def _as_pil(arr: np.ndarray):
 
 
 def _recognize_crops_job(
-    crops: list[np.ndarray], model_name: str = OCR_REC_MODEL,
+    crops: list[np.ndarray],
+    ocr_version: str = OCR_VERSION,
+    lang: str = OCR_LANG,
 ) -> list[OcrBox]:
     """Top-level, picklable Pool-2 job: recognise `crops` with a
-    `PaddleRecBackend` cached per Pool-2 worker process by `model_name`
-    (`PaddleRecBackend._ENGINE_CACHE` is keyed the same way for local
+    `PaddleRecBackend` cached per Pool-2 worker process by `(ocr_version,
+    lang)` (`PaddleRecBackend._ENGINE_CACHE` is keyed the same way for local
     calls). Fitz-free -- plain numpy crops in, dataclasses out."""
-    return PaddleRecBackend(model_name).recognize_crops(crops)
+    return PaddleRecBackend(ocr_version, lang).recognize_crops(crops)

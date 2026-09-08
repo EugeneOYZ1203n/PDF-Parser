@@ -125,15 +125,15 @@ SPATIAL_REGROUP_TOLERANCE_PX = 1.0
 # ======================================================================
 
 # PaddleOCR model family the single OCR backend builds against. Pinned to
-# PP-OCRv5, not the newer PP-OCRv6, because this venv's paddleocr/paddlex
-# install (see requirements.txt) doesn't have PP-OCRv6 models registered.
-OCR_VERSION = "PP-OCRv5"
+# PP-OCRv4 -- the last family shipped by paddleocr 2.x (see requirements.txt),
+# which is also the API surface `archive/`'s raster_parser OCR targets, so
+# the `legacy` benchmark variant needs no compatibility shim.
+OCR_VERSION = "PP-OCRv4"
 
-# The one recognition model the pipeline's OCR backend runs (recognition
-# only -- text detection is the Radon segmentation step, not PaddleOCR).
-# `_mobile_rec` is PP-OCRv5's lightweight rec model; swap to
-# `f"{OCR_VERSION}_server_rec"` for the larger, slower one.
-OCR_REC_MODEL = f"{OCR_VERSION}_mobile_rec"
+# Recognition language passed to `paddleocr.PaddleOCR(lang=...)` -- selects
+# the recognition model (e.g. `en` -> `en_PP-OCRv4_rec`). Text detection is
+# the Radon segmentation step, not PaddleOCR, so only the recogniser runs.
+OCR_LANG = "en"
 
 # ======================================================================
 # Radon text segmentation (OCR/radon.py)
@@ -183,5 +183,6 @@ REC_LINE_MAX_WIDTH_PX = 1024
 # PaddleRecBackend (OCR/Paddle_OCR/ocr_backend.py)
 # ======================================================================
 
-# batch size for the recognition-only TextRecognition.predict call.
+# batch size for the recognition-only `PaddleOCR.text_recognizer` call
+# (maps to `PaddleOCR(rec_batch_num=...)`).
 REC_BATCH_SIZE = 128

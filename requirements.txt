@@ -1,11 +1,17 @@
 pymupdf>=1.24
 Pillow>=10.0
 pytest>=8.0
-paddlepaddle>=3.0
-paddleocr>=3.0
+# PaddleOCR 2.x (PP-OCRv4) -- the API surface archive/'s raster_parser OCR was
+# written against, so the `legacy` benchmark variant needs no compat shim.
+# 2.x is not compatible with numpy 2.
+paddlepaddle>=2.6,<3
+paddleocr>=2.9,<3
 tqdm>=4.65
 pydantic>=2.0
-torch>=2.1
-numpy>=1.24
+# CPU build from the PyTorch index -- the plain PyPI Windows wheel is CUDA-enabled
+# and fails to load (shm.dll WinError 127) without a CUDA runtime.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0+cpu
+numpy>=1.24,<2
 matplotlib>=3.7
-scikit-image>=0.22
+scikit-image>=0.22,<0.25

@@ -1,18 +1,23 @@
 """Adapter: runs archive's legacy pipeline (`raster_parser.main_pipeline_extract.
 extract`) completely unmodified and reshapes its `NativePDFElements` output into
-rastervec's own `ClusterOcrResult`/`DrawingVector` shapes so
-`metrics.evaluate_metrics` can score it on the exact same metrics as the
-current pipeline -- see `rastervec/notebooks/benchmark_vector_classification.ipynb`.
+rastervec's own `ClusterOcrResult` shape so `metrics.evaluate_metrics` can score
+it on the exact same metrics as the current pipeline -- see
+`rastervec/notebooks/benchmark_vector_classification.ipynb`.
 
 Archive is a plain sibling folder under the repo root (not an installed
 package), so `_ensure_archive_importable` adds its path to `sys.path` lazily,
 only when this module's functions are actually called -- nothing about
 archive's own code is touched, copied, or reimplemented here, only its
-*output shape* is translated. `run_archive_pipeline` is a manual smoke test
-only (real archive dependency chain: PaddleOCR, LibreOffice, autotrace --
-same "not unit-testable" convention as `manual_label.py`/`benchmark.py`'s own
-OCR-backed paths); `to_cluster_ocr_results` is pure and unit-tested
-against a hand-built archive-shaped object.
+*output shape* is translated. Using `archive/` at all is logged as a warning
+(once per process), and any legacy-run failure is logged and re-raised, never
+swallowed.
+
+Archive's `raster_parser` needs **PaddleOCR 2.x** (now the repo default -- see
+`OCR/Paddle_OCR/ocr_backend.py`) and **LibreOffice on PATH** (`import
+raster_parser` launches a LibreOffice subprocess at import time). No
+compatibility shim is installed. `run_archive_pipeline` is a manual smoke test
+only; `to_cluster_ocr_results` is pure and unit-tested against a hand-built
+archive-shaped object.
 """
 from __future__ import annotations
 
@@ -20,7 +25,10 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from rastervec.logging_setup import get_logger
 from rastervec.models import ClusterOcrResult, TextVectorResult
+
+_LOG = get_logger("eval.legacy_adapter")
 
 if TYPE_CHECKING:
     from raster_parser.models import NativePDFElements as ArchiveNativePDFElements
@@ -58,18 +66,16 @@ def _ensure_archive_importable() -> None:
     `import raster_parser...` resolves against archive's own tree -- archive
     has no `setup.py`/`pyproject.toml`, it's imported as a plain path root.
 
-    Also installs the PaddleOCR 2.x->3.x compat shim (`_paddle_compat`):
-    archive's OCR code targets PaddleOCR 2.x but the venv ships 3.4.x, so
-    archive's `PaddleOCR(use_gpu=..., drop_score=..., ...)` constructions
-    would otherwise raise `Unknown argument`. Nothing in `archive/` is
-    modified -- only the `paddleocr.PaddleOCR` symbol it imports."""
+    No compatibility shim is installed: the repo now runs PaddleOCR 2.x, the
+    API surface archive's OCR was written against. Nothing in `archive/` is
+    modified. Logs a warning the first time `archive/` is put on the path."""
     root_str = str(_ARCHIVE_ROOT)
     if root_str not in sys.path:
         sys.path.insert(0, root_str)
-
-    from rastervec.Evaluation.Evaluate import _paddle_compat
-
-    _paddle_compat.install()
+        _LOG.warning(
+            "Using archive/ (legacy pipeline): needs PaddleOCR 2.x (now the repo "
+            "default) and LibreOffice on PATH; nothing in archive/ is modified."
+        )
 
 
 def run_archive_pipeline(
@@ -78,11 +84,18 @@ def run_archive_pipeline(
     """Thin call-through to archive's own `main_pipeline_extract.extract` --
     nothing about archive's internals is touched or copied. `extract_kwargs`
     forwards straight to archive's own signature (`ocr_dpi`,
-    `enable_raster_pass`, `workers`, `dump_dir`, `debug`, ...)."""
-    _ensure_archive_importable()
-    from raster_parser.main_pipeline_extract import extract
+    `enable_raster_pass`, `workers`, `dump_dir`, `debug`, ...).
 
-    return extract(pdf_path, page_index, **extract_kwargs)
+    Any failure (archive import, LibreOffice, PaddleOCR) is logged and
+    re-raised -- never swallowed into an empty result."""
+    _ensure_archive_importable()
+    try:
+        from raster_parser.main_pipeline_extract import extract
+
+        return extract(pdf_path, page_index, **extract_kwargs)
+    except Exception as exc:
+        _LOG.warning("legacy pipeline failed: %s", exc)
+        raise
 
 
 def to_cluster_ocr_results(

@@ -10,10 +10,11 @@ should catch its own per-item errors.
 """
 from __future__ import annotations
 
+import contextlib
 import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Callable, Iterable, TypeVar
+from typing import Callable, Iterable, Iterator, TypeVar
 
 from tqdm import tqdm
 
@@ -30,7 +31,6 @@ _WORKER_ENV = {
     "OMP_NUM_THREADS": "1",
     "MKL_NUM_THREADS": "1",
     "OPENBLAS_NUM_THREADS": "1",
-    "PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT": "False",
 }
 
 
@@ -52,18 +52,20 @@ def warmup() -> None:
     so a pool spawned next finds PaddleOCR's models on disk (no worker
     races the first-run download) and every worker's own engine build is
     just a load. Cheap no-op once the caches / on-disk models exist."""
-    try:
-        from rastervec.OCR.Paddle_OCR.ocr_backend import PaddleRecBackend
-
-        PaddleRecBackend.warmup()
-    except Exception as exc:  # noqa: BLE001 -- warmup is best-effort
-        _LOG.warning("PaddleOCR rec warmup skipped: %s", exc)
+    # FAST (torch) first, then PaddleOCR (paddle): on Windows a paddle-first
+    # process fails torch's later DLL load (clashing OpenMP runtimes).
     try:
         from rastervec.OCR.fast_detect import FastDetector
 
         FastDetector().warmup()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 -- warmup is best-effort
         _LOG.warning("FAST warmup skipped: %s", exc)
+    try:
+        from rastervec.OCR.Paddle_OCR.ocr_backend import PaddleRecBackend
+
+        PaddleRecBackend.warmup()
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("PaddleOCR rec warmup skipped: %s", exc)
 
 
 def run_parallel(
@@ -96,3 +98,28 @@ def run_parallel(
         for future in tqdm(as_completed(futures), total=len(futures), desc=desc):
             results[futures[future]] = future.result()
     return results  # type: ignore[return-value]
+
+
+@contextlib.contextmanager
+def compute_pool(workers: int) -> Iterator[object | None]:
+    """Yield a `multiprocessing.Manager`-hosted `Pool` proxy (Pool 2) of
+    `workers` processes for FAST tile detection + OCR crop recognition, or
+    `None` when `workers <= 0` (fully-local, today's default behaviour).
+
+    The proxy is picklable, so it can be threaded into Pool-1 spawn workers
+    and shared by every page job (see `benchmark_jobs.run_benchmark`); a
+    single-process caller (e.g. a notebook running one page) can use it too.
+    `warmup()` runs first so no worker races the first-run model download."""
+    if workers <= 0:
+        yield None
+        return
+
+    warmup()
+    manager = multiprocessing.Manager()
+    pool = manager.Pool(processes=workers)
+    try:
+        yield pool
+    finally:
+        pool.close()
+        pool.join()
+        manager.shutdown()

@@ -5,9 +5,11 @@
   (`benchmark_jobs.py::run_page_task`) per worker. Reads `fitz`, does
   native/vector extraction, classification, and orchestration.
 - Pool 2 (`benchmark_jobs.py::run_benchmark`'s `compute_workers`, built
-  via `multiprocessing.Manager().Pool(...)`): a single shared pool every
-  Pool-1 worker's page job dispatches its FAST tile detection and OCR
-  crop recognition into -- proportionally, since it's one shared queue
+  via `pool.py::compute_pool` -- a `multiprocessing.Manager().Pool(...)`
+  context manager reusable outside the benchmark, e.g. a notebook running
+  one page through `run_pipeline(..., compute=...)`): a single shared pool
+  every Pool-1 worker's page job dispatches its FAST tile detection and
+  OCR crop recognition into -- proportionally, since it's one shared queue
   regardless of which page or which Pool-1 worker a job came from. Pool 2
   never imports `fitz`/`pymupdf`; its jobs (`OCR.fast_detect._detect_job`,
   `OCR.Paddle_OCR.ocr_backend._recognize_crops_job`) take only plain data
@@ -28,6 +30,7 @@ from rastervec.Reader.Parallel.benchmark_jobs import (
     run_page_task,
 )
 from rastervec.Reader.Parallel.pool import (
+    compute_pool,
     default_worker_count,
     run_parallel,
     warmup,
@@ -40,6 +43,7 @@ __all__ = [
     "ShowcaseSample",
     "run_benchmark",
     "run_page_task",
+    "compute_pool",
     "default_worker_count",
     "run_parallel",
     "warmup",

@@ -37,13 +37,22 @@ those labels; all three implemented) plus the inspector tool — see "rastervec 
 .venv/Scripts/python.exe -m rastervec.Evaluation.Labelling.view_auto_labels PDF --page N               # view auto_label output in that editor
 ```
 
-venv is **Python 3.12** (`py -3.12 -m venv .venv`), not 3.14 — `rastervec`'s OCR (paddleocr/
-paddlepaddle) doesn't ship Windows wheels for 3.14 yet. On this dev machine's paddlepaddle build,
-the default mkldnn-accelerated CPU inference path hits an unimplemented PIR attribute-conversion
-error, so `rastervec/OCR/Paddle_OCR/ocr_backend.py` sets
-`PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=False` at import time (before paddleocr/paddlex read their
-flags) to force the plain "paddle" run mode instead — fine for OCR's small, pre-cropped cluster
-renders. If a future paddlepaddle release fixes this, that env-var default can be dropped.
+venv is **Python 3.10** (`.venv/pyvenv.cfg` → 3.10.11):
+`py -3.10 -m venv .venv && .venv/Scripts/python -m pip install -r requirements.txt`. OCR runs
+**paddleocr 2.x** (`paddleocr>=2.9,<3` + `paddlepaddle>=2.6,<3`, resolves to 2.10.0 / 2.6.2) on
+the **PP-OCRv4** model family — the last family 2.x ships, and the API surface `archive/`'s
+`raster_parser` OCR was written against, so the `legacy` benchmark variant needs no compatibility
+shim. paddleocr 2.x is not numpy-2 compatible (`numpy>=1.24,<2` → 1.26.4) and does not pull in
+`paddlex`. `rastervec/` never imports `cv2`. To move models: `config.OCR_VERSION` /
+`config.OCR_LANG`.
+
+Two Windows-specific gotchas, both handled in-code: (1) `torch` must be imported **before**
+`paddle`/`paddleocr` in a process — a paddle-first process fails torch's DLL load (`shm.dll`,
+WinError 127, clashing OpenMP runtimes). The pipeline runs `fast` (torch) before `ocr`
+(paddleocr); `pool.warmup()` warms FAST first; `PaddleRecBackend._engine()` does `import torch`
+right before `from paddleocr import PaddleOCR`. (2) `torch` is pinned to `2.13.0+cpu` from the
+PyTorch CPU index (`--extra-index-url` in `requirements.txt`) — the plain PyPI Windows wheel is
+CUDA-enabled and won't load without a CUDA runtime.
 
 OCR is PaddleOCR-only — `TesseractOcrBackend` was removed (along with `pytesseract` and the
 `scripts/setup_tesseract.*` install scripts) since a single backend was simpler to maintain and
@@ -61,8 +70,9 @@ new rule is **new capability = one more named call in a `pipelines/` file**. Des
 segmentation before OCR is a Radon transform (`skimage.transform.radon`) in `OCR/radon.py`
 (an OCR-preprocessing concern, not a pipeline-orchestration `sub_pipelines/*.py` module),
 replacing the old `OCR/Paddle_OCR/ink_segment.py`. There is one OCR backend now
-(`PaddleRecBackend`, recognition-only over Radon-segmented word crops); the old light/heavy split
-and `PaddleOcrBackend` full-detection path are gone.
+(`PaddleRecBackend`, recognition-only over Radon-segmented word crops — paddleocr 2.x's
+`PaddleOCR(...).text_recognizer` batch call, PP-OCRv4); the old light/heavy split and
+`PaddleOcrBackend` full-detection path are gone.
 
 ## `rastervec/Evaluation/inspector/` architecture
 
@@ -415,34 +425,35 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `current_nofast`, `legacy`) + `DEFAULT_VARIANTS` + `resolve_variant`. Adding an ablation = one
   `VARIANTS` entry; `benchmark_jobs.run_page_task` reads it and threads `enable_fast` into
   `rastervec.pipelines.current.run_pipeline`.
-- **`Evaluation/Evaluate/legacy_adapter.py`** *(implemented)*: runs archive's
-  `raster_parser.main_pipeline_extract.extract` unmodified and reshapes its output into
-  `ClusterOcrResult`s for `metrics.evaluate_metrics` (the `legacy` variant). Archive's OCR code
-  targets **PaddleOCR 2.x** but the venv ships **paddleocr 3.4.x** (needed by the current
-  pipeline's PP-OCRv5), so `_ensure_archive_importable` also installs
-  `Evaluation/Evaluate/_paddle_compat.py`'s shim: it swaps `paddleocr.PaddleOCR` for
-  `_PaddleOCRv2Compat`, which translates archive's removed ctor kwargs (`use_gpu`/`show_log`
-  dropped; `drop_score`→`text_rec_score_thresh`, `det_limit_side_len`→`text_det_limit_side_len`,
-  `det_limit_type`→`text_det_limit_type`, `use_angle_cls`→`use_textline_orientation`), reshapes
-  3.x `predict()` results back to 2.x `[[[box,(text,conf)],...]]`, and exposes a
-  `text_recognizer` callable over `paddleocr.TextRecognition` for `region_ocr._batch_recognize`.
-  Nothing in `archive/` is touched — only the symbol it imports. Shim install is idempotent and
-  scoped to a legacy run.
+- **`Evaluation/Evaluate/legacy_adapter.py`** *(implemented)*: a thin `sys.path` + call-through
+  that runs archive's `raster_parser.main_pipeline_extract.extract` unmodified and reshapes its
+  output into `ClusterOcrResult`s for `metrics.evaluate_metrics` (the `legacy` variant).
+  `_ensure_archive_importable` only prepends repo-root `archive/` to `sys.path` — **no
+  compatibility shim** (`_paddle_compat.py` is gone): the repo now runs paddleocr 2.x, the API
+  archive was written against. It logs a `WARNING` the first time `archive/` goes on the path, and
+  `run_archive_pipeline` logs + **re-raises** any failure (never swallows it). `_run_legacy`
+  (`benchmark_jobs.py`) no longer wraps its runs in `try/except` either — a legacy failure
+  propagates to `run_page_task`'s outer boundary (logged, `PageResult.error` set), not a silent
+  zero score. Nothing in `archive/` is touched. Archive's `raster_parser` still needs **LibreOffice
+  on PATH** (`import raster_parser` launches a LibreOffice subprocess at import time), so `legacy`
+  runs end-to-end only where LibreOffice is installed; elsewhere it warns and fails loudly.
 - **`Reader/Parallel/`** *(implemented)*: two pools. **Pool 1** (page jobs) is `pool.py` —
   `worker_init` (pins `OMP`/`MKL`/`OPENBLAS` to 1 per worker), `default_worker_count`, `warmup`
-  (builds the PaddleOCR heavy + light-rec + FAST caches in the *calling* process, so a spawn pool
+  (builds the PaddleOCR rec + FAST caches in the *calling* process, so a spawn pool
   started next finds the models on disk and no worker races the first-run download —
   `PaddleRecBackend.warmup()` / `FastDetector.warmup()` classmethods force the existing lazy
   `_engine()`/`_model()` path), and `run_parallel(items, fn, *, workers, desc)` — an input-order map
   that is a plain serial loop when `workers <= 1` and a spawn `ProcessPoolExecutor` otherwise.
   Processes not threads: the PaddleOCR engine + FAST model module caches are unlocked shared
   singletons and PyMuPDF is not reentrant. **Pool 2** (compute) is a single
-  `multiprocessing.Manager().Pool(processes=compute_workers)`, built once per `run_benchmark` call
-  and shared by *every* Pool-1 worker's page job — a complex page's many FAST/OCR jobs and simple
+  `multiprocessing.Manager().Pool(processes=compute_workers)` built by the `pool.compute_pool(n)`
+  context manager (`n <= 0` → yields `None`; warms model caches first; reusable outside the
+  benchmark — a notebook running one page through `run_pipeline(..., compute=...)` uses it too),
+  shared by *every* Pool-1 worker's page job — a complex page's many FAST/OCR jobs and simple
   pages' few jobs all queue into this one pool, so idle capacity is never stranded on a page that
   finished early. Pool 2 never imports `fitz`/`pymupdf`; its jobs are two top-level, picklable
   functions taking only plain data — `OCR.fast_detect._detect_job(weights_path, image_array)` and
-  `OCR.Paddle_OCR.ocr_backend._recognize_crops_job(crops, model_name)` — each building/caching its
+  `OCR.Paddle_OCR.ocr_backend._recognize_crops_job(crops, ocr_version, lang)` — each building/caching its
   own model/engine per Pool-2 worker process exactly like Pool 1's per-process caches. `benchmark_jobs.py`
   — the picklable per-page job: `PageTask` (pdf/page/manual entries/`variant`/reconstruct dir/…) →
   `run_page_task(task, compute=None)` (resolves `task.variant` via `variants.resolve_variant`,
@@ -452,13 +463,17 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   per page** on disjoint inputs — `convert_page_text_only` scored vs the `auto` labels,
   `convert_page_drawings_only` scored vs the `manual` labels (the manual run only when the page has
   manual labels) — so the two GT sources are scored against physically separate runs and can't
-  contaminate each other's precision. Each of the (up to) four runs per page is wrapped in its own
-  `try/except`: a failed run leaves that field `None` + a `report_blocks` line; a whole-job failure
-  lands in `PageResult.error`. `run_benchmark(tasks, *, workers, compute_workers=0, desc)` is the
-  thin `run_parallel(tasks, run_page_task, …)` wrapper used by both `benchmark.py` and the notebook
-  — `compute_workers > 0` builds Pool 2 up front and threads its proxy into every page job via
-  `functools.partial(run_page_task, compute=compute)`, shutting it down after; `compute_workers=0`
-  (default) is fully local, today's behavior. Per-variant reconstruct output goes to
+  contaminate each other's precision. Each `current`-engine run per page is wrapped in its own
+  `try/except` (a failed run leaves that field `None` + a `report_blocks` line); the `legacy`
+  runner is **not** wrapped — a legacy failure propagates and lands in `PageResult.error` (a hard,
+  visible error, not a silent zero). `run_benchmark(tasks, *, workers, compute_workers=0, desc)` is
+  the thin `run_parallel(tasks, run_page_task, …)` wrapper used by both `benchmark.py` and the
+  notebook — `compute_workers > 0` builds Pool 2 (`pool.compute_pool`) and threads its proxy into
+  every page job via `functools.partial(run_page_task, compute=compute)`, shutting it down after;
+  `compute_workers=0` (default) is fully local, today's behavior. Both notebooks
+  (`benchmark_vector_classification.ipynb`, `pipeline_stage_visualization.ipynb`) expose a
+  `COMPUTE_WORKERS` knob for Pool 2 (the benchmark notebook also has `BENCH_WORKERS` for Pool 1;
+  Pool 1 is meaningless for the single-page visualization notebook). Per-variant reconstruct output goes to
   `RECONSTRUCT_DIR/<stem>_p<N>_<variant>/`.
 - **`Evaluation/Evaluate/benchmark.py`** *(implemented)* — the CLI wiring Conversion → auto_label →
   a real full pipeline run → `metrics.evaluate_metrics` together: `python -m
@@ -679,12 +694,16 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `PipelineContext`).
 - **`OCR/Paddle_OCR/ocr_backend.py`** — `OcrBox`, the `OcrBackend` Protocol (one method,
   `recognize_crops(crops: list[np.ndarray]) -> list[OcrBox]`), and `PaddleRecBackend` (the only
-  implementation): PaddleOCR standalone `TextRecognition` (`config.OCR_REC_MODEL`, default
-  `PP-OCRv5_mobile_rec`), `normalize_line_crop` each crop → one batched `predict` → one `OcrBox`
-  per crop in input order. Engine cached at class scope, `warmup()`. **No text detection here** —
-  that's the Radon step. `PaddleOcrBackend`/`LightPaddleOcrBackend`/`DocImgOrientationClassification`
-  and their geometry helpers were all deleted. `_recognize_crops_job(crops, model_name)` is the
-  module-level, picklable Pool-2 job (see `Reader/Parallel/`) — `PaddleRecBackend(model_name)
+  implementation): a **paddleocr 2.x** `PaddleOCR(ocr_version=config.OCR_VERSION,
+  lang=config.OCR_LANG, use_angle_cls=False, rec_batch_num=REC_BATCH_SIZE)` engine, cached at class
+  scope by `(ocr_version, lang)`, whose **`.text_recognizer`** (recognition only, PP-OCRv4) is
+  called directly on `normalize_line_crop`'d, RGB→BGR crops → one `OcrBox` per crop in input order
+  (blank text ⇒ 0.0 confidence, still a box). `warmup()`. **No text detection here** — that's the
+  Radon step; the detector model is never invoked. This is the same API surface `archive/`'s
+  `raster_parser` OCR uses, so `legacy` needs no shim. `PaddleOcrBackend`/`LightPaddleOcrBackend`/
+  `_paddle_compat._PaddleOCRv2Compat` and the 3.x `TextRecognition`/`DocImgOrientationClassification`
+  path were all deleted. `_recognize_crops_job(crops, ocr_version, lang)` is the module-level,
+  picklable Pool-2 job (see `Reader/Parallel/`) — `PaddleRecBackend(ocr_version, lang)
   .recognize_crops(crops)`, one engine per Pool-2 worker process, cached the same way as a Pool-1
   worker's own local call.
 - **`OCR/Paddle_OCR/render_ocr.py` — `RenderOCR`** *(implemented)*: `RenderOCR(backend=None,
