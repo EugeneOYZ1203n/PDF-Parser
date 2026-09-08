@@ -9,6 +9,7 @@ The only `Evaluation/Evaluate/` module besides `adapters.py` that imports
 """
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -147,6 +148,37 @@ def list_word_split_candidates(res: "PipelineResult", n: int = 6) -> list[Candid
     return cands
 
 
+def _thumbnail(cand: Candidate, stage: Stage) -> "Image.Image":
+    if stage == "word_split":
+        return _word_split_thumbnail(cand)
+    return render_vector_cluster(cand.cluster, _THUMBNAIL_DPI)
+
+
+def list_stage_candidates(
+    res: "PipelineResult", stage: Stage, *,
+    n: int | None = None, shuffle: bool = True, seed: int | None = None,
+) -> list[Candidate]:
+    """One *combined*, thumbnailed candidate pool for `stage` -- kept and
+    dropped (or passed and dropped) entries interleaved, each still
+    carrying its structural `role`. The curator picks any entry and
+    assigns it a `positive`/`negative` label freely (see
+    `golden_schema`'s module docstring); `role` is preserved for the
+    regression check. Shuffled by default (`seed` for a repeatable order,
+    `None` for a fresh one each call) so picks aren't biased toward the
+    order the pipeline happened to emit clusters in.
+    """
+    pool = _pool_for_stage(res, stage)
+    if stage == "word_split":
+        pool = [c for c in pool if c.segmentation is not None and c.segmentation.word_crops]
+    if shuffle:
+        random.Random(seed).shuffle(pool)
+    if n is not None:
+        pool = pool[:n]
+    for c in pool:
+        c.image = _thumbnail(c, stage)
+    return pool
+
+
 # --------------------------------------------------------------------------
 # capture
 # --------------------------------------------------------------------------
@@ -254,6 +286,24 @@ def run_regression(
             cache[key] = run_pipeline(case.pdf_path, case.page_index, enable_fast=enable_fast, verbose=True)
         results.append(compare_case(case, cache[key], iou_threshold=iou_threshold))
     return results
+
+
+def format_case_bank(bank) -> str:
+    """Numbered one-line-per-case listing of a `GoldenCaseBank` -- the
+    curation notebook's "view all cases" cell, and the index source for
+    `golden_schema.drop_cases`."""
+    if not bank.cases:
+        return "(no cases)"
+    lines = []
+    for i, c in enumerate(bank.cases):
+        bbox = tuple(round(v, 1) for v in c.bbox)
+        words = "" if c.word_bboxes is None else f" words={len(c.word_bboxes)}"
+        lines.append(
+            f"[{i}] {c.stage}/{c.label}  role={c.role or '-'}  "
+            f"{c.pdf_path}#{c.page_index}  bbox={bbox}{words}  :: {c.note}"
+        )
+    lines.append(f"{len(bank.cases)} case(s)")
+    return "\n".join(lines)
 
 
 def format_regression_report(results: list[CaseCheckResult]) -> str:

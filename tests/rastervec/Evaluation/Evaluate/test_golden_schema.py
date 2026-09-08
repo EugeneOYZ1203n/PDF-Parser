@@ -3,6 +3,8 @@ from __future__ import annotations
 from rastervec.Evaluation.Evaluate.golden_schema import (
     GoldenCase,
     GoldenCaseBank,
+    add_case,
+    drop_cases,
     load_cases,
     save_cases,
     upsert_case,
@@ -55,3 +57,31 @@ def test_upsert_case_appends_new_stage_label():
     updated = upsert_case(bank, _case(stage="fast", label="negative", role="dropped"))
     assert len(updated.cases) == 2
     assert {c.label for c in updated.cases} == {"positive", "negative"}
+
+
+def test_add_case_keeps_several_per_stage_label_but_dedupes_by_signature():
+    bank = GoldenCaseBank(cases=[_case(stage="fast", label="positive", signature="a", note="first")])
+    bank = add_case(bank, _case(stage="fast", label="positive", signature="b", note="second"))
+    assert len(bank.cases) == 2
+
+    bank = add_case(bank, _case(stage="fast", label="positive", signature="a", note="replaced"))
+    assert len(bank.cases) == 2
+    assert {(c.signature, c.note) for c in bank.cases} == {("a", "replaced"), ("b", "second")}
+
+
+def test_add_case_labels_kept_candidate_negative():
+    bank = add_case(GoldenCaseBank(), _case(label="negative", role="kept"))
+    assert bank.cases[0].label == "negative"
+    assert bank.cases[0].role == "kept"
+
+
+def test_drop_cases_removes_by_index_and_ignores_out_of_range():
+    bank = GoldenCaseBank(cases=[_case(signature=str(i)) for i in range(4)])
+    dropped = drop_cases(bank, [1, 3, 99])
+    assert [c.signature for c in dropped.cases] == ["0", "2"]
+
+
+def test_drop_cases_supports_negative_index():
+    bank = GoldenCaseBank(cases=[_case(signature=str(i)) for i in range(3)])
+    dropped = drop_cases(bank, [-1])
+    assert [c.signature for c in dropped.cases] == ["0", "1"]

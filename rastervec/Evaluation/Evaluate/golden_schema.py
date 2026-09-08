@@ -4,10 +4,13 @@ Unlike `Evaluation/Labelling/label_schema.py`'s `LabelSet` (exhaustive
 ground truth for one whole PDF, scored by the benchmark), a `GoldenCase`
 is a single curated snapshot of one cluster's/segmentation's output at one
 of three pipeline stages (`"classification"`, `"fast"`, `"word_split"`),
-picked by a human as either a `"positive"` (drawn from that stage's
-passing/kept pool) or `"negative"` (drawn from its dropped pool -- for
-`"word_split"`, which has no structural pass/drop signal, both labels are
-purely the curator's own visual judgement) example. Replaying a case later
+labelled by a human `"positive"` ("this region is text / the split is
+right") or `"negative"` ("it isn't"). The label is the curator's verdict
+and is assigned freely from the *combined* candidate pool -- a candidate
+the pipeline currently keeps/passes can be labelled `"negative"` (a known
+false positive) and one it drops labelled `"positive"` (a known miss).
+What the pipeline actually decided is stored separately in `role` and is
+what the regression check compares. Replaying a case later
 (`Evaluation/Evaluate/golden_regression.py`) checks that a fresh pipeline
 run still produces matching output for that same region, within a small
 tolerance -- a regression guard against silent pipeline drift, not a
@@ -15,6 +18,7 @@ correctness oracle.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal
 
@@ -58,9 +62,29 @@ class GoldenCaseBank(BaseModel):
 def upsert_case(bank: GoldenCaseBank, case: GoldenCase) -> GoldenCaseBank:
     """Replace any existing case with the same (stage, label) key, else
     append -- lets the curation notebook be re-run/re-picked idempotently
-    instead of accumulating duplicates."""
+    instead of accumulating duplicates. Caps a stage at one positive + one
+    negative; use `add_case` to keep several of each."""
     kept = [c for c in bank.cases if not (c.stage == case.stage and c.label == case.label)]
     return GoldenCaseBank(cases=[*kept, case])
+
+
+def add_case(bank: GoldenCaseBank, case: GoldenCase) -> GoldenCaseBank:
+    """Append `case`, replacing only an existing case with the same
+    (stage, label, signature) -- unlike `upsert_case` (one case per
+    (stage, label)), a stage can hold several curated positives and
+    negatives at once, while re-running a notebook pick stays idempotent."""
+    key = (case.stage, case.label, case.signature)
+    kept = [c for c in bank.cases if (c.stage, c.label, c.signature) != key]
+    return GoldenCaseBank(cases=[*kept, case])
+
+
+def drop_cases(bank: GoldenCaseBank, indices: Iterable[int]) -> GoldenCaseBank:
+    """Return a bank without the cases at the given positions in
+    `bank.cases` (as numbered by the curation notebook's view cell).
+    Negative indices count from the end; out-of-range indices are ignored."""
+    n = len(bank.cases)
+    drop = {i + n if i < 0 else i for i in indices}
+    return GoldenCaseBank(cases=[c for i, c in enumerate(bank.cases) if i not in drop])
 
 
 def save_cases(bank: GoldenCaseBank, path: str) -> None:

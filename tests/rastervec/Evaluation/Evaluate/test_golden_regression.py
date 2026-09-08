@@ -163,6 +163,40 @@ def test_list_word_split_candidates_skips_empty_segmentations(vector_path):
     assert cands[0].image is not None
 
 
+def test_list_stage_candidates_combines_roles_and_is_seed_stable(vector_path):
+    kept = [vector_path(seq=0, bbox=(0.0, 0.0, 10.0, 10.0))]
+    dropped_group = [vector_path(seq=1, bbox=(50.0, 50.0, 60.0, 60.0))]
+    bucket = ClusteringStageResult(steps=[StepResult(
+        label="Step",
+        categories={"dropped": CategoryResult(groups=[dropped_group], role="dropped")},
+    )])
+    res = _pr(text_clusters=[kept], clustering={("", None): bucket})
+
+    cands = golden_regression.list_stage_candidates(res, "classification", seed=0)
+    assert {c.role for c in cands} == {"kept", "dropped"}
+    assert all(c.image is not None for c in cands)
+    again = golden_regression.list_stage_candidates(res, "classification", seed=0)
+    assert [c.role for c in cands] == [c.role for c in again]
+
+
+def test_list_stage_candidates_caps_at_n(vector_path):
+    passed = [[vector_path(seq=i, bbox=(float(i), 0.0, float(i) + 1, 1.0))] for i in range(5)]
+    res = _pr(fast_passed=passed, fast_dropped=[])
+    assert len(golden_regression.list_stage_candidates(res, "fast", n=2)) == 2
+
+
+def test_format_case_bank_numbers_cases():
+    bank = GoldenCaseBank(cases=[
+        _case(stage="fast", label="positive", role="passed"),
+        _case(stage="classification", label="negative", role="kept"),
+    ])
+    report = golden_regression.format_case_bank(bank)
+    assert "[0] fast/positive" in report
+    assert "[1] classification/negative" in report
+    assert "2 case(s)" in report
+    assert golden_regression.format_case_bank(GoldenCaseBank()) == "(no cases)"
+
+
 # --------------------------------------------------------------------------
 # run_regression dedup
 # --------------------------------------------------------------------------
