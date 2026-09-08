@@ -35,9 +35,17 @@ _WORKER_ENV = {
 
 
 def worker_init() -> None:
-    """`ProcessPoolExecutor` initializer -- pin BLAS/OMP threads to 1."""
+    """`ProcessPoolExecutor`/`Pool` initializer -- pin BLAS/OMP threads to 1,
+    then warm this worker's own model caches immediately, before it's handed
+    any job. Without this, a worker builds its models lazily on whichever
+    job reaches it first -- harmless for Pool 1 (a page task always runs
+    `fast` before `ocr`), but a real bug for Pool 2, where FAST and OCR jobs
+    from many concurrent pages interleave arbitrarily across workers, so a
+    worker can receive an OCR job first and `import paddle` before `import
+    torch` (the exact Windows DLL-clash `warmup()` exists to prevent)."""
     for key, value in _WORKER_ENV.items():
         os.environ.setdefault(key, value)
+    warmup()
 
 
 def default_worker_count() -> int:
@@ -48,10 +56,13 @@ def default_worker_count() -> int:
 
 
 def warmup() -> None:
-    """Build the shared model caches once, here, in the calling process --
-    so a pool spawned next finds PaddleOCR's models on disk (no worker
-    races the first-run download) and every worker's own engine build is
-    just a load. Cheap no-op once the caches / on-disk models exist."""
+    """Build this process's model caches -- called once in the parent before
+    a pool spawns (so a pool spawned next finds PaddleOCR's models on disk
+    and no worker races another over the first-run download), and again in
+    every worker via `worker_init` (so a worker's own in-memory engine is
+    built at startup, in the safe torch-then-paddle order, instead of
+    lazily on whichever job happens to reach it first). Cheap no-op once the
+    caches / on-disk models exist."""
     # FAST (torch) first, then PaddleOCR (paddle): on Windows a paddle-first
     # process fails torch's later DLL load (clashing OpenMP runtimes).
     try:
@@ -109,14 +120,21 @@ def compute_pool(workers: int) -> Iterator[object | None]:
     The proxy is picklable, so it can be threaded into Pool-1 spawn workers
     and shared by every page job (see `benchmark_jobs.run_benchmark`); a
     single-process caller (e.g. a notebook running one page) can use it too.
-    `warmup()` runs first so no worker races the first-run model download."""
+    `warmup()` runs first in this (parent) process so no worker races
+    another over the first-run model download, and again in every worker via
+    `initializer=worker_init` -- otherwise a Pool-2 worker builds its models
+    lazily on whichever job reaches it first, and since FAST/OCR jobs from
+    many concurrent pages interleave arbitrarily across workers, a worker
+    could receive an OCR job before ever seeing a FAST one and `import
+    paddle` before `import torch` (the Windows DLL-clash `warmup()` guards
+    against)."""
     if workers <= 0:
         yield None
         return
 
     warmup()
     manager = multiprocessing.Manager()
-    pool = manager.Pool(processes=workers)
+    pool = manager.Pool(processes=workers, initializer=worker_init)
     try:
         yield pool
     finally:

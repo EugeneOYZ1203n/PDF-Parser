@@ -28,7 +28,9 @@ from PIL import Image, ImageDraw
 from rastervec.renderer._shapes import path_color_hex
 
 if TYPE_CHECKING:
-    from rastervec.models import VectorPath
+    from pathlib import Path
+
+    from rastervec.models import PageMeta, VectorPath
     from rastervec.pipelines.result import PipelineResult
 
 DEFAULT_PATH_COLOR = "#111827"
@@ -143,6 +145,39 @@ def _paint(img, cat: "RenderCategory", matrix) -> None:
         draw_bboxes(img, cat["bboxes"], matrix, cat.get("color", DEFAULT_PATH_COLOR), cat.get("width", 2))
 
 
+def _hex_to_rgb01(color: str) -> tuple[float, float, float]:
+    c = color.lstrip("#")
+    return tuple(int(c[i : i + 2], 16) / 255 for i in (0, 2, 4))
+
+
+def _category_boxes(
+    cat: "RenderCategory",
+) -> list[tuple[tuple[float, float, float, float], tuple[float, float, float]]]:
+    """Every category entry (a direct bbox, or a path's/poly's own bbox)
+    reduced to a page-space rectangle, in that category's own color -- the
+    PDF-page counterpart of what `_paint` draws onto a raster."""
+    color = _hex_to_rgb01(cat.get("color") or cat.get("path_color") or DEFAULT_PATH_COLOR)
+    out: list[tuple[tuple[float, float, float, float], tuple[float, float, float]]] = []
+    for bb in cat.get("bboxes") or []:
+        out.append((tuple(bb), color))
+    for p in cat.get("paths") or []:
+        out.append((p.bbox, color))
+    for poly in cat.get("polys") or []:
+        xs, ys = [x for x, _ in poly], [y for _, y in poly]
+        out.append(((min(xs), min(ys), max(xs), max(ys)), color))
+    return out
+
+
+def export_stage_boxes_pdf(page_meta: "PageMeta", result: "RenderResult") -> bytes:
+    """`result`'s categories as colored bbox-outline overlays on a single
+    page-sized PDF (real page space, not a raster) -- one rectangle per
+    bbox/path/poly entry across every category, colored per category."""
+    from rastervec.renderer.pdf import render_boxes_pdf
+
+    boxes = [b for cat in result.categories for b in _category_boxes(cat)]
+    return render_boxes_pdf(page_meta, boxes)
+
+
 def _iso_and_overlay(cat: "RenderCategory", original: "Image.Image", matrix):
     iso, ovl = cat.get("isolated"), cat.get("overlay")
     if iso is not None:
@@ -165,9 +200,15 @@ def visualize(
     step_outputs: dict,
     original: "Image.Image",
     matrix,
+    page_meta: "PageMeta | None" = None,
+    export_path: "Path | None" = None,
 ) -> None:
     """Print `stage_key`'s status/note, show the original page, then an
-    isolated/overlay image pair per `result.categories`."""
+    isolated/overlay image pair per `result.categories`. When both
+    `page_meta` and `export_path` are given (and there are categories to
+    export), also write `result` as a page-space bbox-overlay PDF via
+    `export_stage_boxes_pdf` -- the PDF counterpart of the raster shown
+    inline."""
     out = step_outputs.get(stage_key)
     print(f"=== {stage_key} ===")
     if out is None:
@@ -184,3 +225,7 @@ def visualize(
         show_row([iso, ovl], [f"{cat['name']} -- isolated", f"{cat['name']} -- overlay"])
     if not result.categories:
         print("  (no overlays for this stage)")
+    if page_meta is not None and export_path is not None and result.categories:
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        export_path.write_bytes(export_stage_boxes_pdf(page_meta, result))
+        print(f"  wrote {export_path}")

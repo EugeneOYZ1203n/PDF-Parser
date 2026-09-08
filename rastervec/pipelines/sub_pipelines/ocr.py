@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from rastervec.helpers.geometry import union_bbox
 from rastervec.logging_setup import get_logger
-from rastervec.models import ClusterOcrResult, Page, TextVectorResult, VectorPath
+from rastervec.models import ClusterOcrResult, OcrWord, Page, TextVectorResult, VectorPath
 from rastervec.OCR.Paddle_OCR.ocr_backend import OcrBackend, _recognize_crops_job
 from rastervec.OCR.Paddle_OCR.render_ocr import RenderOCR, render_cluster_for_ocr
 from rastervec.OCR.radon import ClusterSegmentation, segment_cluster
@@ -43,15 +43,37 @@ def segment_for_ocr(
 
 
 def _reuse(rep: TextVectorResult, cluster: list[VectorPath], page: Page) -> TextVectorResult:
+    """Reuse `rep`'s reading for `cluster` (a similarity-group match), but
+    re-project its per-word boxes onto `cluster`'s own bbox instead of
+    dropping them -- a similarity group's clusters are geometrically similar
+    copies of the same shape at a different page position, so `rep.bbox` ->
+    `bbox`'s translate+scale carries each word box along with it."""
+    bbox = union_bbox([p.bbox for p in cluster])
+    rx0, ry0, rx1, ry1 = rep.bbox
+    nx0, ny0, nx1, ny1 = bbox
+    sx = (nx1 - nx0) / (rx1 - rx0) if rx1 > rx0 else 1.0
+    sy = (ny1 - ny0) / (ry1 - ry0) if ry1 > ry0 else 1.0
+
+    def _map(b: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+        x0, y0, x1, y1 = b
+        return (
+            nx0 + (x0 - rx0) * sx, ny0 + (y0 - ry0) * sy,
+            nx0 + (x1 - rx0) * sx, ny0 + (y1 - ry0) * sy,
+        )
+
+    words = (
+        [OcrWord(text=w.text, confidence=w.confidence, bbox=_map(w.bbox)) for w in rep.words]
+        if rep.words else None
+    )
     return TextVectorResult(
         paths=cluster,
         text=rep.text,
         confidence=rep.confidence,
-        bbox=union_bbox([p.bbox for p in cluster]),
-        ocr_bbox=None,
+        bbox=bbox,
+        ocr_bbox=_map(rep.ocr_bbox) if rep.ocr_bbox else None,
         rotation_used=rep.rotation_used,
         page_index=page.meta.index,
-        words=None,
+        words=words,
     )
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from rastervec.models import TextVectorResult, VectorPath
+from rastervec.models import OcrWord, TextVectorResult, VectorPath
 from rastervec.pipelines.sub_pipelines import ocr as ocr_mod
 from rastervec.OCR.radon import ClusterSegmentation
 
@@ -59,6 +59,37 @@ def test_recognize_reuses_reading_across_similarity_group():
     assert res.cluster_results[1].resolved.bbox == pytest.approx((100, 100, 110, 110))
     assert res.cluster_results[1].resolved.words is None
     assert res.cluster_results[1].ocr_seconds == 0.0
+
+
+def test_recognize_reuse_carries_translated_and_scaled_word_boxes(monkeypatch):
+    class _WordyRenderOCR(_CountingRenderOCR):
+        def recognize_segmented(self, seg, cluster, page):
+            type(self).calls.append(cluster)
+            return TextVectorResult(
+                paths=cluster, text="AB", confidence=0.9,
+                bbox=(0.0, 0.0, 10.0, 10.0), ocr_bbox=(1.0, 1.0, 9.0, 9.0),
+                rotation_used=0, page_index=page.meta.index,
+                words=[
+                    OcrWord(text="A", confidence=0.9, bbox=(0.0, 2.0, 4.0, 8.0)),
+                    OcrWord(text="B", confidence=0.8, bbox=(6.0, 2.0, 10.0, 8.0)),
+                ],
+            )
+
+    monkeypatch.setattr(ocr_mod, "RenderOCR", _WordyRenderOCR)
+    a = [_path(0, (0, 0, 10, 10))]
+    # b is a's bbox translated by (100, 200) and scaled 2x in each axis.
+    b = [_path(1, (100, 200, 120, 220))]
+    res = ocr_mod.recognize(
+        [_seg(), _seg()], [a, b], _FakePage(), similarity_id={id(a): 0, id(b): 0},
+    )
+
+    reused = res.cluster_results[1].resolved
+    assert reused.text == "AB"
+    assert reused.words is not None
+    assert [w.text for w in reused.words] == ["A", "B"]
+    assert reused.words[0].bbox == pytest.approx((100.0, 204.0, 108.0, 216.0))
+    assert reused.words[1].bbox == pytest.approx((112.0, 204.0, 120.0, 216.0))
+    assert reused.ocr_bbox == pytest.approx((102.0, 202.0, 118.0, 218.0))
 
 
 def test_recognize_no_reuse_across_different_groups():

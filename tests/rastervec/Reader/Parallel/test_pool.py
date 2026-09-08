@@ -26,6 +26,8 @@ def test_run_parallel_single_item_stays_serial():
 
 
 def test_worker_init_pins_threads(monkeypatch):
+    # keep the model warmup out of a pool-plumbing test
+    monkeypatch.setattr(pool_mod, "warmup", lambda: None)
     for key in _WORKER_ENV:
         monkeypatch.delenv(key, raising=False)
     worker_init()
@@ -34,9 +36,17 @@ def test_worker_init_pins_threads(monkeypatch):
 
 
 def test_worker_init_does_not_override_explicit(monkeypatch):
+    monkeypatch.setattr(pool_mod, "warmup", lambda: None)
     monkeypatch.setenv("OMP_NUM_THREADS", "8")
     worker_init()
     assert os.environ["OMP_NUM_THREADS"] == "8"
+
+
+def test_worker_init_warms_model_caches(monkeypatch):
+    calls = []
+    monkeypatch.setattr(pool_mod, "warmup", lambda: calls.append(1))
+    worker_init()
+    assert calls == [1]
 
 
 def test_default_worker_count_is_sane():
