@@ -246,7 +246,13 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   with one bucket's paths at a time — two paths in different layers, or with different stroke/fill
   colors, are never spatially merged together, regardless of how close they are on the page.
 - **`OCR/fast_detect.py` — `FastDetector`** *(implemented)*: see the `pipelines/_steps.py`
-  entry below (`detect_text_fast`) for `detect`/`detect_tiled` usage.
+  entry below (`detect_text_fast`) for `detect`/`detect_tiled` usage. `detect_tiled` detects each
+  tile **once, with no rotation sweep** (an earlier version detected every tile at 4 rotations and
+  averaged the masks — removed as an explicit accuracy-for-simplicity tradeoff). `detect_tiled(...,
+  compute=None)` optionally dispatches each tile's `detect()` call to a shared compute-pool proxy
+  (Pool 2, see `Reader/Parallel/`) via `starmap(_detect_job, ...)` instead of running it locally;
+  `_detect_job(weights_path, image_array)` is the module-level, picklable, `fitz`-free job function
+  (numpy array in, mask out) that a Pool-2 worker actually runs.
 - **`OCR/radon.py`** *(implemented)*: replaces the deleted
   `OCR/Paddle_OCR/ink_segment.py` — Radon-transform deskew + line/word split. See the
   `pipelines/` bullet below.
@@ -411,34 +417,47 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `text_recognizer` callable over `paddleocr.TextRecognition` for `region_ocr._batch_recognize`.
   Nothing in `archive/` is touched — only the symbol it imports. Shim install is idempotent and
   scoped to a legacy run.
-- **`Reader/Parallel/`** *(implemented)*: parallelism for the benchmark. `pool.py` — `worker_init`
-  (pins `OMP`/`MKL`/`OPENBLAS` to 1 per worker), `default_worker_count`, `warmup` (builds the
-  PaddleOCR heavy + light-rec + FAST caches in the *calling* process, so a spawn pool started next
-  finds the models on disk and no worker races the first-run download —
-  `PaddleRecBackend.warmup()` / `FastDetector.warmup()`
-  classmethods force the existing lazy `_engine()`/`_model()` path), and
-  `run_parallel(items, fn, *, workers, desc)` — an input-order map that is a plain serial loop when
-  `workers <= 1` and a spawn `ProcessPoolExecutor` otherwise. Processes not threads: the PaddleOCR
-  engine + FAST model module caches are unlocked shared singletons and PyMuPDF is not reentrant.
-  `benchmark_jobs.py` — the picklable per-page job: `PageTask` (pdf/page/manual entries/`variant`/
-  reconstruct dir/…) → `run_page_task` (resolves `task.variant` via `variants.resolve_variant`,
-  dispatches to the current or legacy runner) → `PageResult` (`variant`, auto + manual
-  `MetricSuiteResult`, stage durations, formatted report blocks, a few PNG-bytes `ShowcaseSample`s,
-  `error`). **Each variant is run twice per page** on disjoint inputs — `convert_page_text_only`
-  scored vs the `auto` labels, `convert_page_drawings_only` scored vs the `manual` labels (the
-  manual run only when the page has manual labels) — so the two GT sources are scored against
-  physically separate runs and can't contaminate each other's precision. Each of the (up to) four
-  runs per page is wrapped in its own `try/except`: a failed run leaves that field `None` + a
-  `report_blocks` line; a whole-job failure lands in `PageResult.error`. `run_benchmark(tasks, *,
-  workers, desc)` is the thin `run_parallel(tasks, run_page_task, …)` wrapper used by both
-  `benchmark.py` and the notebook. Per-variant reconstruct output goes to
+- **`Reader/Parallel/`** *(implemented)*: two pools. **Pool 1** (page jobs) is `pool.py` —
+  `worker_init` (pins `OMP`/`MKL`/`OPENBLAS` to 1 per worker), `default_worker_count`, `warmup`
+  (builds the PaddleOCR heavy + light-rec + FAST caches in the *calling* process, so a spawn pool
+  started next finds the models on disk and no worker races the first-run download —
+  `PaddleRecBackend.warmup()` / `FastDetector.warmup()` classmethods force the existing lazy
+  `_engine()`/`_model()` path), and `run_parallel(items, fn, *, workers, desc)` — an input-order map
+  that is a plain serial loop when `workers <= 1` and a spawn `ProcessPoolExecutor` otherwise.
+  Processes not threads: the PaddleOCR engine + FAST model module caches are unlocked shared
+  singletons and PyMuPDF is not reentrant. **Pool 2** (compute) is a single
+  `multiprocessing.Manager().Pool(processes=compute_workers)`, built once per `run_benchmark` call
+  and shared by *every* Pool-1 worker's page job — a complex page's many FAST/OCR jobs and simple
+  pages' few jobs all queue into this one pool, so idle capacity is never stranded on a page that
+  finished early. Pool 2 never imports `fitz`/`pymupdf`; its jobs are two top-level, picklable
+  functions taking only plain data — `OCR.fast_detect._detect_job(weights_path, image_array)` and
+  `OCR.Paddle_OCR.ocr_backend._recognize_crops_job(crops, model_name)` — each building/caching its
+  own model/engine per Pool-2 worker process exactly like Pool 1's per-process caches. `benchmark_jobs.py`
+  — the picklable per-page job: `PageTask` (pdf/page/manual entries/`variant`/reconstruct dir/…) →
+  `run_page_task(task, compute=None)` (resolves `task.variant` via `variants.resolve_variant`,
+  dispatches to the current or legacy runner — `compute` is forwarded to the current engine only,
+  never to legacy) → `PageResult` (`variant`, auto + manual `MetricSuiteResult`, stage durations,
+  formatted report blocks, a few PNG-bytes `ShowcaseSample`s, `error`). **Each variant is run twice
+  per page** on disjoint inputs — `convert_page_text_only` scored vs the `auto` labels,
+  `convert_page_drawings_only` scored vs the `manual` labels (the manual run only when the page has
+  manual labels) — so the two GT sources are scored against physically separate runs and can't
+  contaminate each other's precision. Each of the (up to) four runs per page is wrapped in its own
+  `try/except`: a failed run leaves that field `None` + a `report_blocks` line; a whole-job failure
+  lands in `PageResult.error`. `run_benchmark(tasks, *, workers, compute_workers=0, desc)` is the
+  thin `run_parallel(tasks, run_page_task, …)` wrapper used by both `benchmark.py` and the notebook
+  — `compute_workers > 0` builds Pool 2 up front and threads its proxy into every page job via
+  `functools.partial(run_page_task, compute=compute)`, shutting it down after; `compute_workers=0`
+  (default) is fully local, today's behavior. Per-variant reconstruct output goes to
   `RECONSTRUCT_DIR/<stem>_p<N>_<variant>/`.
 - **`Evaluation/Evaluate/benchmark.py`** *(implemented)* — the CLI wiring Conversion → auto_label →
   a real full pipeline run → `metrics.evaluate_metrics` together: `python -m
   rastervec.Evaluation.Evaluate.benchmark --pdf PATH [--pdf PATH2 ...] --pages 0,1,2
-  [--iou-threshold 0.1] [--reconstruct-dir DIR] [--workers N] [--variants current,legacy]`
-  (`--iou-threshold` = `MetricConfig.iou_edge_min`; `--workers N>1` runs pages across
-  `Reader/Parallel`'s spawn pool; `--variants` selects which `variants.VARIANTS` to run and compare;
+  [--iou-threshold 0.1] [--reconstruct-dir DIR] [--workers N] [--compute-workers N]
+  [--variants current,legacy]`
+  (`--iou-threshold` = `MetricConfig.iou_edge_min`; `--workers N>1` runs pages across Pool 1
+  (`Reader/Parallel`'s spawn pool); `--compute-workers N>0` additionally runs FAST tile detection +
+  OCR crop recognition on Pool 2, shared by every `--workers` process (see the `Reader/Parallel/`
+  bullet above); `--variants` selects which `variants.VARIANTS` to run and compare;
   `--reconstruct-dir` defaults to `outputs/benchmark_cli/reconstructions/`).
   `run_one_page` is a thin wrapper over `Reader/Parallel/benchmark_jobs.run_page_task` (auto labels,
   returns that page's `MetricSuiteResult`); `main()` runs one `PageTask` product per selected variant
@@ -563,8 +582,10 @@ independently of the others (every stage's *output* is a plain dataclass from `m
 - **`pipelines/`** — the pipeline, as flat readable block-sequence files. This is where a
   contributor reads to learn what runs; **new capability = one more named call added here.**
   - **`pipelines/current.py`** — `run_pipeline(pdf_path, page_index, *, enable_fast=True,
-    verbose=False) -> PipelineResult`, plus `STEP_NAMES` and the `python -m
-    rastervec.pipelines.current --pdf … --page N [-v] [--no-fast]` CLI. Delegates to
+    verbose=False, compute=None) -> PipelineResult`, plus `STEP_NAMES` and the `python -m
+    rastervec.pipelines.current --pdf … --page N [-v] [--no-fast]` CLI (`compute` has no CLI flag
+    here — a single-page run isn't worth spinning up Pool 2 for; it's a benchmark/`run_benchmark`
+    concern, see `Reader/Parallel/`). Delegates to
     `_common.run_current_pipeline`, whose body is the literal 9-step sequence: `read` → `native`
     (`extract_native_text`) → `vectors` (`extract_vectors`) → `classify` (`classify_vectors`) →
     `fast` (`detect_text_fast`) → `regroup` (`spatial_regroup`) → `segment` (`segment_for_ocr` —
@@ -585,16 +606,19 @@ independently of the others (every stage's *output* is a plain dataclass from `m
     `PipelineResult.open_page()` reopens the source PDF (via `page.doc_path` / `page.meta.index`)
     and yields a live `fitz.Page` for rasterization.
   - **`pipelines/_steps.py`** — the thin step functions the pipeline files call: `read_page`,
-    `extract_native_text`/`extract_vectors` (re-exports), `detect_text_fast` (whole-page
-    `render_page_paths` + `FastDetector.detect_tiled`, per-cluster `_sample_mask` scoring min'd
-    across the similarity group, `> FAST_COMBINED_KEEP_THRESHOLD` passes; `enable_fast=False` is
+    `extract_native_text`/`extract_vectors` (re-exports), `detect_text_fast(..., compute=None)`
+    (whole-page `render_page_paths` + `FastDetector.detect_tiled` — `compute` forwarded straight
+    through, per-cluster `_sample_mask` scoring min'd across the similarity group,
+    `> FAST_COMBINED_KEEP_THRESHOLD` passes; `enable_fast=False` is
     a pass-through), `spatial_regroup` (`cluster_spatial` merge of touching clusters regardless of
     layer/color, similarity-id carry-forward), `build_drawing_output` (folds
     classification drops + FAST drops + OCR blanks into `DrawingVector`s in source draw order).
-  - **`pipelines/_common.py`** — `run_current_pipeline` + `StepTimer` (records per-step
-    wall-clock; on `verbose=True` a failing step is logged + recorded as a `StepOutcome` and
-    suppressed so partial state survives; on a normal run it propagates — the benchmark wraps
-    each run). **Simplification vs the old pipeline:** no never-crash-per-stage behaviour on the
+  - **`pipelines/_common.py`** — `run_current_pipeline(..., compute=None)` + `StepTimer` (records
+    per-step wall-clock; on `verbose=True` a failing step is logged + recorded as a `StepOutcome`
+    and suppressed so partial state survives; on a normal run it propagates — the benchmark wraps
+    each run). `compute` (a Pool-2 proxy, see `Reader/Parallel/`) is forwarded to the `fast` and
+    `ocr` steps only — the only two steps with a "long time consuming" job to dispatch.
+    **Simplification vs the old pipeline:** no never-crash-per-stage behaviour on the
     non-verbose path.
   - **`pipelines/sub_pipelines/vector_classification.py`** — `classify_vectors(vector_paths,
     page, *, verbose=False) -> ClassificationResult`: `separate_by_layer` → `separate_by_color`
@@ -605,10 +629,16 @@ independently of the others (every stage's *output* is a plain dataclass from `m
     `steps.append` per step (moved verbatim out of `classification.cluster()`, which is now a
     one-line shim into it).
   - **`pipelines/sub_pipelines/ocr.py`** — `segment_for_ocr(clusters, *, dpi=300)` (Radon
-    segment each cluster render — the detection step) and `recognize(segmentations, clusters,
-    page, *, backend=None, similarity_id=None) -> OcrResult` (one real `RenderOCR.
+    segment each cluster render — the detection step; deliberately **not** wired to Pool 2 — not
+    worth the complexity relative to FAST/OCR) and `recognize(segmentations, clusters,
+    page, *, backend=None, similarity_id=None, compute=None) -> OcrResult` (one real `RenderOCR.
     recognize_segmented` per similarity group, reused for the rest; blank reading folds into
-    `failed`; per-call `ocr_seconds`).
+    `failed`; per-call `ocr_seconds`). `compute`, when given, is the *only* thing that changes —
+    `RenderOCR` is constructed with a `recognize_fn` closure (`lambda crops: compute.apply(
+    ocr_backend._recognize_crops_job, (crops,))`) instead of its default
+    `backend.recognize_crops`; the memoization/orchestration in `recognize()` itself is identical
+    either way. `compute=None` (default) omits `recognize_fn` entirely, so `RenderOCR` behaves
+    exactly as before.
   - **`OCR/radon.py`** — replaces `ink_segment.py`; lives under `OCR/` (a top-level file, matching
     `OCR/fast_detect.py`'s precedent) rather than `pipelines/sub_pipelines/`, since it's an
     OCR-preprocessing concern, not pipeline orchestration. `segment_cluster(image,
@@ -642,14 +672,21 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `PP-OCRv5_mobile_rec`), `normalize_line_crop` each crop → one batched `predict` → one `OcrBox`
   per crop in input order. Engine cached at class scope, `warmup()`. **No text detection here** —
   that's the Radon step. `PaddleOcrBackend`/`LightPaddleOcrBackend`/`DocImgOrientationClassification`
-  and their geometry helpers were all deleted.
-- **`OCR/Paddle_OCR/render_ocr.py` — `RenderOCR`** *(implemented)*: `recognize_segmented(seg,
-  cluster, page) -> TextVectorResult` — `backend.recognize_crops(seg.word_crops)` upright and
-  again on the 180-rotated crops, keep the higher length-weighted-confidence set (that settles
-  the flip), map each surviving word's `seg.word_corners` through `renderer.pixel_to_page_bbox`,
-  join left-to-right, `rotation_used = round(skew/90)*90 + flip`. `ocr_cluster(cluster, page,
-  dpi=300)` = `render_cluster_for_ocr` → `segment_cluster` → `recognize_segmented` (kept for
-  non-pipeline callers); `ocr(image)` is the raw-image convenience used by the inspector.
+  and their geometry helpers were all deleted. `_recognize_crops_job(crops, model_name)` is the
+  module-level, picklable Pool-2 job (see `Reader/Parallel/`) — `PaddleRecBackend(model_name)
+  .recognize_crops(crops)`, one engine per Pool-2 worker process, cached the same way as a Pool-1
+  worker's own local call.
+- **`OCR/Paddle_OCR/render_ocr.py` — `RenderOCR`** *(implemented)*: `RenderOCR(backend=None,
+  recognize_fn=None)` — `recognize_fn` defaults to `backend.recognize_crops`; passing one instead
+  (as `pipelines/sub_pipelines/ocr.py::recognize` does when given a Pool-2 proxy) replaces the
+  actual engine call with a dispatch to that pool, with everything else below unchanged.
+  `recognize_segmented(seg, cluster, page) -> TextVectorResult` — `recognize_fn(seg.word_crops)`
+  upright and again on the 180-rotated crops, keep the higher length-weighted-confidence set (that
+  settles the flip), map each surviving word's `seg.word_corners` through
+  `renderer.pixel_to_page_bbox`, join left-to-right, `rotation_used = round(skew/90)*90 + flip`.
+  `ocr_cluster(cluster, page, dpi=300)` = `render_cluster_for_ocr` → `segment_cluster` →
+  `recognize_segmented` (kept for non-pipeline callers); `ocr(image)` is the raw-image convenience
+  used by the inspector — both always use `backend.recognize_crops` directly, never `recognize_fn`.
 - **`notebooks/pipeline_stage_visualization.ipynb`** *(implemented, on the new `pipelines/` API)*:
   one `res = run_pipeline(PDF_PATH, PAGE_INDEX, enable_fast=…, verbose=True)` run, then one
   `visualize(stage_key, render_<stage_name>(res), step_outputs=…, original=…, matrix=…)` cell per
@@ -667,6 +704,9 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   cluster count in its note, not a per-similarity-group image overlay (there can be dozens).
   `VARIANT` picks a `current`-engine `variants.VARIANTS` entry (`current` / `current_nofast`) for
   its `enable_fast`. The pipeline always runs all 9 steps (PaddleOCR included); writes no files.
+  A final "Timeline" cell renders `res.step_durations` as a waterfall/Gantt `matplotlib.barh`
+  (cumulative start offsets, since the 9 steps run strictly sequentially), colored by each step's
+  `res.step_outputs[name].status` (green ok / red error) when `verbose=True`.
 
 `scripts/rasterize_pdf.py` (outside `rastervec/`, a one-off utility not a pipeline stage): flattens
 every page of a PDF to an image and rebuilds a pure-raster PDF from those images — not currently
