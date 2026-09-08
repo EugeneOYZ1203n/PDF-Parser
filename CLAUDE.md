@@ -161,7 +161,7 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   unions items in neighboring cells whose `geometry.rect_gap` ≤ `threshold` —
   `Vector_Classification/clusters/cluster_filters.py`'s `cluster_spatial_groups` reuses this same
   method at the group level, treating each group as one atomic item, and `pipelines._steps.spatial_regroup`
-  reuses it with an `extra_close` that gates the merge on a shared `(layer, color)` key), then O(k²) pairwise
+  reuses it too, merging purely on bbox proximity regardless of layer/color), then O(k²) pairwise
   union-find within each resulting group (`_split_group_pairwise`, shared by all three of the
   following) for `cluster_by_dimension` (relative width/height closeness), `cluster_by_seq`
   (sorted-seq gap split), and `group_by_overlap` (merges items whose bboxes overlap or are within an
@@ -558,8 +558,8 @@ independently of the others (every stage's *output* is a plain dataclass from `m
     `extract_native_text`/`extract_vectors` (re-exports), `detect_text_fast` (whole-page
     `render_page_paths` + `FastDetector.detect_tiled`, per-cluster `_sample_mask` scoring min'd
     across the similarity group, `> FAST_COMBINED_KEEP_THRESHOLD` passes; `enable_fast=False` is
-    a pass-through), `spatial_regroup` (`cluster_spatial` merge of touching same-`(layer,color)`
-    clusters, `_cluster_lc_key` gate, similarity-id carry-forward), `build_drawing_output` (folds
+    a pass-through), `spatial_regroup` (`cluster_spatial` merge of touching clusters regardless of
+    layer/color, similarity-id carry-forward), `build_drawing_output` (folds
     classification drops + FAST drops + OCR blanks into `DrawingVector`s in source draw order).
   - **`pipelines/_common.py`** — `run_current_pipeline` + `StepTimer` (records per-step
     wall-clock; on `verbose=True` a failing step is logged + recorded as a `StepOutcome` and

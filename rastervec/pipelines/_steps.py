@@ -139,28 +139,20 @@ class RegroupResult:
     similarity_id: dict[int, int]
 
 
-def _cluster_lc_key(cluster: list[VectorPath]) -> tuple:
-    if not cluster:
-        return ("", (None, None, None, None))
-    p = cluster[0]
-    return (p.layer or "", (p.stroke_color, p.fill_color, p.stroke_opacity, p.fill_opacity))
-
-
 def spatial_regroup(
     fast_passed: list[list[VectorPath]],
     cluster_similarity_id: dict[int, int] | None,
 ) -> RegroupResult:
-    """Re-merge FAST-passed clusters whose union bboxes touch/overlap and
-    which share a (layer, color) bucket key -- OCR reads one merged region
-    better than several adjacent fragments. Carries the similarity-group id
-    forward when a merge's inputs all agreed on one."""
+    """Re-merge FAST-passed clusters whose union bboxes touch/overlap --
+    OCR reads one merged region better than several adjacent fragments.
+    Carries the similarity-group id forward when a merge's inputs all
+    agreed on one."""
     passed = fast_passed or []
     similarity_id = cluster_similarity_id or {}
 
     merged = cluster_spatial(
         passed, get_bbox=lambda c: union_bbox([p.bbox for p in c]),
         threshold=SPATIAL_REGROUP_TOLERANCE_PX,
-        extra_close=lambda a, b: _cluster_lc_key(a) == _cluster_lc_key(b),
     )
 
     regrouped: list[list[VectorPath]] = []
@@ -191,7 +183,7 @@ def render_regroup(res: "PipelineResult") -> "RenderResult":
         }],
         note=(
             f"{len(res.fast_passed or [])} FAST-passed -> {len(rg)} regrouped "
-            f"(union-bbox tol {SPATIAL_REGROUP_TOLERANCE_PX}pt, within one (layer, color) bucket)"
+            f"(union-bbox tol {SPATIAL_REGROUP_TOLERANCE_PX}pt)"
         ),
     )
 

@@ -5,7 +5,6 @@ import pytest
 
 from rastervec.models import VectorPath
 from rastervec.pipelines._steps import (
-    _cluster_lc_key,
     _sample_mask,
     build_drawing_output,
     detect_text_fast,
@@ -34,16 +33,6 @@ def test_sample_mask_none_is_zero():
     assert _sample_mask(None, [_path(0, (0, 0, 10, 10))], zoom=1.0) == 0.0
 
 
-def test_cluster_lc_key_paint_match_and_opacity_split():
-    a = [_path(0, (0, 0, 10, 10))]
-    b = [_path(1, (5, 5, 15, 15))]
-    assert _cluster_lc_key(a) == _cluster_lc_key(b)
-    faint = _path(2, (0, 0, 10, 10))
-    faint.stroke_opacity = 0.5
-    assert _cluster_lc_key([faint]) != _cluster_lc_key(a)
-    assert _cluster_lc_key([]) == ("", (None, None, None, None))
-
-
 def test_spatial_regroup_merges_touching_same_paint():
     a = [_path(0, (0, 0, 10, 10))]
     b = [_path(1, (10.5, 0, 20, 10))]
@@ -61,10 +50,10 @@ def test_spatial_regroup_drops_id_on_disagree():
     assert id(res.clusters[0]) not in res.similarity_id
 
 
-def test_spatial_regroup_keeps_different_color_separate():
+def test_spatial_regroup_merges_touching_different_color():
     a = [_path(0, (0, 0, 10, 10), stroke_color=(0, 0, 0))]
     b = [_path(1, (2, 0, 12, 10), stroke_color=(1, 0, 0))]
-    assert len(spatial_regroup([a, b], {}).clusters) == 2
+    assert len(spatial_regroup([a, b], {}).clusters) == 1
 
 
 def test_spatial_regroup_keeps_far_apart_separate():
