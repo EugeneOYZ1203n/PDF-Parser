@@ -10,7 +10,7 @@ wins.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 from PIL import Image
@@ -56,10 +56,19 @@ def _len_weighted_conf(boxes: list[OcrBox]) -> float:
 
 class RenderOCR:
     """Render + segment + recognise. `backend` defaults to
-    `PaddleRecBackend`; pass any `OcrBackend` to swap the recogniser."""
+    `PaddleRecBackend`; pass any `OcrBackend` to swap the recogniser.
+    `recognize_fn`, when given, replaces `backend.recognize_crops` as the
+    actual crop-recognition call (used to dispatch it to a shared compute
+    pool -- see `Reader/Parallel` -- instead of running it in-process);
+    it must have the same signature, `list[np.ndarray] -> list[OcrBox]`."""
 
-    def __init__(self, backend: OcrBackend | None = None) -> None:
+    def __init__(
+        self,
+        backend: OcrBackend | None = None,
+        recognize_fn: Callable[[list[np.ndarray]], list[OcrBox]] | None = None,
+    ) -> None:
         self.backend = backend if backend is not None else PaddleRecBackend()
+        self._recognize_fn = recognize_fn if recognize_fn is not None else self.backend.recognize_crops
 
     # -- primitives -----------------------------------------------------
     def recognize_segmented(
@@ -75,8 +84,8 @@ class RenderOCR:
                 rotation_used=quarter % 360, page_index=page.meta.index, words=None,
             )
 
-        up = self.backend.recognize_crops(seg.word_crops)
-        flipped = self.backend.recognize_crops([np.rot90(c, 2) for c in seg.word_crops])
+        up = self._recognize_fn(seg.word_crops)
+        flipped = self._recognize_fn([np.rot90(c, 2) for c in seg.word_crops])
         if _len_weighted_conf(flipped) > _len_weighted_conf(up):
             boxes, flip = flipped, 180
         else:

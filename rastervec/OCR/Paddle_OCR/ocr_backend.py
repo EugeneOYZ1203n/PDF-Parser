@@ -110,3 +110,13 @@ def _as_pil(arr: np.ndarray):
     if arr.ndim == 2:
         return Image.fromarray(arr.astype(np.uint8), mode="L")
     return Image.fromarray(arr.astype(np.uint8))
+
+
+def _recognize_crops_job(
+    crops: list[np.ndarray], model_name: str = OCR_REC_MODEL,
+) -> list[OcrBox]:
+    """Top-level, picklable Pool-2 job: recognise `crops` with a
+    `PaddleRecBackend` cached per Pool-2 worker process by `model_name`
+    (`PaddleRecBackend._ENGINE_CACHE` is keyed the same way for local
+    calls). Fitz-free -- plain numpy crops in, dataclasses out."""
+    return PaddleRecBackend(model_name).recognize_crops(crops)

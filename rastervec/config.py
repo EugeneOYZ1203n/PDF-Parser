@@ -106,12 +106,10 @@ FAST_COMBINED_KEEP_THRESHOLD = 0.2
 
 # FastDetector.detect_tiled: FAST's own preprocessing always downsizes to a
 # 640px short side, so a whole large page loses most of its resolution in
-# one pass. Instead the render is upscaled by FAST_TILE_SCALE_FACTOR, cut
-# into FAST_TILE_BLOCK_SIZE-square tiles, and each tile detected at
-# FAST_TILE_ROTATION_COUNT evenly-spaced rotations (averaged).
+# one pass. Instead the render is upscaled by FAST_TILE_SCALE_FACTOR and cut
+# into FAST_TILE_BLOCK_SIZE-square tiles, each detected once (no rotation).
 FAST_TILE_BLOCK_SIZE = 2048
 FAST_TILE_SCALE_FACTOR = 5
-FAST_TILE_ROTATION_COUNT = 4
 
 # ======================================================================
 # spatial_regroup stage (pipeline.py)

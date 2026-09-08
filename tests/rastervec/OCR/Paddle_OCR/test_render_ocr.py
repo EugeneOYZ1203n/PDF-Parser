@@ -109,6 +109,37 @@ def test_recognize_segmented_blank_when_no_crops(tmp_pdf_path):
     assert result.words is None
 
 
+def test_recognize_segmented_uses_injected_recognize_fn(tmp_pdf_path):
+    import pymupdf as fitz
+
+    from rastervec.Reader.reader import Reader
+
+    doc = fitz.open()
+    doc.new_page(width=200, height=100)
+    path = tmp_pdf_path(doc)
+
+    calls = []
+
+    def fake_recognize_fn(crops):
+        calls.append(len(crops))
+        return [OcrBox(text=t, confidence=0.9, corners=[]) for t in ["HI", "THERE"][: len(crops)]]
+
+    # No backend.recognize_crops call should ever happen -- passing a
+    # backend whose recognize_crops raises proves recognize_fn is used
+    # instead.
+    class _ExplodingBackend:
+        def recognize_crops(self, crops):
+            raise AssertionError("backend.recognize_crops should not be called")
+
+    render_ocr = RenderOCR(backend=_ExplodingBackend(), recognize_fn=fake_recognize_fn)
+    with Reader(path) as reader:
+        page = reader.get_page(0)
+        result = render_ocr.recognize_segmented(_seg(2), _rect_cluster(), page)
+
+    assert result.text == "HI THERE"
+    assert calls == [2, 2]  # upright pass + 180-flip pass
+
+
 def test_recognize_segmented_picks_flipped_when_more_confident(tmp_pdf_path):
     import pymupdf as fitz
 

@@ -23,11 +23,14 @@ project actually uses.
 
 `detect()` runs one direct pass over a whole image. `detect_tiled()` is
 what `pipeline.py`'s fast_text_detect stage actually calls -- it upscales
-the image, splits it into fixed-size square tiles, and detects each tile
-at several rotations (summed then averaged), since `detect()`'s own
-`_scale_aligned_short` preprocessing always downsizes to a 640px short
-side regardless of input size and so throws away most of a large
-whole-page render's resolution in one direct pass.
+the image and splits it into fixed-size square tiles, detecting each tile
+once (no rotation sweep), since `detect()`'s own `_scale_aligned_short`
+preprocessing always downsizes to a 640px short side regardless of input
+size and so throws away most of a large whole-page render's resolution in
+one direct pass. `detect_tiled` optionally dispatches each tile's
+detection to a `compute` pool (see `Reader/Parallel`) instead of running
+it locally -- the per-tile job (`_detect_job`, module-level and
+picklable) never touches `fitz`, only a plain image array.
 
 torch is only imported lazily, inside FastDetector._model()/_preprocess/
 detect(), so importing this module (and constructing a FastDetector) stays
@@ -47,7 +50,6 @@ from tqdm import tqdm
 
 from rastervec.config import (
     FAST_TILE_BLOCK_SIZE as TILED_BLOCK_SIZE,
-    FAST_TILE_ROTATION_COUNT as TILED_ROTATION_COUNT,
     FAST_TILE_SCALE_FACTOR as TILED_SCALE_FACTOR,
 )
 from rastervec.helpers.geometry import union_bbox
@@ -443,29 +445,30 @@ class FastDetector:
         image: "Image.Image",
         block_size: int = TILED_BLOCK_SIZE,
         scale: float = TILED_SCALE_FACTOR,
-        n_rotations: int = TILED_ROTATION_COUNT,
         desc: str = "FAST text detection",
         show_progress: bool = True,
+        compute=None,
     ) -> "np.ndarray":
         """Runs FAST over `image` upscaled by `scale` and split into
         non-overlapping `block_size`-square tiles (the last row/column of
         tiles is right-padded with white up to `block_size` before
         detection, so an edge tile isn't massively upscaled internally by
         `detect()`'s own `_scale_aligned_short` preprocessing -- the padded
-        region is simply never copied back out). Each tile is detected at
-        `n_rotations` evenly-spaced rotations (0/90/180/270 by default) --
-        the rotated mask is rotated back to the tile's own orientation
-        before summing, then the sum is divided by `n_rotations` for that
-        tile's final score. Every tile's mask is stitched back into one
+        region is simply never copied back out). Each tile is detected once
+        (no rotation sweep). Every tile's mask is stitched back into one
         full mask at the *scaled* resolution, then resized back down to
         `image`'s own original size before returning -- callers sample it
         exactly like `detect()`'s own return value, at `image`'s own pixel
-        coordinates. `show_progress` wraps the block loop in a `tqdm` bar
-        (`desc`), since a large page at a real `scale` can mean hundreds of
-        tiles x rotations."""
-        if n_rotations <= 0:
-            raise ValueError("n_rotations must be a positive integer")
+        coordinates. `show_progress` wraps the local (`compute is None`)
+        block loop in a `tqdm` bar (`desc`), since a large page at a real
+        `scale` can mean hundreds of tiles.
 
+        `compute`, when given a `multiprocessing.managers.SyncManager`
+        -hosted `Pool` proxy, dispatches every tile's detection to that
+        shared pool via `starmap(_detect_job, ...)` instead of computing
+        them locally in this process -- each job carries only this
+        detector's `weights_path` plus one tile's plain numpy array, never
+        a PIL/fitz object, so Pool-2 workers never need `fitz`."""
         orig_w, orig_h = image.size
         scaled = image.convert("RGB").resize(
             (max(1, round(orig_w * scale)), max(1, round(orig_h * scale))), Image.BICUBIC,
@@ -474,11 +477,7 @@ class FastDetector:
         n_cols = max(1, math.ceil(sw / block_size))
         n_rows = max(1, math.ceil(sh / block_size))
 
-        full_mask = np.zeros((sh, sw), dtype=np.float32)
-        blocks = [(r, c) for r in range(n_rows) for c in range(n_cols)]
-        iterator = tqdm(blocks, desc=desc, unit="block") if show_progress else blocks
-
-        for r, c in iterator:
+        def _block(r: int, c: int) -> tuple["Image.Image", tuple[int, int, int, int]]:
             x0, y0 = c * block_size, r * block_size
             x1, y1 = min(x0 + block_size, sw), min(y0 + block_size, sh)
             block = scaled.crop((x0, y0, x1, y1))
@@ -486,28 +485,37 @@ class FastDetector:
                 padded = Image.new("RGB", (block_size, block_size), (255, 255, 255))
                 padded.paste(block, (0, 0))
                 block = padded
+            return block, (x0, y0, x1, y1)
 
-            block_sum = np.zeros((block_size, block_size), dtype=np.float32)
-            for k in range(n_rotations):
-                angle = 360.0 * k / n_rotations
-                rotated = block if angle == 0.0 else block.rotate(
-                    -angle, expand=False, fillcolor=(255, 255, 255), resample=Image.BICUBIC,
-                )
-                rotated_mask = self.detect(rotated)
-                if angle:
-                    mask_img = Image.fromarray(
-                        (np.clip(rotated_mask, 0.0, 1.0) * 255).astype(np.uint8)
-                    ).rotate(angle, expand=False, fillcolor=0, resample=Image.BICUBIC)
-                    rotated_mask = np.asarray(mask_img, dtype=np.float32) / 255.0
-                block_sum += rotated_mask
+        blocks = [_block(r, c) for r in range(n_rows) for c in range(n_cols)]
 
-            block_avg = block_sum / n_rotations
-            full_mask[y0:y1, x0:x1] = block_avg[: y1 - y0, : x1 - x0]
+        if compute is not None:
+            masks = compute.starmap(
+                _detect_job,
+                [(self.weights_path, np.asarray(block)) for block, _ in blocks],
+            )
+        else:
+            iterator = tqdm(blocks, desc=desc, unit="block") if show_progress else blocks
+            masks = [self.detect(block) for block, _ in iterator]
+
+        full_mask = np.zeros((sh, sw), dtype=np.float32)
+        for (_, (x0, y0, x1, y1)), mask in zip(blocks, masks):
+            full_mask[y0:y1, x0:x1] = mask[: y1 - y0, : x1 - x0]
 
         mask_img = Image.fromarray((np.clip(full_mask, 0.0, 1.0) * 255).astype(np.uint8)).resize(
             (orig_w, orig_h), Image.BILINEAR,
         )
         return np.asarray(mask_img, dtype=np.float32) / 255.0
+
+
+def _detect_job(weights_path: str | None, image_array: "np.ndarray") -> "np.ndarray":
+    """Top-level, picklable Pool-2 job for `detect_tiled`'s `compute`
+    dispatch: detect one already-rendered tile (a plain numpy array, never
+    a PIL/fitz object) with a `FastDetector` cached per Pool-2 worker
+    process by `weights_path` (`FastDetector._MODEL_CACHE` is keyed the
+    same way for local calls, so a worker that sees the same weights_path
+    across many jobs only builds the model once)."""
+    return FastDetector(weights_path).detect(Image.fromarray(image_array))
 
 
 # --------------------------------------------------------------------------

@@ -3,7 +3,12 @@ from __future__ import annotations
 import numpy as np
 
 from rastervec.config import OCR_REC_MODEL, OCR_VERSION
-from rastervec.OCR.Paddle_OCR.ocr_backend import OcrBox, PaddleRecBackend, _rec_field
+from rastervec.OCR.Paddle_OCR.ocr_backend import (
+    OcrBox,
+    PaddleRecBackend,
+    _rec_field,
+    _recognize_crops_job,
+)
 
 
 def test_rec_field_handles_dict_and_attr_shapes():
@@ -37,3 +42,17 @@ def test_recognize_crops_maps_engine_results_to_boxes(monkeypatch):
 
 def test_recognize_crops_empty_input():
     assert PaddleRecBackend().recognize_crops([]) == []
+
+
+def test_recognize_crops_job_delegates_to_backend(monkeypatch):
+    calls = []
+
+    def fake_recognize_crops(self, crops):
+        calls.append((self.model_name, len(crops)))
+        return [OcrBox(text="OK", confidence=1.0, corners=[])]
+
+    monkeypatch.setattr(PaddleRecBackend, "recognize_crops", fake_recognize_crops)
+    crops = [np.zeros((8, 10), np.uint8)]
+    boxes = _recognize_crops_job(crops, model_name="some_model")
+    assert calls == [("some_model", 1)]
+    assert boxes[0].text == "OK"

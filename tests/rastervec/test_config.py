@@ -78,7 +78,6 @@ def test_fast_thresholds():
     assert config.FAST_COMBINED_KEEP_THRESHOLD == 0.2
     assert config.FAST_TILE_BLOCK_SIZE == 2048
     assert config.FAST_TILE_SCALE_FACTOR == 5
-    assert config.FAST_TILE_ROTATION_COUNT == 4
 
 
 def test_spatial_regroup_tolerance_px():
