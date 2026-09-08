@@ -80,11 +80,15 @@ def detect_text_fast(
     *,
     enable_fast: bool = True,
     verbose: bool = False,
+    compute=None,
 ) -> FastStepResult:
     """Whole-page FAST render + tiled detect; each text-candidate cluster
     scored against the mask, min'd across its similarity group. Clusters
     over `FAST_COMBINED_KEEP_THRESHOLD` pass; the rest become drawing
-    content. `enable_fast=False` is a pass-through (keep every cluster)."""
+    content. `enable_fast=False` is a pass-through (keep every cluster).
+    `compute`, when given a shared compute-pool proxy (see
+    `Reader/Parallel`), is forwarded to `detect_tiled` so each tile's
+    detection runs on that pool instead of locally."""
     clusters = text_clusters or []
     if not enable_fast:
         result = FastPageResult(None, None, None, {}, list(clusters), [])
@@ -98,7 +102,9 @@ def detect_text_fast(
         page_image = render_page_paths(all_paths, page.meta, FAST_PAGE_RENDER_DPI)
         start = time.perf_counter()
         try:
-            page_mask = detector.detect_tiled(page_image, desc="FAST text detection")
+            page_mask = detector.detect_tiled(
+                page_image, desc="FAST text detection", compute=compute,
+            )
         except FileNotFoundError as exc:
             log.warning("FAST detection skipped (keeping every cluster): %s", exc)
             result = FastPageResult(None, None, None, {}, list(clusters), [])

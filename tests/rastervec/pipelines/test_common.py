@@ -10,8 +10,9 @@ from rastervec.pipelines.sub_pipelines import ocr as ocr_mod
 
 
 class _StubRenderOCR:
-    def __init__(self, backend=None):
+    def __init__(self, backend=None, recognize_fn=None):
         self.backend = backend
+        self.recognize_fn = recognize_fn
 
     def recognize_segmented(self, seg, cluster, page):
         return TextVectorResult(
@@ -94,6 +95,30 @@ def test_result_page_is_detached_and_open_page_reopens(tmp_pdf_path):
         assert pix.width > 0 and pix.height > 0
     # context manager closes the reopened doc; result.page stays detached
     assert res.page.fitz_page is None
+
+
+def test_run_current_pipeline_threads_compute_to_fast_and_ocr(tmp_pdf_path, monkeypatch):
+    sentinel = object()
+    captured: dict = {}
+
+    real_detect_text_fast = _common.detect_text_fast
+
+    def spy_detect_text_fast(*args, **kwargs):
+        captured["fast"] = kwargs.get("compute")
+        return real_detect_text_fast(*args, **kwargs)
+
+    real_recognize = _common.recognize
+
+    def spy_recognize(*args, **kwargs):
+        captured["ocr"] = kwargs.get("compute")
+        return real_recognize(*args, **kwargs)
+
+    monkeypatch.setattr(_common, "detect_text_fast", spy_detect_text_fast)
+    monkeypatch.setattr(_common, "recognize", spy_recognize)
+
+    run_pipeline(_text_pdf(tmp_pdf_path), 0, enable_fast=False, compute=sentinel)
+    assert captured["fast"] is sentinel
+    assert captured["ocr"] is sentinel
 
 
 def test_step_timer_propagates_when_not_verbose():

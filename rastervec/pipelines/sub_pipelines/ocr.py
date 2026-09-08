@@ -16,7 +16,7 @@ from tqdm import tqdm
 from rastervec.helpers.geometry import union_bbox
 from rastervec.logging_setup import get_logger
 from rastervec.models import ClusterOcrResult, Page, TextVectorResult, VectorPath
-from rastervec.OCR.Paddle_OCR.ocr_backend import OcrBackend
+from rastervec.OCR.Paddle_OCR.ocr_backend import OcrBackend, _recognize_crops_job
 from rastervec.OCR.Paddle_OCR.render_ocr import RenderOCR, render_cluster_for_ocr
 from rastervec.OCR.radon import ClusterSegmentation, segment_cluster
 
@@ -62,12 +62,19 @@ def recognize(
     *,
     backend: OcrBackend | None = None,
     similarity_id: dict[int, int] | None = None,
+    compute=None,
 ) -> OcrResult:
     """Recognise each cluster's word crops. One real recognition per
     similarity group; the reading is reused (text/confidence/rotation only)
     for every other cluster sharing that group id. A blank reading folds
-    the cluster into `failed` (drawing content)."""
-    render_ocr = RenderOCR(backend=backend)
+    the cluster into `failed` (drawing content). `compute`, when given a
+    shared compute-pool proxy (see `Reader/Parallel`), replaces the actual
+    engine call (`backend.recognize_crops`) with a dispatch to that pool
+    -- the memoization/orchestration here stays local either way."""
+    render_ocr_kwargs = {"backend": backend}
+    if compute is not None:
+        render_ocr_kwargs["recognize_fn"] = lambda crops: compute.apply(_recognize_crops_job, (crops,))
+    render_ocr = RenderOCR(**render_ocr_kwargs)
     similarity_id = similarity_id or {}
 
     cluster_results: list[ClusterOcrResult] = []

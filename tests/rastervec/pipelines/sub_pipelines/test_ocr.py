@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from rastervec.models import TextVectorResult, VectorPath
@@ -75,6 +76,68 @@ def test_recognize_no_group_ocrs_each():
     b = [_path(1, (100, 100, 110, 110))]
     res = ocr_mod.recognize([_seg(), _seg()], [a, b], _FakePage(), similarity_id={})
     assert _CountingRenderOCR.calls == [a, b]
+
+
+class _FakeCompute:
+    """Stands in for a `multiprocessing.managers.SyncManager`-hosted `Pool`
+    proxy: `.apply` runs inline so the test stays deterministic."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def apply(self, fn, args):
+        self.calls += 1
+        return fn(*args)
+
+
+def test_recognize_passes_recognize_fn_only_when_compute_given(monkeypatch):
+    captured_kwargs: list[dict] = []
+
+    class _CapturingRenderOCR:
+        def __init__(self, **kwargs):
+            captured_kwargs.append(kwargs)
+
+        def recognize_segmented(self, seg, cluster, page):
+            return TextVectorResult(
+                paths=cluster, text="X", confidence=0.5, bbox=(0.0, 0.0, 1.0, 1.0),
+                ocr_bbox=None, rotation_used=0, page_index=page.meta.index, words=None,
+            )
+
+    monkeypatch.setattr(ocr_mod, "RenderOCR", _CapturingRenderOCR)
+    a = [_path(0, (0, 0, 10, 10))]
+
+    ocr_mod.recognize([_seg()], [a], _FakePage(), similarity_id={})
+    assert "recognize_fn" not in captured_kwargs[-1]
+
+    ocr_mod.recognize([_seg()], [a], _FakePage(), similarity_id={}, compute=_FakeCompute())
+    assert "recognize_fn" in captured_kwargs[-1]
+
+
+def test_recognize_fn_closure_dispatches_through_compute_apply(monkeypatch):
+    captured: dict = {}
+
+    class _CapturingRenderOCR:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def recognize_segmented(self, seg, cluster, page):
+            return TextVectorResult(
+                paths=cluster, text="X", confidence=0.5, bbox=(0.0, 0.0, 1.0, 1.0),
+                ocr_bbox=None, rotation_used=0, page_index=page.meta.index, words=None,
+            )
+
+    monkeypatch.setattr(ocr_mod, "RenderOCR", _CapturingRenderOCR)
+    compute = _FakeCompute()
+    a = [_path(0, (0, 0, 10, 10))]
+    ocr_mod.recognize([_seg()], [a], _FakePage(), similarity_id={}, compute=compute)
+
+    crops = [np.zeros((4, 4), dtype=np.uint8)]
+    monkeypatch.setattr(
+        ocr_mod, "_recognize_crops_job", lambda c, model_name=None: [f"got {len(c)}"],
+    )
+    result = captured["recognize_fn"](crops)
+    assert compute.calls == 1
+    assert result == ["got 1"]
 
 
 def test_recognize_blank_reading_folds_into_failed(monkeypatch):

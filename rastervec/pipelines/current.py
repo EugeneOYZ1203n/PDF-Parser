@@ -26,11 +26,16 @@ __all__ = ["run_pipeline", "run_current_pipeline", "STEP_NAMES", "PipelineResult
 
 def run_pipeline(
     pdf_path: str, page_index: int = 0, *, enable_fast: bool = True, verbose: bool = False,
+    compute=None,
 ) -> PipelineResult:
     """Run the current pipeline on one page. `verbose=True` also retains
-    every intermediate value on the returned `PipelineResult`."""
+    every intermediate value on the returned `PipelineResult`. `compute`,
+    when given a `multiprocessing.managers.SyncManager`-hosted `Pool`
+    proxy (see `Reader/Parallel`), dispatches FAST tile detection and OCR
+    crop recognition to that shared pool instead of running them locally
+    -- `None` (the default) preserves today's fully-local behavior."""
     return run_current_pipeline(
-        pdf_path, page_index, enable_fast=enable_fast, verbose=verbose,
+        pdf_path, page_index, enable_fast=enable_fast, verbose=verbose, compute=compute,
     )
 
 

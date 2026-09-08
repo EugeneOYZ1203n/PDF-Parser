@@ -128,12 +128,12 @@ def _page_inputs(task: PageTask, has_manual: bool) -> tuple[bytes, bytes | None]
     return auto_input, manual_input
 
 
-def _run_pipeline(input_bytes: bytes, *, enable_fast: bool = True):
+def _run_pipeline(input_bytes: bytes, *, enable_fast: bool = True, compute=None):
     """Full current-pipeline run on one input PDF -> its PipelineResult."""
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "in.pdf"
         path.write_bytes(input_bytes)
-        return run_pipeline(str(path), 0, enable_fast=enable_fast)
+        return run_pipeline(str(path), 0, enable_fast=enable_fast, compute=compute)
 
 
 def _original_page_meta(pdf_path: str, page_index: int) -> PageMeta:
@@ -197,6 +197,7 @@ def _page_dir(task: PageTask) -> Path | None:
 # --------------------------------------------------------------------------
 def _run_current(
     task: PageTask, gt: LabelSet, cfg: MetricConfig, variant: PipelineVariant,
+    compute=None,
 ) -> PageResult:
     by_src = split_labelset_by_source(gt)
     auto_gt = gt_regions_from_labelset(by_src["auto"])
@@ -211,7 +212,7 @@ def _run_current(
     auto_preds: list = []
     manual_preds: list = []
     total = 0.0
-    run_kw = dict(enable_fast=variant.enable_fast)
+    run_kw = dict(enable_fast=variant.enable_fast, compute=compute)
     lbl = task.variant
 
     try:
@@ -369,17 +370,20 @@ def _run_legacy(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
     return result
 
 
-def run_page_task(task: PageTask) -> PageResult:
+def run_page_task(task: PageTask, compute=None) -> PageResult:
     """One benchmarked page, end to end. Never raises -- a failure is
     captured into `PageResult.error` (a whole-job failure) or a
-    `report_blocks` line (one of the two runs)."""
+    `report_blocks` line (one of the two runs). `compute`, when given a
+    shared compute-pool proxy (see `run_benchmark`'s `compute_workers`),
+    is forwarded to the `current` engine only -- the `legacy` engine is
+    completely unaffected by this parameter."""
     cfg = MetricConfig(iou_edge_min=task.iou_edge_min)
     try:
         variant = resolve_variant(task.variant)
         gt = _ground_truth(task)
         if variant.engine == "legacy":
             return _run_legacy(task, gt, cfg)
-        return _run_current(task, gt, cfg, variant)
+        return _run_current(task, gt, cfg, variant, compute=compute)
     except Exception as exc:  # noqa: BLE001 -- keep benchmarking the rest
         _LOG.warning("%s page %d failed: %s", task.pdf_path, task.page_index, exc)
         return PageResult(
@@ -389,10 +393,33 @@ def run_page_task(task: PageTask) -> PageResult:
 
 
 def run_benchmark(
-    tasks: list[PageTask], *, workers: int = 1, desc: str = "benchmark",
+    tasks: list[PageTask], *, workers: int = 1, compute_workers: int = 0,
+    desc: str = "benchmark",
 ) -> list[PageResult]:
     """Run `run_page_task` over `tasks` (serial when `workers <= 1`,
-    otherwise a spawn process pool), results in input order."""
+    otherwise a spawn process pool -- Pool 1), results in input order.
+
+    `compute_workers > 0` additionally starts a `multiprocessing.Manager`
+    -hosted `Pool` (Pool 2) sized `compute_workers`, shared by every page
+    job regardless of which Pool-1 worker runs it -- a complex page's many
+    FAST/OCR jobs and simple pages' few jobs all queue into this one pool,
+    so idle capacity is never stranded on a page that finished early. Pool
+    2 never imports `fitz`/`pymupdf`. `compute_workers=0` (the default)
+    preserves today's fully-local-per-page behavior."""
     from rastervec.Reader.Parallel.pool import run_parallel
+
+    if compute_workers > 0:
+        import functools
+        import multiprocessing
+
+        manager = multiprocessing.Manager()
+        compute = manager.Pool(processes=compute_workers)
+        try:
+            fn = functools.partial(run_page_task, compute=compute)
+            return run_parallel(tasks, fn, workers=workers, desc=desc)
+        finally:
+            compute.close()
+            compute.join()
+            manager.shutdown()
 
     return run_parallel(tasks, run_page_task, workers=workers, desc=desc)

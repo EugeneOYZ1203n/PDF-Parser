@@ -1,12 +1,23 @@
-"""Parallelism for the benchmarking suite: a generic `spawn` process-pool
-map (`pool.py`) and the benchmark's picklable per-page job
-(`benchmark_jobs.py`).
+"""Parallelism for the benchmarking suite -- two pools:
 
-Why processes, never threads: `PaddleRecBackend._ENGINE_CACHE` and
-`FastDetector._MODEL_CACHE` are unlocked module-level singletons holding
+- Pool 1 (`pool.py::run_parallel`, `workers`): a generic `spawn`
+  process-pool map, one page's whole pipeline job
+  (`benchmark_jobs.py::run_page_task`) per worker. Reads `fitz`, does
+  native/vector extraction, classification, and orchestration.
+- Pool 2 (`benchmark_jobs.py::run_benchmark`'s `compute_workers`, built
+  via `multiprocessing.Manager().Pool(...)`): a single shared pool every
+  Pool-1 worker's page job dispatches its FAST tile detection and OCR
+  crop recognition into -- proportionally, since it's one shared queue
+  regardless of which page or which Pool-1 worker a job came from. Pool 2
+  never imports `fitz`/`pymupdf`; its jobs (`OCR.fast_detect._detect_job`,
+  `OCR.Paddle_OCR.ocr_backend._recognize_crops_job`) take only plain data
+  (numpy arrays), never a `fitz`-backed object.
+
+Why processes, never threads, for either pool: `PaddleRecBackend._ENGINE_CACHE`
+and `FastDetector._MODEL_CACHE` are unlocked module-level singletons holding
 engines that are not safe to call from multiple threads, and PyMuPDF is
-not reentrant. Each worker process gets its own copies. Every worker pins
-OMP / MKL / OpenBLAS to one thread so N workers do not oversubscribe the
+not reentrant. Each worker process gets its own copies. Every Pool-1 worker
+pins OMP / MKL / OpenBLAS to one thread so N workers do not oversubscribe the
 CPU (mirrors `archive/raster_parser`'s `*_worker_init`).
 """
 from rastervec.Reader.Parallel.benchmark_jobs import (

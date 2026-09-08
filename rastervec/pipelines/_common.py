@@ -62,6 +62,7 @@ class StepTimer:
 
 def run_current_pipeline(
     pdf_path: str, page_index: int, *, enable_fast: bool = True, verbose: bool = False,
+    compute=None,
 ) -> PipelineResult:
     timer = StepTimer(verbose=verbose)
     page = native = vectors = cls = fast = regrouped = segments = ocr = drawing = None
@@ -78,7 +79,7 @@ def run_current_pipeline(
         with timer("fast"):
             fast = detect_text_fast(
                 vectors.paths, cls.text_clusters, cls.similarity_groups, page,
-                enable_fast=enable_fast, verbose=verbose,
+                enable_fast=enable_fast, verbose=verbose, compute=compute,
             )
         with timer("regroup"):
             regrouped = spatial_regroup(fast.passed, cls.cluster_similarity_id)
@@ -87,7 +88,7 @@ def run_current_pipeline(
         with timer("ocr"):
             ocr = recognize(
                 segments, regrouped.clusters, page,
-                similarity_id=regrouped.similarity_id,
+                similarity_id=regrouped.similarity_id, compute=compute,
             )
         with timer("drawing"):
             drawing = build_drawing_output(cls.dropped, fast.dropped, ocr.failed)

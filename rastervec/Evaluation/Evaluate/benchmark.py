@@ -5,7 +5,7 @@ per-page report plus cross-variant accuracy + timing comparison tables.
 
     .venv/Scripts/python.exe -m rastervec.Evaluation.Evaluate.benchmark \
         --pdf path/to.pdf --pages 0,1,2 [--iou-threshold 0.3] \
-        [--reconstruct-dir DIR] [--workers N] \
+        [--reconstruct-dir DIR] [--workers N] [--compute-workers N] \
         [--variants current,current_nofast,legacy]
 
 `--variants` selects which `Evaluation/Evaluate/variants.VARIANTS` to run
@@ -19,7 +19,11 @@ green(matched) / yellow(spurious pred) / red(missed gt) box overlay.
 
 `--workers N` (>1) runs the pages across a spawn process pool (`Reader/
 Parallel`); the model caches are warmed once up front so the first run is
-safe. The real `pipeline.STAGES` chain runs through OCR (PaddleOCR) --
+safe. `--compute-workers N` (>0) additionally starts a shared
+`multiprocessing.Manager`-hosted pool (Pool 2, `fitz`-free) that every page
+job dispatches its FAST/OCR work into, regardless of which `--workers`
+process runs that page -- see `Reader/Parallel/benchmark_jobs.run_benchmark`.
+The real `pipeline.STAGES` chain runs through OCR (PaddleOCR) --
 `main()`'s actual PDF/OCR path is a documented manual smoke test only.
 
 `format_report` / `aggregate_results` / `format_aggregate_comparison` /
@@ -275,6 +279,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "(serial). See rastervec.Reader.Parallel.",
     )
     parser.add_argument(
+        "--compute-workers", type=int, default=0,
+        help="Run FAST tile detection + OCR crop recognition on a shared "
+        "multiprocessing.Manager-hosted pool of this size (>0), used by every "
+        "page job regardless of which --workers process runs it. Default 0 "
+        "(fully local per page, today's behavior). Legacy variant is unaffected.",
+    )
+    parser.add_argument(
         "--variants", default=",".join(DEFAULT_VARIANTS),
         help="Comma-separated pipeline variant names to run and compare "
         f"(default: {','.join(DEFAULT_VARIANTS)}). See "
@@ -314,7 +325,9 @@ def main(argv: list[str] | None = None) -> int:
             for pdf_path in args.pdf
             for page_index in pages
         ]
-        page_results = run_benchmark(tasks, workers=args.workers, desc=name)
+        page_results = run_benchmark(
+            tasks, workers=args.workers, compute_workers=args.compute_workers, desc=name,
+        )
 
         results: list[MetricSuiteResult] = []
         per_page_timings: list[dict[str, float]] = []
