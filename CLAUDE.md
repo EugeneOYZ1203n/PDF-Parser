@@ -363,6 +363,36 @@ independently of the others (every stage's *output* is a plain dataclass from `m
 - **`Evaluation/Labelling/label_schema.py::split_labelset_by_source`** splits a mixed-source
   `LabelSet` into `{"auto": …, "manual": …}` so the benchmark can score auto-derived and
   human-entered ground truth as separate runs.
+- **`Evaluation/Evaluate/golden_schema.py` + `golden_regression.py`** *(implemented)*: a
+  hand-curated golden/regression test suite, separate from the `LabelSet`/benchmark machinery
+  above — one `GoldenCase` (pydantic, `golden_schema.py`, pure) is a single curated snapshot of
+  one cluster's/segmentation's output at one of three stages (`"classification"`, `"fast"`,
+  `"word_split"`), labelled `"positive"` (from that stage's kept/passed pool) or `"negative"`
+  (from its dropped pool; `"word_split"` has no structural pass/drop signal, so both labels there
+  are purely the curator's own visual judgement) — stored in one shared `GoldenCaseBank`
+  (`upsert_case`/`save_cases`/`load_cases`, JSON at `outputs/regression_cases/cases.json`, not
+  one file per PDF, since a bank only ever holds a handful of self-describing cases rather than
+  an exhaustive per-PDF labelling). `golden_regression.py` (the pipeline-facing half, alongside
+  `adapters.py` the only other `Evaluation/Evaluate/` module importing `rastervec.pipelines`)
+  builds each stage's candidate pool from the same `PipelineResult` fields the visualization
+  notebook's own `render_*` functions read (`text_clusters`/`clustering`'s `role="dropped"`
+  categories, `fast_passed`/`fast_dropped`, `regrouped_clusters` zipped with `segmentations`),
+  `capture_case` turns a picked `Candidate` into a `GoldenCase` (`label_schema.cluster_signature`
+  for debug provenance only), and `compare_case`/`run_regression` replay a bank against fresh
+  pipeline runs — matching is **IoU-based**, not signature-based (an unrelated member-count shift
+  would make an exact-equality signature falsely read as "not found"): the current pool entry
+  closest by `bbox_iou` to the stored bbox must clear `DEFAULT_IOU_THRESHOLD` (0.85 — deliberately
+  tighter than `metrics.MetricConfig.iou_edge_min`'s 0.10, tuned loose for benchmark-style
+  detection matching, since this wants "did this basically not change"), then
+  classification/fast compare `role` exactly and `word_split` greedily IoU-pairs stored vs.
+  current word boxes. `run_regression` runs the pipeline once per distinct `(pdf_path,
+  page_index)` among a bank's cases, not once per case.
+- **`notebooks/golden_case_curation.ipynb`** *(implemented)*: the curation notebook over
+  `golden_regression.py` — run the pipeline once (`verbose=True`), then per stage a
+  browse-candidates / pick-an-index / capture-and-save cell triplet, then a shared **Replay**
+  section (`run_regression` + `format_regression_report`) that re-checks every case in the bank
+  (from any prior session, not just the current one) — the same cell to re-run later as a
+  regression check.
 - **`Evaluation/Evaluate/variants.py`** *(implemented)*: `PipelineVariant` (name, `engine`
   current/legacy, `enable_fast`) + the `VARIANTS` registry (`current` [default],
   `current_nofast`, `legacy`) + `DEFAULT_VARIANTS` + `resolve_variant`. Adding an ablation = one
