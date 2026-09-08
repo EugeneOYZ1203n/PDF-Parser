@@ -39,14 +39,30 @@ def test_ink_runs_finds_contiguous_blocks():
 def test_split_on_gaps_single_run_is_one_span():
     arr = np.zeros(12, dtype=bool)
     arr[5:10] = True
-    assert radon._split_on_gaps(arr, gap_factor=1.9, min_gap=2.0) == [(5, 9)]
+    assert radon._split_on_gaps(arr, gap_threshold=2.0) == [(5, 9)]
 
 
 def test_split_on_gaps_breaks_on_wide_gap():
     arr = np.zeros(50, dtype=bool)
     for s, e in [(0, 1), (3, 4), (6, 7), (40, 41)]:
         arr[s:e + 1] = True
-    assert radon._split_on_gaps(arr, gap_factor=1.9, min_gap=2.0) == [(0, 7), (40, 41)]
+    assert radon._split_on_gaps(arr, gap_threshold=2.0) == [(0, 7), (40, 41)]
+
+
+def test_line_gaps_returns_inter_run_gaps():
+    arr = np.zeros(50, dtype=bool)
+    for s, e in [(0, 1), (3, 4), (6, 7), (40, 41)]:
+        arr[s:e + 1] = True
+    assert radon._line_gaps(arr) == [1.0, 1.0, 32.0]
+    assert radon._line_gaps(np.array([True, True, True])) == []
+    assert radon._line_gaps(np.zeros(5, dtype=bool)) == []
+
+
+def test_cluster_gap_threshold_pools_and_floors():
+    assert radon._cluster_gap_threshold([1.0, 1.0, 1.0, 9.0, 9.0, 9.0]) == 5.0
+    assert radon._cluster_gap_threshold([]) == radon.RADON_MIN_GAP_PX
+    assert radon._cluster_gap_threshold([0.1, 0.1]) == radon.RADON_MIN_GAP_PX
+    assert radon._cluster_gap_threshold([1.0, 1.0, 1.0], min_gap=0.5) == 1.0
 
 
 # --------------------------------------------------------------------------
@@ -107,6 +123,28 @@ def test_segment_cluster_blank_is_empty():
     assert seg.word_crops == [] and seg.word_corners == []
 
 
+def test_segment_cluster_pools_gap_threshold_across_lines():
+    """Line A has 3 ink runs with its own gaps [4, 20]px; judged on its own
+    (median 12, no pooling) its 20px gap would exceed that and split it
+    into two words. Line B has 4 runs with three 40px gaps, pulling the
+    cluster-wide pooled median up to 40 -- above line A's 20px gap -- so
+    with the shared threshold line A's runs merge into a single word
+    instead. This is the behavioral difference between a per-line and a
+    cluster-wide gap threshold."""
+    w, h = 240, 86
+    img = Image.new("L", (w, h), 255)
+    d = ImageDraw.Draw(img)
+    # line A: 3 runs, gaps [4, 20]
+    for x0 in (10, 24, 54):
+        d.rectangle([x0, 20, x0 + 9, 35], fill=0)
+    # line B: 4 runs, gaps [40, 40, 40]
+    for x0 in (10, 60, 110, 160):
+        d.rectangle([x0, 50, x0 + 9, 65], fill=0)
+
+    seg = radon.segment_cluster(img)
+    assert len(seg.word_crops) == 2
+
+
 def test_rotation_inverse_round_trips():
     out_shape, forward, inverse = radon._rotation((50, 80), 12.0)
     pts = np.array([(0.0, 0.0), (79.0, 0.0), (40.0, 25.0)])
@@ -119,9 +157,9 @@ def test_split_words_gives_each_word_its_own_tight_y_extent():
     word, then a tall one) must get different y-extents -- not the whole
     line's shared ink bbox repeated for both words. Each "word" is two
     small ink runs (like _text_image's dashes) with a small intra-word gap
-    and a wide inter-word gap, since _split_on_gaps's median-gap rule can't
-    split apart a column profile with only one gap in it (as a single solid
-    rectangle per word would produce)."""
+    and a wide inter-word gap, since _split_on_gaps can't split apart a
+    column profile with only one gap in it (as a single solid rectangle
+    per word would produce)."""
     w, h = 200, 40
     img = Image.new("L", (w, h), 255)
     d = ImageDraw.Draw(img)
@@ -132,7 +170,7 @@ def test_split_words_gives_each_word_its_own_tight_y_extent():
     # tall word: two ticks, with an ascender
     d.rectangle([80, baseline - 20, 86, baseline], fill=0)
     d.rectangle([90, baseline - 20, 96, baseline], fill=0)
-    boxes = radon.split_words(np.asarray(img))
+    boxes = radon.split_words(np.asarray(img), gap_threshold=10.0)
     assert len(boxes) == 2
     (_, short_y0, _, short_y1), (_, tall_y0, _, tall_y1) = boxes
     assert (short_y0, short_y1) != (tall_y0, tall_y1)

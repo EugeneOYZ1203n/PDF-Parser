@@ -98,6 +98,7 @@ def test_radon_constants():
     assert config.RADON_ANGLE_STEP_DEG == 0.25
     assert config.RADON_LINE_BAND_MIN_FRAC == 0.10
     assert config.RADON_MAX_RENDER_SIDE_PX == 1000
+    assert config.RADON_MIN_GAP_PX == 2.0
 
 
 def test_min_render_side_px():

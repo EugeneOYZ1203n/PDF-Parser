@@ -35,6 +35,7 @@ from rastervec.config import (
     RADON_ANGLE_STEP_DEG,
     RADON_LINE_BAND_MIN_FRAC,
     RADON_MAX_RENDER_SIDE_PX,
+    RADON_MIN_GAP_PX,
     RADON_SKEW_LIMIT_DEG,
 )
 from rastervec.renderer import render_vector_cluster
@@ -81,18 +82,35 @@ def _group_runs(runs: list[tuple[int, int]], gap_thresh: float) -> list[tuple[in
     return spans
 
 
-def _split_on_gaps(
-    has_ink: np.ndarray, *, gap_factor: float, min_gap: float,
-) -> list[tuple[int, int]]:
-    """Group ``_ink_runs(has_ink)`` on any gap wider than
-    ``max(min_gap, gap_factor * median(inter-run gaps))``. Fewer than two
-    runs -> a single span over the whole ink extent (``[]`` if no ink)."""
+def _split_on_gaps(has_ink: np.ndarray, *, gap_threshold: float) -> list[tuple[int, int]]:
+    """Group ``_ink_runs(has_ink)`` on any gap wider than `gap_threshold`.
+    Fewer than two runs -> a single span over the whole ink extent (``[]``
+    if no ink)."""
     runs = _ink_runs(has_ink)
     if len(runs) < 2:
         return [(runs[0][0], runs[-1][1])] if runs else []
-    gaps = [runs[i + 1][0] - runs[i][1] - 1 for i in range(len(runs) - 1)]
-    thresh = max(min_gap, gap_factor * float(np.median(gaps)))
-    return _group_runs(runs, thresh)
+    return _group_runs(runs, gap_threshold)
+
+
+def _line_gaps(has_ink: np.ndarray) -> list[float]:
+    """This line's own inter-run gaps (px), for pooling into the
+    cluster-wide gap distribution. ``[]`` if fewer than two ink runs."""
+    runs = _ink_runs(has_ink)
+    if len(runs) < 2:
+        return []
+    return [float(runs[i + 1][0] - runs[i][1] - 1) for i in range(len(runs) - 1)]
+
+
+def _cluster_gap_threshold(all_gaps: list[float], *, min_gap: float = RADON_MIN_GAP_PX) -> float:
+    """One shared word-split threshold for the whole cluster: the median of
+    every inter-run gap pooled across every line (not one line's own gaps)
+    -- a gap wider than this starts a new word. `min_gap` floors the
+    degenerate case (pooled median at/near zero, e.g. very tight kerning or
+    mostly single-run lines), so splitting doesn't collapse to "every run
+    is its own word."""
+    if not all_gaps:
+        return min_gap
+    return max(min_gap, float(np.median(all_gaps)))
 
 
 # --------------------------------------------------------------------------
@@ -189,15 +207,16 @@ def line_spacing(profile: np.ndarray) -> float:
     return float(np.median(np.diff(centres)))
 
 
-def split_words(line_gray: np.ndarray, *, gap_factor: float = 1.9,
-                min_gap: float = 2.0, pad: int = 1) -> list[tuple[int, int, int, int]]:
+def split_words(line_gray: np.ndarray, *, gap_threshold: float,
+                pad: int = 1) -> list[tuple[int, int, int, int]]:
     """`(x0, y0, x1, y1)` pixel boxes, one per word, within one deskewed
     line crop. Both x- and y-extent are each word's own tight ink bbox:
-    the column profile is split on the ported median-gap rule first, then
-    each word's y-extent comes from ink within just that word's own
-    column slice -- not the whole line -- so a short word doesn't inherit
-    an ascender/descender that only exists in a different word on the
-    same line."""
+    the column profile is split on `gap_threshold` (the cluster-wide
+    pooled-median gap, see `_cluster_gap_threshold`) first, then each
+    word's y-extent comes from ink within just that word's own column
+    slice -- not the whole line -- so a short word doesn't inherit an
+    ascender/descender that only exists in a different word on the same
+    line."""
     if line_gray.ndim != 2 or line_gray.size == 0:
         return []
     h, w = line_gray.shape
@@ -205,7 +224,7 @@ def split_words(line_gray: np.ndarray, *, gap_factor: float = 1.9,
     if not ink.any():
         return []
     boxes: list[tuple[int, int, int, int]] = []
-    for sx0, sx1 in _split_on_gaps(ink.any(axis=0), gap_factor=gap_factor, min_gap=min_gap):
+    for sx0, sx1 in _split_on_gaps(ink.any(axis=0), gap_threshold=gap_threshold):
         word_rows = ink[:, sx0:sx1 + 1].any(axis=1)
         if not word_rows.any():
             continue  # defensive; every column span has ink by construction
@@ -304,11 +323,14 @@ def segment_cluster(image, dpi_used: int = 300, *, verbose: bool = False) -> Clu
     prof = row_profile(to_ink(deskewed))
     bands = line_bands(prof)
 
+    line_cols = [to_ink(deskewed[by0:by1 + 1, :]).any(axis=0) for by0, by1 in bands]
+    gap_threshold = _cluster_gap_threshold([g for cols in line_cols for g in _line_gaps(cols)])
+
     crops: list[np.ndarray] = []
     corners: list[list[tuple[float, float]]] = []
     for by0, by1 in bands:
         line = deskewed[by0:by1 + 1, :]
-        for wx0, wy0, wx1, wy1 in split_words(line):
+        for wx0, wy0, wx1, wy1 in split_words(line, gap_threshold=gap_threshold):
             gy0, gy1 = by0 + wy0, by0 + wy1
             crops.append(deskewed[gy0:gy1, wx0:wx1])
             box = np.array([(wx0, gy0), (wx1, gy0), (wx1, gy1), (wx0, gy1)], dtype=np.float64)

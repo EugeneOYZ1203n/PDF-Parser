@@ -152,6 +152,10 @@ RADON_LINE_BAND_MIN_FRAC = 0.10
 # estimation is scale-invariant, so a big merged bbox is downscaled to
 # this first to keep the O(pixels * angles) transform fast.
 RADON_MAX_RENDER_SIDE_PX = 1000
+# Floor (px) on the cluster-wide word-split gap threshold (the median
+# inter-run gap pooled across every line in the cluster) -- guards the
+# degenerate case where that pooled median is near zero.
+RADON_MIN_GAP_PX = 2.0
 
 # RenderOCR: a cluster render whose shorter side would fall under this many
 # pixels at the requested dpi is bumped to a higher effective dpi instead

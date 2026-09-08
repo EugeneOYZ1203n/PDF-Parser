@@ -588,10 +588,14 @@ independently of the others (every stage's *output* is a plain dataclass from `m
     Radon projection angle by `sum(projection**2)` (Postl criterion — sharpest profile is
     parallel to the text baseline), coarse full sweep + fine sweep (`RADON_*` config), maps to a
     `(-90, 90]` deskew angle; `_rotation` builds the exact forward/inverse affine so word-box
-    corners map back to the original render. `split_words` keeps the old
-    `_split_on_gaps`/`_ink_runs`/`_group_runs` median-gap rule (ported here) for the column
-    (x-extent) split, but each word's y-extent is then taken from ink within just that word's own
-    column slice, not the whole line's ink bbox — so two words on the same line with different
+    corners map back to the original render. `split_words` splits the column (x-extent) profile
+    on a `gap_threshold` via `_split_on_gaps`/`_ink_runs`/`_group_runs` — `segment_cluster`
+    computes that threshold once per cluster (`_cluster_gap_threshold`, floored by
+    `RADON_MIN_GAP_PX`), as the median of every line's inter-run gaps (`_line_gaps`) pooled
+    together, so every line in the cluster splits on the same shared threshold rather than each
+    line recomputing its own from just its own (often noisy, small-sample) gaps. Each word's
+    y-extent is then taken from ink within just that word's own column slice, not the whole
+    line's ink bbox — so two words on the same line with different
     glyph heights (e.g. one with a descender, one without) get genuinely different, tight
     `word_corners` boxes rather than sharing the line's full ink height. The 0-vs-180 (and
     90-vs-270) flip Radon can't resolve is left to `RenderOCR.recognize_segmented`.
