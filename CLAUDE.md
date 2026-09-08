@@ -58,10 +58,11 @@ Tesseract wasn't in active use.
 sequences (`native = extract_native_text(page)` etc.) — see the `pipelines/` bullet below.
 `pipeline.py` (the old `PipelineContext` + `STAGES` + `_run_stages` machinery) is gone; the
 new rule is **new capability = one more named call in a `pipelines/` file**. Deskew + line/word
-segmentation before OCR is a Radon transform (`skimage.transform.radon`) in
-`pipelines/sub_pipelines/radon.py`, replacing the old `OCR/Paddle_OCR/ink_segment.py`. There is
-one OCR backend now (`PaddleRecBackend`, recognition-only over Radon-segmented word crops); the
-old light/heavy split and `PaddleOcrBackend` full-detection path are gone.
+segmentation before OCR is a Radon transform (`skimage.transform.radon`) in `OCR/radon.py`
+(an OCR-preprocessing concern, not a pipeline-orchestration `sub_pipelines/*.py` module),
+replacing the old `OCR/Paddle_OCR/ink_segment.py`. There is one OCR backend now
+(`PaddleRecBackend`, recognition-only over Radon-segmented word crops); the old light/heavy split
+and `PaddleOcrBackend` full-detection path are gone.
 
 ## `rastervec/Evaluation/inspector/` architecture
 
@@ -246,7 +247,7 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   colors, are never spatially merged together, regardless of how close they are on the page.
 - **`OCR/fast_detect.py` — `FastDetector`** *(implemented)*: see the `pipelines/_steps.py`
   entry below (`detect_text_fast`) for `detect`/`detect_tiled` usage.
-- **`pipelines/sub_pipelines/radon.py`** *(implemented)*: replaces the deleted
+- **`OCR/radon.py`** *(implemented)*: replaces the deleted
   `OCR/Paddle_OCR/ink_segment.py` — Radon-transform deskew + line/word split. See the
   `pipelines/` bullet below.
 - **`OCR/Paddle_OCR/crop_normalize.py`** *(implemented, PIL only)*: `normalize_line_crop` — PIL port
@@ -255,7 +256,7 @@ independently of the others (every stage's *output* is a plain dataclass from `m
 - **`OCR/Paddle_OCR/ocr_backend.py` + `render_ocr.py`** — see the `pipelines/` bullet below
   (`PaddleRecBackend`, the one recognition-only backend; `RenderOCR.recognize_segmented` /
   `ocr_cluster` / `ocr`). Text *detection* is the Radon segmentation step
-  (`pipelines/sub_pipelines/radon.py`), not PaddleOCR.
+  (`OCR/radon.py`), not PaddleOCR.
 - **`Evaluation/conversion.py`** *(implemented)*: three functions, each re-expressing a
   page's content as vector paths (`get_drawings()`) for a Vector_Classification known-answer test —
   **none ever rewrites pre-existing vector-path geometry** (an earlier version SVG-round-tripped the
@@ -441,7 +442,15 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   — colored rectangle outlines, each entry `(bbox, rgb)` or `(bbox, rgb, dashes)` where `dashes` is
   a PyMuPDF dash string / `None`), `svg.py` (`render_page_svg`, a thin
   `get_svg_image()` wrapper), and `_shapes.py` (shared). Import straight from `rastervec.renderer`
-  (`from rastervec.renderer import render_vector_cluster`, etc.).
+  (`from rastervec.renderer import render_vector_cluster`, etc.). `notebook.py` is the exception:
+  notebook-only display plumbing (`RenderResult`, `visualize`, `draw_paths`/`draw_polys`/
+  `draw_bboxes`, `page_setup`, ...) for `pipeline_stage_visualization.ipynb`, deliberately **not**
+  re-exported through `renderer/__init__.py` — it imports matplotlib, and this package is imported
+  by the real pipeline itself (`render_vector_cluster`, `render_reconstructed_page`, ...), so
+  folding it into the package's own `__init__` would drag matplotlib into every pipeline run's
+  import graph. Import it directly (`from rastervec.renderer.notebook import ...`); every stage
+  module's own `render_<stage_name>` function does this lazily, inside the function body, for the
+  same reason.
   `_shapes.path_color_hex(path)` returns a path's real PDF stroke/fill color as hex (used by both the
   visualization notebook and OCR input rendering) — any B/W-style simplification stays purely
   internal to classification, never substituted into a rendered/displayed color.
@@ -570,7 +579,9 @@ independently of the others (every stage's *output* is a plain dataclass from `m
     page, *, backend=None, similarity_id=None) -> OcrResult` (one real `RenderOCR.
     recognize_segmented` per similarity group, reused for the rest; blank reading folds into
     `failed`; per-call `ocr_seconds`).
-  - **`pipelines/sub_pipelines/radon.py`** — replaces `ink_segment.py`. `segment_cluster(image,
+  - **`OCR/radon.py`** — replaces `ink_segment.py`; lives under `OCR/` (a top-level file, matching
+    `OCR/fast_detect.py`'s precedent) rather than `pipelines/sub_pipelines/`, since it's an
+    OCR-preprocessing concern, not pipeline orchestration. `segment_cluster(image,
     dpi_used) -> ClusterSegmentation` (`skew_deg`, `line_spacing_px`, `word_crops` (deskewed
     grayscale), `word_corners` (4 corners each, in the *original* render's pixel space),
     `render_dpi`, verbose-only `deskewed_gray`/`profile`). `estimate_skew` scores each swept
@@ -578,8 +589,16 @@ independently of the others (every stage's *output* is a plain dataclass from `m
     parallel to the text baseline), coarse full sweep + fine sweep (`RADON_*` config), maps to a
     `(-90, 90]` deskew angle; `_rotation` builds the exact forward/inverse affine so word-box
     corners map back to the original render. `split_words` keeps the old
-    `_split_on_gaps`/`_ink_runs`/`_group_runs` median-gap rule (ported here). The 0-vs-180 (and
+    `_split_on_gaps`/`_ink_runs`/`_group_runs` median-gap rule (ported here) for the column
+    (x-extent) split, but each word's y-extent is then taken from ink within just that word's own
+    column slice, not the whole line's ink bbox — so two words on the same line with different
+    glyph heights (e.g. one with a descender, one without) get genuinely different, tight
+    `word_corners` boxes rather than sharing the line's full ink height. The 0-vs-180 (and
     90-vs-270) flip Radon can't resolve is left to `RenderOCR.recognize_segmented`.
+    `render_radon(res: PipelineResult) -> RenderResult` (notebook-only, appended at the bottom of
+    this file) re-renders each segmented cluster's original pre-deskew image via
+    `renderer.render_vector_cluster` and draws its real `word_corners` polygons on top — see the
+    `notebooks/pipeline_stage_visualization.ipynb` bullet below.
 
   `PipelineResult.to_native_pdf_elements()` is the serialization boundary (ported from the old
   `PipelineContext`).
@@ -598,11 +617,22 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   dpi=300)` = `render_cluster_for_ocr` → `segment_cluster` → `recognize_segmented` (kept for
   non-pipeline callers); `ocr(image)` is the raw-image convenience used by the inspector.
 - **`notebooks/pipeline_stage_visualization.ipynb`** *(implemented, on the new `pipelines/` API)*:
-  one `res = run_pipeline(PDF_PATH, PAGE_INDEX, enable_fast=…, verbose=True)` run, then per-step
-  `visualize()` cells keyed on the 9 `STEP_NAMES` reading `res.*` fields (including a `segment` cell
-  showing the Radon deskew + line/word boxes from `res.segmentations`). `VARIANT` picks a
-  `current`-engine `variants.VARIANTS` entry (`current` / `current_nofast`) for its `enable_fast`.
-  The pipeline always runs all 9 steps (PaddleOCR included); writes no files.
+  one `res = run_pipeline(PDF_PATH, PAGE_INDEX, enable_fast=…, verbose=True)` run, then one
+  `visualize(stage_key, render_<stage_name>(res), step_outputs=…, original=…, matrix=…)` cell per
+  pipeline step — `visualize` and the generic pixel-drawing plumbing it shares across every stage
+  (`RenderResult`, `draw_paths`/`draw_polys`/`draw_bboxes`, `page_setup`, ...) live in
+  `renderer/notebook.py`; the stage-specific part (*what* to draw) is one `render_<stage_name>`
+  function living next to that stage's own code (`native_text.render_native`,
+  `Vector.vector.render_vectors`, `Vector_Classification.classification.render_layers` /
+  `render_layer_color_buckets` / `render_clustering_steps` / `render_text_candidates`,
+  `OCR.fast_detect.render_fast`, `pipelines._steps.render_regroup` / `render_drawing`,
+  `OCR.radon.render_radon`, `OCR.Paddle_OCR.render_ocr.render_ocr_results`). "Segment (Radon)" and
+  "PaddleOCR" are two separate sections/cells (`segment` and `ocr` are already two distinct
+  `STEP_NAMES`) rather than one combined cell, so the Radon step's own pass/fail/timing is now
+  visible too. `render_text_candidates` reports similarity grouping as a plain original-vs-unique
+  cluster count in its note, not a per-similarity-group image overlay (there can be dozens).
+  `VARIANT` picks a `current`-engine `variants.VARIANTS` entry (`current` / `current_nofast`) for
+  its `enable_fast`. The pipeline always runs all 9 steps (PaddleOCR included); writes no files.
 
 `scripts/rasterize_pdf.py` (outside `rastervec/`, a one-off utility not a pipeline stage): flattens
 every page of a PDF to an image and rebuilds a pure-raster PDF from those images — not currently
@@ -629,7 +659,12 @@ Three things, all following the existing pattern:
    `STEP_NAMES`), or a step in a `sub_pipelines/*.py` block sequence — plus a thin adapter in
    `_steps.py` if it needs one. Add its output to the `PipelineResult` constructor (always-on
    or verbose-only). No registry, no `StageSpec`.
-3. Add a per-step cell to `notebooks/pipeline_stage_visualization.ipynb` reading `res.<field>`.
+3. Add a `render_<stage_name>(res: PipelineResult) -> RenderResult` function next to the stage's
+   own code (reading `res.<field>`, lazily importing `RenderResult`/`renderer.notebook` inside the
+   function body so matplotlib stays out of the pipeline's own import graph), plus a thin cell in
+   `notebooks/pipeline_stage_visualization.ipynb` calling
+   `visualize(stage_key, render_<stage_name>(res), step_outputs=outputs, original=ORIGINAL,
+   matrix=MATRIX)`.
 Also add tests under the matching `tests/rastervec/` subfolder using the synthetic PDF fixtures,
 and new third-party dependencies to `requirements.txt` only when the stage that needs them is
 actually implemented.

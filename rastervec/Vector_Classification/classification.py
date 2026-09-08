@@ -35,9 +35,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from rastervec.config import UNIQUE_CLUSTER_TOLERANCE
+from rastervec.config import SIGNATURE_ROUND_PX, UNIQUE_CLUSTER_TOLERANCE
 from rastervec.helpers.geometry import is_dashed, union_bbox
 from rastervec.logging_setup import get_logger
 from rastervec.models import DrawingVector, Page, VectorPath, VectorRecord
@@ -45,7 +45,16 @@ from rastervec.Vector_Classification import cluster_filters as clf
 from rastervec.Vector_Classification import group_filters as grf  # noqa: F401 -- re-exported
 from rastervec.Vector_Classification import item_filters as itf  # noqa: F401 -- re-exported
 
+if TYPE_CHECKING:
+    from rastervec.pipelines.result import PipelineResult
+    from rastervec.renderer.notebook import RenderResult
+
 _LOG = get_logger("classification")
+
+# notebook-visualization display colors (see the render_* functions at the
+# bottom of this file) -- not classification logic.
+_CLUSTER_STEP_COLORS = ["#2563eb", "#7c3aed", "#ea580c", "#0d9488", "#6b7280", "#c026d3", "#65a30d", "#0284c7"]
+_SIDE_CATEGORY_COLORS = ["#9ca3af", "#f59e0b", "#db2777", "#eab308", "#16a34a"]
 
 CategoryRole = Literal["kept", "dropped", "info"]
 
@@ -184,3 +193,127 @@ def build_drawing_vectors(paths: list[VectorPath]) -> list[DrawingVector]:
 
     _LOG.debug("build_drawing_vectors: %d path(s) -> %d drawing(s)", len(paths), len(result))
     return result
+
+
+# --------------------------------------------------------------------------
+# notebook visualization (pipeline_stage_visualization.ipynb's "classify"
+# sections) -- reads a PipelineResult, never called by the real pipeline.
+# --------------------------------------------------------------------------
+def render_layers(res: "PipelineResult") -> "RenderResult":
+    """Paths grouped by their PDF layer."""
+    from rastervec.renderer.notebook import RenderResult
+
+    pbl = res.paths_by_layer or {}
+    return RenderResult(
+        categories=[
+            {"name": f"layer {name or '(no layer)'} ({len(ps)})", "paths": ps}
+            for name, ps in pbl.items()
+        ],
+        note=f"{len(pbl)} layer(s)",
+    )
+
+
+def render_layer_color_buckets(res: "PipelineResult") -> "RenderResult":
+    """Paths grouped by (layer, color) bucket -- the classification
+    chain's own unit of work."""
+    from rastervec.renderer.notebook import RenderResult
+
+    pblc = res.paths_by_layer_color or {}
+    cats = []
+    for layer, by_color in pblc.items():
+        for color, ps in by_color.items():
+            cats.append({"name": f"{layer or '(no layer)'} / {color} ({len(ps)})", "paths": ps})
+    return RenderResult(categories=cats, note=f"{len(cats)} (layer, color) bucket(s)")
+
+
+def _signature_color(sig) -> str:
+    import colorsys
+    import hashlib
+
+    digest = hashlib.md5(repr(sig).encode()).hexdigest()
+    hue = (int(digest[:8], 16) % 360) / 360.0
+    r, g, b = colorsys.hsv_to_rgb(hue, 0.65, 0.85)
+    return "#%02x%02x%02x" % (round(r * 255), round(g * 255), round(b * 255))
+
+
+def render_clustering_steps(res: "PipelineResult", matrix, original) -> "RenderResult":
+    """The 12-step chain's own per-step categories, one row per (step,
+    named category) across every (layer, color) bucket, plus a "colour by
+    vector type" overlay coloring every surviving path by its
+    `VectorSignature`. `matrix`/`original` come from
+    `renderer.notebook.page_setup()`."""
+    import pymupdf as fitz
+    from PIL import ImageDraw
+
+    from rastervec.renderer.notebook import RenderResult, blank_like
+
+    clustering = res.clustering or {}
+    results = list(clustering.values())[:10]
+    step_labels = [s.label for s in results[0].steps] if results else []
+    cats = []
+    for i, label in enumerate(step_labels):
+        names = []
+        for r in results:
+            for nm in r.steps[i].categories:
+                if nm not in names:
+                    names.append(nm)
+        side_i = 0
+        for nm in names:
+            groups, role = [], "kept"
+            for r in results:
+                cat = r.steps[i].categories.get(nm)
+                if cat is None:
+                    continue
+                role = cat.role
+                groups.extend(g for g in cat.groups if g)
+            if role == "kept":
+                color = _CLUSTER_STEP_COLORS[i % len(_CLUSTER_STEP_COLORS)]
+            else:
+                color = _SIDE_CATEGORY_COLORS[side_i % len(_SIDE_CATEGORY_COLORS)]
+                side_i += 1
+            cats.append({
+                "name": f"step {i + 1} {label} / {nm} [{role}] ({len(groups)} grp)",
+                "color": color,
+                "bboxes": [union_bbox([p.bbox for p in g]) for g in groups],
+            })
+
+    sig_paths = [
+        p for r in results for s in r.steps
+        if s.signature_counts is not None
+        for g in s.categories["kept"].groups for p in g
+    ]
+    if sig_paths:
+        iso, ovl = blank_like(original), original.copy()
+        for im in (iso, ovl):
+            d = ImageDraw.Draw(im)
+            for p in sig_paths:
+                pts = [(pt.x, pt.y) for pt in (fitz.Point(x, y) * matrix for x, y in p.points)]
+                if len(pts) >= 2:
+                    d.line(pts, fill=_signature_color(itf.vector_signature(p, SIGNATURE_ROUND_PX)), width=2)
+        cats.append({"name": "colour by vector type", "isolated": iso, "overlay": ovl})
+
+    return RenderResult(
+        categories=cats,
+        note=f"{len(results)} (layer, color) bucket(s), {len(step_labels)} steps",
+    )
+
+
+def render_text_candidates(res: "PipelineResult") -> "RenderResult":
+    """Surviving text-candidate cluster boxes, plus a simple
+    original-vs-unique cluster count after similarity grouping -- no
+    per-similarity-group image (there can be dozens, and the count is what's
+    actually useful here)."""
+    from rastervec.renderer.notebook import RenderResult
+
+    tc = res.text_clusters or []
+    n_unique = len(res.similarity_groups or []) or len(tc)
+    return RenderResult(
+        categories=[{
+            "name": f"text candidate clusters ({len(tc)})",
+            "color": _CLUSTER_STEP_COLORS[0],
+            "bboxes": [union_bbox([p.bbox for p in c]) for c in tc if c],
+            "paths": [p for c in tc for p in c],
+            "path_color": _CLUSTER_STEP_COLORS[0],
+        }],
+        note=f"{len(tc)} original cluster(s) -> {n_unique} unique cluster(s) after similarity grouping",
+    )

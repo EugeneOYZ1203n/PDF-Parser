@@ -9,6 +9,7 @@ pipeline and Glossary.md for group/cluster terminology.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import pymupdf as fitz
 
@@ -19,6 +20,10 @@ from rastervec.Vector.layer_color_separation import (  # noqa: F401 -- re-export
     separate_by_color,
     separate_by_layer,
 )
+
+if TYPE_CHECKING:
+    from rastervec.pipelines.result import PipelineResult
+    from rastervec.renderer.notebook import RenderResult
 
 _LOG = get_logger("vector")
 
@@ -216,4 +221,25 @@ def _extract_curve(item: tuple, item_index: int, common: dict) -> VectorPath:
         points=[(p.x, p.y) for p in points],
         bbox=bbox,
         **common,
+    )
+
+
+# --------------------------------------------------------------------------
+# notebook visualization (pipeline_stage_visualization.ipynb's "Vector
+# Extraction" section) -- reads a PipelineResult, never called by the real
+# pipeline.
+# --------------------------------------------------------------------------
+def render_vectors(res: "PipelineResult") -> "RenderResult":
+    """One category per distinct `VectorPath.kind`."""
+    from rastervec.renderer.notebook import RenderResult
+
+    paths = res.vector_paths or []
+    kinds = sorted({p.kind for p in paths})
+    return RenderResult(
+        categories=[
+            {"name": f"kind {k!r} ({sum(p.kind == k for p in paths)})",
+             "paths": [p for p in paths if p.kind == k]}
+            for k in kinds
+        ],
+        note=f"{len(paths)} paths, kinds={kinds}",
     )

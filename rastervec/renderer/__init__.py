@@ -12,6 +12,12 @@ Split by output concern:
 - `_shapes.py` -- `replay_drawing_paths` (per-drawing composite path replay
   with the even_odd fill rule, so filled glyph counters render as holes)
   and `path_color_hex`, shared by png/pdf.
+- `notebook.py` -- notebook-only display plumbing (`RenderResult`,
+  `visualize`, `draw_paths`/`draw_polys`/`draw_bboxes`, ...) for
+  `pipeline_stage_visualization.ipynb`. Deliberately **not** re-exported
+  here -- it imports matplotlib, and this package is imported by the real
+  pipeline itself; import it directly
+  (`from rastervec.renderer.notebook import ...`) instead.
 
 Module-level functions, no `Renderer` class -- import what you need
 straight from `rastervec.renderer`.

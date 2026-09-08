@@ -10,6 +10,7 @@ wins.
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 import numpy as np
 from PIL import Image
@@ -18,12 +19,17 @@ from rastervec.config import MIN_RENDER_SIDE_PX
 from rastervec.helpers.geometry import PDF_POINTS_PER_INCH, union_bbox
 from rastervec.models import OcrWord, Page, TextVectorResult, VectorPath
 from rastervec.OCR.Paddle_OCR.ocr_backend import OcrBackend, OcrBox, PaddleRecBackend
-from rastervec.pipelines.sub_pipelines.radon import ClusterSegmentation, segment_cluster
+from rastervec.OCR.radon import ClusterSegmentation, segment_cluster
 from rastervec.renderer import (
     cluster_frame_size,
     pixel_to_page_bbox,
+    render_reconstructed_page,
     render_vector_cluster,
 )
+
+if TYPE_CHECKING:
+    from rastervec.pipelines.result import PipelineResult
+    from rastervec.renderer.notebook import RenderResult
 
 
 def render_cluster_for_ocr(
@@ -130,3 +136,33 @@ class RenderOCR:
         ys = [y for _t, _c, poly in found for _x, y in poly]
         corners = [(min(xs), min(ys)), (max(xs), min(ys)), (max(xs), max(ys)), (min(xs), max(ys))]
         return text, confidence, corners
+
+
+# --------------------------------------------------------------------------
+# notebook visualization (pipeline_stage_visualization.ipynb's "PaddleOCR"
+# section) -- reads a PipelineResult, never called by the real pipeline.
+# --------------------------------------------------------------------------
+_PASSED_COLOR = "#059669"
+_FAILED_COLOR = "#dc2626"
+_WORD_BOX_COLOR = "#0891b2"
+
+
+def render_ocr_results(res: "PipelineResult", *, zoom: float = 1.0) -> "RenderResult":
+    """Passed (non-blank) vs failed (blank) readings, plus every
+    `OcrWord`'s own bbox."""
+    from rastervec.renderer.notebook import RenderResult
+
+    cor = res.cluster_ocr_results or []
+    passed = [r for r in cor if r.resolved.text.strip()]
+    failed = [r for r in cor if not r.resolved.text.strip()]
+    return RenderResult(categories=[
+        {"name": f"passed ({len(passed)})", "color": _PASSED_COLOR,
+         "bboxes": [r.resolved.bbox for r in passed],
+         "isolated": render_reconstructed_page(
+             res.page.meta, ocr_results=[r.resolved for r in passed], zoom=zoom)},
+        {"name": f"failed ({len(failed)})", "color": _FAILED_COLOR,
+         "bboxes": [r.resolved.bbox for r in failed],
+         "paths": [p for r in failed for p in r.cluster], "path_color": _FAILED_COLOR},
+        {"name": "OCR word boxes", "color": _WORD_BOX_COLOR,
+         "bboxes": [w.bbox for r in cor for w in (r.resolved.words or [])]},
+    ])

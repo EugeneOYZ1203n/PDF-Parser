@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -21,11 +22,17 @@ from rastervec.models import DrawingVector, Page, VectorPath
 from rastervec.native_text import extract_native_text as _extract_native_text
 from rastervec.OCR.fast_detect import FastDetector
 from rastervec.pipelines.result import FastPageResult
-from rastervec.renderer import render_page_paths
+from rastervec.renderer import render_page_paths, render_reconstructed_page
 from rastervec.Vector.vector import extract_vectors as _extract_vectors
 from rastervec.Vector_Classification.classification import build_drawing_vectors
 
+if TYPE_CHECKING:
+    from rastervec.pipelines.result import PipelineResult
+    from rastervec.renderer.notebook import RenderResult
+
 log = get_logger("pipelines.steps")
+
+_SPATIAL_REGROUP_COLOR = "#8b5cf6"
 
 # re-exported so the pipeline files read `extract_native_text(page)` etc.
 extract_native_text = _extract_native_text
@@ -168,6 +175,27 @@ def spatial_regroup(
     return RegroupResult(regrouped, regrouped_similarity_id)
 
 
+def render_regroup(res: "PipelineResult") -> "RenderResult":
+    """Notebook visualization for the spatial-regroup step: regrouped
+    cluster boxes/paths."""
+    from rastervec.renderer.notebook import RenderResult
+
+    rg = res.regrouped_clusters or []
+    return RenderResult(
+        categories=[{
+            "name": f"regrouped clusters ({len(rg)})",
+            "color": _SPATIAL_REGROUP_COLOR,
+            "bboxes": [union_bbox([p.bbox for p in c]) for c in rg if c],
+            "paths": [p for c in rg for p in c],
+            "path_color": _SPATIAL_REGROUP_COLOR,
+        }],
+        note=(
+            f"{len(res.fast_passed or [])} FAST-passed -> {len(rg)} regrouped "
+            f"(union-bbox tol {SPATIAL_REGROUP_TOLERANCE_PX}pt, within one (layer, color) bucket)"
+        ),
+    )
+
+
 # --------------------------------------------------------------------------
 # drawing output
 # --------------------------------------------------------------------------
@@ -186,3 +214,22 @@ def build_drawing_output(
         paths.extend(cluster)
     paths.sort(key=lambda p: (p.seq, p.item_index))
     return build_drawing_vectors(paths)
+
+
+def render_drawing(res: "PipelineResult", *, zoom: float = 1.0) -> "RenderResult":
+    """Notebook visualization for the drawing-vectors output: dashed vs
+    solid bboxes, plus a full page reconstruction."""
+    from rastervec.renderer.notebook import DEFAULT_PATH_COLOR, RenderResult
+
+    dv = res.drawing_vectors or []
+    dashed = [d for d in dv if d.dashed]
+    solid = [d for d in dv if not d.dashed]
+    recon = render_reconstructed_page(res.page.meta, drawing_vectors=dv, zoom=zoom)
+    return RenderResult(
+        categories=[
+            {"name": f"dashed ({len(dashed)})", "color": DEFAULT_PATH_COLOR, "bboxes": [d.bbox for d in dashed]},
+            {"name": f"solid ({len(solid)})", "color": DEFAULT_PATH_COLOR, "bboxes": [d.bbox for d in solid]},
+            {"name": "full reconstruction", "isolated": recon, "overlay": recon},
+        ],
+        note=f"{len(dv)} drawing vector(s)",
+    )

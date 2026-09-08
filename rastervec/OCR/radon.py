@@ -25,8 +25,10 @@ higher-confidence reading.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
+from PIL import ImageDraw
 from skimage.transform import SimilarityTransform, radon, resize, warp
 
 from rastervec.config import (
@@ -35,6 +37,11 @@ from rastervec.config import (
     RADON_MAX_RENDER_SIDE_PX,
     RADON_SKEW_LIMIT_DEG,
 )
+from rastervec.renderer import render_vector_cluster
+
+if TYPE_CHECKING:
+    from rastervec.pipelines.result import PipelineResult
+    from rastervec.renderer.notebook import RenderResult
 
 # A pixel darker than this counts as glyph ink (0 = black, 255 = white).
 # Kept identical to the old ink_segment.INK_LEVEL so ported gap rules are
@@ -185,23 +192,30 @@ def line_spacing(profile: np.ndarray) -> float:
 def split_words(line_gray: np.ndarray, *, gap_factor: float = 1.9,
                 min_gap: float = 2.0, pad: int = 1) -> list[tuple[int, int, int, int]]:
     """`(x0, y0, x1, y1)` pixel boxes, one per word, within one deskewed
-    line crop. y-extent is the crop's full ink height; the column profile
-    is split on the ported median-gap rule."""
+    line crop. Both x- and y-extent are each word's own tight ink bbox:
+    the column profile is split on the ported median-gap rule first, then
+    each word's y-extent comes from ink within just that word's own
+    column slice -- not the whole line -- so a short word doesn't inherit
+    an ascender/descender that only exists in a different word on the
+    same line."""
     if line_gray.ndim != 2 or line_gray.size == 0:
         return []
     h, w = line_gray.shape
     ink = to_ink(line_gray)
-    row_has_ink = ink.any(axis=1)
-    if not row_has_ink.any():
+    if not ink.any():
         return []
-    ys = np.flatnonzero(row_has_ink)
-    y0, y1 = int(ys[0]), int(ys[-1]) + 1
-    return [
-        (max(0, sx0 - pad), max(0, y0 - pad), min(w, sx1 + 1 + pad), min(h, y1 + pad))
-        for sx0, sx1 in _split_on_gaps(
-            ink.any(axis=0), gap_factor=gap_factor, min_gap=min_gap
-        )
-    ]
+    boxes: list[tuple[int, int, int, int]] = []
+    for sx0, sx1 in _split_on_gaps(ink.any(axis=0), gap_factor=gap_factor, min_gap=min_gap):
+        word_rows = ink[:, sx0:sx1 + 1].any(axis=1)
+        if not word_rows.any():
+            continue  # defensive; every column span has ink by construction
+        ys = np.flatnonzero(word_rows)
+        wy0, wy1 = int(ys[0]), int(ys[-1]) + 1
+        boxes.append((
+            max(0, sx0 - pad), max(0, wy0 - pad),
+            min(w, sx1 + 1 + pad), min(h, wy1 + pad),
+        ))
+    return boxes
 
 
 # --------------------------------------------------------------------------
@@ -309,6 +323,42 @@ def segment_cluster(image, dpi_used: int = 300, *, verbose: bool = False) -> Clu
         render_dpi=dpi_used,
         deskewed_gray=deskewed if verbose else None,
         profile=prof if verbose else None,
+    )
+
+
+# --------------------------------------------------------------------------
+# notebook visualization (pipeline_stage_visualization.ipynb's "Segment
+# (Radon)" section) -- reads a PipelineResult, never called by the real
+# pipeline.
+# --------------------------------------------------------------------------
+def render_radon(res: "PipelineResult") -> "RenderResult":
+    """One row per segmented cluster: re-render that cluster's ORIGINAL
+    (pre-deskew) image via renderer.render_vector_cluster and draw its
+    real seg.word_corners polygons on top -- word_corners already live in
+    exactly that image's own pixel space (ClusterSegmentation's own
+    contract), so no extra transform is needed."""
+    from rastervec.renderer.notebook import RenderResult
+
+    clusters = res.regrouped_clusters or []
+    segs = res.segmentations or []
+    cor = res.cluster_ocr_results or []
+    rows = []
+    for cluster, seg, ocr in zip(clusters, segs, cor):
+        if not seg.word_crops:
+            continue
+        base = render_vector_cluster(cluster, seg.render_dpi).convert("RGB")
+        d = ImageDraw.Draw(base)
+        for corners in seg.word_corners:
+            d.polygon(corners, outline="#dc2626", width=1)
+        caption = (
+            f"skew={seg.skew_deg:+.1f}deg  spacing={seg.line_spacing_px:.0f}px  "
+            f"{len(seg.word_crops)} word(s)  ->  {(ocr.resolved.text or '(blank)')[:40]}"
+        )
+        rows.append({"name": caption, "isolated": base, "overlay": base})
+
+    return RenderResult(
+        categories=rows[:8],
+        note=f"{sum(1 for s in segs if s.word_crops)} segmented cluster(s) with word boxes",
     )
 
 

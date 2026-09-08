@@ -4,7 +4,7 @@ import pytest
 
 from rastervec.models import TextVectorResult, VectorPath
 from rastervec.pipelines.sub_pipelines import ocr as ocr_mod
-from rastervec.pipelines.sub_pipelines.radon import ClusterSegmentation
+from rastervec.OCR.radon import ClusterSegmentation
 
 
 class _FakePage:

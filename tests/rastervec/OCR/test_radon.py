@@ -5,7 +5,7 @@ import pytest
 from PIL import Image, ImageDraw
 from skimage.transform import rotate as sk_rotate
 
-from rastervec.pipelines.sub_pipelines import radon
+from rastervec.OCR import radon
 
 
 def _text_image(lines: int = 3, w: int = 240, line_h: int = 16, gap: int = 14) -> np.ndarray:
@@ -112,3 +112,28 @@ def test_rotation_inverse_round_trips():
     pts = np.array([(0.0, 0.0), (79.0, 0.0), (40.0, 25.0)])
     back = inverse(forward(pts))
     assert np.allclose(back, pts, atol=1e-6)
+
+
+def test_split_words_gives_each_word_its_own_tight_y_extent():
+    """Two words on one baseline with different glyph heights (a short
+    word, then a tall one) must get different y-extents -- not the whole
+    line's shared ink bbox repeated for both words. Each "word" is two
+    small ink runs (like _text_image's dashes) with a small intra-word gap
+    and a wide inter-word gap, since _split_on_gaps's median-gap rule can't
+    split apart a column profile with only one gap in it (as a single solid
+    rectangle per word would produce)."""
+    w, h = 200, 40
+    img = Image.new("L", (w, h), 255)
+    d = ImageDraw.Draw(img)
+    baseline = 30
+    # short word: two ticks, no ascender
+    d.rectangle([10, baseline - 6, 16, baseline], fill=0)
+    d.rectangle([20, baseline - 6, 26, baseline], fill=0)
+    # tall word: two ticks, with an ascender
+    d.rectangle([80, baseline - 20, 86, baseline], fill=0)
+    d.rectangle([90, baseline - 20, 96, baseline], fill=0)
+    boxes = radon.split_words(np.asarray(img))
+    assert len(boxes) == 2
+    (_, short_y0, _, short_y1), (_, tall_y0, _, tall_y1) = boxes
+    assert (short_y0, short_y1) != (tall_y0, tall_y1)
+    assert (short_y1 - short_y0) < (tall_y1 - tall_y0)

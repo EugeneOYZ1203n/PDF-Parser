@@ -32,7 +32,7 @@ if TYPE_CHECKING:
         VectorRecord,
     )
     from rastervec.output_types import NativePDFElements
-    from rastervec.pipelines.sub_pipelines.radon import ClusterSegmentation
+    from rastervec.OCR.radon import ClusterSegmentation
     from rastervec.Vector_Classification.classification import StepResult
 
 # (layer, color) -- one Vector.separate_by_color() bucket.

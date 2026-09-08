@@ -6,14 +6,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 from itertools import groupby
 from math import atan2, degrees, hypot
+from typing import TYPE_CHECKING
 
 import pymupdf as fitz
 
 from rastervec.helpers.geometry import make_oriented_quad
 from rastervec.logging_setup import get_logger
 from rastervec.models import Page, TextWord
+from rastervec.renderer import render_reconstructed_page
+
+if TYPE_CHECKING:
+    from rastervec.pipelines.result import PipelineResult
+    from rastervec.renderer.notebook import RenderResult
 
 _LOG = get_logger("native")
+
+_NATIVE_WORD_COLOR = "#2563eb"
 
 # A word overlapping a span by less than this fraction of the word's own
 # area is treated as unmatched (garbage geometry / stray span) rather than
@@ -202,3 +210,22 @@ def _to_word(
         orientation_source="text-span", page_index=page_index, seq=seq,
         wmode=span.wmode, block_no=block_no, line_no=line_no, word_no=word_no,
     )
+
+
+# --------------------------------------------------------------------------
+# notebook visualization (pipeline_stage_visualization.ipynb's "Native
+# Text" section) -- reads a PipelineResult, never called by the real
+# pipeline.
+# --------------------------------------------------------------------------
+def render_native(res: "PipelineResult", *, zoom: float = 1.0) -> "RenderResult":
+    """Word quads over the page, plus a full page reconstruction built
+    from `native_words` alone."""
+    from rastervec.renderer.notebook import RenderResult
+
+    words = res.native_words or []
+    return RenderResult(categories=[{
+        "name": f"text words ({len(words)})",
+        "color": _NATIVE_WORD_COLOR,
+        "polys": [w.quad for w in words],
+        "isolated": render_reconstructed_page(res.page.meta, native_words=words, zoom=zoom),
+    }])

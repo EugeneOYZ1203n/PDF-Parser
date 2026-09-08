@@ -1,7 +1,7 @@
 """The OCR recognition backend behind `RenderOCR`.
 
 Text *detection* is not PaddleOCR's job in this pipeline -- the Radon
-segmentation step (`pipelines/sub_pipelines/radon.py`) deskews each cluster
+segmentation step (`OCR/radon.py`) deskews each cluster
 render and splits it into word crops. A backend only has to *recognise*
 those pre-segmented crops, so the whole `OcrBackend` contract is one
 method: `recognize_crops(crops) -> list[OcrBox]`, one `OcrBox` per input

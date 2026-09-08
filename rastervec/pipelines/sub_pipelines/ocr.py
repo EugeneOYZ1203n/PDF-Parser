@@ -18,7 +18,7 @@ from rastervec.logging_setup import get_logger
 from rastervec.models import ClusterOcrResult, Page, TextVectorResult, VectorPath
 from rastervec.OCR.Paddle_OCR.ocr_backend import OcrBackend
 from rastervec.OCR.Paddle_OCR.render_ocr import RenderOCR, render_cluster_for_ocr
-from rastervec.pipelines.sub_pipelines.radon import ClusterSegmentation, segment_cluster
+from rastervec.OCR.radon import ClusterSegmentation, segment_cluster
 
 _LOG = get_logger("ocr")
 

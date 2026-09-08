@@ -138,7 +138,7 @@ OCR_VERSION = "PP-OCRv5"
 OCR_REC_MODEL = f"{OCR_VERSION}_mobile_rec"
 
 # ======================================================================
-# Radon text segmentation (pipelines/sub_pipelines/radon.py)
+# Radon text segmentation (OCR/radon.py)
 # ======================================================================
 
 # Fine skew sweep half-range (degrees) around the coarse Radon peak.

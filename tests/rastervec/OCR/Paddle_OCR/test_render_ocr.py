@@ -8,7 +8,7 @@ import pytest
 from rastervec.models import VectorPath
 from rastervec.OCR.Paddle_OCR.ocr_backend import OcrBox
 from rastervec.OCR.Paddle_OCR.render_ocr import RenderOCR, render_cluster_for_ocr
-from rastervec.pipelines.sub_pipelines.radon import ClusterSegmentation
+from rastervec.OCR.radon import ClusterSegmentation
 
 _RUN_OCR_TESTS = os.environ.get("RASTERVEC_RUN_OCR_TESTS") == "1"
 
