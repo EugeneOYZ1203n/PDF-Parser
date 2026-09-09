@@ -5,14 +5,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import groupby
-from math import atan2, degrees, hypot
 from typing import TYPE_CHECKING
 
 import pymupdf as fitz
 
-from rastervec.helpers.geometry import make_oriented_quad
+from rastervec.helpers.geometry import compute_origin
 from rastervec.logging_setup import get_logger
-from rastervec.models import Page, TextWord
+from rastervec.models import Page, Text
 from rastervec.renderer import render_reconstructed_page
 
 if TYPE_CHECKING:
@@ -31,9 +30,7 @@ _MIN_SPAN_OVERLAP = 0.10
 
 @dataclass
 class _Span:
-    """One `get_text("dict")` span, flattened. Field names match `TextWord`
-    so `_to_word` can copy them straight across (no `dir`->`direction` /
-    `size`->`font_size` silent renames)."""
+    """One `get_text("dict")` span, flattened."""
 
     bbox: "fitz.Rect"
     text: str
@@ -46,11 +43,12 @@ class _Span:
     ascender: float | None
     descender: float | None
     wmode: int
+    raw: dict
 
 
-def extract_native_text(page: Page) -> list[TextWord]:
-    """One `TextWord` per `get_text("words")` word, in reading order,
-    with font/rotation metadata joined from the best-overlapping
+def extract_native_text(page: Page) -> list[Text]:
+    """One `Text` (source="native") per `get_text("words")` word, in reading
+    order, with font/rotation metadata joined from the best-overlapping
     `get_text("dict")` span."""
     fitz_page = page.fitz_page
     page_index = page.meta.index
@@ -61,8 +59,9 @@ def extract_native_text(page: Page) -> list[TextWord]:
         "page %d: %d word(s), %d span(s)", page_index, len(words), len(spans),
     )
 
-    result: list[TextWord] = []
-    for seq, (x0, y0, x1, y1, text, block_no, line_no, word_no) in enumerate(words):
+    result: list[Text] = []
+    for seq, raw_word in enumerate(words):
+        x0, y0, x1, y1, text, block_no, line_no, word_no = raw_word
         bbox = fitz.Rect(x0, y0, x1, y1)
         span = _match_word_to_span(bbox, spans)
         if span is None:
@@ -71,7 +70,7 @@ def extract_native_text(page: Page) -> list[TextWord]:
                 page_index, text, bbox,
             )
         result.append(
-            _to_word(bbox, text, span, page_index, seq, block_no, line_no, word_no)
+            _to_word(bbox, text, span, page_index, seq, block_no, line_no, word_no, raw_word)
         )
     return result
 
@@ -104,6 +103,7 @@ def _extract_spans(fitz_page: "fitz.Page") -> list[_Span]:
                         ascender=span.get("ascender", None),
                         descender=span.get("descender", None),
                         wmode=line_wmode,
+                        raw=span,
                     )
                 )
     return spans
@@ -141,40 +141,6 @@ def _match_word_to_span(bbox: "fitz.Rect", spans: list[_Span]) -> "_Span | None"
     return best
 
 
-def _oriented_quad(bbox: "fitz.Rect", dx: float, dy: float) -> tuple:
-    """(ul, ur, lr, ll) as (x, y) tuples, oriented along (dx, dy)."""
-    return make_oriented_quad((bbox.x0, bbox.y0, bbox.x1, bbox.y1), dx, dy)
-
-
-def _word_origin(
-    bbox: "fitz.Rect", span_origin: tuple[float, float] | None,
-    dx: float, dy: float,
-) -> tuple[float, float] | None:
-    """A per-word insertion point on the span's baseline.
-
-    `get_text('dict')`'s span-level `origin` is the baseline start of
-    the *whole* span (which can hold several words). This keeps the
-    span's baseline (its perpendicular offset from the direction line)
-    but moves along the direction to this word's own leading edge, using
-    the same along/normal projection `make_oriented_quad` uses -- so
-    it's correct for rotated/vertical text, not just horizontal."""
-    if span_origin is None:
-        return None
-    length = hypot(dx, dy)
-    if length < 1e-9:
-        dx, dy = 1.0, 0.0
-        length = 1.0
-    dx, dy = dx / length, dy / length
-    nx, ny = -dy, dx
-    corners = [
-        (bbox.x0, bbox.y0), (bbox.x1, bbox.y0),
-        (bbox.x1, bbox.y1), (bbox.x0, bbox.y1),
-    ]
-    along_min = min(x * dx + y * dy for x, y in corners)
-    normal_offset = span_origin[0] * nx + span_origin[1] * ny
-    return (along_min * dx + normal_offset * nx, along_min * dy + normal_offset * ny)
-
-
 def _to_word(
     bbox: "fitz.Rect",
     text: str,
@@ -184,31 +150,29 @@ def _to_word(
     block_no: int,
     line_no: int,
     word_no: int,
-) -> TextWord:
+    raw_word: tuple,
+) -> Text:
     bbox_tuple = (bbox.x0, bbox.y0, bbox.x1, bbox.y1)
     if span is None:
-        x0, y0, x1, y1 = bbox_tuple
-        return TextWord(
+        return Text(
             text=text, bbox=bbox_tuple,
-            quad=((x0, y0), (x1, y0), (x1, y1), (x0, y1)),
-            angle=0.0, direction=(1.0, 0.0), font="", font_size=0.0,
-            color=None, flags=0, origin=None, ascender=None, descender=None,
-            orientation_source="fallback", page_index=page_index, seq=seq,
-            wmode=0, block_no=block_no, line_no=line_no, word_no=word_no,
+            direction=(1.0, 0.0), origin=compute_origin(bbox_tuple, (1.0, 0.0)),
+            font="", font_size=0.0, color=None, flags=0,
+            ascender=None, descender=None, wmode=0,
+            block_no=block_no, line_no=line_no, word_no=word_no,
+            page_index=page_index, seqno=seq, source="native",
+            raw_word=raw_word, raw_span=None,
         )
 
     dx, dy = span.direction
-    return TextWord(
+    return Text(
         text=text, bbox=bbox_tuple,
-        quad=_oriented_quad(bbox, dx, dy),
-        angle=degrees(atan2(dy, dx)),
-        direction=(dx, dy),
+        direction=(dx, dy), origin=compute_origin(bbox_tuple, (dx, dy)),
         font=span.font, font_size=span.font_size, color=span.color,
-        flags=span.flags,
-        origin=_word_origin(bbox, span.origin, dx, dy),
-        ascender=span.ascender, descender=span.descender,
-        orientation_source="text-span", page_index=page_index, seq=seq,
+        flags=span.flags, ascender=span.ascender, descender=span.descender,
         wmode=span.wmode, block_no=block_no, line_no=line_no, word_no=word_no,
+        page_index=page_index, seqno=seq, source="native",
+        raw_word=raw_word, raw_span=span.raw,
     )
 
 
@@ -226,6 +190,6 @@ def render_native(res: "PipelineResult", *, zoom: float = 1.0) -> "RenderResult"
     return RenderResult(categories=[{
         "name": f"text words ({len(words)})",
         "color": _NATIVE_WORD_COLOR,
-        "polys": [w.quad for w in words],
+        "polys": [w.quad() for w in words],
         "isolated": render_reconstructed_page(res.page.meta, native_words=words, zoom=zoom),
     }])

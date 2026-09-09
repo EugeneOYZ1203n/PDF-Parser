@@ -1,7 +1,7 @@
 """Adapter: runs archive's legacy pipeline (`raster_parser.main_pipeline_extract.
 extract`) completely unmodified and reshapes its `NativePDFElements` output into
-rastervec's own `ClusterOcrResult` shape so `metrics.evaluate_metrics` can score
-it on the exact same metrics as the current pipeline -- see
+rastervec's own `Text` shape so `metrics.evaluate_metrics` can score it on the
+exact same metrics as the current pipeline -- see
 `rastervec/notebooks/benchmark_vector_classification.ipynb`.
 
 Archive is a plain sibling folder under the repo root (not an installed
@@ -25,8 +25,9 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from rastervec.helpers.geometry import compute_origin
 from rastervec.logging_setup import get_logger
-from rastervec.models import ClusterOcrResult, TextVectorResult
+from rastervec.models import Text
 
 _LOG = get_logger("eval.legacy_adapter")
 
@@ -98,28 +99,29 @@ def run_archive_pipeline(
         raise
 
 
-def to_cluster_ocr_results(
+def to_texts(
     elements: "_ArchiveNativePDFElements", page_index: int = 0,
-) -> list[ClusterOcrResult]:
-    """Wraps each archive `TextDTO` word as a rastervec `ClusterOcrResult` so
-    `evaluate_metrics` scores it identically to the current pipeline's own
-    OCR readings. `cluster`/`paths` are left empty -- archive's `TextDTO`
-    carries no back-reference to source vector geometry, and
-    `evaluate_metrics` only ever reads `ClusterOcrResult.resolved` for
-    scoring, never `.cluster`. `confidence` defaults to 1.0 since archive's
-    `TextDTO` doesn't carry one."""
-    results: list[ClusterOcrResult] = []
-    for word in elements.words:
-        resolved = TextVectorResult(
-            paths=[],
-            text=word.word,
-            confidence=1.0,
-            bbox=(word.x0, word.y0, word.x1, word.y1),
-            ocr_bbox=None,
-            rotation_used=word.rotate,
-            page_index=page_index,
-        )
-        results.append(ClusterOcrResult(cluster=[], resolved=resolved, ocr_seconds=0.0))
+) -> list[Text]:
+    """Wraps each archive `TextDTO` word as a rastervec `Text` (source=
+    "ocr") so `evaluate_metrics` scores it identically to the current
+    pipeline's own OCR readings. `confidence` defaults to 1.0 since
+    archive's `TextDTO` doesn't carry one; `direction` is derived from
+    `rotate` (a quarter-turn int, archive's own precision)."""
+    import math
+
+    results: list[Text] = []
+    for seq, word in enumerate(elements.words):
+        bbox = (word.x0, word.y0, word.x1, word.y1)
+        angle = math.radians(word.rotate)
+        direction = (math.cos(angle), math.sin(angle))
+        results.append(Text(
+            text=word.word, bbox=bbox, direction=direction,
+            origin=compute_origin(bbox, direction),
+            font="", font_size=0.0, color=None, flags=0,
+            ascender=None, descender=None, wmode=0,
+            block_no=0, line_no=0, word_no=0,
+            page_index=page_index, seqno=seq, confidence=1.0, source="ocr",
+        ))
     return results
 
 

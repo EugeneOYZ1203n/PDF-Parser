@@ -535,32 +535,33 @@ def _fast_mask_overlay(base: "Image.Image", mask: "np.ndarray") -> "Image.Image"
 
 
 def render_fast(res: "PipelineResult", *, enable_fast: bool) -> "RenderResult":
-    """The whole-page render, its detection heatmap, and passed/dropped
-    cluster boxes. `enable_fast=False` and a page with no vector paths
-    both render as a note only (no pixels to show)."""
+    """The whole-page render, its detection heatmap, and passed (kept as
+    `UniqueSegment`s)/dropped (folded into drawing vectors) segment boxes.
+    `enable_fast=False` and a page with no segments both render as a note
+    only (no pixels to show)."""
     from rastervec.renderer.notebook import RenderResult
 
     fr = res.fast_result
+    uniques = res.unique_segments or []
+    dropped_vectors = res.fast_dropped_vectors or []
     if not enable_fast:
-        n = len(res.fast_passed or [])
         return RenderResult(note=(
-            f"ENABLE_FAST=False -- pass-through, all {n} text candidate(s) "
-            "kept, none dropped, no render/detection"
+            f"ENABLE_FAST=False -- pass-through, all {len(uniques)} unique "
+            "segment(s) kept, none dropped, no render/detection"
         ))
     if fr is None or fr.page_image is None:
-        return RenderResult(note="(no vector paths on this page)")
+        return RenderResult(note="(no segments on this page)")
 
     render = fr.page_image.convert("RGB")
     heat = _fast_mask_overlay(render, fr.page_mask) if fr.page_mask is not None else render
-    passed, dropped = res.fast_passed or [], res.fast_dropped or []
     return RenderResult(
         categories=[
             {"name": "FAST render", "isolated": render, "overlay": render},
             {"name": "detection heatmap", "isolated": heat, "overlay": heat},
-            {"name": f"passed clusters ({len(passed)})", "color": _PASSED_COLOR,
-             "bboxes": [union_bbox([p.bbox for p in c]) for c in passed if c]},
-            {"name": f"dropped clusters ({len(dropped)})", "color": _DROPPED_COLOR,
-             "bboxes": [union_bbox([p.bbox for p in c]) for c in dropped if c]},
+            {"name": f"passed unique segments ({len(uniques)})", "color": _PASSED_COLOR,
+             "bboxes": [union_bbox([v.bbox for v in u.vectors]) for u in uniques if u.vectors]},
+            {"name": f"dropped vectors ({len(dropped_vectors)})", "color": _DROPPED_COLOR,
+             "bboxes": [v.bbox for v in dropped_vectors]},
         ],
         note=f"detect_seconds = {fr.detect_seconds}",
     )

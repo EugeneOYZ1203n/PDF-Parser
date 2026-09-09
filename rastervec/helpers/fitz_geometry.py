@@ -77,3 +77,30 @@ def matrix_scale(matrix: fitz.Matrix) -> tuple[float, float]:
     sx = sqrt(matrix.a * matrix.a + matrix.b * matrix.b)
     sy = sqrt(matrix.c * matrix.c + matrix.d * matrix.d)
     return (sx, sy)
+
+
+def plain_item(item: tuple) -> tuple:
+    """Convert one raw `get_drawings()['items']` tuple (carrying fitz
+    `Point`/`Rect`/`Quad` objects) into the same `(kind, *geometry)` shape
+    with plain float tuples instead, so `models.Vector.items` stays
+    fitz-free while still perfectly mirroring PyMuPDF's own item structure
+    -- no VectorPath-style decomposition, just a type conversion of the
+    same tuple. Any trailing elements past the geometry (e.g. a "re" item's
+    orientation flag on newer PyMuPDF) pass through unchanged."""
+    kind = item[0]
+    if kind == "l":
+        p1, p2 = fitz.Point(item[1]), fitz.Point(item[2])
+        return (kind, (p1.x, p1.y), (p2.x, p2.y))
+    if kind == "re":
+        rect = fitz.Rect(item[1])
+        return (kind, (rect.x0, rect.y0, rect.x1, rect.y1), *item[2:])
+    if kind == "qu":
+        quad = fitz.Quad(item[1])
+        return (
+            kind,
+            ((quad.ul.x, quad.ul.y), (quad.ur.x, quad.ur.y), (quad.lr.x, quad.lr.y), (quad.ll.x, quad.ll.y)),
+        )
+    if kind == "c":
+        points = [fitz.Point(p) for p in item[1:5]]
+        return (kind, *[(p.x, p.y) for p in points], *item[5:])
+    return item

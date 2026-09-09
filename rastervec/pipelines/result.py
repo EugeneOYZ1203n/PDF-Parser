@@ -22,17 +22,7 @@ if TYPE_CHECKING:
     import numpy as np
     from PIL import Image
 
-    from rastervec.models import (
-        ClusterOcrResult,
-        DrawingVector,
-        Page,
-        TextVectorResult,
-        TextWord,
-        VectorPath,
-        VectorRecord,
-    )
-    from rastervec.output_types import NativePDFElements
-    from rastervec.OCR.radon import ClusterSegmentation
+    from rastervec.models import Page, Segment, SegmentMeta, Text, UniqueSegment, Vector
     from rastervec.Vector_Classification.classification import StepResult
 
 # (layer, color) -- one Vector.separate_by_color() bucket.
@@ -42,8 +32,8 @@ GroupKey = "tuple[str, tuple]"
 @dataclass
 class ClusteringStageResult:
     """One (layer, color) bucket's Vector Classification result: `steps` is
-    exactly `classify_bucket()` / the old `classification.cluster()`'s
-    return value. `steps[-1].categories["kept"]` is the final surviving
+    exactly `classify_bucket()` / `classification.cluster()`'s return
+    value. `steps[-1].categories["kept"]` is the final surviving (tiered)
     clusters; every `role="dropped"` category across every step is drawing
     content."""
 
@@ -53,14 +43,14 @@ class ClusteringStageResult:
 @dataclass
 class FastPageResult:
     """FAST text detection's whole-page result (see
-    `pipelines/_steps.detect_text_fast`)."""
+    `pipelines/_steps.detect_text_fast`). `scores` is keyed by a segment
+    similarity group's own index into that step's `groups` list (the
+    group's combined, min-across-members score)."""
 
     page_image: "Image.Image | None"
     page_mask: "np.ndarray | None"
     detect_seconds: float | None
-    scores: dict
-    passed: "list[list[VectorPath]]"
-    dropped: "list[list[VectorPath]]"
+    scores: dict[int, float]
 
 
 @dataclass
@@ -77,31 +67,27 @@ class StepOutcome:
 class PipelineResult:
     # ---- always populated -------------------------------------------------
     page: "Page"  # `page.fitz_page` is None -- use `open_page()` for a live one
-    native_words: "list[TextWord]"
-    drawing_vectors: "list[DrawingVector]"
-    ocr_results: "list[TextVectorResult]"
-    cluster_ocr_results: "list[ClusterOcrResult]"
-    text_clusters: "list[list[VectorPath]]"
-    regrouped_clusters: "list[list[VectorPath]]"
-    clustering: dict
-    cluster_groups: dict
-    fast_dropped: "list[list[VectorPath]]"
-    ocr_failed: "list[list[VectorPath]]"
+    texts: "list[Text]"  # native + restored OCR text, flat
+    vectors: "list[Vector]"  # drawing content: classification + FAST drops, flat
     step_durations: dict
     engine: str  # "current" | "legacy"
 
     # ---- verbose only (None unless verbose=True) -------------------------
-    vector_paths: "list[VectorPath] | None" = None
-    vector_records: "list[VectorRecord] | None" = None
-    paths_by_layer: dict | None = None
-    paths_by_layer_color: dict | None = None
-    text_candidate_records: "list[VectorRecord] | None" = None
-    similarity_groups: "list[list[list[VectorPath]]] | None" = None
-    cluster_similarity_id: dict | None = None
-    fast_passed: "list[list[VectorPath]] | None" = None
+    native_words: "list[Text] | None" = None
+    vectors_raw: "list[Vector] | None" = None
+    vectors_by_layer: dict | None = None
+    vectors_by_layer_color: dict | None = None
+    text_clusters: "list[list[list[Vector]]] | None" = None
+    clustering: dict | None = None
+    classification_dropped: "list[Vector] | None" = None
+    segments: "list[Segment] | None" = None
+    similarity_groups: "list[list[int]] | None" = None
     fast_result: FastPageResult | None = None
-    regrouped_cluster_similarity_id: dict | None = None
-    segmentations: "list[ClusterSegmentation] | None" = None
+    unique_segments: "list[UniqueSegment] | None" = None
+    segment_metas: "list[SegmentMeta] | None" = None
+    fast_dropped_vectors: "list[Vector] | None" = None
+    unique_texts: "list[Text] | None" = None
+    restored_texts: "list[Text] | None" = None
     step_outputs: dict | None = None
 
     @contextmanager
@@ -114,12 +100,3 @@ class PipelineResult:
 
         with Reader(self.page.doc_path) as reader:
             yield reader.get_page(self.page.meta.index)
-
-    def to_native_pdf_elements(self) -> "NativePDFElements":
-        """Serialization/export boundary -- standardized output_types.py
-        DTOs from this run's native_words/drawing_vectors."""
-        from rastervec.output_types import NativePDFElements
-
-        return NativePDFElements.from_extract(
-            words=self.native_words or [], drawings=self.drawing_vectors or [],
-        )

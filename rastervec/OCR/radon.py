@@ -1,14 +1,12 @@
-"""Radon-transform text deskew + line/word segmentation.
+"""Radon-transform text deskew + word segmentation.
 
-Replaces the old axis-aligned ink-projection segmentation
-(`OCR/Paddle_OCR/ink_segment.py`). A rendered vector-text cluster is
-usually *roughly* upright but can carry a small skew (or a 90/180/270
-turn, for rotated CAD text). Projecting the ink onto a swept set of
-directions -- a Radon transform -- and scoring each direction by how
-spiky its 1-D profile is (the classic projection-profile-variance /
-Postl criterion) recovers the true baseline angle: the sharpest profile
-comes from projecting *along* the text lines, where the gaps between
-lines read as deep troughs.
+A rendered vector-text cluster is usually *roughly* upright but can carry a
+small skew (or a 90/180/270 turn, for rotated CAD text). Projecting the ink
+onto a swept set of directions -- a Radon transform -- and scoring each
+direction by how spiky its 1-D profile is (the classic
+projection-profile-variance / Postl criterion) recovers the true baseline
+angle: the sharpest profile comes from projecting *along* the text lines,
+where the gaps between lines read as deep troughs.
 
 Intuition (the "shine a light through the page" picture): each glyph is
 a little wall. Rotate a light source around the page; the detector on the
@@ -16,14 +14,33 @@ far side sees the most light when the beam runs cleanly *between* the
 lines of text. The beam angle that maximises that contrast is the text
 angle.
 
-Pipeline use: `pipelines/sub_pipelines/ocr.py::segment_for_ocr` calls
-`segment_cluster` on each cluster render, before OCR recognition. The
-0-vs-180 (and 90-vs-270) ambiguity Radon cannot resolve is left to
-`RenderOCR.recognize_segmented`, which recognises both ways and keeps the
-higher-confidence reading.
+**Precision note (standing invariant -- read before touching this file):**
+`Segment.angle` is Radon's raw, full-precision fine-sweep result
+(`RADON_ANGLE_STEP_DEG` resolution, e.g. 0.25 deg) -- it must NEVER be
+rounded or snapped to a multiple of 90 anywhere in this pipeline. Both the
+post-segmentation similarity check (`pipelines/_steps.py`'s
+`group_similar_segments`, which normalizes rotation using this exact value
+instead of a page-wide search) and the final OCR `Text.direction` (which
+combines this angle with PaddleOCR's cls-detected 180-degree flip) depend
+on the full-precision value; rounding it here would silently degrade every
+downstream angle to blocky 90-degree steps.
+
+Pipeline use: this now runs directly on Vector_Classification's kept
+clusters, *before* similarity grouping and FAST detection (moved earlier
+in the pipeline vs. the pre-refactor design, where Radon ran right before
+OCR on already-deduped/FAST-passed clusters) -- see
+`pipelines/_common.py`. `segment_clusters` renders each cluster once
+(transient -- the image itself is never returned or kept) purely to
+estimate its skew and word boundaries, then maps each word's crop region
+back onto the cluster's own `Vector`s (by bbox overlap) to build a flat
+`list[Segment]`, one per word, at real page position. The 0-vs-180 (and
+90-vs-270) ambiguity Radon cannot resolve is left to
+`OCR/Paddle_OCR/ocr_backend.py`'s PaddleOCR `cls` pass, once a segment's
+been deduped down to a `UniqueSegment` and is actually being OCR'd.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -32,27 +49,31 @@ from PIL import ImageDraw
 from skimage.transform import SimilarityTransform, radon, resize, warp
 
 from rastervec.config import (
+    MIN_RENDER_SIDE_PX,
     RADON_ANGLE_STEP_DEG,
     RADON_LINE_BAND_MIN_FRAC,
     RADON_MAX_RENDER_SIDE_PX,
     RADON_MIN_GAP_PX,
     RADON_SKEW_LIMIT_DEG,
 )
-from rastervec.renderer import render_vector_cluster
+from rastervec.helpers.geometry import (
+    PDF_POINTS_PER_INCH,
+    bbox_intersection_area,
+    union_bbox,
+)
+from rastervec.models import Segment, Vector
+from rastervec.renderer import cluster_frame_size, pixel_to_page_bbox, render_vector_cluster
 
 if TYPE_CHECKING:
     from rastervec.pipelines.result import PipelineResult
     from rastervec.renderer.notebook import RenderResult
 
 # A pixel darker than this counts as glyph ink (0 = black, 255 = white).
-# Kept identical to the old ink_segment.INK_LEVEL so ported gap rules are
-# unchanged.
 INK_LEVEL = 250
 
 
 # --------------------------------------------------------------------------
-# 1-D ink-run helpers (ported verbatim from the old ink_segment.py -- only
-# the "assume axis-aligned" caller changed, not this gap math)
+# 1-D ink-run helpers
 # --------------------------------------------------------------------------
 def _ink_runs(has_ink: np.ndarray) -> list[tuple[int, int]]:
     """Contiguous inclusive ``[start, end]`` index runs of True in a 1-D
@@ -144,7 +165,8 @@ def best_theta(ink: np.ndarray, *, limit_deg: float, step_deg: float) -> float:
     """The projection angle (degrees, skimage convention, in [0, 180)) whose
     1-D profile is sharpest -- i.e. parallel to the text baseline. A coarse
     full sweep fixes the gross orientation (0/90/180 ~ horizontal vs
-    vertical text), then a fine sweep around that peak refines it."""
+    vertical text), then a fine sweep around that peak refines it to full
+    `step_deg` precision -- see this module's precision note."""
     img = ink.astype(np.float64)
     coarse = np.arange(0.0, 180.0, 2.0)
     coarse_best = float(coarse[int(np.argmax(_objective(radon(img, theta=coarse, circle=False))))])
@@ -154,7 +176,8 @@ def best_theta(ink: np.ndarray, *, limit_deg: float, step_deg: float) -> float:
 
 
 def estimate_skew_from_mask(ink: np.ndarray) -> float:
-    """`estimate_skew` for a pre-computed (possibly downscaled) ink mask."""
+    """`estimate_skew` for a pre-computed (possibly downscaled) ink mask.
+    Full precision -- see this module's precision note."""
     if not ink.any():
         return 0.0
     theta = best_theta(ink, limit_deg=RADON_SKEW_LIMIT_DEG, step_deg=RADON_ANGLE_STEP_DEG)
@@ -172,8 +195,8 @@ def estimate_skew_from_mask(ink: np.ndarray) -> float:
 def estimate_skew(gray: np.ndarray) -> float:
     """Angle (degrees, counter-clockwise positive) to rotate `gray` so its
     text lines become horizontal. Near 0 for already-upright text; near
-    +/-90 for vertical (rotated) text. The 0-vs-180 flip is *not* resolved
-    here."""
+    +/-90 for vertical (rotated) text. Full precision -- never rounded to a
+    quarter turn. The 0-vs-180 flip is *not* resolved here."""
     return estimate_skew_from_mask(to_ink(gray))
 
 
@@ -274,30 +297,11 @@ def _rotation(shape_hw: tuple[int, int], angle_deg: float):
     return (oh, ow), forward, inverse
 
 
-# --------------------------------------------------------------------------
-# public entrypoint
-# --------------------------------------------------------------------------
-@dataclass
-class ClusterSegmentation:
-    """One cluster render's deskew + line/word split. `word_crops` are
-    deskewed grayscale sub-images ready for `crop_normalize.normalize_line_crop`;
-    `word_corners[i]` are the 4 corners of `word_crops[i]` in the *original*
-    render's pixel space (so `renderer.pixel_to_page_bbox` can place them)."""
-
-    skew_deg: float
-    line_spacing_px: float
-    word_crops: list[np.ndarray]
-    word_corners: list[list[tuple[float, float]]]
-    render_dpi: int = 300
-    deskewed_gray: np.ndarray | None = None  # verbose-only
-    profile: np.ndarray | None = None        # verbose-only
-
-
 def _downscale_ink_for_radon(gray: np.ndarray) -> np.ndarray:
     """Ink mask, capped at RADON_MAX_RENDER_SIDE_PX on the long side --
     Radon cost is O(pixels * angles), so a huge merged cluster bbox would
     otherwise hang. Angle estimation is scale-invariant, so this only
-    affects the estimate, never the returned crops/corners."""
+    affects the estimate, never the returned word boxes."""
     ink = to_ink(gray)
     long_side = max(ink.shape)
     if long_side <= RADON_MAX_RENDER_SIDE_PX:
@@ -307,45 +311,106 @@ def _downscale_ink_for_radon(gray: np.ndarray) -> np.ndarray:
     return resize(ink.astype(np.float64), new_hw, order=1) > 0.5
 
 
-def segment_cluster(image, dpi_used: int = 300, *, verbose: bool = False) -> ClusterSegmentation:
-    """Deskew `image` (a cluster render), split into line then word crops."""
-    gray = to_gray(image)
-    if gray.size == 0 or not to_ink(gray).any():
-        return ClusterSegmentation(0.0, 0.0, [], [], render_dpi=dpi_used)
+def render_cluster_for_radon(vectors: list[Vector], dpi: int = 300) -> tuple["np.ndarray", int]:
+    """Render `vectors` as Radon/OCR sees it: `dpi` bumped upward (never
+    down) so the rendered image's shorter side is at least
+    `MIN_RENDER_SIDE_PX`. Returns `(gray, dpi_used)`. Shared by
+    `segment_clusters` (Phase D, one render per cluster) and OCR's own
+    unique-segment render (Phase G, one render per unique segment) -- same
+    "don't hand PaddleOCR a tiny crop" rationale either way."""
+    width_pt, height_pt = cluster_frame_size(vectors)
+    min_side_pt = min(width_pt, height_pt)
+    if min_side_pt > 0:
+        needed_dpi = math.ceil(MIN_RENDER_SIDE_PX * PDF_POINTS_PER_INCH / min_side_pt)
+        dpi = max(dpi, needed_dpi)
+    image = render_vector_cluster(vectors, dpi)
+    return to_gray(image), dpi
 
-    skew = estimate_skew_from_mask(_downscale_ink_for_radon(gray))
-    out_shape, forward, inverse = _rotation(gray.shape, skew)
-    deskewed = warp(
-        gray, forward.inverse, output_shape=out_shape,
-        cval=255.0, order=1, preserve_range=True,
-    ).astype(np.uint8)
 
-    prof = row_profile(to_ink(deskewed))
-    bands = line_bands(prof)
+def _bbox_center(bbox: tuple[float, float, float, float]) -> tuple[float, float]:
+    x0, y0, x1, y1 = bbox
+    return ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
 
-    line_cols = [to_ink(deskewed[by0:by1 + 1, :]).any(axis=0) for by0, by1 in bands]
-    gap_threshold = _cluster_gap_threshold([g for cols in line_cols for g in _line_gaps(cols)])
 
-    crops: list[np.ndarray] = []
-    corners: list[list[tuple[float, float]]] = []
-    for by0, by1 in bands:
-        line = deskewed[by0:by1 + 1, :]
-        for wx0, wy0, wx1, wy1 in split_words(line, gap_threshold=gap_threshold):
-            gy0, gy1 = by0 + wy0, by0 + wy1
-            crops.append(deskewed[gy0:gy1, wx0:wx1])
-            box = np.array([(wx0, gy0), (wx1, gy0), (wx1, gy1), (wx0, gy1)], dtype=np.float64)
-            mapped = inverse(box)
-            corners.append([(float(x), float(y)) for x, y in mapped])
+def _assign_vectors_to_words(
+    vectors: list[Vector], word_bboxes: list[tuple[float, float, float, float]],
+) -> list[list[Vector]]:
+    """Assigns every one of `vectors` to exactly one word bbox -- the one it
+    overlaps most, or (no overlap at all) the one whose center it's
+    nearest to -- so a cluster's Vectors are fully partitioned across its
+    words with none lost and none duplicated. A Vector is never split
+    across two words."""
+    assignment: list[list[Vector]] = [[] for _ in word_bboxes]
+    centers = [_bbox_center(b) for b in word_bboxes]
+    for v in vectors:
+        best_i, best_score = 0, -1.0
+        for i, wb in enumerate(word_bboxes):
+            score = bbox_intersection_area(v.bbox, wb)
+            if score > best_score:
+                best_score, best_i = score, i
+        if best_score <= 0.0:
+            vcx, vcy = _bbox_center(v.bbox)
+            best_i = min(
+                range(len(word_bboxes)),
+                key=lambda i: math.hypot(centers[i][0] - vcx, centers[i][1] - vcy),
+            )
+        assignment[best_i].append(v)
+    return assignment
 
-    return ClusterSegmentation(
-        skew_deg=float(skew),
-        line_spacing_px=line_spacing(prof),
-        word_crops=crops,
-        word_corners=corners,
-        render_dpi=dpi_used,
-        deskewed_gray=deskewed if verbose else None,
-        profile=prof if verbose else None,
-    )
+
+def segment_clusters(clusters: list[list[Vector]], *, dpi: int = 300) -> list[Segment]:
+    """Radon-segments every cluster into word-level `Segment`s at real page
+    position. For each cluster: render (transient, not kept) -> estimate
+    skew (full precision) -> deskew -> split into line/word crops ->
+    map each word's crop region back onto the cluster's own `Vector`s (by
+    bbox overlap, see `_assign_vectors_to_words`) -> one `Segment` per
+    non-empty word. A cluster with no ink, or whose deskewed profile
+    yields no word bands, is skipped (its Vectors are lost from this
+    step's output -- callers should already know FAST/similarity only see
+    clusters with real ink)."""
+    segments: list[Segment] = []
+    for cluster in clusters:
+        if not cluster:
+            continue
+        gray, dpi_used = render_cluster_for_radon(cluster, dpi)
+        if gray.size == 0 or not to_ink(gray).any():
+            continue
+
+        skew = estimate_skew_from_mask(_downscale_ink_for_radon(gray))
+        out_shape, forward, inverse = _rotation(gray.shape, skew)
+        deskewed = warp(
+            gray, forward.inverse, output_shape=out_shape,
+            cval=255.0, order=1, preserve_range=True,
+        ).astype(np.uint8)
+
+        prof = row_profile(to_ink(deskewed))
+        bands = line_bands(prof)
+        if not bands:
+            continue
+
+        line_cols = [to_ink(deskewed[by0:by1 + 1, :]).any(axis=0) for by0, by1 in bands]
+        gap_threshold = _cluster_gap_threshold([g for cols in line_cols for g in _line_gaps(cols)])
+
+        word_bboxes: list[tuple[float, float, float, float]] = []
+        for by0, by1 in bands:
+            line = deskewed[by0:by1 + 1, :]
+            for wx0, wy0, wx1, wy1 in split_words(line, gap_threshold=gap_threshold):
+                gy0, gy1 = by0 + wy0, by0 + wy1
+                box = np.array([(wx0, gy0), (wx1, gy0), (wx1, gy1), (wx0, gy1)], dtype=np.float64)
+                mapped = inverse(box)
+                page_bbox = pixel_to_page_bbox(
+                    cluster, dpi_used, [(float(x), float(y)) for x, y in mapped],
+                )
+                word_bboxes.append(page_bbox)
+
+        if not word_bboxes:
+            continue
+
+        for word_vectors in _assign_vectors_to_words(cluster, word_bboxes):
+            if word_vectors:
+                segments.append(Segment(vectors=word_vectors, angle=float(skew)))
+
+    return segments
 
 
 # --------------------------------------------------------------------------
@@ -354,33 +419,38 @@ def segment_cluster(image, dpi_used: int = 300, *, verbose: bool = False) -> Clu
 # pipeline.
 # --------------------------------------------------------------------------
 def render_radon(res: "PipelineResult") -> "RenderResult":
-    """One row per segmented cluster: re-render that cluster's ORIGINAL
-    (pre-deskew) image via renderer.render_vector_cluster and draw its
-    real seg.word_corners polygons on top -- word_corners already live in
-    exactly that image's own pixel space (ClusterSegmentation's own
-    contract), so no extra transform is needed."""
+    """One row per segmented cluster (grouped back by original cluster
+    index via `Segment`'s own vectors): re-render each cluster and draw its
+    words' page-space bboxes, mapped to this render's pixel space, on
+    top."""
+    from rastervec.renderer import page_points_to_pixel
     from rastervec.renderer.notebook import RenderResult
 
-    clusters = res.regrouped_clusters or []
-    segs = res.segmentations or []
-    cor = res.cluster_ocr_results or []
+    segments = res.segments or []
+    clusters = res.text_clusters or []
+
+    def _flatten(entry) -> list[Vector]:
+        if entry and isinstance(entry[0], list):
+            return [v for g in entry for v in g]
+        return entry
+
     rows = []
-    for cluster, seg, ocr in zip(clusters, segs, cor):
-        if not seg.word_crops:
+    for cluster_entry in clusters[:8]:
+        cluster = _flatten(cluster_entry)
+        cluster_ids = {id(v) for v in cluster}
+        own_segments = [s for s in segments if any(id(v) in cluster_ids for v in s.vectors)]
+        if not own_segments:
             continue
-        base = render_vector_cluster(cluster, seg.render_dpi).convert("RGB")
+        base = render_vector_cluster(cluster, 300).convert("RGB")
         d = ImageDraw.Draw(base)
-        for corners in seg.word_corners:
-            d.polygon(corners, outline="#dc2626", width=1)
-        caption = (
-            f"skew={seg.skew_deg:+.1f}deg  spacing={seg.line_spacing_px:.0f}px  "
-            f"{len(seg.word_crops)} word(s)  ->  {(ocr.resolved.text or '(blank)')[:40]}"
-        )
+        for seg in own_segments:
+            bbox = union_bbox([v.bbox for v in seg.vectors])
+            pts = page_points_to_pixel(cluster, 300, [(bbox[0], bbox[1]), (bbox[2], bbox[3])])
+            d.rectangle([pts[0], pts[1]], outline="#dc2626", width=1)
+        caption = f"{len(own_segments)} word(s), angle={own_segments[0].angle:+.2f}deg"
         rows.append({"name": caption, "isolated": base, "overlay": base})
 
     return RenderResult(
-        categories=rows[:8],
-        note=f"{sum(1 for s in segs if s.word_crops)} segmented cluster(s) with word boxes",
+        categories=rows,
+        note=f"{len(segments)} segment(s) across {len(clusters)} cluster(s)",
     )
-
-

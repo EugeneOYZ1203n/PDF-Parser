@@ -8,7 +8,7 @@ that need `fitz.Point`/`Quad`/`Rect`/`Matrix` objects live in
 """
 from __future__ import annotations
 
-from math import hypot
+from math import cos, hypot, radians, sin
 
 # Axis-aligned bounding box: (x0, y0, x1, y1) in PDF page space.
 BBox = tuple[float, float, float, float]
@@ -199,3 +199,139 @@ def make_oriented_quad(bbox: BBox, dx: float, dy: float) -> Quad:
     lr = point(half_along, half_normal)
 
     return (ul, ur, lr, ll)
+
+
+def compute_origin(bbox: BBox, direction: Point) -> Point:
+    """A baseline leading-edge point for `bbox`, oriented along `direction`
+    -- the same along/normal projection `make_oriented_quad` uses, generalized
+    from native text's old per-word `_word_origin` so native and OCR `Text`
+    populate `origin` the same way. Uses the bbox's own normal-axis center
+    (no separate baseline offset input, unlike the old span-origin-aware
+    version) since OCR results have no independent baseline sample."""
+    x0, y0, x1, y1 = bbox
+    dx, dy = direction
+    length = hypot(dx, dy)
+    if length < 1e-9:
+        dx, dy = 1.0, 0.0
+        length = 1.0
+    dx, dy = dx / length, dy / length
+    nx, ny = -dy, dx
+    corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    along_min = min(x * dx + y * dy for x, y in corners)
+    normal_vals = [x * nx + y * ny for x, y in corners]
+    normal_center = (min(normal_vals) + max(normal_vals)) / 2.0
+    return (along_min * dx + normal_center * nx, along_min * dy + normal_center * ny)
+
+
+# --------------------------------------------------------------------------
+# Vector.items geometry -- operates on the plain-tuple item shape stored on
+# Vector.items ((kind, *geometry), fitz-free -- see helpers/fitz_geometry.py's
+# plain_item for the one-time raw-get_drawings()-item conversion). Used by
+# Vector_Classification filters that need a Vector's own sub-item geometry
+# for scoring, without Vector ever being decomposed into standalone items.
+# --------------------------------------------------------------------------
+
+
+def item_points(item: tuple) -> list[Point]:
+    """Every point of one Vector.items entry, in the same order PyMuPDF's
+    own item tuple carries them."""
+    kind = item[0]
+    if kind == "l":
+        return [item[1], item[2]]
+    if kind == "re":
+        x0, y0, x1, y1 = item[1]
+        return [(x0, y0), (x1, y1)]
+    if kind == "qu":
+        return list(item[1])
+    if kind == "c":
+        return list(item[1:5])
+    return []
+
+
+def item_bbox(item: tuple) -> BBox:
+    """Axis-aligned bbox of one Vector.items entry, computed on demand
+    (never cached on Vector itself)."""
+    points = item_points(item)
+    if not points:
+        return (0.0, 0.0, 0.0, 0.0)
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def transform_point(p: Point, offset: Point, rotation_deg: float) -> Point:
+    """Rotate `p` about (0, 0) by `rotation_deg` (degrees, counter-clockwise
+    in PDF's y-down... actually y-up-agnostic -- just the standard 2-D
+    rotation matrix), then translate by `offset`."""
+    theta = radians(rotation_deg)
+    cos_t, sin_t = cos(theta), sin(theta)
+    x, y = p
+    return (x * cos_t - y * sin_t + offset[0], x * sin_t + y * cos_t + offset[1])
+
+
+def transform_item(item: tuple, offset: Point, rotation_deg: float) -> tuple:
+    """Rotate+translate every point of one Vector.items entry, keeping its
+    (kind, *extra) shape -- e.g. a "re" item's trailing orientation field (if
+    present) passes through untouched, only its rect corners move."""
+    kind = item[0]
+
+    def tp(p: Point) -> Point:
+        return transform_point(p, offset, rotation_deg)
+
+    if kind == "l":
+        return (kind, tp(item[1]), tp(item[2]))
+    if kind == "re":
+        x0, y0, x1, y1 = item[1]
+        (nx0, ny0), (nx1, ny1) = tp((x0, y0)), tp((x1, y1))
+        new_rect = (min(nx0, nx1), min(ny0, ny1), max(nx0, nx1), max(ny0, ny1))
+        return (kind, new_rect, *item[2:])
+    if kind == "qu":
+        return (kind, tuple(tp(p) for p in item[1]))
+    if kind == "c":
+        return (kind, *[tp(p) for p in item[1:5]], *item[5:])
+    return item
+
+
+def transform_bbox(bbox: BBox, offset: Point, rotation_deg: float) -> BBox:
+    """Rotate-then-translate an axis-aligned bbox's four corners by
+    `(rotation_deg, offset)` (see `transform_point`'s exact convention) and
+    return the new axis-aligned bbox of the transformed corners. Used to
+    restore OCR `Text` geometry from a `UniqueSegment`'s canonical frame
+    back onto one real `SegmentMeta` occurrence (see
+    `pipelines/sub_pipelines/ocr.py::restore_segment_texts`)."""
+    x0, y0, x1, y1 = bbox
+    corners = [transform_point(p, offset, rotation_deg) for p in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]]
+    xs = [p[0] for p in corners]
+    ys = [p[1] for p in corners]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def transform_direction(direction: Point, rotation_deg: float) -> Point:
+    """Rotate a direction unit vector by `rotation_deg` about the origin
+    -- no translation, since a direction is a vector, not a point."""
+    return transform_point(direction, offset=(0.0, 0.0), rotation_deg=rotation_deg)
+
+
+def transform_vector(v, *, offset: Point, rotation_deg: float):
+    """Rotate+translate every item of `v` (and its `rect`/`scissor`),
+    returning a new Vector -- never touches item *structure*, only geometry.
+    Used to normalize a Segment's Vectors to a canonical (origin, upright)
+    frame, and to invert that transform when restoring a UniqueSegment's OCR
+    Text back onto each of its real page-space occurrences."""
+    from dataclasses import replace
+
+    new_items = [transform_item(item, offset, rotation_deg) for item in v.items]
+    points = [p for item in new_items for p in item_points(item)]
+    if points:
+        xs, ys = [p[0] for p in points], [p[1] for p in points]
+        new_rect = (min(xs), min(ys), max(xs), max(ys))
+    else:
+        new_rect = v.rect
+
+    new_scissor = None
+    if v.scissor:
+        sx0, sy0 = transform_point((v.scissor[0], v.scissor[1]), offset, rotation_deg)
+        sx1, sy1 = transform_point((v.scissor[2], v.scissor[3]), offset, rotation_deg)
+        new_scissor = (min(sx0, sx1), min(sy0, sy1), max(sx0, sx1), max(sy0, sy1))
+
+    return replace(v, items=new_items, rect=new_rect, scissor=new_scissor)

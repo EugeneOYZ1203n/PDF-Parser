@@ -1,9 +1,11 @@
-"""Vector Classification sub-pipeline: turn raw vector paths into text
+"""Vector Classification sub-pipeline: turn raw vectors into text
 candidates + drawing content.
 
-Read `_classify_bucket` to see the fixed 13-step chain as one named call
+Read `_classify_bucket` to see the fixed 12-step chain as one named call
 per step. `classify_vectors` wraps it with the per-`(layer, color)`-bucket
-loop, the whole-page similarity grouping, and the drop collection.
+loop and the drop collection. Whole-page similarity grouping no longer
+happens here -- it runs later, on post-Radon `Segment`s (see
+`OCR/radon.py` / `pipelines/_steps.py`).
 
 New capability = one more named call + `steps.append` in `_classify_bucket`,
 or one more line in `classify_vectors`. No registry, no dispatch table.
@@ -33,38 +35,37 @@ from rastervec.config import (
     SPATIAL_CLUSTER_THRESHOLD,
     SPATIAL_SIZE_TOLERANCE,
 )
-from rastervec.models import Page, VectorPath, VectorRecord
+from rastervec.models import Page, Vector
 from rastervec.pipelines.result import ClusteringStageResult
 from rastervec.Vector.vector import separate_by_color, separate_by_layer
 from rastervec.Vector_Classification import cluster_filters as clf
 from rastervec.Vector_Classification import group_filters as grf
 from rastervec.Vector_Classification import item_filters as itf
-from rastervec.Vector_Classification.classification import (
-    CategoryResult,
-    StepResult,
-    build_vector_records,
-    group_similar_clusters,
-)
+from rastervec.Vector_Classification.classification import CategoryResult, StepResult
 
 
 @dataclass
 class ClassificationResult:
-    text_clusters: list[list[VectorPath]]
-    cluster_groups: dict[int, list[list[VectorPath]]]
+    """`text_clusters` is tiered: `list[list[list[Vector]]]` -- one entry
+    per surviving cluster, each a `list[list[Vector]]` of its member
+    groups (see `cluster_filters.cluster_spatial_groups`). `drawing_vectors`
+    is flat -- every dropped Vector across every bucket/step, in no
+    particular order."""
+
+    text_clusters: list[list[list[Vector]]]
+    drawing_vectors: list[Vector]
     clustering: dict
-    dropped: list[VectorPath]
-    records: list[VectorRecord] = field(default_factory=list)
-    similarity_groups: list[list[list[VectorPath]]] = field(default_factory=list)
-    cluster_similarity_id: dict[int, int] = field(default_factory=dict)
-    paths_by_layer: dict | None = None
-    paths_by_layer_color: dict | None = None
+    vectors_by_layer: dict | None = None
+    vectors_by_layer_color: dict | None = None
 
 
-def _classify_bucket(paths: list[VectorPath], page: Page) -> list[StepResult]:
+def _classify_bucket(vectors: list[Vector], page: Page) -> list[StepResult]:
     """The fixed classification chain for one (layer, color) bucket -- one
     named step-module call per step, each wrapped into a `StepResult`. The
-    previous step's `"kept"` category feeds the next."""
-    groups: list[list[VectorPath]] = [[p] for p in paths]
+    previous step's `"kept"` category feeds the next. Steps 1-5 operate on
+    `list[list[Vector]]` groups; step 6 onward operate on tiered
+    `list[list[list[Vector]]]` clusters."""
+    groups: list[list[Vector]] = [[v] for v in vectors]
     steps: list[StepResult] = []
 
     groups, dropped = itf.filter_large_items(groups, page, MAX_DIMENSION_FRACTION)
@@ -100,130 +101,117 @@ def _classify_bucket(paths: list[VectorPath], page: Page) -> list[StepResult]:
         "dropped_oversized": CategoryResult(dropped, "dropped"),
     }))
 
-    groups, debug_unconstrained, debug_no_parallel, lineage = clf.cluster_spatial_groups(
+    clusters, debug_unconstrained, debug_no_parallel = clf.cluster_spatial_groups(
         groups, SPATIAL_CLUSTER_THRESHOLD, SPATIAL_SIZE_TOLERANCE,
     )
     steps.append(StepResult("Spatial cluster", {
-        "kept": CategoryResult(groups, "kept"),
+        "kept": CategoryResult(clusters, "kept"),
         "debug_unconstrained": CategoryResult(debug_unconstrained, "info"),
         "debug_no_parallel": CategoryResult(debug_no_parallel, "info"),
     }))
 
-    groups, dropped = clf.filter_mixed_fill_rule_clusters(groups)
+    clusters, dropped = clf.filter_mixed_fill_rule_clusters(clusters)
     steps.append(StepResult("Mixed fill-rule clusters", {
-        "kept": CategoryResult(groups, "kept"),
+        "kept": CategoryResult(clusters, "kept"),
         "dropped_mixed_fill_rule": CategoryResult(dropped, "dropped"),
     }))
 
-    groups, group_stats = grf.compute_group_stats(groups, SIGNATURE_ROUND_PX)
+    clusters, group_stats = grf.compute_group_stats(clusters, SIGNATURE_ROUND_PX)
     steps.append(StepResult(
-        "Group stats", {"kept": CategoryResult(groups, "kept")},
+        "Group stats", {"kept": CategoryResult(clusters, "kept")},
         group_stats=group_stats,
     ))
 
-    groups, dropped = clf.filter_perimeter_only_clusters(
-        groups, group_stats, PERIMETER_MARGIN_FRACTION
+    clusters, dropped = clf.filter_perimeter_only_clusters(
+        clusters, group_stats, PERIMETER_MARGIN_FRACTION
     )
     steps.append(StepResult("Perimeter-only clusters", {
-        "kept": CategoryResult(groups, "kept"),
+        "kept": CategoryResult(clusters, "kept"),
         "dropped_perimeter": CategoryResult(dropped, "dropped"),
     }))
 
-    groups, dropped = clf.filter_density_clusters(
-        groups, group_stats, DENSITY_DEFAULT_GRID_SIZE, DENSITY_MIN_CELL_PX,
+    clusters, dropped = clf.filter_density_clusters(
+        clusters, group_stats, DENSITY_DEFAULT_GRID_SIZE, DENSITY_MIN_CELL_PX,
         DENSITY_MAX_CELL_PX, DENSITY_MAX_EMPTY_FRACTION,
     )
     steps.append(StepResult("Density clusters", {
-        "kept": CategoryResult(groups, "kept"),
+        "kept": CategoryResult(clusters, "kept"),
         "dropped_low_density": CategoryResult(dropped, "dropped"),
     }))
 
-    groups, dropped = clf.filter_constant_spacing_clusters(
-        groups, SIGNATURE_ROUND_PX, PATTERN_SPACING_TOLERANCE,
+    clusters, dropped = clf.filter_constant_spacing_clusters(
+        clusters, SIGNATURE_ROUND_PX, PATTERN_SPACING_TOLERANCE,
         PATTERN_MIN_REPEAT_COUNT, PATTERN_FRACTION_THRESHOLD,
     )
     steps.append(StepResult("Constant-spacing clusters", {
-        "kept": CategoryResult(groups, "kept"),
+        "kept": CategoryResult(clusters, "kept"),
         "dropped_constant_spacing": CategoryResult(dropped, "dropped"),
     }))
 
-    groups, dropped = clf.filter_low_variety_clusters(
-        groups, group_stats,
+    clusters, dropped = clf.filter_low_variety_clusters(
+        clusters, group_stats,
         LOW_VARIETY_MIN_MEMBER_COUNT, LOW_VARIETY_MIN_REQUIRED,
         LOW_VARIETY_MAX_MEMBER_COUNT, LOW_VARIETY_MAX_REQUIRED,
     )
-    cluster_groups = {id(g): lineage.get(id(g), [g]) for g in groups}
-    steps.append(StepResult(
-        "Low-variety clusters", {
-            "kept": CategoryResult(groups, "kept"),
-            "dropped_low_variety": CategoryResult(dropped, "dropped"),
-        },
-        cluster_groups=cluster_groups,
-    ))
+    steps.append(StepResult("Low-variety clusters", {
+        "kept": CategoryResult(clusters, "kept"),
+        "dropped_low_variety": CategoryResult(dropped, "dropped"),
+    }))
 
     return steps
 
 
-def _iter_buckets(paths_by_layer_color: dict):
+def _iter_buckets(vectors_by_layer_color: dict):
     return [
-        ((layer, color), paths)
-        for layer, color_groups in paths_by_layer_color.items()
-        for color, paths in color_groups.items()
+        ((layer, color), vectors)
+        for layer, color_groups in vectors_by_layer_color.items()
+        for color, vectors in color_groups.items()
     ]
 
 
-def _collect_dropped(clustering: dict) -> list[VectorPath]:
-    out: list[VectorPath] = []
+def _collect_dropped(clustering: dict) -> list[Vector]:
+    out: list[Vector] = []
     for stage in clustering.values():
         for step in stage.steps:
             for category in step.categories.values():
-                if category.role == "dropped":
-                    for group in category.groups:
-                        out.extend(group)
+                if category.role != "dropped":
+                    continue
+                for entry in category.groups:
+                    if entry and isinstance(entry[0], list):
+                        out.extend(v for g in entry for v in g)
+                    else:
+                        out.extend(entry)
     return out
 
 
 def classify_vectors(
-    vector_paths: list[VectorPath], page: Page, *, verbose: bool = False,
+    vectors: list[Vector], page: Page, *, verbose: bool = False,
 ) -> ClassificationResult:
     """Separate by (layer, color), run `_classify_bucket` per bucket, gather
-    every bucket's surviving "kept" clusters, group them by whole-page
-    similarity, and collect every dropped group as drawing content."""
-    paths_by_layer = separate_by_layer(vector_paths)
-    paths_by_layer_color = {
-        layer: separate_by_color(paths) for layer, paths in paths_by_layer.items()
+    every bucket's surviving "kept" clusters (tiered, real nested
+    structure -- no lineage side-channel), and collect every dropped
+    Vector as drawing content."""
+    vectors_by_layer = separate_by_layer(vectors)
+    vectors_by_layer_color = {
+        layer: separate_by_color(vs) for layer, vs in vectors_by_layer.items()
     }
 
     clustering: dict = {}
-    for key, bucket in _iter_buckets(paths_by_layer_color):
+    for key, bucket in _iter_buckets(vectors_by_layer_color):
         clustering[key] = ClusteringStageResult(steps=_classify_bucket(bucket, page))
 
-    text_clusters: list[list[VectorPath]] = []
-    cluster_groups: dict[int, list[list[VectorPath]]] = {}
-    records: list[VectorRecord] = []
+    text_clusters: list[list[list[Vector]]] = []
     for stage in clustering.values():
         if not stage.steps:
             continue
         last = stage.steps[-1]
         # NO copy -- manual_label keys its Ungroup lineage on id(cluster).
         text_clusters.extend(last.categories["kept"].groups)
-        if last.cluster_groups:
-            cluster_groups.update(last.cluster_groups)
-        records.extend(build_vector_records(stage.steps))
-
-    similarity_groups = group_similar_clusters(text_clusters)
-    cluster_similarity_id = {
-        id(c): gi for gi, group in enumerate(similarity_groups) for c in group
-    }
 
     return ClassificationResult(
         text_clusters=text_clusters,
-        cluster_groups=cluster_groups,
+        drawing_vectors=_collect_dropped(clustering),
         clustering=clustering,
-        dropped=_collect_dropped(clustering),
-        records=records,
-        similarity_groups=similarity_groups,
-        cluster_similarity_id=cluster_similarity_id,
-        paths_by_layer=paths_by_layer if verbose else None,
-        paths_by_layer_color=paths_by_layer_color if verbose else None,
+        vectors_by_layer=vectors_by_layer if verbose else None,
+        vectors_by_layer_color=vectors_by_layer_color if verbose else None,
     )

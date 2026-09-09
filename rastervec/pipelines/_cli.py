@@ -46,10 +46,11 @@ def main(pipeline_name: str, argv: list[str] | None = None) -> int:
             verbose=args.verbose,
         )
 
+    n_native = sum(1 for t in result.texts if t.source == "native")
+    n_ocr = sum(1 for t in result.texts if t.source == "ocr")
     _LOG.info(
         "page %d: %d native word(s), %d OCR reading(s), %d drawing vector(s)",
-        args.page, len(result.native_words), len(result.ocr_results),
-        len(result.drawing_vectors),
+        args.page, n_native, n_ocr, len(result.vectors),
     )
     for name, secs in result.step_durations.items():
         _LOG.info("  %-9s %6.2fs", name, secs)

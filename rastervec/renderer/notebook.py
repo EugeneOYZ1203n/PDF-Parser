@@ -25,12 +25,13 @@ import matplotlib.pyplot as plt
 import pymupdf as fitz
 from PIL import Image, ImageDraw
 
+from rastervec.helpers.geometry import item_points
 from rastervec.renderer._shapes import path_color_hex
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from rastervec.models import PageMeta, VectorPath
+    from rastervec.models import PageMeta, Vector
     from rastervec.pipelines.result import PipelineResult
 
 DEFAULT_PATH_COLOR = "#111827"
@@ -39,12 +40,12 @@ DEFAULT_PATH_COLOR = "#111827"
 class RenderCategory(TypedDict, total=False):
     """One overlay category within a stage's `RenderResult`. `isolated`/
     `overlay` are a precomputed image pair (used when a category can't be
-    expressed purely as paths/polys/bboxes over one shared color, e.g. a
-    per-path custom coloring or a page reconstruction) -- when absent,
-    `visualize()` builds them itself from `paths`/`polys`/`bboxes`."""
+    expressed purely as vectors/polys/bboxes over one shared color, e.g. a
+    per-vector custom coloring or a page reconstruction) -- when absent,
+    `visualize()` builds them itself from `vectors`/`polys`/`bboxes`."""
 
     name: str
-    paths: "list[VectorPath]"
+    vectors: "list[Vector]"
     path_color: str | None
     polys: list
     bboxes: list
@@ -87,20 +88,21 @@ def _xf(x, y, matrix) -> tuple[float, float]:
     return (p.x, p.y)
 
 
-def draw_paths(img, paths, matrix, color=None, width: int = 2) -> None:
-    """Polyline of each path's own points (curves as straight segments
-    through control points). `color=None` -> each path in its own real PDF
-    stroke/fill color."""
+def draw_paths(img, vectors, matrix, color=None, width: int = 2) -> None:
+    """Polyline of each Vector's own items' points (curves as straight
+    segments through control points). `color=None` -> each Vector in its
+    own real PDF stroke/fill color."""
     d = ImageDraw.Draw(img)
-    for p in paths:
-        pts = [_xf(x, y, matrix) for x, y in p.points]
-        if len(pts) < 2:
-            continue
-        c = color or path_color_hex(p)
-        if p.kind in ("re", "qu"):
-            d.polygon(pts, outline=c, width=width)
-        else:
-            d.line(pts, fill=c, width=width)
+    for v in vectors:
+        c = color or path_color_hex(v)
+        for item in v.items:
+            pts = [_xf(x, y, matrix) for x, y in item_points(item)]
+            if len(pts) < 2:
+                continue
+            if item[0] in ("re", "qu"):
+                d.polygon(pts, outline=c, width=width)
+            else:
+                d.line(pts, fill=c, width=width)
 
 
 def draw_polys(img, polys, matrix, color: str = DEFAULT_PATH_COLOR, width: int = 2) -> None:
@@ -137,8 +139,8 @@ def show_row(images, titles, height: float = 5.0) -> None:
 
 
 def _paint(img, cat: "RenderCategory", matrix) -> None:
-    if cat.get("paths"):
-        draw_paths(img, cat["paths"], matrix, cat.get("path_color"), cat.get("width", 2))
+    if cat.get("vectors"):
+        draw_paths(img, cat["vectors"], matrix, cat.get("path_color"), cat.get("width", 2))
     if cat.get("polys"):
         draw_polys(img, cat["polys"], matrix, cat.get("color", DEFAULT_PATH_COLOR), cat.get("width", 2))
     if cat.get("bboxes"):
@@ -153,15 +155,15 @@ def _hex_to_rgb01(color: str) -> tuple[float, float, float]:
 def _category_boxes(
     cat: "RenderCategory",
 ) -> list[tuple[tuple[float, float, float, float], tuple[float, float, float]]]:
-    """Every category entry (a direct bbox, or a path's/poly's own bbox)
+    """Every category entry (a direct bbox, or a vector's/poly's own bbox)
     reduced to a page-space rectangle, in that category's own color -- the
     PDF-page counterpart of what `_paint` draws onto a raster."""
     color = _hex_to_rgb01(cat.get("color") or cat.get("path_color") or DEFAULT_PATH_COLOR)
     out: list[tuple[tuple[float, float, float, float], tuple[float, float, float]]] = []
     for bb in cat.get("bboxes") or []:
         out.append((tuple(bb), color))
-    for p in cat.get("paths") or []:
-        out.append((p.bbox, color))
+    for v in cat.get("vectors") or []:
+        out.append((v.bbox, color))
     for poly in cat.get("polys") or []:
         xs, ys = [x for x, _ in poly], [y for _, y in poly]
         out.append(((min(xs), min(ys), max(xs), max(ys)), color))

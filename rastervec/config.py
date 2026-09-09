@@ -100,9 +100,11 @@ UNIQUE_CLUSTER_TOLERANCE = 0.04
 # (RenderOCR's per-cluster renders use 300 DPI).
 FAST_PAGE_RENDER_DPI = 150
 
-# A text-candidate cluster passes FAST if its combined score (its own
-# page-mask score, min'd across its similarity group) exceeds this.
-FAST_COMBINED_KEEP_THRESHOLD = 0.2
+# A segment similarity group passes FAST only if *every* member's own
+# page-mask score exceeds this (functionally: min-across-group > threshold).
+# Raised from 0.2 (the old per-cluster, min'd-across-similarity-group value)
+# now that every member must individually clear it, not just the min.
+FAST_COMBINED_KEEP_THRESHOLD = 0.5
 
 # FastDetector.detect_tiled: FAST's own preprocessing always downsizes to a
 # 640px short side, so a whole large page loses most of its resolution in
@@ -112,16 +114,7 @@ FAST_TILE_BLOCK_SIZE = 2048
 FAST_TILE_SCALE_FACTOR = 5
 
 # ======================================================================
-# spatial_regroup stage (pipeline.py)
-# ======================================================================
-
-# Two FAST-passed clusters in the same (layer, color) bucket merge before
-# OCR if their aggregate bboxes are within this gap (PDF points; rect_gap
-# is 0.0 for overlapping/touching boxes).
-SPATIAL_REGROUP_TOLERANCE_PX = 1.0
-
-# ======================================================================
-# ocr_compare stage (pipeline.py)
+# OCR (OCR/Paddle_OCR/ocr_backend.py)
 # ======================================================================
 
 # PaddleOCR model family the single OCR backend builds against. Pinned to
@@ -179,10 +172,7 @@ OCR_HORIZONTAL_PADDING_FRACTION = 0.30
 REC_LINE_HEIGHT_PX = 48
 REC_LINE_MAX_WIDTH_PX = 1024
 
-# ======================================================================
-# PaddleRecBackend (OCR/Paddle_OCR/ocr_backend.py)
-# ======================================================================
-
-# batch size for the recognition-only `PaddleOCR.text_recognizer` call
-# (maps to `PaddleOCR(rec_batch_num=...)`).
-REC_BATCH_SIZE = 128
+# batch size for both the classification (`cls_batch_num`) and
+# recognition (`rec_batch_num`) PaddleOCR calls, and for
+# `recognize_unique_segments`'s own batching over `UniqueSegment`s.
+OCR_BATCH_SIZE = 128

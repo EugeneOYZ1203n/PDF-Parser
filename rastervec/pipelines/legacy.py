@@ -2,9 +2,8 @@
 `raster_parser` pipeline and reshapes its output into a `PipelineResult`
 so the benchmark can score it beside `current`.
 
-Only the OCR-scored fields are meaningful here -- archive's `TextDTO`
-carries no back-reference to source geometry, so `text_clusters`,
-`clustering`, etc. stay empty.
+Only `texts` is meaningful here -- archive's `TextDTO` carries no
+back-reference to source geometry, so `vectors` stays empty.
 """
 from __future__ import annotations
 
@@ -21,10 +20,7 @@ def run_pipeline(
     pdf_path: str, page_index: int = 0, *, enable_raster_pass: bool = False,
     verbose: bool = False,
 ) -> PipelineResult:
-    from rastervec.Evaluation.Evaluate.legacy_adapter import (
-        run_archive_pipeline,
-        to_cluster_ocr_results,
-    )
+    from rastervec.Evaluation.Evaluate.legacy_adapter import run_archive_pipeline, to_texts
 
     start = time.perf_counter()
     elements = run_archive_pipeline(
@@ -32,22 +28,14 @@ def run_pipeline(
     )
     elapsed = time.perf_counter() - start
 
-    cor = to_cluster_ocr_results(elements, page_index=page_index)
+    texts = to_texts(elements, page_index=page_index)
     with Reader(pdf_path) as reader:
         page = reader.get_page(page_index)  # meta snapshot; fitz_page unused downstream
 
     return PipelineResult(
         page=page,
-        native_words=[],
-        drawing_vectors=[],
-        ocr_results=[c.resolved for c in cor],
-        cluster_ocr_results=cor,
-        text_clusters=[],
-        regrouped_clusters=[],
-        clustering={},
-        cluster_groups={},
-        fast_dropped=[],
-        ocr_failed=[],
+        texts=texts,
+        vectors=[],
         step_durations={"legacy": elapsed},
         engine="legacy",
     )
