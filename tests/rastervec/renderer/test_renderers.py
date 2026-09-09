@@ -90,6 +90,55 @@ def test_render_reconstructed_page_shrinks_ocr_text_to_fit_narrow_bbox(text):
     assert darkest < 255
 
 
+def _ink_pixels(image: "Image.Image") -> int:
+    return int(np.count_nonzero(np.asarray(image.convert("L")) < 250))
+
+
+def test_render_reconstructed_page_ocr_text_sized_from_bbox_height_not_font_size(text):
+    # OCR `Text` carries font_size=0.0 (it's never measured). The old
+    # `_place_word` path rendered it at ~1 pt; it must now be sized from
+    # the bbox height, the same as an equivalent ground-truth text box.
+    bbox = (20.0, 20.0, 150.0, 55.0)
+    ocr_word = text(text="SCHEDULE", bbox=bbox, source="ocr", font_size=0.0)
+
+    from_ocr = render_reconstructed_page(_meta(), ocr_results=[ocr_word], zoom=3.0)
+    from_box = render_reconstructed_page(_meta(), text_boxes=[("SCHEDULE", bbox, 0.0)], zoom=3.0)
+
+    ocr_ink = _ink_pixels(from_ocr)
+    assert ocr_ink > 400  # nowhere near a 1 pt rendering
+    # both paths go through the same height-sizing helper -> same ink
+    assert ocr_ink == pytest.approx(_ink_pixels(from_box), rel=0.02)
+
+
+def test_render_reconstructed_page_fills_width_by_widening_word_gaps(text):
+    # A short multi-word string in a wide bbox: the gaps between words are
+    # widened so ink reaches both the left and right edges of the bbox.
+    bbox = (10.0, 40.0, 190.0, 60.0)
+    word = text(text="PANEL SCHEDULE", bbox=bbox, source="ocr", font_size=0.0)
+
+    image = render_reconstructed_page(_meta(), ocr_results=[word], zoom=4.0)
+    W, H = image.size
+    band = round(W * 0.08)
+    assert _has_ink(image.crop((0, 0, band, H))), "text does not reach the left edge"
+    assert _has_ink(image.crop((W - band, 0, W, H))), "text does not reach the right edge"
+
+
+def test_render_reconstructed_pdf_multiword_text_stays_word_searchable():
+    # Widening word gaps must keep each word a single drawn token, so the
+    # selectable-text output of render_reconstructed_pdf stays greppable.
+    pdf_bytes = render_reconstructed_pdf(
+        _meta(width=400.0), text_boxes=[("PANEL SCHEDULE NOTES", (10, 10, 390, 34), 0.0)],
+    )
+    doc = fitz.open("pdf", pdf_bytes)
+    try:
+        page_text = doc[0].get_text()
+        assert "PANEL" in page_text
+        assert "SCHEDULE" in page_text
+        assert "NOTES" in page_text
+    finally:
+        doc.close()
+
+
 def test_render_reconstructed_page_arbitrary_angle_text_does_not_raise(text):
     word = text(text="Hi", bbox=(10, 10, 30, 25), direction=(0.6, 0.8))  # ~53 degrees
 
@@ -169,10 +218,11 @@ def _has_ink(band: "Image.Image") -> bool:
 
 
 def test_reconstructed_text_reaches_all_four_perimeter_bands():
-    # Left/right is a genuine *scaling* check: a bbox sized to the text's
-    # own natural width (plus a small margin) forces render_reconstructed_
-    # page's width-fit-shrink formula to produce ink spanning exactly that
-    # width, so it must reach both the left and right 10% bands.
+    # Left/right is a genuine width-fit check: a bbox sized to the text's
+    # own natural width (plus a small margin) leaves render_reconstructed_
+    # page's width fill (here a single word -> horizontal stretch) almost
+    # nothing to do, so ink must span essentially the whole width and
+    # reach both the left and right 10% bands.
     #
     # Top/bottom is deliberately a *positioning* check instead of the same
     # kind of scaling check: a font's nominal ascender/descender metrics

@@ -106,12 +106,17 @@ def render_native(res: "PipelineResult", *, zoom: float = 1.0) -> "RenderResult"
     from rastervec.renderer.notebook import RenderResult
 
     words = res.native_words or []
+    fallback = sum(1 for w in words if w.orientation_source == "fallback")
     return RenderResult(categories=[{
         "name": f"text words ({len(words)})",
         "color": _NATIVE_WORD_COLOR,
         "polys": [w.quad() for w in words],
         "isolated": render_reconstructed_page(res.page.meta, native_words=words, zoom=zoom),
-    }])
+    }], note=(
+        f"{len(words)} word(s)"
+        + (f"; {fallback} lost their rotation (no matching span, defaulted to horizontal)"
+           if fallback else "")
+    ))
 
 
 # --------------------------------------------------------------------------

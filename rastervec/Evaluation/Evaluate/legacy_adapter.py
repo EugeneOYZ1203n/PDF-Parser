@@ -121,6 +121,7 @@ def to_texts(
             ascender=None, descender=None, wmode=0,
             block_no=0, line_no=0, word_no=0,
             page_index=page_index, seqno=seq, confidence=1.0, source="ocr",
+            orientation_source="ocr",
         ))
     return results
 

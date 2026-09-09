@@ -8,8 +8,12 @@ the original" for one stage's output at a time. `render_reconstructed_pdf`
 builds the exact same page but hands back the PDF bytes instead of a
 raster, for side-by-side ground-truth-vs-pipeline comparison files (see
 `notebooks/benchmark_vector_classification.ipynb`). Both are rough
-previews: font family isn't preserved (always the base14 "helv"), only
-size/baseline/rotation are approximated.
+previews: font family isn't preserved (always the base14 "helv"). Native
+words render at their extracted font size (`_place_word`); OCR words and
+label boxes have no real size, so `_place_text` derives it from the box
+height and then fills the box width by widening the gaps between words
+(a single word with no gaps falls back to per-character spacing; a string
+too long even at natural spacing is shrunk uniformly instead).
 
 `render_boxes_pdf` is unrelated to reconstruction -- a generic "draw these
 colored bbox outlines on a fresh page" primitive, used by
@@ -91,40 +95,90 @@ def _build_reconstructed_doc(
         for word in native_words:
             _place_word(word)
 
-    def _place_text(text: str, bbox: tuple[float, float, float, float], rotation: float) -> None:
+    def _place_text(
+        text: str,
+        bbox: tuple[float, float, float, float],
+        rotation: float,
+        *,
+        color: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    ) -> None:
+        """Place `text` so it fills `bbox`: font size is derived from the
+        box height, then the box *width* is filled by widening the gaps
+        between words (justified-text style) rather than by scaling the
+        glyphs. A single word with no gaps to widen is stretched
+        horizontally instead (one draw call, so it stays selectable in
+        `render_reconstructed_pdf`'s output). A string too long even at
+        natural spacing is shrunk uniformly. Used for OCR'd words (no real
+        font size) and ground-truth label boxes; native words keep their
+        extracted size via `_place_word` instead."""
         if not text.strip():
             return
         x0, y0, x1, y1 = bbox
-        # A font's em-square (fontsize) is taller than the rendered
-        # glyph bbox by ascender - descender (both em-fractions);
-        # recover fontsize from the bbox height via that ratio, then
-        # place the baseline ascender*fontsize below the bbox's top
-        # edge, rather than treating the bbox height as the fontsize
-        # and the bbox's bottom edge as the baseline outright.
-        fontsize = max((y1 - y0) / font_span, 1.0)
-        # Height alone doesn't guarantee the text actually fits within
-        # its own bbox's width (e.g. a long OCR'd string in a narrow
-        # cluster/word bbox) -- shrink fontsize further, uniformly, so
-        # the rendered text_length never exceeds the bbox width it was
-        # read from.
         bbox_width = x1 - x0
-        if bbox_width > 0:
-            text_width = base_font.text_length(text, fontsize=fontsize)
-            if text_width > bbox_width:
-                fontsize = max(fontsize * bbox_width / text_width, 1.0)
-        origin = (x0, y0 + base_font.ascender * fontsize)
-        # Rotate around the bbox's own center, not the baseline origin.
+        # A font's em-square (fontsize) is taller than the rendered glyph
+        # bbox by ascender - descender (both em-fractions); recover
+        # fontsize from the bbox height via that ratio.
+        fontsize = max((y1 - y0) / font_span, 1.0)
+        # Rotate the whole placed string as a unit about the bbox centre
+        # (insert_text's `rotate` only does multiples of 90, so use morph).
         center = fitz.Point((x0 + x1) / 2, (y0 + y1) / 2)
+        morph = (center, fitz.Matrix(1, 1).prerotate(rotation))
+
+        natural = base_font.text_length(text, fontsize=fontsize)
+
+        # Overflow: no room even at natural spacing -> shrink the whole
+        # font uniformly so the text never spills past the box (and page).
+        if bbox_width > 0 and natural > bbox_width:
+            fontsize = max(fontsize * bbox_width / natural, 1.0)
+            origin = (x0, y0 + base_font.ascender * fontsize)
+            page.insert_text(
+                origin, text, fontsize=fontsize, color=color, rotate=0, morph=morph,
+            )
+            return
+
+        origin_y = y0 + base_font.ascender * fontsize
+
+        # Already fits, or no width to fill -> one call at natural spacing.
+        if bbox_width <= 0 or natural >= bbox_width - 1e-3:
+            page.insert_text(
+                (x0, origin_y), text, fontsize=fontsize, color=color, rotate=0, morph=morph,
+            )
+            return
+
+        # Underflow: distribute the leftover width across the gaps between
+        # words (letterforms + intra-word spacing untouched), one draw call
+        # per word all sharing `morph` so the line turns as a unit.
+        tokens = text.split()
+        if len(tokens) >= 2:
+            slack = bbox_width - natural
+            gap = base_font.text_length(" ", fontsize=fontsize) + slack / (len(tokens) - 1)
+            cursor = x0
+            for token in tokens:
+                page.insert_text(
+                    (cursor, origin_y), token,
+                    fontsize=fontsize, color=color, rotate=0, morph=morph,
+                )
+                cursor += base_font.text_length(token, fontsize=fontsize) + gap
+            return
+
+        # A single word: no gaps to widen, so stretch it horizontally to
+        # the box width via a non-uniform scale in the morph transform
+        # (kept to one draw call so the text stays selectable). Cap the
+        # stretch so a very short token in a wide box isn't grotesque, and
+        # pre-shift the origin so that after scaling about the box centre
+        # the glyphs still start at the box's left edge.
+        scale = min(bbox_width / natural, 3.0) if natural > 0 else 1.0
+        start_x = center.x - (bbox_width / 2.0) / scale
         page.insert_text(
-            origin, text,
-            fontsize=fontsize,
-            rotate=0,
-            morph=(center, fitz.Matrix(1, 1).prerotate(rotation)),
+            (start_x, origin_y), text, fontsize=fontsize, color=color, rotate=0,
+            morph=(center, fitz.Matrix(scale, 1.0).prerotate(rotation)),
         )
 
     if ocr_results:
         for word in ocr_results:
-            _place_word(word)
+            _place_text(
+                word.text, word.bbox, word.angle(), color=_text_color(word.color),
+            )
 
     if text_boxes:
         for text, bbox, rotation in text_boxes:

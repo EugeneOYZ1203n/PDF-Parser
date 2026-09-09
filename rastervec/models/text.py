@@ -12,9 +12,14 @@ cluster's own PCA-estimated rotation is layered on top of that afterward
 when restoring onto each real occurrence (see
 `pipelines/sub_pipelines/ocr.py::restore_cluster_texts`).
 
-`origin` is computed the same way for native and OCR text via
-`helpers.geometry.compute_origin(bbox, direction)`, so the field means the
-same thing regardless of `source`.
+`origin` is a baseline leading-edge point for both native and OCR text
+(`helpers.geometry.compute_origin`), so the field means the same thing
+regardless of `source`. Native text passes the matched span's real
+`get_text("dict")` `origin` as the baseline sample; OCR text has none, so
+`compute_origin` falls back to the bbox's normal-axis centre there.
+
+`orientation_source` records where `direction` came from: `"span"` (a real
+line `dir`), `"fallback"` (no span matched -> horizontal), or `"ocr"`.
 
 `from_pymupdf`/`to_pymupdf` are the fitz boundary for *native* text (an
 OCR `Text` is hand-built by `OCR/Paddle_OCR/ocr_backend.py` /
@@ -54,6 +59,12 @@ class Text:
     seqno: int
     confidence: float = 0.0
     source: str = "native"  # "native" | "ocr"
+    # Where `direction` came from: "span" -- a real get_text("dict") line
+    # `dir`; "fallback" -- no span matched, defaulted to horizontal (1, 0);
+    # "ocr" -- Radon skew + PaddleOCR flip, folded in before the Text was
+    # built. Lets downstream/debug tell a genuine horizontal word from one
+    # that silently lost its rotation.
+    orientation_source: str = "span"
 
     # Forward-compat / literally-every-get_text()-field escape hatch: the
     # verbatim source tuple/dict, alongside the normalized fields above that
@@ -89,18 +100,28 @@ class Text:
                 ascender=None, descender=None, wmode=0,
                 block_no=block_no, line_no=line_no, word_no=word_no,
                 page_index=page_index, seqno=seqno, source="native",
+                orientation_source="fallback",
                 raw_word=raw_word, raw_span=None,
             )
 
         direction = tuple(raw_span.get("dir", (1.0, 0.0)))
+        # `get_text("dict")`'s span-level `origin` is the real baseline start
+        # of the whole span -- keep its perpendicular (normal) offset so the
+        # per-word origin lands on the actual glyph baseline, not the bbox
+        # centre `compute_origin` falls back to (correct for rotated/vertical
+        # text too, since the offset is projected along the direction normal).
+        span_origin = raw_span.get("origin")
+        baseline = tuple(span_origin) if span_origin is not None else None
         return Text(
-            text=text, bbox=bbox, direction=direction, origin=compute_origin(bbox, direction),
+            text=text, bbox=bbox, direction=direction,
+            origin=compute_origin(bbox, direction, baseline),
             font=raw_span.get("font", ""), font_size=raw_span.get("size", 0.0),
             color=raw_span.get("color"), flags=raw_span.get("flags", 0),
             ascender=raw_span.get("ascender"), descender=raw_span.get("descender"),
             wmode=raw_span.get("wmode", 0),
             block_no=block_no, line_no=line_no, word_no=word_no,
             page_index=page_index, seqno=seqno, source="native",
+            orientation_source="span",
             raw_word=raw_word, raw_span=raw_span,
         )
 

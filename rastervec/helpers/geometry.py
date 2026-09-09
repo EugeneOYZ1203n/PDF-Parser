@@ -201,13 +201,24 @@ def make_oriented_quad(bbox: BBox, dx: float, dy: float) -> Quad:
     return (ul, ur, lr, ll)
 
 
-def compute_origin(bbox: BBox, direction: Point) -> Point:
+def compute_origin(
+    bbox: BBox, direction: Point, baseline_point: Point | None = None,
+) -> Point:
     """A baseline leading-edge point for `bbox`, oriented along `direction`
     -- the same along/normal projection `make_oriented_quad` uses, generalized
     from native text's old per-word `_word_origin` so native and OCR `Text`
-    populate `origin` the same way. Uses the bbox's own normal-axis center
-    (no separate baseline offset input, unlike the old span-origin-aware
-    version) since OCR results have no independent baseline sample."""
+    populate `origin` the same way.
+
+    Along the direction, the point sits at the bbox's leading (minimum-
+    projection) edge. Perpendicular to it:
+
+    - if `baseline_point` is given (native text's real `get_text("dict")`
+      span `origin`), the point keeps that baseline's own normal offset --
+      so the result lands on the actual glyph baseline, correct for
+      rotated/vertical text, not just the bbox centre;
+    - otherwise (OCR results, which have no independent baseline sample)
+      it falls back to the bbox's own normal-axis centre.
+    """
     x0, y0, x1, y1 = bbox
     dx, dy = direction
     length = hypot(dx, dy)
@@ -218,9 +229,12 @@ def compute_origin(bbox: BBox, direction: Point) -> Point:
     nx, ny = -dy, dx
     corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
     along_min = min(x * dx + y * dy for x, y in corners)
-    normal_vals = [x * nx + y * ny for x, y in corners]
-    normal_center = (min(normal_vals) + max(normal_vals)) / 2.0
-    return (along_min * dx + normal_center * nx, along_min * dy + normal_center * ny)
+    if baseline_point is not None:
+        normal_offset = baseline_point[0] * nx + baseline_point[1] * ny
+    else:
+        normal_vals = [x * nx + y * ny for x, y in corners]
+        normal_offset = (min(normal_vals) + max(normal_vals)) / 2.0
+    return (along_min * dx + normal_offset * nx, along_min * dy + normal_offset * ny)
 
 
 # --------------------------------------------------------------------------

@@ -165,7 +165,11 @@ independently of the others (every stage's *output* is a plain dataclass from `m
 - **`helpers/geometry.py`** — pure-math helpers, originally ported from the inspector tool's
   `pdf_model.py` (`point_angle`, `line_length`, `quad_angle`, `matrix_rotation`, `matrix_scale`,
   `make_oriented_quad`, `rect_gap`, `union_bbox`, etc.), shared by `native_text.py` and `Vector/` (and
-  the inspector) so none of them duplicate this math independently.
+  the inspector) so none of them duplicate this math independently. `compute_origin(bbox,
+  direction, baseline_point=None)` returns a baseline leading-edge point: along the direction it
+  sits at the bbox's leading edge; perpendicular to it, it keeps `baseline_point`'s normal offset
+  when given (native text passes the real span `origin`), else falls back to the bbox's normal-
+  axis centre (OCR text, which has no baseline sample).
 - **`helpers/clustering.py` — `Clustering`** *(implemented)*: pure-Python (no scipy/sklearn) spatial
   hash grid + union-find for `cluster_spatial` (buckets items into grid cells sized by `threshold`,
   unions items in neighboring cells whose `geometry.rect_gap` ≤ `threshold` —
@@ -188,13 +192,19 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `iter_pages(indices=None)`), each carrying a `PageMeta` snapshot (mediabox, rotation normalised to
   [0,360), dimensions) plus the live `fitz.Page`. `page.meta.index` is always the source-PDF page
   index and round-trips through `get_page`.
-- **`native_text.py`** *(implemented)*: `extract_native_text(page) -> list[TextWord]` — one
-  `TextWord` per `get_text("words")` word (geometry + `block_no`/`line_no`/`word_no`), font/size/
-  colour/direction/`wmode` joined from the best-overlapping `get_text("dict")` span (`_Span`
-  dataclass), above `_MIN_SPAN_OVERLAP`. Produces correctly oriented quads even for rotated text
-  (`_oriented_quad` → `geometry.make_oriented_quad`). Split into small private module functions
-  (`_extract_spans`/`_extract_words`/`_match_word_to_span`/`_oriented_quad`/`_to_word`) so each is
-  independently testable against a synthetic `fitz.Page`.
+- **`native_text.py`** *(implemented)*: `extract_native_text(page) -> list[Text]` — one
+  `Text` (`source="native"`) per `get_text("words")` word (geometry + `block_no`/`line_no`/
+  `word_no`), font/size/colour/direction/`wmode` joined from the best-overlapping
+  `get_text("dict")` span (`_Span` dataclass), above `_MIN_SPAN_OVERLAP`. `Text.quad()` /
+  `angle()` are derived from `direction` on demand, correct for rotated text. `Text.from_pymupdf`
+  builds `origin` via `helpers.geometry.compute_origin(bbox, direction, baseline_point)`, passing
+  the matched span's **real `get_text("dict")` `origin`** as `baseline_point` so the per-word
+  origin lands on the actual glyph baseline (not the bbox centre `compute_origin` falls back to
+  when it has none, e.g. OCR text). `Text.orientation_source` is `"span"` normally, `"fallback"`
+  when no span matched and `direction` defaulted to `(1, 0)` — `renderer.stages.render_native`
+  surfaces the fallback count. Split into small private module functions
+  (`_extract_spans`/`_extract_words`/`_match_word_to_span`/`_to_word`) so each is independently
+  testable against a synthetic `fitz.Page`.
 - **`Vector/vector.py`** *(implemented)*: `extract_paths(page) -> list[VectorPath]` walks
   `page.fitz_page.get_drawings()`, emitting one `VectorPath` per drawing item (`l`/`re`/`qu`/`c`),
   tagged with its parent drawing's `seq` (drawing index) plus stroke/fill color, width, dashes,
@@ -577,20 +587,16 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   (via the shared `_shapes.replay_drawing_paths`, so multi-contour fills keep their holes here too),
   never just their aggregate bbox. `native_words`/`ocr_results` are inserted as real text via
   `page.insert_text` — necessarily approximate: font family isn't preserved (always PyMuPDF's
-  base14 `"helv"`). Font size and baseline are derived from `fitz.Font("helv")`'s own
-  ascender/descender metrics rather than treating the bbox height as the fontsize and the bbox's
-  bottom edge as the baseline outright (a font's em-square is taller than its rendered bbox, and the
-  baseline sits `ascender * fontsize` below the bbox's *top* edge, not at its bottom): `fontsize =
-  (bbox_height) / (ascender - descender)`, `baseline_y = bbox_top + ascender * fontsize`. For
-  `ocr_results` specifically, placement is per-word when `TextVectorResult.words` is populated
-  (one `_place_text` call per `OcrWord`, each scaled/baselined into its own bbox instead of one
-  string stretched across the whole cluster bbox; falls back to the single-bbox
-  `result.text`/`result.bbox` path when `words` is `None`/empty, e.g. Paddle's line-level boxes or
-  `native_words`, which has no per-word concept).
-  Either way, that height-derived fontsize is then shrunk further if needed so the
-  text actually fits the bbox it was read from *widthwise* too, via `fitz.Font.text_length(text,
-  fontsize)` against `bbox_width` -- the height-only fontsize can otherwise overflow a narrow
-  cluster/group bbox for a long OCR'd string. Rotation is
+  base14 `"helv"`). Two text helpers: **`_place_word`** (native words only) draws one word at its
+  own extracted `font_size` and its own `origin`. **`_place_text(text, bbox, rotation, *, color)`**
+  (OCR words — which carry no measured `font_size` — and `text_boxes`) derives the size from the
+  box *height* via helv's own metrics (`fontsize = bbox_height / (ascender - descender)`,
+  `baseline_y = bbox_top + ascender * fontsize`), then fills the box *width*: multiple words →
+  widen the gaps between words (justified-text style, one `insert_text` per word, letterforms and
+  intra-word spacing untouched); a single word → stretch it horizontally via a non-uniform scale
+  in the `morph` matrix (one draw call, so `render_reconstructed_pdf`'s output stays word-
+  searchable); a string too long even at natural spacing → shrink the font uniformly (via
+  `fitz.Font.text_length` vs `bbox_width`) so it never spills past the box/page. Rotation is
   exact at any angle: since `insert_text`'s own `rotate` param only accepts multiples of 90, rotation
   is applied instead via its `morph=(fixpoint, matrix)` param — `(bbox_center, fitz.Matrix(1,
   1).prerotate(angle))`, PyMuPDF's mechanism for arbitrary-angle text (a `cm` transform applied

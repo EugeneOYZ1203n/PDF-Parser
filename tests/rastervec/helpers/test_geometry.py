@@ -158,6 +158,24 @@ def test_compute_origin_matches_leading_edge_for_rotated_direction():
     assert origin == pytest.approx((5.0, 0.0))
 
 
+def test_compute_origin_uses_baseline_point_normal_offset_when_given():
+    # With a baseline sample, the perpendicular offset comes from that
+    # point (here y=3.5, near the bbox bottom), not the bbox centre (y=2).
+    origin = geometry.compute_origin(
+        (0.0, 0.0, 10.0, 4.0), (1.0, 0.0), baseline_point=(2.0, 3.5),
+    )
+    assert origin == pytest.approx((0.0, 3.5))
+
+
+def test_compute_origin_baseline_point_projects_along_direction_normal():
+    # direction (0, 1): the normal axis is x, so only the baseline point's
+    # x component sets the perpendicular offset; along-axis still leading.
+    origin = geometry.compute_origin(
+        (0.0, 0.0, 10.0, 4.0), (0.0, 1.0), baseline_point=(1.0, 999.0),
+    )
+    assert origin == pytest.approx((1.0, 0.0))
+
+
 # --------------------------------------------------------------------------
 # Vector.items geometry -- item_points / item_bbox
 # --------------------------------------------------------------------------

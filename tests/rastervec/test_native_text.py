@@ -180,3 +180,57 @@ def test_no_matching_span_falls_back():
     assert word.angle() == 0.0
     assert word.raw_span is None
     assert word.text == "orphan"
+    assert word.orientation_source == "fallback"
+
+
+def test_extract_text_origin_sits_on_the_real_baseline_not_the_bbox_centre(
+    synthetic_pdf_factory, tmp_pdf_path,
+):
+    # insert_text's insertion point IS the baseline, so the extracted
+    # word's origin.y must match the span's real get_text("dict") origin
+    # (~the y we inserted at), not the bbox vertical centre that
+    # compute_origin falls back to when it has no baseline sample.
+    doc = synthetic_pdf_factory(
+        [{"texts": [{"point": (10, 40), "text": "Baseline", "fontsize": 12}]}]
+    )
+    path = tmp_pdf_path(doc)
+
+    with Reader(path) as reader:
+        page = reader.get_page(0)
+        (word,) = native.extract_native_text(page)
+
+    span_baseline_y = word.raw_span["origin"][1]
+    bbox_centre_y = (word.bbox[1] + word.bbox[3]) / 2
+
+    assert word.orientation_source == "span"
+    assert word.origin[1] == pytest.approx(span_baseline_y, abs=0.5)
+    assert abs(word.origin[1] - bbox_centre_y) > 1.5  # clearly not the centre
+
+
+def test_extract_text_on_rotated_page_keeps_span_orientation(
+    synthetic_pdf_factory, tmp_pdf_path,
+):
+    # Span matching (word bbox <-> dict span, both in unrotated MediaBox
+    # space) must still work when the page itself carries a /Rotate, so a
+    # word on a rotated page keeps a real direction, not the (1, 0)
+    # fallback.
+    doc = synthetic_pdf_factory(
+        [{"width": 200, "height": 300, "rotation": 90,
+          "texts": [{"point": (40, 80), "text": "Rotated", "fontsize": 12}]}]
+    )
+    path = tmp_pdf_path(doc)
+
+    with Reader(path) as reader:
+        page = reader.get_page(0)
+        (word,) = native.extract_native_text(page)
+
+    assert word.text == "Rotated"
+    assert word.raw_span is not None
+    assert word.orientation_source == "span"
+
+    # quad long axis follows the text direction, and origin is on a bbox
+    # edge (the baseline), not floating at the bbox centre.
+    dx, dy = word.direction
+    cx = (word.bbox[0] + word.bbox[2]) / 2
+    cy = (word.bbox[1] + word.bbox[3]) / 2
+    assert (word.origin[0] - cx) ** 2 + (word.origin[1] - cy) ** 2 > 1.0

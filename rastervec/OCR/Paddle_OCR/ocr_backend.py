@@ -186,5 +186,6 @@ def recognize_segments(
                 block_no=0, line_no=0, word_no=0,
                 page_index=0, seqno=0,
                 confidence=box.confidence, source="ocr",
+                orientation_source="ocr",
             ))
     return texts
