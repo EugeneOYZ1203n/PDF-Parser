@@ -7,10 +7,10 @@ from an axis-aligned bbox + direction, so nothing new is invented). There is
 no `rotation_used` field: an OCR result's final orientation is a word's
 own Radon residual skew angle combined with PaddleOCR's cls-detected
 180-degree correction, folded into `direction` once, before the `Text` is
-built (see `OCR/Paddle_OCR/ocr_backend.py::recognize_segments`); a
-cluster's own PCA-estimated rotation is layered on top of that afterward
-when restoring onto each real occurrence (see
-`pipelines/sub_pipelines/ocr.py::restore_cluster_texts`).
+built (see `OCR/Paddle_OCR/ocr_backend.py::recognize_segments`); an elected
+representative's own canonicalizing rotation is layered on top of that
+afterward when restoring onto each real word occurrence (see
+`pipelines/sub_pipelines/ocr.py::restore_word_texts`).
 
 `origin` is a baseline leading-edge point for both native and OCR text
 (`helpers.geometry.compute_origin`), so the field means the same thing
@@ -23,7 +23,7 @@ line `dir`), `"fallback"` (no span matched -> horizontal), or `"ocr"`.
 
 `from_pymupdf`/`to_pymupdf` are the fitz boundary for *native* text (an
 OCR `Text` is hand-built by `OCR/Paddle_OCR/ocr_backend.py` /
-`pipelines/sub_pipelines/ocr.py::restore_cluster_texts` instead, never via
+`pipelines/sub_pipelines/ocr.py::restore_word_texts` instead, never via
 `from_pymupdf`). `raw_span`, note, is not the bare `get_text("dict")` span
 dict -- `direction`/`wmode` live on that span's *line*, one level up, not
 on the span itself, so `native_text.py::_extract_spans` merges the line's

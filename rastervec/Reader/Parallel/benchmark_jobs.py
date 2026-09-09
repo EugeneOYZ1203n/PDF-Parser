@@ -29,13 +29,14 @@ verbose-only) for `attribute_miss`, and the showcase sampler needs
 from __future__ import annotations
 
 import io
-import math
 import random
 import tempfile
 import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from PIL import Image
 
 from rastervec.Evaluation.conversion import (
     convert_page_drawings_only,
@@ -61,18 +62,11 @@ from rastervec.Evaluation.Labelling.label_schema import (
     LabelSet,
     split_labelset_by_source,
 )
-from rastervec.config import MIN_RENDER_SIDE_PX
-from rastervec.helpers.geometry import PDF_POINTS_PER_INCH
 from rastervec.logging_setup import get_logger
-from rastervec.models import PageMeta
+from rastervec.models import PageMeta, Segment, Text
 from rastervec.pipelines.current import run_pipeline
 from rastervec.Reader.reader import Reader
-from rastervec.renderer import (
-    cluster_frame_size,
-    render_boxes_pdf,
-    render_reconstructed_pdf,
-    render_vector_cluster,
-)
+from rastervec.renderer import render_boxes_pdf, render_reconstructed_pdf
 
 _LOG = get_logger("reader.parallel.jobs")
 
@@ -152,40 +146,18 @@ def _original_page_meta(pdf_path: str, page_index: int) -> PageMeta:
         return reader.get_page(page_index).meta
 
 
-def _render_ocr_input(vectors, dpi: int = 300):
-    """The exact image OCR's own render step feeds PaddleOCR for one
-    UniqueSegment/cluster (dpi bumped up the same way for a tiny render)."""
-    width_pt, height_pt = cluster_frame_size(vectors)
-    min_side_pt = min(width_pt, height_pt)
-    if min_side_pt > 0:
-        dpi = max(
-            dpi,
-            math.ceil(MIN_RENDER_SIDE_PX * PDF_POINTS_PER_INCH / min_side_pt),
-        )
-    return render_vector_cluster(vectors, dpi)
-
-
-def _joined_text(words: list) -> str:
-    """A representative cluster's own word-level `Text`s, joined into one
-    display string for the showcase -- `unique_texts` is now `list[Text]`
-    per representative (one entry per word Radon found in it), not a
-    single `Text`, since a representative can be a whole multi-word
-    cluster."""
-    return " ".join(w.text.strip() for w in words if w.text.strip())
-
-
 def _showcase(
-    unique_pairs: list[tuple], per_page: int, seed: int,
+    unique_pairs: "list[tuple[Segment, Text]]", per_page: int, seed: int,
 ) -> list[ShowcaseSample]:
-    """`unique_pairs` is `[(UniqueSegment, list[Text]), ...]` -- one real
-    render per pair (mirrors the old per-cluster showcase, now sampling the
-    deduped representative clusters instead of every candidate cluster);
-    the pair's displayed text is every one of that representative's own
-    words joined together (see `_joined_text`)."""
+    """`unique_pairs` is `[(Segment, Text), ...]` -- one elected
+    representative word and its own OCR reading, sampling the deduped
+    representatives instead of every candidate word. The displayed image is
+    the representative's own captured crop (`seg.image` -- already the
+    exact image OCR itself recognized, no re-render needed)."""
     if per_page <= 0 or not unique_pairs:
         return []
-    passed = [(seg, t) for seg, t in unique_pairs if _joined_text(t)]
-    blank = [(seg, t) for seg, t in unique_pairs if not _joined_text(t)]
+    passed = [(seg, t) for seg, t in unique_pairs if t.text.strip()]
+    blank = [(seg, t) for seg, t in unique_pairs if not t.text.strip()]
     rng = random.Random(seed)
     half = per_page // 2
     pick = rng.sample(passed, min(half, len(passed)))
@@ -197,13 +169,11 @@ def _showcase(
 
     out: list[ShowcaseSample] = []
     for seg, t in pick:
-        try:
-            image = _render_ocr_input(seg.vectors)
-        except Exception:  # noqa: BLE001 -- a bad crop shouldn't kill the page
+        if seg.image is None:
             continue
         buf = io.BytesIO()
-        image.save(buf, format="PNG")
-        text = _joined_text(t)
+        Image.fromarray(seg.image).save(buf, format="PNG")
+        text = t.text.strip()
         out.append(ShowcaseSample(png=buf.getvalue(), text=text, passed=bool(text)))
     return out
 

@@ -174,11 +174,11 @@ def test_recognize_segments_empty_input():
 )
 def test_recognize_segments_reads_real_rendered_text(tmp_pdf_path):
     """End-to-end smoke test with the real PaddleOCR engine: a real vector-
-    text page, run through classification, then Radon segmentation on that
-    one surviving cluster's own vectors (standing in for a `UniqueSegment`
-    -- the new pipeline only ever Radon-segments a representative cluster,
-    never a whole page's clusters at once), recognizing the real word-level
-    `Segment`s (with their real captured crop images) it produces."""
+    text page, run through classification, then Radon segmentation directly
+    on that surviving cluster's own vectors (the pipeline itself now Radon-
+    segments every FAST-surviving cluster, not just elected representatives
+    -- see `docs/PIPELINE.md`), recognizing the real word-level `Segment`s
+    (with their real captured crop images) it produces."""
     from rastervec.Evaluation.conversion import convert_page_text_only
     from rastervec.OCR.radon import segment_clusters
     from rastervec.pipelines.sub_pipelines.vector_classification import classify_vectors

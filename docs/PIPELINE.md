@@ -13,10 +13,7 @@ Everything in this pipeline is either a `Vector` or a `Text` (`rastervec/models/
   item shape (`("l", p1, p2)` / `("re", rect)` / `("qu", quad)` / `("c", p1, p2, p3, p4)`, fitz
   objects converted to plain tuples) -- **a `Vector` is never decomposed into its own items anywhere
   in this pipeline.** Filters that need item-level detail (perimeter/density/constant-spacing
-  scoring) inspect `v.items` internally but always keep or drop the whole `Vector`. This replaces the
-  pre-refactor design, where every drawing was exploded into one `VectorPath` per item at extraction
-  time and only reassembled for final output -- that reassembly step doesn't exist anymore because
-  nothing was ever taken apart.
+  scoring) inspect `v.items` internally but always keep or drop the whole `Vector`.
 - **`Text`** mirrors `get_text()`'s field surface (`"words"` + the matching `"dict"` span) and
   doubles as the OCR result type (`source="native"` or `source="ocr"`). It stores `direction` (a unit
   vector) and computes `angle()`/`quad()` from it plus `bbox` on demand -- there is no stored `angle`,
@@ -27,7 +24,7 @@ Everything in this pipeline is either a `Vector` or a `Text` (`rastervec/models/
 ## The step sequence
 
 ```
-read -> native -> vectors -> classify -> similarity -> fast -> segment -> ocr -> restore -> drawing
+read -> native -> vectors -> classify -> fast -> segment -> similarity -> ocr -> restore -> drawing
 ```
 
 1. **`read`** -- opens the PDF, hands back one `Page` (mediabox/rotation snapshot + a live
@@ -45,55 +42,50 @@ read -> native -> vectors -> classify -> similarity -> fast -> segment -> ocr ->
    the real signal. Output: `text_clusters` (tiered `list[list[list[Vector]]]` -- clusters of their
    member groups of `Vector`s, real nested structure, no `id()`-keyed lineage side-channel) and
    `drawing_vectors` (flat, every dropped `Vector`).
-5. **`similarity`** (`build_cluster_candidates` + `group_similar_segments`, `pipelines/_steps.py`) --
-   runs directly on classification's kept clusters (flattened to `list[Vector]` per cluster),
-   **before** Radon or OCR ever touch them. `build_cluster_candidates` wraps each cluster as a
-   `Segment(vectors, angle)`, `angle` a cheap PCA principal-axis estimate over the cluster's own
-   point cloud (`_cluster_angle`) -- pure vector-geometry math, no rendering, unlike Radon's precise
-   but render-dependent skew. `group_similar_segments` then groups these cluster-level `Segment`s by
-   whole-page, translation+rotation-tolerant shape equivalence, normalizing rotation with that PCA
-   estimate. Output: `list[list[int]]`, each inner list the indices of one similarity group of
-   *clusters*.
-6. **`fast`** (`detect_text_fast`, `pipelines/_steps.py`) -- scores every cluster candidate, at its
-   real page position, against one whole-page FAST detection mask. **A group passes only if every
-   one of its members individually exceeds `FAST_COMBINED_KEEP_THRESHOLD` (0.7)** -- not just the
-   group's weakest member scraping by, every real occurrence has to look like text on its own. A
-   passing group materializes its first member's canonical (translated-to-origin, PCA-rotated-to-
-   upright) `vectors` -- a *whole representative cluster*, not yet split into words -- as one
-   `UniqueSegment`, plus one `SegmentMeta` per member (including that first member) recording how to
-   get back to that member's real position. A failing group's real (un-normalized) vectors are
-   flattened into drawing output. This function is unchanged code from the pre-reorder pipeline --
-   it only ever reads `Segment.vectors`/`.angle`, so calling it with cluster-level candidates instead
-   of word-level ones just works.
-7. **`segment`** (`segment_unique_clusters` + `segment_clusters`, `OCR/radon.py`) -- Radon-transform
-   deskew, run **only on the small set of elected representative clusters** step 6 dedup down to (one
-   `segment_clusters([u.vectors])` call per `UniqueSegment`) -- never on every surviving
-   classification cluster, and never on a non-representative occurrence at all. For each
-   representative: render, estimate skew at full precision, deskew, split into line/word crops, map
-   each word's crop region back onto the representative's own `Vector`s by bbox overlap, **and
-   capture that word's own deskewed pixel crop directly** (`Segment.image`) so OCR never has to
-   re-render. Output: one `list[Segment]` per representative, each a word at its position *within
-   that representative's own canonical frame* (not yet placed onto any real occurrence), `angle` now
-   Radon's precise residual skew on top of the coarser PCA rotation already applied in step 5.
-8. **`ocr`** (`recognize_unique_clusters`, `pipelines/sub_pipelines/ocr.py` ->
-   `OCR/Paddle_OCR/ocr_backend.py::recognize_segments`) -- recognizes every representative's own word
-   `Segment`s straight from their captured `.image` crops -- **no render happens in this step at
-   all**. Recognition is a single pass per batch: PaddleOCR's own angle classifier
-   (`use_angle_cls=True`) resolves the one remaining 0-vs-180-degree ambiguity Radon can't (a
-   baseline is a line, not an arrow), flagged crops are rotated, then `text_recognizer` runs once
-   over the batch. `direction` combines that word's own Radon residual angle with the classifier's
-   flip. Output: one inner `list[Text]` per representative (that representative's own words, in its
-   own canonical frame), same order/length as step 7's output.
-9. **`restore`** (`restore_cluster_texts`, `pipelines/sub_pipelines/ocr.py`) -- for every
-   `SegmentMeta` (one real cluster occurrence), replays *every one* of that occurrence's
-   representative's word-level `Text`s through `transform_bbox`/`transform_direction`/
-   `transform_point` by that meta's own `(offset, rotation)` -- the exact inverse of the PCA
-   normalization applied in step 5/6 -- placing every word onto that occurrence's real page position.
-   Output: one restored, real-position `Text` per (real cluster occurrence x representative word)
-   pair.
-10. **`drawing`** (`build_drawing_output`) -- merges classification's drops (step 4) with FAST's drops
-    (step 6) into one flat, `seqno`-ordered `list[Vector]`. Nothing is reassembled -- a `Vector` was
-    never decomposed, so there's no per-drawing regrouping left to do.
+5. **`fast`** (`detect_text_fast`, `pipelines/_steps.py`) -- runs directly on classification's kept
+   clusters (flattened to plain `list[Vector]` per cluster -- no `Segment` wrapping, no rotation
+   estimate of any kind), scoring each cluster (at its real page position) against one whole-page
+   FAST detection mask. **Each cluster passes or fails entirely on its own score** -- there is no
+   grouping yet at this point, so there is no "every occurrence of this shape must pass" check; a
+   weak render of an otherwise-common shape is dropped on its own, independent of its stronger
+   siblings. A passing cluster's real, unmodified `Vector`s flow on to Radon segmentation; a
+   failing cluster's vectors are flattened into drawing output.
+6. **`segment`** (`OCR/radon.py::segment_clusters`, called directly from `_common.py`) --
+   Radon-transform deskew, run on **every FAST-surviving cluster** (not a deduped subset -- dedup
+   happens after this step now). One call, `segment_clusters(fast.passed)`, over the whole list at
+   once: for each cluster, render, estimate skew at full precision, deskew, split into line/word
+   crops, map each word's crop region back onto the cluster's own `Vector`s by bbox overlap, and
+   capture that word's own deskewed pixel crop directly (`Segment.image`) so OCR never has to
+   re-render. Output: one flat `list[Segment]`, combined across every input cluster, each entry one
+   word at its real page position with Radon's precise `angle`.
+7. **`similarity`** (`group_similar_segments` + `elect_unique_segments`, `pipelines/_steps.py`) --
+   groups the flat word `Segment` list from step 6 by whole-page, translation+rotation-tolerant
+   shape equivalence, using each `Segment`'s own Radon-precise `angle` to normalize rotation -- this
+   is the *only* rotation estimate anywhere in this pipeline now (there is no separate, coarser
+   pre-Radon estimate). For each resulting group, `elect_unique_segments` canonicalizes `group[0]`
+   into a zero-angle `Segment` (translation+rotation-normalized `vectors`, `image` carried over
+   unchanged from the real occurrence -- already upright, no re-render), and builds one `SegmentMeta`
+   per group member (including the representative's own occurrence) recording how to transform its
+   eventual OCR result back onto its own real position. Output: `unique_segments` (one canonical
+   `Segment` per group) and `segment_metas` (one per real word occurrence).
+8. **`ocr`** (`recognize_unique_words`, `pipelines/sub_pipelines/ocr.py` ->
+   `OCR/Paddle_OCR/ocr_backend.py::recognize_segments`) -- recognizes every elected representative's
+   own captured `.image` crop directly -- **no render happens in this step at all**. Recognition is
+   a single pass per batch: PaddleOCR's own angle classifier (`use_angle_cls=True`) resolves the one
+   remaining 0-vs-180-degree ambiguity Radon can't (a baseline is a line, not an arrow), flagged
+   crops are rotated, then `text_recognizer` runs once over the batch. `direction` combines that
+   representative's own residual angle (0.0, since `elect_unique_segments` already canonicalized it)
+   with the classifier's flip. Output: `unique_texts`, one canonical-frame `Text` per
+   `unique_segments` entry, same order/length.
+9. **`restore`** (`restore_word_texts`, `pipelines/sub_pipelines/ocr.py`) -- for every `SegmentMeta`
+   (one real word occurrence), replays `unique_texts[meta.unique_index]` through
+   `transform_bbox`/`transform_direction`/`transform_point` by that meta's own `(offset, rotation)`
+   -- the exact inverse of the canonicalization applied in step 7 -- placing it onto that
+   occurrence's real page position. Output: one restored, real-position `Text` per real word
+   occurrence.
+10. **`drawing`** (`build_drawing_output`) -- merges classification's drops (step 4) with FAST's
+    drops (step 5) into one flat, `seqno`-ordered `list[Vector]`. Nothing is reassembled -- a
+    `Vector` was never decomposed, so there's no per-drawing regrouping left to do.
 
 Final, always-on `PipelineResult` fields: `texts` (native + restored OCR, flat) and `vectors`
 (drawing content, flat). Everything else is verbose-only intermediate state (see below).
@@ -105,41 +97,25 @@ one of them rotated 90 degrees.
 
 - **Classify** keeps all five as one or more text-candidate clusters (spatial clustering only merges
   *nearby* geometry, so these five separate stamps stay as five separate clusters).
-- **Similarity** estimates each cluster's own PCA angle (cheap, no rendering) and normalizes each to
-  its own canonical frame using that estimate, so the four upright stamps and the one rotated stamp
-  all land in the *same* shape after normalization -- one group of five cluster indices.
-- **FAST** scores all five cluster candidates at their real positions. All five must individually
-  clear 0.7. If they do, the group's first member becomes one `UniqueSegment` (its whole canonical
-  cluster, not yet split into words), and five `SegmentMeta` entries are recorded (one per stamp,
-  including the first), each carrying that stamp's own `(offset, rotation)` back to its real
-  position.
-- **Segment** Radon-deskews **only that one representative cluster** -- the other four real stamps
-  are never rendered or Radon-processed at all -- producing one word-level `Segment("12.5m", angle,
-  image)` (Radon's precise residual angle on top of the coarser PCA rotation, plus the word's own
-  captured crop).
-- **OCR** recognizes that one word crop directly (no render) -- one batch slot, one recognition call
-  -- producing one canonical `Text("12.5m")`.
-- **Restore** replays that one `Text` across all five `SegmentMeta`s, each transformed by its own
-  `(offset, rotation)`, so the final output has five `Text("12.5m")` entries at five different real
-  positions/rotations -- one of them rotated 90 degrees, matching the original page -- for the cost
-  of **one Radon segmentation and one OCR call instead of five**, not just one OCR call as before.
-
-## The angle-precision invariant
-
-There are now two distinct rotation estimates in play, used at different granularities:
-
-- **Cluster-level (steps 5-6):** `_cluster_angle`'s PCA principal-axis estimate. Cheap (pure
-  point-cloud math, no rendering) and good enough to canonicalize a whole cluster for
-  similarity-grouping and FAST scoring purposes -- it does not need to be pixel-precise, since it's
-  only ever used to decide *which clusters are the same shape* and to compute the exact affine
-  transform back to each real occurrence (which is itself exact regardless of how the angle was
-  estimated, since restore uses the same value both ways).
-- **Word-level (step 7):** `Segment.angle` from Radon's fine sweep (`RADON_ANGLE_STEP_DEG`
-  resolution, currently 0.25 degrees) -- **still never rounded or snapped to a multiple of 90**,
-  exactly as before. This is the value the final OCR `Text.direction` (step 8) combines with
-  PaddleOCR's 0/180 correction. Rounding it would silently degrade every downstream angle to blocky
-  90-degree steps -- if you find yourself wanting to `round(angle / 90) * 90` anywhere in this
-  pipeline, that's a regression, not a simplification.
+- **FAST** scores each of the five clusters independently against the page mask. Each stamp passes
+  or fails purely on its own render quality -- if one of the five happens to render weakly (a stray
+  overlap, a thin line width) it can be dropped on its own while the other four survive; there is no
+  group to average across yet.
+- **Segment (Radon)** deskews **every one of the surviving stamps individually** -- Radon runs once
+  per surviving occurrence here, not once per shape, since dedup hasn't happened yet. Each produces
+  its own word-level `Segment("12.5m", angle, image)` (Radon's precise per-occurrence skew, plus that
+  occurrence's own captured crop).
+- **Similarity** normalizes each of those word `Segment`s to its own canonical frame using its own
+  Radon angle, so the (up to) four upright stamps and the one rotated stamp all land in the *same*
+  shape after normalization -- one group of however many stamps survived FAST. `elect_unique_segments`
+  picks the first as representative and records one `SegmentMeta` per surviving stamp.
+- **OCR** recognizes only that one representative's captured crop directly (no render) -- one batch
+  slot, one recognition call -- producing one canonical `Text("12.5m")`.
+- **Restore** replays that one `Text` across every `SegmentMeta`, each transformed by its own
+  `(offset, rotation)`, so the final output has one restored `Text("12.5m")` per stamp that survived
+  FAST, at its real position/rotation -- for the cost of **one OCR call instead of many**. Unlike the
+  previous ordering, dedup here only saves OCR calls: Radon still ran once per surviving occurrence,
+  since grouping isn't known until after Radon produces a precise angle to group by.
 
 ## `PipelineResult`'s verbose-only fields
 
@@ -154,14 +130,14 @@ visualization notebook reads via its own `render_<stage_name>` function:
 | `text_clusters` | classify | Tiered surviving clusters (`list[list[list[Vector]]]`) |
 | `clustering` | classify | Per-bucket `ClusteringStageResult` (every step's kept/dropped categories) |
 | `classification_dropped` | classify | Flat drawing-content `Vector`s from this step alone |
-| `cluster_segments` | similarity | Every cluster candidate `Segment` (PCA angle, no image) |
-| `similarity_groups` | similarity | `list[list[int]]` indices into `cluster_segments` |
-| `fast_result` | fast | Whole-page render/mask/per-group scores |
-| `unique_segments` / `segment_metas` | fast | One `UniqueSegment` per representative *cluster*, one `SegmentMeta` per real cluster occurrence |
-| `fast_dropped_vectors` | fast | Real vectors from failing groups |
-| `word_segments` | segment | Radon's per-representative word-level `Segment`s (with `.image`) |
-| `unique_texts` | ocr | One inner `list[Text]` per representative (that representative's own words) |
-| `restored_texts` | restore | One `Text` per (real cluster occurrence x representative word), real position |
+| `fast_result` | fast | Whole-page render/mask/per-cluster scores |
+| `fast_passed` | fast | FAST-surviving clusters, pre-Radon (`list[list[Vector]]`) |
+| `fast_dropped_vectors` | fast | Real vectors from failing clusters |
+| `word_segments` | segment | Every FAST-surviving cluster's own Radon word `Segment`s, flat |
+| `similarity_groups` | similarity | `list[list[int]]` indices into `word_segments` |
+| `unique_segments` / `segment_metas` | similarity | One canonical `Segment` per similarity group, one `SegmentMeta` per real word occurrence |
+| `unique_texts` | ocr | One `Text` per `unique_segments` entry, canonical frame |
+| `restored_texts` | restore | One `Text` per real word occurrence, real position |
 | `step_outputs` | (all) | Per-step `StepOutcome` (status/error/duration) |
 
 ## Simplifications, honestly stated
@@ -172,11 +148,11 @@ right, tune later" bias rather than fully optimized:
 - **Word-to-Vector assignment** in `segment_clusters` assigns each cluster `Vector` to whichever
   Radon-detected word bbox it overlaps most (nearest-center as a fallback for no overlap at all) --
   a `Vector` spanning two words in practice would be assigned whole to one of them, not split.
-- **Similarity tolerance** (`UNIQUE_CLUSTER_TOLERANCE`) is shared, as-is, between this PCA-based
-  cluster-level check and (historically) a Radon-angle-based word-level check; it has not been
-  independently re-tuned for the PCA estimate's coarser precision, though the two should behave
-  similarly for well-separated, non-near-square cluster shapes.
-- **No word-level dedup within one representative.** Every word Radon finds inside an elected
-  representative cluster is recognized directly -- a representative containing several repeated
-  words of its own (e.g. a table-like block of identical short labels) pays one OCR batch slot per
-  word, not deduped further. Cluster-level dedup (steps 5-6) is the only dedup pass in this pipeline.
+- **FAST filters per-occurrence, not per-shape.** Because FAST now runs before any dedup exists,
+  identical stamps of the same shape are each scored independently; a page with many repeats of a
+  weakly-rendered shape can end up keeping some occurrences and dropping others, where the previous
+  (pre-reorder) group-min check would have dropped or kept them all together.
+- **No word-level dedup within one representative's own multi-word neighbors.** Similarity dedup
+  operates over the flat, whole-page word list produced by step 6 -- two occurrences of the same word
+  in *different* clusters dedup together same as before, but this is the only dedup pass in the
+  pipeline.

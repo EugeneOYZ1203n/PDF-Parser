@@ -1,24 +1,27 @@
 """The OCR backend: recognises pre-segmented word crops with PaddleOCR and
 returns one `Text` per word.
 
-Text *detection* is not PaddleOCR's job in this pipeline -- similarity+FAST
-dedup (Phase E/F, `pipelines/_steps.py`) first narrows every surviving
-classification cluster down to the small set of elected representatives
-that actually need processing, then Radon segmentation
-(`OCR/radon.py::segment_clusters`, called only on those representatives)
-splits each one into word-level `Segment`s, each already carrying its own
-deskewed crop (`Segment.image`) -- so by the time a `Segment` reaches this
-module it *is* one word, already rotated to (approximately) upright, and no
-render happens here at all. The only remaining ambiguity Radon's
+Text *detection* is not PaddleOCR's job in this pipeline -- FAST (Phase D,
+`pipelines/_steps.py::detect_text_fast`) first narrows classification's
+clusters down to the ones that look like text, then Radon segmentation
+(`OCR/radon.py::segment_clusters`, Phase E, called on every FAST-surviving
+cluster) splits each one into word-level `Segment`s, each already carrying
+its own deskewed crop (`Segment.image`) -- so by the time a `Segment`
+reaches this module it *is* one word, already rotated to (approximately)
+upright, and no render happens here at all. Similarity dedup (Phase F,
+`pipelines/_steps.py::elect_unique_segments`) then elects one representative
+`Segment` per repeated shape and it's only those representatives this
+module actually recognizes. The only remaining ambiguity Radon's
 projection-profile skew estimate cannot resolve is a 0-vs-180-degree flip (a
 baseline is a line, not an arrow) -- PaddleOCR's own angle classifier
 (`use_angle_cls=True`) resolves it in one extra pass, then `text_recognizer`
-runs once per batch. Radon's own residual skew angle and the classifier's
-0/180 correction are combined into one final `direction` before the `Text`
-is returned -- see `recognize_segments`. (A cluster's own PCA-estimated
-rotation, on top of this, is applied afterward by `pipelines/sub_pipelines/
-ocr.py::restore_cluster_texts` when placing a representative's words back
-onto each real cluster occurrence -- this module never sees that.)
+runs once per batch. Radon's own residual skew angle (0.0 for an elected
+representative's canonicalized copy) and the classifier's 0/180 correction
+are combined into one final `direction` before the `Text` is returned --
+see `recognize_segments`. (A representative's own canonicalizing rotation,
+on top of this, is applied afterward by `pipelines/sub_pipelines/
+ocr.py::restore_word_texts` when placing its `Text` back onto each real
+word occurrence -- this module never sees that.)
 
 `PaddleRecBackend` builds one `paddleocr.PaddleOCR` engine
 (`config.OCR_VERSION` = PP-OCRv4, `config.OCR_LANG`), cached at class scope
@@ -153,19 +156,19 @@ def recognize_segments(
     deskewed crop in `.image` -- no render happens here) in batches of
     `batch_size`, and returns one `Text` per input `Segment`, `source=
     "ocr"`, in the same coordinate frame `segment.vectors` already live in
-    (a representative cluster's own canonical frame -- see `models/
-    segment.py`'s docstring). `recognize_fn` defaults to a fresh
+    -- real page position for a plain word `Segment`, or an elected
+    representative's own canonical frame (see `models/segment.py`'s
+    docstring). `recognize_fn` defaults to a fresh
     `PaddleRecBackend().recognize_crops`; pass one (e.g. dispatching to a
     shared compute pool -- see `Reader/Parallel`) to replace the actual
     engine call without changing anything else here.
 
     `direction` combines that word's own Radon residual skew
-    (`segment.angle` -- typically small, since `segment.vectors` were
-    already once coarsely upright via the cluster-level PCA canonicalization
-    that ran before Radon) with the classifier's 0/180 flip correction. A
-    cluster's own PCA rotation is layered on top of this by `pipelines/
-    sub_pipelines/ocr.py::restore_cluster_texts` when placing these words
-    back onto each real cluster occurrence -- not here."""
+    (`segment.angle` -- 0.0 for an elected representative's canonicalized
+    copy) with the classifier's 0/180 flip correction. A representative's
+    own canonicalizing rotation is layered on top of this by `pipelines/
+    sub_pipelines/ocr.py::restore_word_texts` when placing it back onto
+    each real word occurrence -- not here."""
     recognize_fn = recognize_fn if recognize_fn is not None else PaddleRecBackend().recognize_crops
 
     bboxes = [union_bbox([v.bbox for v in seg.vectors]) for seg in segments]

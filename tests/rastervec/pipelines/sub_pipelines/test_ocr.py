@@ -4,7 +4,7 @@ from rastervec.models import Segment, SegmentMeta
 from rastervec.pipelines.sub_pipelines import ocr as ocr_mod
 
 
-def test_recognize_unique_clusters_delegates_to_recognize_segments(monkeypatch):
+def test_recognize_unique_words_delegates_to_recognize_segments(monkeypatch):
     captured: dict = {}
 
     def fake_recognize_segments(segments, *, recognize_fn=None):
@@ -12,17 +12,16 @@ def test_recognize_unique_clusters_delegates_to_recognize_segments(monkeypatch):
         return [f"text for {len(segments)} word(s)"]
 
     monkeypatch.setattr(ocr_mod, "_recognize_segments", fake_recognize_segments)
-    word_segments_by_unique = [[Segment(vectors=[], angle=0.0)], [Segment(vectors=[], angle=0.0)] * 2]
+    uniques = [Segment(vectors=[], angle=0.0), Segment(vectors=[], angle=0.0)]
 
-    result = ocr_mod.recognize_unique_clusters(word_segments_by_unique)
+    result = ocr_mod.recognize_unique_words(uniques)
 
-    assert result == [["text for 1 word(s)"], ["text for 2 word(s)"]]
-    assert [segs for segs, _fn in captured["calls"]] == word_segments_by_unique
-    assert all(fn is None for _segs, fn in captured["calls"])
+    assert result == ["text for 2 word(s)"]
+    assert captured["calls"] == [(uniques, None)]
 
 
-def test_recognize_unique_clusters_empty_input():
-    assert ocr_mod.recognize_unique_clusters([]) == []
+def test_recognize_unique_words_empty_input():
+    assert ocr_mod.recognize_unique_words([]) == []
 
 
 class _FakeCompute:
@@ -37,7 +36,7 @@ class _FakeCompute:
         return fn(*args)
 
 
-def test_recognize_unique_clusters_passes_recognize_fn_only_when_compute_given(monkeypatch):
+def test_recognize_unique_words_passes_recognize_fn_only_when_compute_given(monkeypatch):
     captured: list = []
 
     def fake_recognize_segments(segments, *, recognize_fn=None):
@@ -46,10 +45,10 @@ def test_recognize_unique_clusters_passes_recognize_fn_only_when_compute_given(m
 
     monkeypatch.setattr(ocr_mod, "_recognize_segments", fake_recognize_segments)
 
-    ocr_mod.recognize_unique_clusters([[]])
+    ocr_mod.recognize_unique_words([])
     assert captured[-1] is None
 
-    ocr_mod.recognize_unique_clusters([[]], compute=_FakeCompute())
+    ocr_mod.recognize_unique_words([], compute=_FakeCompute())
     assert captured[-1] is not None
 
 
@@ -64,7 +63,7 @@ def test_recognize_fn_closure_dispatches_through_compute_apply(monkeypatch):
     monkeypatch.setattr(ocr_mod, "_recognize_crops_job", lambda c, *a, **k: [f"got {len(c)}"])
 
     compute = _FakeCompute()
-    ocr_mod.recognize_unique_clusters([[]], compute=compute)
+    ocr_mod.recognize_unique_words([], compute=compute)
 
     result = captured["recognize_fn"]([1, 2, 3])
     assert compute.calls == 1
@@ -87,7 +86,7 @@ def test_recognize_fn_closure_increments_progress_counter_by_crop_count(monkeypa
     monkeypatch.setattr(ocr_mod, "_recognize_crops_job", lambda c, *a, **k: [f"got {len(c)}"])
 
     counter = _FakeCounter()
-    ocr_mod.recognize_unique_clusters([[]], compute=_FakeCompute(), progress_counter=counter)
+    ocr_mod.recognize_unique_words([], compute=_FakeCompute(), progress_counter=counter)
 
     captured["recognize_fn"]([1, 2, 3])
     assert counter.value == 3
@@ -95,7 +94,7 @@ def test_recognize_fn_closure_increments_progress_counter_by_crop_count(monkeypa
     assert counter.value == 4
 
 
-def test_recognize_unique_clusters_no_progress_counter_without_compute(monkeypatch):
+def test_recognize_unique_words_no_progress_counter_without_compute(monkeypatch):
     # progress_counter alone (no compute) has nothing to hook into --
     # recognize_fn stays None, same as without progress_counter at all.
     captured: list = []
@@ -105,18 +104,18 @@ def test_recognize_unique_clusters_no_progress_counter_without_compute(monkeypat
         return []
 
     monkeypatch.setattr(ocr_mod, "_recognize_segments", fake_recognize_segments)
-    ocr_mod.recognize_unique_clusters([[]], progress_counter=_FakeCounter())
+    ocr_mod.recognize_unique_words([], progress_counter=_FakeCounter())
     assert captured[-1] is None
 
 
 # --------------------------------------------------------------------------
-# restore_cluster_texts
+# restore_word_texts
 # --------------------------------------------------------------------------
-def test_restore_cluster_texts_transforms_canonical_text_by_meta(text):
+def test_restore_word_texts_transforms_canonical_text_by_meta(text):
     canonical = text(text="Hi", bbox=(0.0, 0.0, 10.0, 5.0), direction=(1.0, 0.0))
     meta = SegmentMeta(unique_index=0, offset=(100.0, 200.0), rotation=90.0, page_index=3, seqno=7)
 
-    [restored] = ocr_mod.restore_cluster_texts([[canonical]], [meta])
+    [restored] = ocr_mod.restore_word_texts([canonical], [meta])
 
     assert restored.text == "Hi"
     assert restored.page_index == 3
@@ -126,45 +125,42 @@ def test_restore_cluster_texts_transforms_canonical_text_by_meta(text):
     assert round(restored.direction[1], 6) == 1.0
 
 
-def test_restore_cluster_texts_identity_transform_leaves_geometry_unchanged(text):
+def test_restore_word_texts_identity_transform_leaves_geometry_unchanged(text):
     canonical = text(text="Hi", bbox=(1.0, 2.0, 11.0, 7.0), direction=(1.0, 0.0))
     meta = SegmentMeta(unique_index=0, offset=(0.0, 0.0), rotation=0.0, page_index=0, seqno=0)
 
-    [restored] = ocr_mod.restore_cluster_texts([[canonical]], [meta])
+    [restored] = ocr_mod.restore_word_texts([canonical], [meta])
 
     assert restored.bbox == canonical.bbox
     assert restored.direction == canonical.direction
     assert restored.origin == canonical.origin
 
 
-def test_restore_cluster_texts_duplicates_one_unique_across_many_metas(text):
+def test_restore_word_texts_duplicates_one_unique_across_many_metas(text):
     canonical = text(text="Dup", bbox=(0.0, 0.0, 10.0, 5.0), direction=(1.0, 0.0))
     metas = [
         SegmentMeta(unique_index=0, offset=(0.0, 0.0), rotation=0.0, page_index=0, seqno=i)
         for i in range(5)
     ]
 
-    restored = ocr_mod.restore_cluster_texts([[canonical]], metas)
+    restored = ocr_mod.restore_word_texts([canonical], metas)
 
     assert len(restored) == 5
     assert all(t.text == "Dup" for t in restored)
     assert [t.seqno for t in restored] == [0, 1, 2, 3, 4]
 
 
-def test_restore_cluster_texts_replays_every_word_per_occurrence(text):
-    """A representative with M words fans out to every real occurrence --
-    each occurrence gets all M of the representative's words, not just
-    one."""
+def test_restore_word_texts_selects_by_unique_index(text):
+    """Two different representatives' texts are placed onto the right
+    occurrences via `meta.unique_index`, not positionally."""
     word_a = text(text="A", bbox=(0.0, 0.0, 5.0, 5.0), direction=(1.0, 0.0))
-    word_b = text(text="B", bbox=(10.0, 0.0, 15.0, 5.0), direction=(1.0, 0.0))
+    word_b = text(text="B", bbox=(0.0, 0.0, 5.0, 5.0), direction=(1.0, 0.0))
     metas = [
-        SegmentMeta(unique_index=0, offset=(0.0, 0.0), rotation=0.0, page_index=0, seqno=0),
+        SegmentMeta(unique_index=1, offset=(0.0, 0.0), rotation=0.0, page_index=0, seqno=0),
         SegmentMeta(unique_index=0, offset=(100.0, 0.0), rotation=0.0, page_index=0, seqno=1),
     ]
 
-    restored = ocr_mod.restore_cluster_texts([[word_a, word_b]], metas)
+    restored = ocr_mod.restore_word_texts([word_a, word_b], metas)
 
-    assert len(restored) == 4
-    assert [t.text for t in restored] == ["A", "B", "A", "B"]
-    assert restored[0].bbox == word_a.bbox
-    assert restored[2].bbox == (100.0, 0.0, 105.0, 5.0)
+    assert [t.text for t in restored] == ["B", "A"]
+    assert restored[1].bbox == (100.0, 0.0, 105.0, 5.0)

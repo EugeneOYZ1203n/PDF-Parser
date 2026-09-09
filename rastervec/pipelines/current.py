@@ -3,15 +3,15 @@
     native           = extract_native_text(page)                      # list[Text]
     vectors          = extract_vectors(page)                          # list[Vector]
     classification   = classify_vectors(vectors, page)                # tiered text clusters + drawing drops
-    cluster_segments = build_cluster_candidates(flat_clusters)        # PCA angle estimate -> list[Segment]
-    groups           = group_similar_segments(cluster_segments)       # shape dedup -> list[list[int]]
-    fast             = detect_text_fast(cluster_segments, groups, page)  # all-must-pass -> UniqueSegments
-                                                                          # (one representative CLUSTER each)
-                                                                          # + SegmentMetas (real occurrences)
-    word_segments    = segment_unique_clusters(fast.uniques)          # Radon, representatives only -> per-unique
+    fast             = detect_text_fast(flat_clusters, page)          # per-cluster, independent -> passed clusters
+                                                                       # + dropped_vectors
+    word_segments    = segment_clusters(fast.passed)                  # Radon, every surviving cluster -> flat
                                                                        # list[Segment] (word-level, w/ .image)
-    unique_texts     = recognize_unique_clusters(word_segments)       # per-unique list[Text]
-    restored         = restore_cluster_texts(unique_texts, ...)       # every word, onto every real occurrence
+    groups           = group_similar_segments(word_segments)          # shape dedup, Radon angle -> list[list[int]]
+    uniques, metas   = elect_unique_segments(word_segments, groups)   # one canonical Segment/group + SegmentMetas
+                                                                       # (real word occurrences)
+    unique_texts     = recognize_unique_words(uniques)                # one Text per unique
+    restored         = restore_word_texts(unique_texts, metas)        # each unique's Text, onto every occurrence
     drawing_vectors  = build_drawing_output(...)
 
 See `_common.run_current_pipeline` for the real block sequence and

@@ -100,10 +100,12 @@ UNIQUE_CLUSTER_TOLERANCE = 0.04
 # (RenderOCR's per-cluster renders use 300 DPI).
 FAST_PAGE_RENDER_DPI = 150
 
-# A segment similarity group passes FAST only if *every* member's own
-# page-mask score exceeds this (functionally: min-across-group > threshold).
-# Raised from 0.2 (the old per-cluster, min'd-across-similarity-group value)
-# now that every member must individually clear it, not just the min.
+# A classification cluster passes FAST if its own page-mask score exceeds
+# this. FAST now runs before similarity grouping (no groups exist yet at
+# this point), so this applies per cluster, independently -- kept at 0.5
+# (its prior group-min value from when this threshold was last raised from
+# an even older per-cluster value of 0.2) rather than reverted, pending
+# real-world re-tuning now that the group-min check is gone.
 FAST_COMBINED_KEEP_THRESHOLD = 0.5
 
 # FastDetector.detect_tiled: FAST's own preprocessing always downsizes to a

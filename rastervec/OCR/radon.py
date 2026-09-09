@@ -25,23 +25,26 @@ combines this angle with PaddleOCR's cls-detected 180-degree flip) depend
 on the full-precision value; rounding it here would silently degrade every
 downstream angle to blocky 90-degree steps.
 
-Pipeline use: this runs *after* similarity grouping and FAST detection have
-already deduped Vector_Classification's kept clusters down to one elected
-representative per similarity group (the pre-refactor design -- see
-`pipelines/_steps.py::segment_unique_clusters`, called once per
-`UniqueSegment`, never on a whole page's clusters at once). Cluster-level
-grouping/FAST use a cheap PCA-based rotation estimate instead of Radon's
-(see `pipelines/_steps.py::_cluster_angle`), precisely because running
-Radon itself is the expensive, render-dependent step this reordering
-defers until after dedup. `segment_clusters` renders each input cluster
-once, estimates its skew and word boundaries, then maps each word's crop
-region back onto the cluster's own `Vector`s (by bbox overlap) to build a
-flat `list[Segment]`, one per word, in that cluster's own frame -- and
-now also captures each word's own deskewed pixel crop directly into
-`Segment.image`, so OCR (`OCR/Paddle_OCR/ocr_backend.py::
-recognize_segments`) never has to re-render from vectors a second time.
-The 0-vs-180 (and 90-vs-270) ambiguity Radon cannot resolve is left to
-PaddleOCR's `cls` pass once a word is actually being OCR'd.
+Pipeline use: this runs directly after FAST detection (`pipelines/
+_steps.py::detect_text_fast`) and before similarity grouping -- every
+FAST-surviving classification cluster gets Radon-segmented here, not just a
+deduped set of elected representatives, since dedup itself now happens
+*after* this step, at word granularity, using this module's own precise
+per-word `angle` instead of a coarser pre-Radon estimate (there is no such
+estimate anymore -- FAST never needed a rotation at all, since it scores
+each cluster independently). `_common.py` calls `segment_clusters` once
+with every FAST-surviving cluster at once. `segment_clusters` renders each
+input cluster once, estimates its skew and word boundaries, then maps each
+word's crop region back onto the cluster's own `Vector`s (by bbox overlap)
+to build a flat `list[Segment]`, one per word, in that cluster's own
+frame -- and also captures each word's own deskewed pixel crop directly
+into `Segment.image`, so OCR (`OCR/Paddle_OCR/ocr_backend.py::
+recognize_segments`) never has to re-render from vectors a second time; an
+elected similarity-group representative's canonicalized copy
+(`pipelines/_steps.py::elect_unique_segments`) carries that same real image
+over unchanged, so OCR never re-renders there either. The 0-vs-180 (and
+90-vs-270) ambiguity Radon cannot resolve is left to PaddleOCR's `cls` pass
+once a word is actually being OCR'd.
 """
 from __future__ import annotations
 

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     import numpy as np
     from PIL import Image
 
-    from rastervec.models import Page, Segment, SegmentMeta, Text, UniqueSegment, Vector
+    from rastervec.models import Page, Segment, SegmentMeta, Text, Vector
     from rastervec.Vector_Classification.classification import StepResult
 
 # (layer, color) -- one Vector.separate_by_color() bucket.
@@ -43,9 +43,10 @@ class ClusteringStageResult:
 @dataclass
 class FastPageResult:
     """FAST text detection's whole-page result (see
-    `pipelines/_steps.detect_text_fast`). `scores` is keyed by a cluster
-    similarity group's own index into that step's `groups` list (the
-    group's combined, min-across-members score)."""
+    `pipelines/_steps.detect_text_fast`). `scores` is keyed by a
+    classification cluster's own index into that step's `clusters` input
+    list -- each cluster is scored and kept/dropped independently, before
+    any similarity grouping exists."""
 
     page_image: "Image.Image | None"
     page_mask: "np.ndarray | None"
@@ -80,21 +81,21 @@ class PipelineResult:
     text_clusters: "list[list[list[Vector]]] | None" = None
     clustering: dict | None = None
     classification_dropped: "list[Vector] | None" = None
-    cluster_segments: "list[Segment] | None" = None  # pre-Radon, PCA-angle,
-    # one per surviving classification cluster -- similarity+FAST's input
-    similarity_groups: "list[list[int]] | None" = None
     fast_result: FastPageResult | None = None
-    unique_segments: "list[UniqueSegment] | None" = None  # one whole
-    # representative CLUSTER per passing similarity group (its vectors)
-    segment_metas: "list[SegmentMeta] | None" = None  # one per real cluster
-    # occurrence (including the representative's own)
+    fast_passed: "list[list[Vector]] | None" = None  # clusters that cleared
+    # FAST, pre-Radon -- Radon's own input
     fast_dropped_vectors: "list[Vector] | None" = None
-    word_segments: "list[list[Segment]] | None" = None  # Radon's output,
-    # representatives only -- word-level Segments (with `.image`), one
-    # inner list per `unique_segments` entry, same order
-    unique_texts: "list[list[Text]] | None" = None  # one inner list per
-    # `unique_segments`/`word_segments` entry -- that representative's own
-    # word-level OCR Texts, in canonical frame
+    word_segments: "list[Segment] | None" = None  # Radon's output: every
+    # FAST-surviving cluster's own word-level Segments (with `.image`),
+    # flat, combined across every cluster -- similarity's input
+    similarity_groups: "list[list[int]] | None" = None  # indices into
+    # word_segments -- each inner list one similarity group of words
+    unique_segments: "list[Segment] | None" = None  # one canonicalized
+    # (angle=0.0) representative word Segment per similarity group
+    segment_metas: "list[SegmentMeta] | None" = None  # one per real word
+    # occurrence (including the representative's own)
+    unique_texts: "list[Text] | None" = None  # one Text per
+    # `unique_segments` entry, in canonical frame
     restored_texts: "list[Text] | None" = None
     step_outputs: dict | None = None
 

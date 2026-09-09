@@ -27,47 +27,40 @@ survives the whole chain becomes a *text candidate* (see below).
 
 ## Segment
 
-The same dataclass (`vectors`, `angle`, optionally `image`) shared by two
-dedup passes at two granularities -- see `docs/PIPELINE.md`'s step
-sequence and `models/segment.py`'s docstring:
-
-- **Cluster-level (pre-Radon)**: one `Segment` per classification cluster,
-  `angle` a cheap PCA principal-axis estimate over the cluster's own point
-  cloud (`pipelines._steps._cluster_angle`) -- pure vector-geometry math,
-  no rendering. The unit similarity grouping and FAST detection both
-  operate on, run directly on classification's kept clusters, *before*
-  Radon or OCR ever touch them.
-- **Word-level (post-Radon, representatives only)**: one `Segment` per
-  word, produced by `OCR/radon.py::segment_clusters` when run on just an
-  elected representative's own canonical-frame vectors -- Radon's precise
-  residual skew `angle`, at full precision (never rounded to a quarter
-  turn -- see `docs/PIPELINE.md`'s angle-precision invariant), plus that
-  word's own captured crop in `image`.
+The dataclass (`vectors`, `angle`, optionally `image`) `OCR/radon.py::
+segment_clusters` produces -- one `Segment` per word, at its real page
+position, Radon's precise residual skew `angle` (full precision, never
+rounded to a quarter turn -- see `docs/PIPELINE.md`'s worked example),
+plus that word's own captured deskewed crop in `image`. This is the only
+`Segment` lifecycle in the pipeline: FAST (`pipelines._steps.
+detect_text_fast`) runs *before* Radon, directly on plain classification
+clusters, and never needs a rotation estimate at all.
 
 ## Similarity group
 
-A whole-page grouping of geometrically equivalent *clusters* --
-same shapes, translation/rotation-tolerant (using each cluster's own PCA
-angle estimate to normalize rotation) -- computed by
-`pipelines._steps.group_similar_segments`, after `classify` and before
-`fast`, i.e. *before* Radon ever runs. Clusters in the same similarity
-group (e.g. repeated instances of the same label or symbol at different
-positions/orientations on the page) share one FAST verdict: a group passes
-only if *every* member's own combined FAST score individually exceeds
-`FAST_COMBINED_KEEP_THRESHOLD` -- one weak instance drops the whole group.
+A whole-page grouping of geometrically equivalent *word* `Segment`s --
+same shapes, translation/rotation-tolerant (using each word's own
+Radon-precise `angle` to normalize rotation) -- computed by
+`pipelines._steps.group_similar_segments`, after `segment` (Radon) and
+before `ocr`. Words in the same similarity group (e.g. repeated instances
+of the same label at different positions/orientations on the page) share
+one OCR result: `elect_unique_segments` (see "Unique segment" below) picks
+one representative to actually recognize.
 
 ## Unique segment
 
-The single representative *cluster* of a passing similarity group --
-its `vectors` are normalized to a canonical frame (translated so the
-cluster's own bbox origin is `(0, 0)`, rotated by `-angle` so it's
-upright). Every other member of the group keeps only a `SegmentMeta`
-(offset + rotation back to its own real position). Only this
-representative is Radon-segmented into words and OCR'd (`pipelines.
-_steps.segment_unique_clusters` -> `OCR.Paddle_OCR.ocr_backend.
-recognize_segments`); the resulting word-level `Text`s are then replayed
+The single elected representative word `Segment` of a passing similarity
+group, canonicalized (`pipelines._steps.elect_unique_segments`) --
+`vectors` normalized to a canonical frame (translated so the word's own
+bbox origin is `(0, 0)`, rotated by `-angle` so it's upright, `angle` then
+reset to `0.0`), `image` carried over unchanged from the real occurrence it
+came from (Radon already captured it upright -- no re-render). Every other
+member of the group keeps only a `SegmentMeta` (offset + rotation back to
+its own real position). Only this representative is actually OCR'd
+(`pipelines.sub_pipelines.ocr.recognize_unique_words` -> `OCR.Paddle_OCR.
+ocr_backend.recognize_segments`); the resulting `Text` is then replayed
 onto every other member's real position (`pipelines.sub_pipelines.ocr.
-restore_cluster_texts`) without re-rendering or re-recognizing anything.
+restore_word_texts`) without re-rendering or re-recognizing anything.
 
 ## Text candidate
 

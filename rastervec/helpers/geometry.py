@@ -310,9 +310,9 @@ def transform_bbox(bbox: BBox, offset: Point, rotation_deg: float) -> BBox:
     """Rotate-then-translate an axis-aligned bbox's four corners by
     `(rotation_deg, offset)` (see `transform_point`'s exact convention) and
     return the new axis-aligned bbox of the transformed corners. Used to
-    restore OCR `Text` geometry from a `UniqueSegment`'s canonical frame
-    back onto one real `SegmentMeta` occurrence (see
-    `pipelines/sub_pipelines/ocr.py::restore_cluster_texts`)."""
+    restore OCR `Text` geometry from an elected representative `Segment`'s
+    canonical frame back onto one real `SegmentMeta` occurrence (see
+    `pipelines/sub_pipelines/ocr.py::restore_word_texts`)."""
     x0, y0, x1, y1 = bbox
     corners = [transform_point(p, offset, rotation_deg) for p in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]]
     xs = [p[0] for p in corners]
@@ -330,8 +330,9 @@ def transform_vector(v, *, offset: Point, rotation_deg: float):
     """Rotate+translate every item of `v` (and its `rect`/`scissor`),
     returning a new Vector -- never touches item *structure*, only geometry.
     Used to normalize a Segment's Vectors to a canonical (origin, upright)
-    frame, and to invert that transform when restoring a UniqueSegment's OCR
-    Text back onto each of its real page-space occurrences."""
+    frame, and to invert that transform when restoring an elected
+    representative's OCR Text back onto each of its real page-space
+    occurrences."""
     from dataclasses import replace
 
     new_items = [transform_item(item, offset, rotation_deg) for item in v.items]
