@@ -63,7 +63,7 @@ class StepTimer:
 
 def run_current_pipeline(
     pdf_path: str, page_index: int, *, enable_fast: bool = True, verbose: bool = False,
-    compute=None,
+    compute=None, progress_counter=None,
 ) -> PipelineResult:
     timer = StepTimer(verbose=verbose)
     page = native = vectors = cls = segments = groups = fast = None
@@ -89,9 +89,12 @@ def run_current_pipeline(
             fast = detect_text_fast(
                 segments, groups, page,
                 enable_fast=enable_fast, verbose=verbose, compute=compute,
+                progress_counter=progress_counter,
             )
         with timer("ocr"):
-            unique_texts = recognize(fast.uniques if fast else [], compute=compute)
+            unique_texts = recognize(
+                fast.uniques if fast else [], compute=compute, progress_counter=progress_counter,
+            )
         with timer("restore"):
             restored = restore_segment_texts(unique_texts or [], fast.metas if fast else [])
         with timer("drawing"):

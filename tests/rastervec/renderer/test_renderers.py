@@ -302,6 +302,26 @@ def test_render_vector_cluster_line_kind(vector):
     assert darkest < 255
 
 
+def test_render_vector_cluster_reuses_doc_without_bleeding_between_calls(vector):
+    """The shared per-process render document (rastervec.renderer.png's
+    _get_render_doc) must never hold more than one page at a time, and
+    successive calls with different content must not bleed into each
+    other -- a regression test for the fitz.Document-reuse performance
+    fix."""
+    from rastervec.renderer import png as png_module
+
+    filled = vector(kind="re", bbox=(0, 0, 20, 10), fill=(0, 0, 0))
+    blank = vector(kind="re", bbox=(0, 0, 20, 10), color=None, fill=None)
+
+    image_filled = render_vector_cluster([filled], dpi=150)
+    assert png_module._render_doc.page_count == 0
+    image_blank = render_vector_cluster([blank], dpi=150)
+    assert png_module._render_doc.page_count == 0
+
+    assert image_filled.convert("L").getextrema()[0] < 255
+    assert image_blank.convert("L").getextrema()[0] == 255
+
+
 def test_pixel_to_page_bbox_round_trips_cluster_frame(vector):
     v = vector(kind="re", bbox=(0, 0, 20, 10), fill=(0, 0, 0))
     dpi = 150

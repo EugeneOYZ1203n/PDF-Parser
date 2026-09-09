@@ -77,20 +77,47 @@ def test_split_on_gaps_breaks_on_wide_gap():
     assert radon._split_on_gaps(arr, gap_threshold=2.0) == [(0, 7), (40, 41)]
 
 
-def test_line_gaps_returns_inter_run_gaps():
+def test_line_run_widths_returns_ink_run_widths():
     arr = np.zeros(50, dtype=bool)
-    for s, e in [(0, 1), (3, 4), (6, 7), (40, 41)]:
+    for s, e in [(0, 4), (10, 11), (20, 29)]:
         arr[s:e + 1] = True
-    assert radon._line_gaps(arr) == [1.0, 1.0, 32.0]
-    assert radon._line_gaps(np.array([True, True, True])) == []
-    assert radon._line_gaps(np.zeros(5, dtype=bool)) == []
+    assert radon._line_run_widths(arr) == [5.0, 2.0, 10.0]
+    assert radon._line_run_widths(np.zeros(5, dtype=bool)) == []
 
 
-def test_cluster_gap_threshold_pools_and_floors():
-    assert radon._cluster_gap_threshold([1.0, 1.0, 1.0, 9.0, 9.0, 9.0]) == 5.0
+def test_cluster_gap_threshold_is_15pct_of_widest_run_and_floors():
+    assert radon._cluster_gap_threshold([4.0, 8.0, 40.0]) == pytest.approx(6.0)
     assert radon._cluster_gap_threshold([]) == radon.RADON_MIN_GAP_PX
-    assert radon._cluster_gap_threshold([0.1, 0.1]) == radon.RADON_MIN_GAP_PX
-    assert radon._cluster_gap_threshold([1.0, 1.0, 1.0], min_gap=0.5) == 1.0
+    assert radon._cluster_gap_threshold([1.0, 1.0]) == radon.RADON_MIN_GAP_PX
+    assert radon._cluster_gap_threshold([10.0], min_gap=0.5) == pytest.approx(1.5)
+
+
+def test_enforce_min_run_count_merges_short_spans_regardless_of_gap():
+    # Span 0 (1 run) is short; merging it into span 1 (2 runs) reaches the
+    # 3-run minimum, so the well-formed span 2 (5 runs) is left alone.
+    spans = [(0, 1, 1), (10, 15, 2), (30, 39, 5)]
+    merged = radon._enforce_min_run_count(spans, min_chars=3)
+    assert merged == [(0, 15, 3), (30, 39, 5)]
+
+
+def test_enforce_min_run_count_last_span_merges_backward():
+    spans = [(0, 9, 3), (20, 21, 1)]
+    assert radon._enforce_min_run_count(spans, min_chars=3) == [(0, 21, 4)]
+
+
+def test_enforce_min_run_count_single_span_left_alone():
+    # Nothing left to merge into -- stays under min_chars.
+    assert radon._enforce_min_run_count([(0, 1, 1)], min_chars=3) == [(0, 1, 1)]
+
+
+def test_split_columns_into_words_overrides_gap_threshold_for_short_words():
+    """Two single-run "words" separated by a gap far wider than the gap
+    threshold must still merge into one word -- the 3-character minimum
+    outranks the gap split."""
+    arr = np.zeros(60, dtype=bool)
+    arr[0:2] = True    # run 1 (1 run)
+    arr[40:42] = True  # run 2 (1 run) -- 38px gap, way over gap_threshold=2.0
+    assert radon._split_columns_into_words(arr, gap_threshold=2.0, min_chars=3) == [(0, 41)]
 
 
 # --------------------------------------------------------------------------
@@ -163,32 +190,38 @@ def test_segment_clusters_empty_input():
     assert radon.segment_clusters([]) == []
 
 
-def test_segment_clusters_pools_gap_threshold_across_lines():
-    """Line A's own 3 runs have gaps [4, 20]px -- judged on its own
-    (median ~12) its 20px gap would split it into two words. Line B's 4
-    runs have three 40px gaps, pulling the cluster-wide *pooled* median up
-    well past line A's own 20px gap, so with the shared threshold line A's
-    runs merge into a single word instead of two -- the behavioral
-    difference a per-line-only threshold would not produce."""
+def test_segment_clusters_pools_widest_run_across_lines():
+    """Line A's wide (40pt) runs push the cluster-wide pooled gap
+    threshold (15% of the widest run anywhere in the cluster) up to 6pt.
+    Line B's own runs are narrow (4pt) -- judged on its own, its threshold
+    would be a mere 0.6pt, well under the 5pt gap separating its two
+    3-run "words" (each already clearing the 3-character minimum on its
+    own, so item 4's merge doesn't confound this), which would stay
+    separate at that local threshold. With the cluster-wide pool, that
+    same 5pt gap falls under the shared 6pt threshold, so line B's two
+    words merge into one 6-run segment -- the cross-line pooling
+    behavioral difference a per-line-only threshold would not produce."""
     vectors: list[Vector] = []
     seq = 0
-    # line A: 3 runs, gaps [4, 20]
-    for x0 in (10, 24, 54):
-        vectors.append(_word_vector((x0, 20, x0 + 9, 35), seq))
+    # line A: 3 runs, 40pt wide each, 2pt gaps -- sets the pooled max.
+    for x0 in (10, 52, 94):
+        vectors.append(_word_vector((x0, 20, x0 + 40, 35), seq))
         seq += 1
-    # line B: 4 runs, gaps [40, 40, 40]
-    for x0 in (10, 60, 110, 160):
-        vectors.append(_word_vector((x0, 50, x0 + 9, 65), seq))
+    # line B, word 1: 3 runs, 4pt wide each, 1pt gaps.
+    for x0 in (10, 15, 20):
+        vectors.append(_word_vector((x0, 50, x0 + 4, 65), seq))
         seq += 1
+    # line B, word 2: same pattern, starting 5pt after word 1 ends (x=24).
+    for x0 in (29, 34, 39):
+        vectors.append(_word_vector((x0, 50, x0 + 4, 65), seq))
+        seq += 1
+    line_b_seqnos = {v.seqno for v in vectors[3:]}
 
     segments = radon.segment_clusters([vectors])
 
-    # line A's 3 runs merged into 1 word (pooled threshold > its own 20px
-    # gap) + line B's 4 runs, which stay separate at that same threshold.
-    line_a_seqnos = {0, 1, 2}
-    line_a_segments = [seg for seg in segments if {v.seqno for v in seg.vectors} & line_a_seqnos]
-    assert len(line_a_segments) == 1
-    assert {v.seqno for v in line_a_segments[0].vectors} == line_a_seqnos
+    line_b_segments = [seg for seg in segments if {v.seqno for v in seg.vectors} & line_b_seqnos]
+    assert len(line_b_segments) == 1
+    assert {v.seqno for v in line_b_segments[0].vectors} == line_b_seqnos
 
 
 def test_rotation_inverse_round_trips():
@@ -216,7 +249,10 @@ def test_split_words_gives_each_word_its_own_tight_y_extent():
     # tall word: two ticks, with an ascender
     d.rectangle([80, baseline - 20, 86, baseline], fill=0)
     d.rectangle([90, baseline - 20, 96, baseline], fill=0)
-    boxes = radon.split_words(np.asarray(img), gap_threshold=10.0)
+    # min_chars=1: each word here is only 2 ink runs, below the real
+    # 3-character minimum -- irrelevant to what this test checks (y-extent
+    # tightness), so disabled here to keep the two words from merging.
+    boxes = radon.split_words(np.asarray(img), gap_threshold=10.0, min_chars=1)
     assert len(boxes) == 2
     (_, short_y0, _, short_y1), (_, tall_y0, _, tall_y1) = boxes
     assert (short_y0, short_y1) != (tall_y0, tall_y1)

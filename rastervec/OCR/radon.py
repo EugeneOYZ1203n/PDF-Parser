@@ -42,10 +42,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import numpy as np
-from PIL import ImageDraw
 from skimage.transform import SimilarityTransform, radon, resize, warp
 
 from rastervec.config import (
@@ -54,19 +52,16 @@ from rastervec.config import (
     RADON_LINE_BAND_MIN_FRAC,
     RADON_MAX_RENDER_SIDE_PX,
     RADON_MIN_GAP_PX,
+    RADON_MIN_WORD_CHARS,
     RADON_SKEW_LIMIT_DEG,
 )
 from rastervec.helpers.geometry import (
     PDF_POINTS_PER_INCH,
     bbox_intersection_area,
-    union_bbox,
 )
 from rastervec.models import Segment, Vector
 from rastervec.renderer import cluster_frame_size, pixel_to_page_bbox, render_vector_cluster
-
-if TYPE_CHECKING:
-    from rastervec.pipelines.result import PipelineResult
-    from rastervec.renderer.notebook import RenderResult
+from rastervec.renderer.stages import render_radon  # noqa: F401 -- re-exported for callers
 
 # A pixel darker than this counts as glyph ink (0 = black, 255 = white).
 INK_LEVEL = 250
@@ -87,51 +82,100 @@ def _ink_runs(has_ink: np.ndarray) -> list[tuple[int, int]]:
     return [(int(idx[s]), int(idx[e])) for s, e in zip(starts, ends)]
 
 
-def _group_runs(runs: list[tuple[int, int]], gap_thresh: float) -> list[tuple[int, int]]:
-    """Merge `runs` into spans, starting a new span whenever the gap
-    between two consecutive runs exceeds `gap_thresh`."""
+def _group_runs(runs: list[tuple[int, int]], gap_thresh: float) -> list[tuple[int, int, int]]:
+    """Merge `runs` into `(start, end, run_count)` spans, starting a new
+    span whenever the gap between two consecutive runs exceeds
+    `gap_thresh`. `run_count` is how many of the original `runs` compose
+    that span -- the pre-OCR character-count proxy `_enforce_min_run_count`
+    merges short spans on."""
     if not runs:
         return []
-    spans: list[tuple[int, int]] = []
+    spans: list[tuple[int, int, int]] = []
     grp_start, grp_end = runs[0]
+    grp_count = 1
     for start, end in runs[1:]:
         if start - grp_end - 1 > gap_thresh:
-            spans.append((grp_start, grp_end))
-            grp_start = start
+            spans.append((grp_start, grp_end, grp_count))
+            grp_start, grp_count = start, 0
         grp_end = max(grp_end, end)
-    spans.append((grp_start, grp_end))
+        grp_count += 1
+    spans.append((grp_start, grp_end, grp_count))
     return spans
 
 
 def _split_on_gaps(has_ink: np.ndarray, *, gap_threshold: float) -> list[tuple[int, int]]:
     """Group ``_ink_runs(has_ink)`` on any gap wider than `gap_threshold`.
     Fewer than two runs -> a single span over the whole ink extent (``[]``
-    if no ink)."""
+    if no ink). Pure gap-based split, with no minimum-run-count enforcement
+    -- see `_split_columns_into_words` for the word-splitting variant that
+    adds that on top."""
     runs = _ink_runs(has_ink)
     if len(runs) < 2:
         return [(runs[0][0], runs[-1][1])] if runs else []
-    return _group_runs(runs, gap_threshold)
+    return [(s, e) for s, e, _c in _group_runs(runs, gap_threshold)]
 
 
-def _line_gaps(has_ink: np.ndarray) -> list[float]:
-    """This line's own inter-run gaps (px), for pooling into the
-    cluster-wide gap distribution. ``[]`` if fewer than two ink runs."""
+def _enforce_min_run_count(
+    spans: list[tuple[int, int, int]], min_chars: int,
+) -> list[tuple[int, int, int]]:
+    """Repeatedly merges any span whose `run_count` is under `min_chars`
+    into a neighboring span (summing counts, extending the interval) --
+    the following span, or the previous one when it's the last span --
+    until every remaining span clears `min_chars` or only one span is left
+    (nothing further to merge into). This overrides the gap-based split:
+    a merge happens regardless of how wide the gap originally separating
+    the two spans was -- the 3-character minimum outranks the gap
+    threshold, since a too-short word hurts PaddleOCR's ability to
+    determine orientation more than an over-merged word does."""
+    spans = list(spans)
+    changed = True
+    while changed and len(spans) > 1:
+        changed = False
+        for i, (s, e, c) in enumerate(spans):
+            if c < min_chars:
+                if i < len(spans) - 1:
+                    ns, ne, nc = spans[i + 1]
+                    spans[i:i + 2] = [(s, ne, c + nc)]
+                else:
+                    ps, pe, pc = spans[i - 1]
+                    spans[i - 1:i + 1] = [(ps, e, pc + c)]
+                changed = True
+                break
+    return spans
+
+
+def _split_columns_into_words(
+    has_ink: np.ndarray, *, gap_threshold: float, min_chars: int,
+) -> list[tuple[int, int]]:
+    """`_split_on_gaps`'s word-splitting counterpart: same gap-based
+    grouping, then `_enforce_min_run_count` merges any resulting span with
+    fewer than `min_chars` ink runs into a neighbor. Fewer than two runs
+    behaves exactly like `_split_on_gaps` (a single span can't be merged
+    further)."""
     runs = _ink_runs(has_ink)
     if len(runs) < 2:
-        return []
-    return [float(runs[i + 1][0] - runs[i][1] - 1) for i in range(len(runs) - 1)]
+        return [(runs[0][0], runs[-1][1])] if runs else []
+    spans = _enforce_min_run_count(_group_runs(runs, gap_threshold), min_chars)
+    return [(s, e) for s, e, _c in spans]
 
 
-def _cluster_gap_threshold(all_gaps: list[float], *, min_gap: float = RADON_MIN_GAP_PX) -> float:
-    """One shared word-split threshold for the whole cluster: the median of
-    every inter-run gap pooled across every line (not one line's own gaps)
-    -- a gap wider than this starts a new word. `min_gap` floors the
-    degenerate case (pooled median at/near zero, e.g. very tight kerning or
-    mostly single-run lines), so splitting doesn't collapse to "every run
-    is its own word."""
-    if not all_gaps:
+def _line_run_widths(has_ink: np.ndarray) -> list[float]:
+    """This line's own ink-run widths (px) -- the character-width samples
+    pooled into the cluster-wide word-split gap threshold (see
+    `_cluster_gap_threshold`). ``[]`` if the line has no ink."""
+    return [float(end - start + 1) for start, end in _ink_runs(has_ink)]
+
+
+def _cluster_gap_threshold(all_run_widths: list[float], *, min_gap: float = RADON_MIN_GAP_PX) -> float:
+    """One shared word-split threshold for the whole cluster: 15% of the
+    widest ink run (character) found anywhere in the cluster, pooled
+    across every line (not one line's own runs) -- a gap wider than this
+    starts a new word. `min_gap` floors the degenerate case (no runs, or
+    every run vanishingly thin), so splitting doesn't collapse to "every
+    run is its own word."""
+    if not all_run_widths:
         return min_gap
-    return max(min_gap, float(np.median(all_gaps)))
+    return max(min_gap, 0.15 * max(all_run_widths))
 
 
 # --------------------------------------------------------------------------
@@ -231,13 +275,18 @@ def line_spacing(profile: np.ndarray) -> float:
 
 
 def split_words(line_gray: np.ndarray, *, gap_threshold: float,
+                min_chars: int = RADON_MIN_WORD_CHARS,
                 pad: int = 1) -> list[tuple[int, int, int, int]]:
     """`(x0, y0, x1, y1)` pixel boxes, one per word, within one deskewed
     line crop. Both x- and y-extent are each word's own tight ink bbox:
     the column profile is split on `gap_threshold` (the cluster-wide
-    pooled-median gap, see `_cluster_gap_threshold`) first, then each
-    word's y-extent comes from ink within just that word's own column
-    slice -- not the whole line -- so a short word doesn't inherit an
+    pooled 15%-of-widest-character gap, see `_cluster_gap_threshold`)
+    first, then any resulting span with fewer than `min_chars` ink runs
+    (the pre-OCR proxy for character count) is merged into a neighbor --
+    overriding the gap split, since PaddleOCR reads a too-short word's
+    orientation poorly -- via `_split_columns_into_words`. Each word's
+    y-extent then comes from ink within just that word's own column slice
+    -- not the whole line -- so a short word doesn't inherit an
     ascender/descender that only exists in a different word on the same
     line."""
     if line_gray.ndim != 2 or line_gray.size == 0:
@@ -247,7 +296,9 @@ def split_words(line_gray: np.ndarray, *, gap_threshold: float,
     if not ink.any():
         return []
     boxes: list[tuple[int, int, int, int]] = []
-    for sx0, sx1 in _split_on_gaps(ink.any(axis=0), gap_threshold=gap_threshold):
+    for sx0, sx1 in _split_columns_into_words(
+        ink.any(axis=0), gap_threshold=gap_threshold, min_chars=min_chars,
+    ):
         word_rows = ink[:, sx0:sx1 + 1].any(axis=1)
         if not word_rows.any():
             continue  # defensive; every column span has ink by construction
@@ -389,7 +440,7 @@ def segment_clusters(clusters: list[list[Vector]], *, dpi: int = 300) -> list[Se
             continue
 
         line_cols = [to_ink(deskewed[by0:by1 + 1, :]).any(axis=0) for by0, by1 in bands]
-        gap_threshold = _cluster_gap_threshold([g for cols in line_cols for g in _line_gaps(cols)])
+        gap_threshold = _cluster_gap_threshold([w for cols in line_cols for w in _line_run_widths(cols)])
 
         word_bboxes: list[tuple[float, float, float, float]] = []
         for by0, by1 in bands:
@@ -411,46 +462,3 @@ def segment_clusters(clusters: list[list[Vector]], *, dpi: int = 300) -> list[Se
                 segments.append(Segment(vectors=word_vectors, angle=float(skew)))
 
     return segments
-
-
-# --------------------------------------------------------------------------
-# notebook visualization (pipeline_stage_visualization.ipynb's "Segment
-# (Radon)" section) -- reads a PipelineResult, never called by the real
-# pipeline.
-# --------------------------------------------------------------------------
-def render_radon(res: "PipelineResult") -> "RenderResult":
-    """One row per segmented cluster (grouped back by original cluster
-    index via `Segment`'s own vectors): re-render each cluster and draw its
-    words' page-space bboxes, mapped to this render's pixel space, on
-    top."""
-    from rastervec.renderer import page_points_to_pixel
-    from rastervec.renderer.notebook import RenderResult
-
-    segments = res.segments or []
-    clusters = res.text_clusters or []
-
-    def _flatten(entry) -> list[Vector]:
-        if entry and isinstance(entry[0], list):
-            return [v for g in entry for v in g]
-        return entry
-
-    rows = []
-    for cluster_entry in clusters[:8]:
-        cluster = _flatten(cluster_entry)
-        cluster_ids = {id(v) for v in cluster}
-        own_segments = [s for s in segments if any(id(v) in cluster_ids for v in s.vectors)]
-        if not own_segments:
-            continue
-        base = render_vector_cluster(cluster, 300).convert("RGB")
-        d = ImageDraw.Draw(base)
-        for seg in own_segments:
-            bbox = union_bbox([v.bbox for v in seg.vectors])
-            pts = page_points_to_pixel(cluster, 300, [(bbox[0], bbox[1]), (bbox[2], bbox[3])])
-            d.rectangle([pts[0], pts[1]], outline="#dc2626", width=1)
-        caption = f"{len(own_segments)} word(s), angle={own_segments[0].angle:+.2f}deg"
-        rows.append({"name": caption, "isolated": base, "overlay": base})
-
-    return RenderResult(
-        categories=rows,
-        note=f"{len(segments)} segment(s) across {len(clusters)} cluster(s)",
-    )

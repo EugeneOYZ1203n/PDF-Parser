@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import math
 import os
-from typing import TYPE_CHECKING
 
 import numpy as np
 from PIL import Image
@@ -52,11 +51,8 @@ from rastervec.config import (
     FAST_TILE_BLOCK_SIZE as TILED_BLOCK_SIZE,
     FAST_TILE_SCALE_FACTOR as TILED_SCALE_FACTOR,
 )
-from rastervec.helpers.geometry import union_bbox
-
-if TYPE_CHECKING:
-    from rastervec.pipelines.result import PipelineResult
-    from rastervec.renderer.notebook import RenderResult
+from rastervec.helpers.geometry import bbox_intersection_area
+from rastervec.renderer.stages import render_fast  # noqa: F401 -- re-exported for callers
 
 _MODEL_CACHE: dict[str, object] = {}
 
@@ -448,6 +444,8 @@ class FastDetector:
         desc: str = "FAST text detection",
         show_progress: bool = True,
         compute=None,
+        candidate_bboxes: "list[tuple[float, float, float, float]] | None" = None,
+        progress_counter=None,
     ) -> "np.ndarray":
         """Runs FAST over `image` upscaled by `scale` and split into
         non-overlapping `block_size`-square tiles (the last row/column of
@@ -459,16 +457,40 @@ class FastDetector:
         full mask at the *scaled* resolution, then resized back down to
         `image`'s own original size before returning -- callers sample it
         exactly like `detect()`'s own return value, at `image`'s own pixel
-        coordinates. `show_progress` wraps the local (`compute is None`)
-        block loop in a `tqdm` bar (`desc`), since a large page at a real
-        `scale` can mean hundreds of tiles.
+        coordinates. `show_progress` wraps the local (`compute is None`,
+        `progress_counter is None`) block loop in a `tqdm` bar (`desc`),
+        since a large page at a real `scale` can mean hundreds of tiles --
+        this is the fallback for a bare call with no outer progress bar to
+        report into (e.g. a notebook running one page directly).
+
+        `candidate_bboxes`, when given, is a list of `(x0, y0, x1, y1)`
+        rects already in this same *scaled* tile-pixel space (i.e. a page-
+        space text-candidate bbox converted by the same `dpi`/`scale` chain
+        the caller rendered `image` with) -- only tiles that intersect at
+        least one of them are actually detected; every other tile's mask
+        region is left at 0 (`full_mask` is already zero-initialized, so no
+        stitching change is needed). `None` (the default) detects every
+        tile, exactly like before -- existing callers are unaffected.
 
         `compute`, when given a `multiprocessing.managers.SyncManager`
         -hosted `Pool` proxy, dispatches every tile's detection to that
         shared pool via `starmap(_detect_job, ...)` instead of computing
         them locally in this process -- each job carries only this
         detector's `weights_path` plus one tile's plain numpy array, never
-        a PIL/fitz object, so Pool-2 workers never need `fitz`."""
+        a PIL/fitz object, so Pool-2 workers never need `fitz`.
+
+        `progress_counter`, when given a `multiprocessing.managers.
+        ValueProxy` (or any object with a settable `.value`), is
+        incremented by 1 per tile as each tile's detection completes,
+        instead of driving a local `tqdm` bar -- the intended use is many
+        concurrent page jobs each incrementing the *same* shared counter,
+        which some outer caller (see `Reader/Parallel/pool.py::run_parallel`)
+        polls to show one combined "N tiles done" figure instead of each
+        worker opening its own bar and garbling shared stdout. When given
+        together with `compute`, tile dispatch switches from a single
+        blocking `starmap` call to `imap` (still order-preserving) so
+        progress can be reported as each result arrives rather than only
+        once every tile in the batch is done."""
         orig_w, orig_h = image.size
         scaled = image.convert("RGB").resize(
             (max(1, round(orig_w * scale)), max(1, round(orig_h * scale))), Image.BICUBIC,
@@ -487,13 +509,34 @@ class FastDetector:
                 block = padded
             return block, (x0, y0, x1, y1)
 
-        blocks = [_block(r, c) for r in range(n_rows) for c in range(n_cols)]
+        tile_positions = [(r, c) for r in range(n_rows) for c in range(n_cols)]
+        if candidate_bboxes is not None:
+            tile_positions = [
+                (r, c) for r, c in tile_positions
+                if _tile_has_candidate(
+                    (c * block_size, r * block_size,
+                     min(c * block_size + block_size, sw), min(r * block_size + block_size, sh)),
+                    candidate_bboxes,
+                )
+            ]
+        blocks = [_block(r, c) for r, c in tile_positions]
 
+        args_list = [(self.weights_path, np.asarray(block)) for block, _ in blocks]
         if compute is not None:
-            masks = compute.starmap(
-                _detect_job,
-                [(self.weights_path, np.asarray(block)) for block, _ in blocks],
-            )
+            if not blocks:
+                masks = []
+            elif progress_counter is not None:
+                masks = []
+                for mask in compute.imap(_detect_job, args_list):
+                    masks.append(mask)
+                    progress_counter.value += 1
+            else:
+                masks = compute.starmap(_detect_job, args_list)
+        elif progress_counter is not None:
+            masks = []
+            for block, _ in blocks:
+                masks.append(self.detect(block))
+                progress_counter.value += 1
         else:
             iterator = tqdm(blocks, desc=desc, unit="block") if show_progress else blocks
             masks = [self.detect(block) for block, _ in iterator]
@@ -508,6 +551,16 @@ class FastDetector:
         return np.asarray(mask_img, dtype=np.float32) / 255.0
 
 
+def _tile_has_candidate(
+    tile_rect: tuple[int, int, int, int],
+    candidate_bboxes: "list[tuple[float, float, float, float]]",
+) -> bool:
+    """True if `tile_rect` (a `detect_tiled` tile, in scaled-pixel space)
+    overlaps at least one of `candidate_bboxes` (already converted into
+    that same space by the caller)."""
+    return any(bbox_intersection_area(tile_rect, cb) > 0 for cb in candidate_bboxes)
+
+
 def _detect_job(weights_path: str | None, image_array: "np.ndarray") -> "np.ndarray":
     """Top-level, picklable Pool-2 job for `detect_tiled`'s `compute`
     dispatch: detect one already-rendered tile (a plain numpy array, never
@@ -516,52 +569,3 @@ def _detect_job(weights_path: str | None, image_array: "np.ndarray") -> "np.ndar
     same way for local calls, so a worker that sees the same weights_path
     across many jobs only builds the model once)."""
     return FastDetector(weights_path).detect(Image.fromarray(image_array))
-
-
-# --------------------------------------------------------------------------
-# notebook visualization (pipeline_stage_visualization.ipynb's "FAST: Text
-# Detect" section) -- reads a PipelineResult, never called by the real
-# pipeline.
-# --------------------------------------------------------------------------
-_PASSED_COLOR = "#059669"
-_DROPPED_COLOR = "#dc2626"
-
-
-def _fast_mask_overlay(base: "Image.Image", mask: "np.ndarray") -> "Image.Image":
-    heat = (np.clip(mask, 0.0, 1.0) * 255).astype("uint8")
-    zeros = Image.new("L", base.size, 0)
-    heat_img = Image.merge("RGB", (Image.fromarray(heat), zeros, zeros))
-    return Image.blend(base.convert("RGB"), heat_img, alpha=0.5)
-
-
-def render_fast(res: "PipelineResult", *, enable_fast: bool) -> "RenderResult":
-    """The whole-page render, its detection heatmap, and passed (kept as
-    `UniqueSegment`s)/dropped (folded into drawing vectors) segment boxes.
-    `enable_fast=False` and a page with no segments both render as a note
-    only (no pixels to show)."""
-    from rastervec.renderer.notebook import RenderResult
-
-    fr = res.fast_result
-    uniques = res.unique_segments or []
-    dropped_vectors = res.fast_dropped_vectors or []
-    if not enable_fast:
-        return RenderResult(note=(
-            f"ENABLE_FAST=False -- pass-through, all {len(uniques)} unique "
-            "segment(s) kept, none dropped, no render/detection"
-        ))
-    if fr is None or fr.page_image is None:
-        return RenderResult(note="(no segments on this page)")
-
-    render = fr.page_image.convert("RGB")
-    heat = _fast_mask_overlay(render, fr.page_mask) if fr.page_mask is not None else render
-    return RenderResult(
-        categories=[
-            {"name": "FAST render", "isolated": render, "overlay": render},
-            {"name": "detection heatmap", "isolated": heat, "overlay": heat},
-            {"name": f"passed unique segments ({len(uniques)})", "color": _PASSED_COLOR,
-             "bboxes": [union_bbox([v.bbox for v in u.vectors]) for u in uniques if u.vectors]},
-            {"name": f"dropped vectors ({len(dropped_vectors)})", "color": _DROPPED_COLOR,
-             "bboxes": [v.bbox for v in dropped_vectors]},
-        ],
-        note=f"detect_seconds = {fr.detect_seconds}",
-    )

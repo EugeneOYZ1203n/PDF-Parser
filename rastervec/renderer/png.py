@@ -26,8 +26,6 @@ every other rastervec stage -- no page rotation is applied (see
 """
 from __future__ import annotations
 
-import io
-
 import pymupdf as fitz
 from PIL import Image
 
@@ -39,6 +37,37 @@ from rastervec.config import (
 from rastervec.helpers.geometry import PDF_POINTS_PER_INCH, union_bbox
 from rastervec.models import PageMeta, Vector
 from rastervec.renderer._shapes import replay_drawing_paths
+
+# One `fitz.Document` reused across every render_vector_cluster/
+# render_page_paths call in this process, instead of a fresh fitz.open()
+# per call -- render_vector_cluster in particular is called once per
+# text-candidate cluster (Radon segmentation) and again per deduped unique
+# segment (OCR), so a real page can mean hundreds of calls; open/close and
+# font-table setup on a brand-new document each time is pure overhead. Each
+# call adds exactly one page, renders it, then deletes it (never closes the
+# document), so the doc never holds more than one page at a time. Per-process
+# (like `FastDetector`'s/`PaddleRecBackend`'s own model caches), safe under
+# Pool-2 multiprocessing since each worker process gets its own.
+_render_doc: "fitz.Document | None" = None
+
+
+def _get_render_doc() -> "fitz.Document":
+    global _render_doc
+    if _render_doc is None:
+        _render_doc = fitz.open()
+    return _render_doc
+
+
+def _rasterize(page: "fitz.Page", dpi: int) -> "Image.Image":
+    """Renders `page` at `dpi` directly from its pixmap's raw samples --
+    no PNG encode/decode round-trip -- and detaches the result via
+    `.copy()` so the returned image outlives the pixmap/page (which the
+    caller's `finally` immediately deletes from the shared render doc)."""
+    zoom = dpi / PDF_POINTS_PER_INCH
+    pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    return Image.frombuffer(
+        "RGB", (pixmap.width, pixmap.height), pixmap.samples, "raw", "RGB", 0, 1,
+    ).copy()
 
 
 def _cluster_frame(vectors: list[Vector]) -> tuple[float, float, float, float]:
@@ -71,12 +100,14 @@ def cluster_frame_size(vectors: list[Vector]) -> tuple[float, float]:
 
 def render_vector_cluster(vectors: list[Vector], dpi: int) -> "Image.Image":
     """High-resolution render of an isolated vector cluster, used as OCR
-    input. Builds a fresh single-page PyMuPDF document sized to the
-    cluster's own bbox (plus the asymmetric OCR border, via
-    `_cluster_frame`), replays each Vector's items as one composite path
-    via `_shapes.replay_drawing_paths`, then rasterizes at `dpi` -- reusing
-    PyMuPDF's own rendering rather than re-implementing curve/fill
-    rasterization by hand."""
+    input. Adds one page (sized to the cluster's own bbox plus the
+    asymmetric OCR border, via `_cluster_frame`) to this process's shared
+    render document (see `_get_render_doc` -- called at real-pipeline scale,
+    once per text-candidate cluster and again per deduped unique segment, so
+    a fresh `fitz.open()` per call would be pure overhead), replays each
+    Vector's items as one composite path via `_shapes.replay_drawing_paths`,
+    then rasterizes at `dpi` -- reusing PyMuPDF's own rendering rather than
+    re-implementing curve/fill rasterization by hand."""
     if not vectors:
         raise ValueError("render_vector_cluster requires at least one vector")
 
@@ -86,20 +117,15 @@ def render_vector_cluster(vectors: list[Vector], dpi: int) -> "Image.Image":
     width = (x1 - x0) + 2 * pad_x
     height = (y1 - y0) + 2 * pad_y
 
-    doc = fitz.open()
+    doc = _get_render_doc()
+    cluster_page = doc.new_page(width=width, height=height)
     try:
-        cluster_page = doc.new_page(width=width, height=height)
         shape = cluster_page.new_shape()
         replay_drawing_paths(shape, vectors, dx=dx, dy=dy)
         shape.commit()
-
-        zoom = dpi / PDF_POINTS_PER_INCH
-        pixmap = cluster_page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-        image = Image.open(io.BytesIO(pixmap.tobytes("png")))
-        image.load()  # decode now -- the backing BytesIO doesn't outlive this call
-        return image
+        return _rasterize(cluster_page, dpi)
     finally:
-        doc.close()
+        doc.delete_page(cluster_page.number)
 
 
 def pixel_to_page_bbox(
@@ -144,17 +170,12 @@ def render_page_paths(
     small per-cluster collages. Stays in unrotated MediaBox space like
     every other stage (no rotation applied), consistent with
     `render_vector_cluster`."""
-    doc = fitz.open()
+    doc = _get_render_doc()
+    page = doc.new_page(width=page_meta.width, height=page_meta.height)
     try:
-        page = doc.new_page(width=page_meta.width, height=page_meta.height)
         shape = page.new_shape()
         replay_drawing_paths(shape, vectors)
         shape.commit()
-
-        zoom = dpi / PDF_POINTS_PER_INCH
-        pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-        image = Image.open(io.BytesIO(pixmap.tobytes("png")))
-        image.load()
-        return image
+        return _rasterize(page, dpi)
     finally:
-        doc.close()
+        doc.delete_page(page.number)

@@ -6,6 +6,7 @@ import pytest
 from rastervec.models import Segment
 from rastervec.pipelines import _steps
 from rastervec.pipelines._steps import (
+    _candidate_tile_bboxes,
     _sample_mask,
     build_drawing_output,
     detect_text_fast,
@@ -141,6 +142,41 @@ def test_detect_text_fast_drops_group_when_any_member_fails(monkeypatch, vector,
     assert res.uniques == []
     assert len(res.dropped_vectors) == 1
     assert res.dropped_vectors[0] is v
+
+
+def test_candidate_tile_bboxes_converts_and_pads(vector):
+    seg = Segment(vectors=[vector(bbox=(10.0, 20.0, 30.0, 40.0))], angle=0.0)
+
+    boxes = _candidate_tile_bboxes([seg], zoom=2.0, tile_scale=5.0, margin=3.0)
+
+    assert boxes == [(10.0 * 10.0 - 3.0, 20.0 * 10.0 - 3.0, 30.0 * 10.0 + 3.0, 40.0 * 10.0 + 3.0)]
+
+
+def test_candidate_tile_bboxes_skips_empty_segments():
+    assert _candidate_tile_bboxes(
+        [Segment(vectors=[], angle=0.0)], zoom=1.0, tile_scale=1.0, margin=0.0,
+    ) == []
+
+
+def test_detect_text_fast_forwards_candidate_bboxes(monkeypatch, vector, page_meta):
+    captured = {}
+
+    class _RecordingDetector:
+        def detect_tiled(self, image, **kwargs):
+            captured.update(kwargs)
+            return np.ones((image.height, image.width), dtype=np.float32)
+
+    monkeypatch.setattr(_steps, "FastDetector", lambda: _RecordingDetector())
+
+    class _FakePage:
+        meta = page_meta(width=200, height=200)
+
+    v = vector(bbox=(10, 10, 20, 20))
+    seg = Segment(vectors=[v], angle=0.0)
+
+    detect_text_fast([seg], [[0]], _FakePage(), enable_fast=True)
+
+    assert len(captured.get("candidate_bboxes") or []) == 1
 
 
 def test_detect_text_fast_all_must_pass_not_just_the_group_min(monkeypatch, vector, page_meta):

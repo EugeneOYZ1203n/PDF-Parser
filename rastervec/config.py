@@ -113,6 +113,12 @@ FAST_COMBINED_KEEP_THRESHOLD = 0.5
 FAST_TILE_BLOCK_SIZE = 2048
 FAST_TILE_SCALE_FACTOR = 5
 
+# FastDetector.detect_tiled: a text-candidate segment's bbox is padded by
+# this fraction of FAST_TILE_BLOCK_SIZE (in the same scaled-tile pixel
+# space) before testing which tiles it overlaps, so a segment sitting
+# right at a tile boundary isn't dropped by an off-by-one intersection.
+FAST_TILE_CANDIDATE_MARGIN_FRAC = 0.05
+
 # ======================================================================
 # OCR (OCR/Paddle_OCR/ocr_backend.py)
 # ======================================================================
@@ -143,10 +149,15 @@ RADON_LINE_BAND_MIN_FRAC = 0.10
 # estimation is scale-invariant, so a big merged bbox is downscaled to
 # this first to keep the O(pixels * angles) transform fast.
 RADON_MAX_RENDER_SIDE_PX = 1000
-# Floor (px) on the cluster-wide word-split gap threshold (the median
-# inter-run gap pooled across every line in the cluster) -- guards the
-# degenerate case where that pooled median is near zero.
+# Floor (px) on the cluster-wide word-split gap threshold (15% of the
+# widest ink-run/character width pooled across every line in the cluster)
+# -- guards the degenerate case where every run is vanishingly thin.
 RADON_MIN_GAP_PX = 2.0
+# Minimum ink-run count (the pre-OCR proxy for character count) a split
+# word must have -- a shorter word merges into a neighbor regardless of
+# the gap between them, since PaddleOCR reads a too-short word's
+# orientation poorly. Outranks RADON_MIN_GAP_PX's gap-based split.
+RADON_MIN_WORD_CHARS = 3
 
 # RenderOCR: a cluster render whose shorter side would fall under this many
 # pixels at the requested dpi is bumped to a higher effective dpi instead

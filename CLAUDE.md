@@ -523,9 +523,9 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   re-exported through `renderer/__init__.py` — it imports matplotlib, and this package is imported
   by the real pipeline itself (`render_vector_cluster`, `render_reconstructed_page`, ...), so
   folding it into the package's own `__init__` would drag matplotlib into every pipeline run's
-  import graph. Import it directly (`from rastervec.renderer.notebook import ...`); every stage
-  module's own `render_<stage_name>` function does this lazily, inside the function body, for the
-  same reason.
+  import graph. Import it directly (`from rastervec.renderer.notebook import ...`); every
+  `render_<stage_name>` function in `renderer/stages.py` (see that bullet) does this lazily,
+  inside the function body, for the same reason.
   `_shapes.path_color_hex(path)` returns a path's real PDF stroke/fill color as hex (used by both the
   visualization notebook and OCR input rendering) — any B/W-style simplification stays purely
   internal to classification, never substituted into a rendered/displayed color.
@@ -685,8 +685,9 @@ independently of the others (every stage's *output* is a plain dataclass from `m
     glyph heights (e.g. one with a descender, one without) get genuinely different, tight
     `word_corners` boxes rather than sharing the line's full ink height. The 0-vs-180 (and
     90-vs-270) flip Radon can't resolve is left to `RenderOCR.recognize_segmented`.
-    `render_radon(res: PipelineResult) -> RenderResult` (notebook-only, appended at the bottom of
-    this file) re-renders each segmented cluster's original pre-deskew image via
+    `render_radon(res: PipelineResult) -> RenderResult` (notebook-only, in `renderer/stages.py`,
+    re-exported from this file for backward compatibility) re-renders each segmented cluster's
+    original pre-deskew image via
     `renderer.render_vector_cluster` and draws its real `word_corners` polygons on top — see the
     `notebooks/pipeline_stage_visualization.ipynb` bullet below.
 
@@ -723,11 +724,12 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   pipeline step — `visualize` and the generic pixel-drawing plumbing it shares across every stage
   (`RenderResult`, `draw_paths`/`draw_polys`/`draw_bboxes`, `page_setup`, ...) live in
   `renderer/notebook.py`; the stage-specific part (*what* to draw) is one `render_<stage_name>`
-  function living next to that stage's own code (`native_text.render_native`,
-  `Vector.vector.render_vectors`, `Vector_Classification.classification.render_layers` /
-  `render_layer_color_buckets` / `render_clustering_steps` / `render_text_candidates`,
-  `OCR.fast_detect.render_fast`, `pipelines._steps.render_regroup` / `render_drawing`,
-  `OCR.radon.render_radon`, `OCR.Paddle_OCR.render_ocr.render_ocr_results`). "Segment (Radon)" and
+  function, all twelve centralized in `renderer/stages.py` (`render_vectors`, `render_native`,
+  `render_layers` / `render_layer_color_buckets` / `render_clustering_steps` /
+  `render_text_candidates`, `render_radon`, `render_similarity`, `render_fast`, `render_drawing`,
+  `render_ocr_results`, `render_restore` — each still a thin lazy-`renderer.notebook`-import
+  function, and each original stage module keeps a one-line re-export of its own function for
+  backward compatibility). "Segment (Radon)" and
   "PaddleOCR" are two separate sections/cells (`segment` and `ocr` are already two distinct
   `STEP_NAMES`) rather than one combined cell, so the Radon step's own pass/fail/timing is now
   visible too. `render_text_candidates` reports similarity grouping as a plain original-vs-unique
@@ -763,10 +765,11 @@ Three things, all following the existing pattern:
    `STEP_NAMES`), or a step in a `sub_pipelines/*.py` block sequence — plus a thin adapter in
    `_steps.py` if it needs one. Add its output to the `PipelineResult` constructor (always-on
    or verbose-only). No registry, no `StageSpec`.
-3. Add a `render_<stage_name>(res: PipelineResult) -> RenderResult` function next to the stage's
-   own code (reading `res.<field>`, lazily importing `RenderResult`/`renderer.notebook` inside the
-   function body so matplotlib stays out of the pipeline's own import graph), plus a thin cell in
-   `notebooks/pipeline_stage_visualization.ipynb` calling
+3. Add a `render_<stage_name>(res: PipelineResult) -> RenderResult` function to
+   `rastervec/renderer/stages.py` (reading `res.<field>`, lazily importing `RenderResult`/
+   `renderer.notebook` inside the function body so matplotlib stays out of the pipeline's own
+   import graph -- every other function in that module follows this same pattern), plus a thin
+   cell in `notebooks/pipeline_stage_visualization.ipynb` calling
    `visualize(stage_key, render_<stage_name>(res), step_outputs=outputs, original=ORIGINAL,
    matrix=MATRIX)`.
 Also add tests under the matching `tests/rastervec/` subfolder using the synthetic PDF fixtures,

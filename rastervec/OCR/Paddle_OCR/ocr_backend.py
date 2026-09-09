@@ -36,6 +36,7 @@ from rastervec.logging_setup import get_logger
 from rastervec.models import Text, UniqueSegment
 from rastervec.OCR.Paddle_OCR.crop_normalize import normalize_line_crop
 from rastervec.OCR.radon import render_cluster_for_radon
+from rastervec.renderer.stages import render_ocr_results  # noqa: F401 -- re-exported for callers
 
 _LOG = get_logger("ocr.backend")
 
@@ -190,29 +191,3 @@ def recognize_unique_segments(
                 confidence=box.confidence, source="ocr",
             ))
     return texts
-
-
-# --------------------------------------------------------------------------
-# notebook visualization (pipeline_stage_visualization.ipynb's "PaddleOCR"
-# section) -- reads a PipelineResult, never called by the real pipeline.
-# --------------------------------------------------------------------------
-_PASSED_COLOR = "#059669"
-_FAILED_COLOR = "#dc2626"
-
-
-def render_ocr_results(res, *, zoom: float = 1.0):
-    """Passed (non-blank) vs failed (blank) unique-segment OCR readings, in
-    their own canonical frame (not restored to real page position -- there
-    can be many restored instances per unique reading)."""
-    from rastervec.renderer.notebook import RenderResult
-
-    unique_texts = res.unique_texts or []
-    passed = [t for t in unique_texts if t.text.strip()]
-    failed = [t for t in unique_texts if not t.text.strip()]
-    return RenderResult(categories=[
-        {"name": f"passed ({len(passed)})", "color": _PASSED_COLOR, "bboxes": [t.bbox for t in passed]},
-        {"name": f"failed ({len(failed)})", "color": _FAILED_COLOR, "bboxes": [t.bbox for t in failed]},
-    ], note=(
-        f"{len(unique_texts)} unique segment(s) OCR'd -> "
-        f"{len(res.restored_texts or [])} restored Text(s) across all occurrences"
-    ))

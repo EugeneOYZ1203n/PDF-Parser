@@ -133,13 +133,18 @@ def _page_inputs(task: PageTask, has_manual: bool) -> tuple[bytes, bytes | None]
     return auto_input, manual_input
 
 
-def _run_pipeline(input_bytes: bytes, *, enable_fast: bool = True, compute=None):
+def _run_pipeline(
+    input_bytes: bytes, *, enable_fast: bool = True, compute=None, progress_counter=None,
+):
     """Full current-pipeline run on one input PDF -> its PipelineResult.
     Always `verbose=True` -- see this module's docstring."""
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "in.pdf"
         path.write_bytes(input_bytes)
-        return run_pipeline(str(path), 0, enable_fast=enable_fast, verbose=True, compute=compute)
+        return run_pipeline(
+            str(path), 0, enable_fast=enable_fast, verbose=True, compute=compute,
+            progress_counter=progress_counter,
+        )
 
 
 def _original_page_meta(pdf_path: str, page_index: int) -> PageMeta:
@@ -208,7 +213,7 @@ def _page_dir(task: PageTask) -> Path | None:
 # --------------------------------------------------------------------------
 def _run_current(
     task: PageTask, gt: LabelSet, cfg: MetricConfig, variant: PipelineVariant,
-    compute=None,
+    compute=None, progress_counter=None,
 ) -> PageResult:
     by_src = split_labelset_by_source(gt)
     auto_gt = gt_regions_from_labelset(by_src["auto"])
@@ -223,7 +228,7 @@ def _run_current(
     auto_preds: list = []
     manual_preds: list = []
     total = 0.0
-    run_kw = dict(enable_fast=variant.enable_fast, compute=compute)
+    run_kw = dict(enable_fast=variant.enable_fast, compute=compute, progress_counter=progress_counter)
     lbl = task.variant
 
     try:
@@ -374,20 +379,22 @@ def _run_legacy(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
     return result
 
 
-def run_page_task(task: PageTask, compute=None) -> PageResult:
+def run_page_task(task: PageTask, compute=None, progress_counter=None) -> PageResult:
     """One benchmarked page, end to end. Never raises -- a failure is
     captured into `PageResult.error` (a whole-job failure) or a
     `report_blocks` line (one of the two runs). `compute`, when given a
     shared compute-pool proxy (see `run_benchmark`'s `compute_workers`),
     is forwarded to the `current` engine only -- the `legacy` engine is
-    completely unaffected by this parameter."""
+    completely unaffected by this parameter. `progress_counter` is
+    likewise forwarded to the `current` engine only -- see
+    `run_benchmark`'s own docstring for the full picture."""
     cfg = MetricConfig(iou_edge_min=task.iou_edge_min)
     try:
         variant = resolve_variant(task.variant)
         gt = _ground_truth(task)
         if variant.engine == "legacy":
             return _run_legacy(task, gt, cfg)
-        return _run_current(task, gt, cfg, variant, compute=compute)
+        return _run_current(task, gt, cfg, variant, compute=compute, progress_counter=progress_counter)
     except Exception as exc:  # noqa: BLE001 -- keep benchmarking the rest
         _LOG.warning("%s page %d failed: %s", task.pdf_path, task.page_index, exc)
         return PageResult(
@@ -409,15 +416,31 @@ def run_benchmark(
     complex page's many FAST/OCR jobs and simple pages' few jobs all queue
     into this one pool, so idle capacity is never stranded on a page that
     finished early. Pool 2 never imports `fitz`/`pymupdf`. `compute_workers=0`
-    (the default) preserves today's fully-local-per-page behavior."""
+    (the default) preserves today's fully-local-per-page behavior.
+
+    A dedicated `multiprocessing.Manager().Value` progress counter is
+    always created here (independent of `compute_pool`'s own Manager, which
+    only exists when `compute_workers > 0`) and threaded into every page
+    job -- each FAST tile / OCR crop-batch completed, from any Pool-1
+    worker and/or Pool-2 job, increments this one shared counter, which
+    `run_parallel` polls to show a combined "N done" figure as the outer
+    page-level bar's postfix instead of each worker opening its own
+    (garbling, or -- once Pool 2 is involved -- entirely silent) `tqdm`
+    bar. See `OCR/fast_detect.py::detect_tiled`'s own docstring."""
     import functools
+    import multiprocessing
 
     from rastervec.Reader.Parallel.pool import compute_pool, run_parallel
 
-    with compute_pool(compute_workers) as compute:
-        fn = (
-            run_page_task
-            if compute is None
-            else functools.partial(run_page_task, compute=compute)
-        )
-        return run_parallel(tasks, fn, workers=workers, desc=desc)
+    progress_manager = multiprocessing.Manager()
+    try:
+        progress_counter = progress_manager.Value("i", 0)
+        with compute_pool(compute_workers) as compute:
+            fn = functools.partial(
+                run_page_task, compute=compute, progress_counter=progress_counter,
+            )
+            return run_parallel(
+                tasks, fn, workers=workers, desc=desc, progress_counter=progress_counter,
+            )
+    finally:
+        progress_manager.shutdown()

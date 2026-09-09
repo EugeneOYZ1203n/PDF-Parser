@@ -47,7 +47,7 @@ def test_run_page_task_unknown_variant_captures_error():
 def test_run_benchmark_compute_workers_wires_a_starmap_capable_proxy(monkeypatch):
     captured: dict = {}
 
-    def fake_run_page_task(task, compute=None):
+    def fake_run_page_task(task, compute=None, progress_counter=None):
         captured["compute"] = compute
         return PageResult(pdf_path=task.pdf_path, page_index=task.page_index, variant=task.variant)
 
@@ -68,7 +68,7 @@ def test_run_benchmark_compute_workers_wires_a_starmap_capable_proxy(monkeypatch
 def test_run_benchmark_compute_workers_zero_passes_no_compute(monkeypatch):
     captured: dict = {}
 
-    def fake_run_page_task(task, compute=None):
+    def fake_run_page_task(task, compute=None, progress_counter=None):
         captured["compute"] = compute
         return PageResult(pdf_path=task.pdf_path, page_index=task.page_index, variant=task.variant)
 
@@ -77,3 +77,23 @@ def test_run_benchmark_compute_workers_zero_passes_no_compute(monkeypatch):
 
     run_benchmark(tasks, workers=1, desc="")
     assert captured["compute"] is None
+
+
+def test_run_benchmark_forwards_a_progress_counter(monkeypatch):
+    # The counter proxy is only reachable while run_benchmark's own Manager
+    # is alive (it's shut down before run_benchmark returns), so read
+    # .value from inside the fake job, not after the call returns.
+    captured: dict = {}
+
+    def fake_run_page_task(task, compute=None, progress_counter=None):
+        captured["had_counter"] = progress_counter is not None
+        captured["initial_value"] = progress_counter.value if progress_counter is not None else None
+        return PageResult(pdf_path=task.pdf_path, page_index=task.page_index, variant=task.variant)
+
+    monkeypatch.setattr(bj, "run_page_task", fake_run_page_task)
+    tasks = [PageTask(pdf_path="x.pdf", page_index=0)]
+
+    run_benchmark(tasks, workers=1, desc="")
+
+    assert captured["had_counter"] is True
+    assert captured["initial_value"] == 0

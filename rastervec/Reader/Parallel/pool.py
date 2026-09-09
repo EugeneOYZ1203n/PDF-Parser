@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import multiprocessing
 import os
+import threading
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Callable, Iterable, Iterator, TypeVar
 
@@ -79,6 +80,39 @@ def warmup() -> None:
         _LOG.warning("PaddleOCR rec warmup skipped: %s", exc)
 
 
+_PROGRESS_POLL_SECONDS = 0.5
+
+
+@contextlib.contextmanager
+def _progress_postfix(pbar, counter) -> Iterator[None]:
+    """While the `with` block runs, polls `counter.value` (a
+    `multiprocessing.managers.ValueProxy` or similar) every
+    `_PROGRESS_POLL_SECONDS` and shows it as `pbar`'s postfix -- one shared
+    counter surfaced on the single outer bar, instead of each worker
+    opening its own `tqdm` bar and garbling shared stdout (or, once a Pool-2
+    compute proxy is involved, no progress being visible at all -- see
+    `OCR/fast_detect.py::detect_tiled`'s own docstring). A no-op when
+    `counter` is `None` (the default -- callers that don't opt in see
+    exactly today's behavior)."""
+    if counter is None:
+        yield
+        return
+    stop = threading.Event()
+
+    def _poll() -> None:
+        while not stop.wait(_PROGRESS_POLL_SECONDS):
+            pbar.set_postfix_str(f"{counter.value} compute job(s) done", refresh=True)
+
+    poller = threading.Thread(target=_poll, daemon=True)
+    poller.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        poller.join()
+        pbar.set_postfix_str(f"{counter.value} compute job(s) done", refresh=True)
+
+
 def run_parallel(
     items: Iterable[_T],
     fn: Callable[[_T], _R],
@@ -86,15 +120,24 @@ def run_parallel(
     workers: int = 1,
     desc: str = "",
     warmup_first: bool = True,
+    progress_counter=None,
 ) -> list[_R]:
     """Map `fn` over `items`, returning results in input order.
 
     `workers <= 1`: plain serial loop. Otherwise a spawn `ProcessPoolExecutor`
     of `workers` processes (BLAS threads pinned to 1 each); `warmup()` runs
-    once in the parent first when `warmup_first`."""
+    once in the parent first when `warmup_first`.
+
+    `progress_counter`, when given a shared counter (e.g. a
+    `multiprocessing.Manager().Value` -- see `benchmark_jobs.run_benchmark`),
+    is polled and shown as this function's own `tqdm` bar's postfix (see
+    `_progress_postfix`) -- `fn` itself is responsible for incrementing it as
+    it does within-item work. `None` (the default) preserves today's
+    behavior exactly."""
     work = list(items)
     if workers <= 1 or len(work) <= 1:
-        return [fn(x) for x in tqdm(work, desc=desc)]
+        with tqdm(work, desc=desc) as pbar, _progress_postfix(pbar, progress_counter):
+            return [fn(x) for x in pbar]
 
     if warmup_first:
         _LOG.info("warming model caches before spawning %d workers", workers)
@@ -106,8 +149,12 @@ def run_parallel(
         max_workers=workers, mp_context=ctx, initializer=worker_init,
     ) as pool:
         futures = {pool.submit(fn, item): i for i, item in enumerate(work)}
-        for future in tqdm(as_completed(futures), total=len(futures), desc=desc):
-            results[futures[future]] = future.result()
+        with (
+            tqdm(as_completed(futures), total=len(futures), desc=desc) as pbar,
+            _progress_postfix(pbar, progress_counter),
+        ):
+            for future in pbar:
+                results[futures[future]] = future.result()
     return results  # type: ignore[return-value]
 
 

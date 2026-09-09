@@ -68,6 +68,44 @@ def test_recognize_fn_closure_dispatches_through_compute_apply(monkeypatch):
     assert result == ["got 3"]
 
 
+class _FakeCounter:
+    def __init__(self, value: int = 0) -> None:
+        self.value = value
+
+
+def test_recognize_fn_closure_increments_progress_counter_by_crop_count(monkeypatch):
+    captured: dict = {}
+
+    def fake_recognize_unique_segments(uniques, *, recognize_fn=None):
+        captured["recognize_fn"] = recognize_fn
+        return []
+
+    monkeypatch.setattr(ocr_mod, "_recognize_unique_segments", fake_recognize_unique_segments)
+    monkeypatch.setattr(ocr_mod, "_recognize_crops_job", lambda c, *a, **k: [f"got {len(c)}"])
+
+    counter = _FakeCounter()
+    ocr_mod.recognize([], compute=_FakeCompute(), progress_counter=counter)
+
+    captured["recognize_fn"]([1, 2, 3])
+    assert counter.value == 3
+    captured["recognize_fn"]([1])
+    assert counter.value == 4
+
+
+def test_recognize_no_progress_counter_without_compute(monkeypatch):
+    # progress_counter alone (no compute) has nothing to hook into --
+    # recognize_fn stays None, same as without progress_counter at all.
+    captured: list = []
+
+    def fake_recognize_unique_segments(uniques, *, recognize_fn=None):
+        captured.append(recognize_fn)
+        return []
+
+    monkeypatch.setattr(ocr_mod, "_recognize_unique_segments", fake_recognize_unique_segments)
+    ocr_mod.recognize([], progress_counter=_FakeCounter())
+    assert captured[-1] is None
+
+
 # --------------------------------------------------------------------------
 # restore_segment_texts
 # --------------------------------------------------------------------------

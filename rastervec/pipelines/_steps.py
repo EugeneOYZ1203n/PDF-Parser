@@ -8,11 +8,17 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import numpy as np
 
-from rastervec.config import FAST_COMBINED_KEEP_THRESHOLD, FAST_PAGE_RENDER_DPI, UNIQUE_CLUSTER_TOLERANCE
+from rastervec.config import (
+    FAST_COMBINED_KEEP_THRESHOLD,
+    FAST_PAGE_RENDER_DPI,
+    FAST_TILE_BLOCK_SIZE,
+    FAST_TILE_CANDIDATE_MARGIN_FRAC,
+    FAST_TILE_SCALE_FACTOR,
+    UNIQUE_CLUSTER_TOLERANCE,
+)
 from rastervec.helpers.geometry import (
     PDF_POINTS_PER_INCH,
     item_points,
@@ -26,12 +32,9 @@ from rastervec.models import Page, Segment, SegmentMeta, UniqueSegment, Vector
 from rastervec.native_text import extract_native_text as _extract_native_text
 from rastervec.OCR.fast_detect import FastDetector
 from rastervec.pipelines.result import FastPageResult
-from rastervec.renderer import render_page_paths, render_reconstructed_page
+from rastervec.renderer import render_page_paths
+from rastervec.renderer.stages import render_drawing, render_similarity  # noqa: F401 -- re-exported for callers
 from rastervec.Vector.vector import extract_vectors as _extract_vectors
-
-if TYPE_CHECKING:
-    from rastervec.pipelines.result import PipelineResult
-    from rastervec.renderer.notebook import RenderResult
 
 log = get_logger("pipelines.steps")
 
@@ -158,6 +161,28 @@ def _sample_mask(mask, vectors: list[Vector], zoom: float) -> float:
     return total_score / total_pixels if total_pixels else 0.0
 
 
+def _candidate_tile_bboxes(
+    segments: list[Segment], *, zoom: float, tile_scale: float, margin: float,
+) -> list[tuple[float, float, float, float]]:
+    """Every segment's page-space bbox, converted into `detect_tiled`'s
+    scaled tile-pixel space (page pt -> `FAST_PAGE_RENDER_DPI`-render px
+    via `zoom` -> `* tile_scale`) and padded by `margin` px on every side,
+    so a segment sitting right at a tile boundary isn't dropped by an
+    off-by-one intersection test -- the text-candidate set `detect_tiled`
+    should only bother detecting tiles near."""
+    boxes: list[tuple[float, float, float, float]] = []
+    for seg in segments:
+        if not seg.vectors:
+            continue
+        x0, y0, x1, y1 = union_bbox([v.bbox for v in seg.vectors])
+        scale = zoom * tile_scale
+        boxes.append((
+            x0 * scale - margin, y0 * scale - margin,
+            x1 * scale + margin, y1 * scale + margin,
+        ))
+    return boxes
+
+
 def _segment_meta(seg: Segment, unique_index: int, origin_after_rotation: tuple[float, float]) -> SegmentMeta:
     offset = transform_point(origin_after_rotation, offset=(0.0, 0.0), rotation_deg=seg.angle)
     first = seg.vectors[0]
@@ -175,6 +200,7 @@ def detect_text_fast(
     enable_fast: bool = True,
     verbose: bool = False,
     compute=None,
+    progress_counter=None,
 ) -> FastStepResult:
     """Scores every segment (at its real page position) against a
     whole-page FAST mask; a group passes only if *every* member's score
@@ -186,7 +212,9 @@ def detect_text_fast(
     `enable_fast=False` is a pass-through (every group passes).
     `compute`, when given a shared compute-pool proxy (see
     `Reader/Parallel`), is forwarded to `detect_tiled` so each tile's
-    detection runs on that pool instead of locally."""
+    detection runs on that pool instead of locally. `progress_counter`,
+    when given, is forwarded to `detect_tiled` too -- see that function's
+    own docstring."""
     canon = [_normalize_segment(seg) for seg in segments]
 
     def _materialize(group: list[int]) -> tuple[UniqueSegment, list[SegmentMeta]]:
@@ -214,23 +242,29 @@ def detect_text_fast(
 
     page_image = page_mask = None
     detect_seconds = None
+    zoom = FAST_PAGE_RENDER_DPI / PDF_POINTS_PER_INCH
     all_vectors = [v for seg in segments for v in seg.vectors]
     if all_vectors:
         detector = FastDetector()
         page_image = render_page_paths(all_vectors, page.meta, FAST_PAGE_RENDER_DPI)
+        candidate_bboxes = _candidate_tile_bboxes(
+            segments, zoom=zoom, tile_scale=FAST_TILE_SCALE_FACTOR,
+            margin=FAST_TILE_BLOCK_SIZE * FAST_TILE_CANDIDATE_MARGIN_FRAC,
+        )
         start = time.perf_counter()
         try:
             page_mask = detector.detect_tiled(
                 page_image, desc="FAST text detection", compute=compute,
+                candidate_bboxes=candidate_bboxes, progress_counter=progress_counter,
             )
         except FileNotFoundError as exc:
             log.warning("FAST detection skipped (keeping every segment): %s", exc)
             return detect_text_fast(
                 segments, groups, page, enable_fast=False, verbose=verbose, compute=compute,
+                progress_counter=progress_counter,
             )
         detect_seconds = time.perf_counter() - start
 
-    zoom = FAST_PAGE_RENDER_DPI / PDF_POINTS_PER_INCH
     seg_scores = [_sample_mask(page_mask, seg.vectors, zoom) for seg in segments]
 
     uniques = []
@@ -274,47 +308,3 @@ def build_drawing_output(
     vectors = list(classification_dropped) + list(fast_dropped)
     vectors.sort(key=lambda v: v.seqno)
     return vectors
-
-
-def render_similarity(res: "PipelineResult") -> "RenderResult":
-    """Notebook visualization for the similarity-grouping step: every
-    segment's bbox, plus a note on how much the grouping is expected to
-    save Phase G's OCR call count (each group beyond size 1 means every
-    extra member reuses one render+recognition instead of paying for its
-    own)."""
-    from rastervec.renderer.notebook import RenderResult
-
-    segments = res.segments or []
-    groups = res.similarity_groups or []
-    dup_groups = [g for g in groups if len(g) > 1]
-    saved = sum(len(g) - 1 for g in dup_groups)
-    return RenderResult(
-        categories=[{
-            "name": f"segments ({len(segments)}) in {len(groups)} similarity group(s)",
-            "bboxes": [union_bbox([v.bbox for v in seg.vectors]) for seg in segments if seg.vectors],
-        }],
-        note=(
-            f"{len(segments)} segment(s) -> {len(groups)} group(s) "
-            f"({len(dup_groups)} with >1 member, dedup saves {saved} OCR call(s) if all pass FAST)"
-        ),
-    )
-
-
-def render_drawing(res: "PipelineResult", *, zoom: float = 1.0) -> "RenderResult":
-    """Notebook visualization for the drawing-vectors output: dashed vs
-    solid bboxes, plus a full page reconstruction."""
-    from rastervec.helpers.geometry import is_dashed
-    from rastervec.renderer.notebook import DEFAULT_PATH_COLOR, RenderResult
-
-    dv = res.vectors or []
-    dashed = [d for d in dv if is_dashed(d.dashes)]
-    solid = [d for d in dv if not is_dashed(d.dashes)]
-    recon = render_reconstructed_page(res.page.meta, drawing_vectors=dv, zoom=zoom)
-    return RenderResult(
-        categories=[
-            {"name": f"dashed ({len(dashed)})", "color": DEFAULT_PATH_COLOR, "bboxes": [d.bbox for d in dashed]},
-            {"name": f"solid ({len(solid)})", "color": DEFAULT_PATH_COLOR, "bboxes": [d.bbox for d in solid]},
-            {"name": "full reconstruction", "isolated": recon, "overlay": recon},
-        ],
-        note=f"{len(dv)} drawing vector(s)",
-    )

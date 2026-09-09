@@ -12,29 +12,36 @@ occurrence's real page position/rotation.
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
 
 from rastervec.helpers.geometry import transform_bbox, transform_direction, transform_point
 from rastervec.models import SegmentMeta, Text, UniqueSegment
 from rastervec.OCR.Paddle_OCR.ocr_backend import _recognize_crops_job
 from rastervec.OCR.Paddle_OCR.ocr_backend import recognize_unique_segments as _recognize_unique_segments
-
-if TYPE_CHECKING:
-    from rastervec.pipelines.result import PipelineResult
-    from rastervec.renderer.notebook import RenderResult
+from rastervec.renderer.stages import render_restore  # noqa: F401 -- re-exported for callers
 
 
 def recognize(
-    uniques: list[UniqueSegment], *, compute=None,
+    uniques: list[UniqueSegment], *, compute=None, progress_counter=None,
 ) -> list[Text]:
     """Recognises every `UniqueSegment`, returning one canonical-frame
     `Text` per input (same order). `compute`, when given a shared
     compute-pool proxy (see `Reader/Parallel`), replaces the actual engine
     call with a dispatch to that pool -- the batching/orchestration in
-    `recognize_unique_segments` stays local either way."""
+    `recognize_unique_segments` stays local either way. `progress_counter`,
+    when given (together with `compute`), is incremented by each batch's
+    crop count as that batch's `compute.apply` call returns -- coarser than
+    per-crop (one increment per similarity-group batch, not per crop), but
+    still real, non-blocking-silent progress for the same shared counter
+    `Reader/Parallel/pool.py::run_parallel` polls (see
+    `OCR/fast_detect.py::detect_tiled`'s own docstring for the full
+    picture)."""
     recognize_fn = None
     if compute is not None:
-        recognize_fn = lambda crops: compute.apply(_recognize_crops_job, (crops,))  # noqa: E731
+        def recognize_fn(crops):
+            result = compute.apply(_recognize_crops_job, (crops,))
+            if progress_counter is not None:
+                progress_counter.value += len(crops)
+            return result
     return _recognize_unique_segments(uniques, recognize_fn=recognize_fn)
 
 
@@ -58,26 +65,3 @@ def restore_segment_texts(unique_texts: list[Text], metas: list[SegmentMeta]) ->
             page_index=meta.page_index, seqno=meta.seqno,
         ))
     return restored
-
-
-# --------------------------------------------------------------------------
-# notebook visualization (pipeline_stage_visualization.ipynb's "Restore"
-# section) -- reads a PipelineResult, never called by the real pipeline.
-# --------------------------------------------------------------------------
-def render_restore(res: "PipelineResult") -> "RenderResult":
-    """Every restored `Text`'s real-position bbox -- the dedup payoff made
-    visible: one `UniqueSegment` OCR reading fans back out to every real
-    occurrence it covers."""
-    from rastervec.renderer.notebook import RenderResult
-
-    restored = res.restored_texts or []
-    return RenderResult(
-        categories=[{
-            "name": f"restored text ({len(restored)})",
-            "bboxes": [t.bbox for t in restored],
-        }],
-        note=(
-            f"{len(res.unique_texts or [])} unique OCR call(s) -> "
-            f"{len(restored)} restored Text(s) at their real page positions"
-        ),
-    )
