@@ -10,8 +10,9 @@ Split by output concern:
   primitive used by the benchmark's pred-vs-GT box overlay.
 - `svg.py`  -- `render_page_svg`, a thin `get_svg_image()` wrapper.
 - `_shapes.py` -- `replay_drawing_paths` (per-drawing composite path replay
-  with the even_odd fill rule, so filled glyph counters render as holes)
-  and `path_color_hex`, shared by png/pdf.
+  with the even_odd fill rule so filled glyph counters render as holes, plus
+  per-`(blendmode, opacity)`-run ExtGState wrapping so blended lines don't
+  reconstruct fully opaque) and `path_color_hex`, shared by png/pdf.
 - `notebook.py` -- notebook-only display plumbing (`RenderResult`,
   `visualize`, `draw_paths`/`draw_polys`/`draw_bboxes`, ...) for
   `pipeline_stage_visualization.ipynb`. Deliberately **not** re-exported

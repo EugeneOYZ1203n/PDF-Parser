@@ -88,6 +88,53 @@ def test_extract_vectors_matches_reference_pdf_drawings(pdf_path):
     assert len(vectors) > 0
 
 
+# A page with a Multiply-blended red stroke over a solid-cyan rect, plus a
+# plain (no blend) black stroke as a control. `/BM` never reaches the path
+# dict from plain get_drawings(), so extract_vectors must read it off the
+# enclosing group via get_drawings(extended=True).
+_BLEND_PDF = b"""%PDF-1.7
+1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
+2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj
+3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 4 0 R\
+/Resources<</ExtGState<</GSm<</BM/Multiply>>>>>>>>endobj
+4 0 obj<</Length 110>>stream
+0 1 1 rg 0 70 200 60 re f
+q /GSm gs 1 0 0 RG 30 w 0 100 m 200 100 l S Q
+0 0 0 RG 4 w 0 30 m 200 30 l S
+endstream endobj
+trailer<</Root 1 0 R>>
+"""
+
+
+def _blend_pdf_reader(tmp_path):
+    path = tmp_path / "blend.pdf"
+    path.write_bytes(_BLEND_PDF)
+    return Reader(str(path))
+
+
+def test_extract_vectors_folds_group_blend_mode_onto_vector(tmp_path):
+    with _blend_pdf_reader(tmp_path) as reader:
+        page = reader.get_page(0)
+        vectors = vector.extract_vectors(page)
+        n_paths = len([
+            d for d in page.fitz_page.get_drawings(extended=True)
+            if d.get("type") in ("s", "f", "fs")
+        ])
+
+    # group/clip wrapper entries never become Vectors
+    assert len(vectors) == n_paths
+    assert [v.seqno for v in vectors] == list(range(len(vectors)))
+
+    multiply = [v for v in vectors if v.blendmode == "Multiply"]
+    assert len(multiply) == 1
+    assert multiply[0].color == (1.0, 0.0, 0.0)
+
+    # the plain black stroke stays un-blended
+    plain = [v for v in vectors if v.blendmode is None]
+    assert len(plain) == len(vectors) - 1
+    assert all(v.opacity is None for v in plain)
+
+
 def test_separate_by_layer_groups_by_layer_field(vector):
     from rastervec.Vector.vector import separate_by_layer
 

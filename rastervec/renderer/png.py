@@ -120,9 +120,7 @@ def render_vector_cluster(vectors: list[Vector], dpi: int) -> "Image.Image":
     doc = _get_render_doc()
     cluster_page = doc.new_page(width=width, height=height)
     try:
-        shape = cluster_page.new_shape()
-        replay_drawing_paths(shape, vectors, dx=dx, dy=dy)
-        shape.commit()
+        replay_drawing_paths(cluster_page, vectors, dx=dx, dy=dy)
         return _rasterize(cluster_page, dpi)
     finally:
         doc.delete_page(cluster_page.number)
@@ -173,9 +171,7 @@ def render_page_paths(
     doc = _get_render_doc()
     page = doc.new_page(width=page_meta.width, height=page_meta.height)
     try:
-        shape = page.new_shape()
-        replay_drawing_paths(shape, vectors)
-        shape.commit()
+        replay_drawing_paths(page, vectors)
         return _rasterize(page, dpi)
     finally:
         doc.delete_page(page.number)

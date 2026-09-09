@@ -67,9 +67,7 @@ def _build_reconstructed_doc(
     page.set_rotation(page_meta.rotation)
 
     if drawing_vectors:
-        shape = page.new_shape()
-        replay_drawing_paths(shape, drawing_vectors)
-        shape.commit()
+        replay_drawing_paths(page, drawing_vectors)
 
     base_font = fitz.Font("helv")
     font_span = base_font.ascender - base_font.descender
@@ -83,12 +81,17 @@ def _build_reconstructed_doc(
         # transform, so using origin as the fixpoint swings the text
         # around its own left edge instead of turning in place.
         center = fitz.Point((bx0 + bx1) / 2, (by0 + by1) / 2)
+        # `angle()` is measured in PyMuPDF's get_text `dir` convention (y down);
+        # `insert_text`'s morph rotation turns the other way in that frame, so
+        # the angle is negated here -- without it a word whose direction has a
+        # non-zero y component reconstructs mirrored about the x-axis (e.g.
+        # text reading up comes out reading down).
         page.insert_text(
             word.origin, word.text,
             fontsize=max(word.font_size, 1.0),
             color=_text_color(word.color),
             rotate=0,
-            morph=(center, fitz.Matrix(1, 1).prerotate(word.angle())),
+            morph=(center, fitz.Matrix(1, 1).prerotate(-word.angle())),
         )
 
     if native_words:
@@ -121,8 +124,10 @@ def _build_reconstructed_doc(
         fontsize = max((y1 - y0) / font_span, 1.0)
         # Rotate the whole placed string as a unit about the bbox centre
         # (insert_text's `rotate` only does multiples of 90, so use morph).
+        # `rotation` is in the get_text `dir` convention (y down); morph turns
+        # the other way in that frame, hence `-rotation` (see `_place_word`).
         center = fitz.Point((x0 + x1) / 2, (y0 + y1) / 2)
-        morph = (center, fitz.Matrix(1, 1).prerotate(rotation))
+        morph = (center, fitz.Matrix(1, 1).prerotate(-rotation))
 
         natural = base_font.text_length(text, fontsize=fontsize)
 
@@ -171,7 +176,7 @@ def _build_reconstructed_doc(
         start_x = center.x - (bbox_width / 2.0) / scale
         page.insert_text(
             (start_x, origin_y), text, fontsize=fontsize, color=color, rotate=0,
-            morph=(center, fitz.Matrix(scale, 1.0).prerotate(rotation)),
+            morph=(center, fitz.Matrix(scale, 1.0).prerotate(-rotation)),
         )
 
     if ocr_results:

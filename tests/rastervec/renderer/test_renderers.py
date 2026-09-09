@@ -148,6 +148,65 @@ def test_render_reconstructed_page_arbitrary_angle_text_does_not_raise(text):
     assert darkest < 255
 
 
+def _reconstructed_line_dirs(pdf_bytes: bytes) -> list[tuple[float, float]]:
+    doc = fitz.open("pdf", pdf_bytes)
+    try:
+        return [
+            tuple(round(c, 3) for c in ln["dir"])
+            for b in doc[0].get_text("dict")["blocks"]
+            for ln in b.get("lines", [])
+        ]
+    finally:
+        doc.close()
+
+
+@pytest.mark.parametrize("direction", [(0.0, -1.0), (0.0, 1.0), (0.6, 0.8), (-0.6, 0.8)])
+def test_render_reconstructed_pdf_preserves_native_text_direction(text, direction):
+    # A word whose direction has a non-zero y component must reconstruct
+    # with that same direction -- not mirrored about the x-axis (the morph
+    # rotation turns opposite to the get_text `dir` angle convention, so the
+    # renderer negates the angle).
+    import math
+
+    n = math.hypot(*direction)
+    expected = (round(direction[0] / n, 3), round(direction[1] / n, 3))
+    word = text(text="Xy", bbox=(90, 40, 110, 160), direction=direction, font_size=12)
+
+    pdf = render_reconstructed_pdf(_meta(width=200, height=200), native_words=[word])
+
+    assert _reconstructed_line_dirs(pdf) == [expected]
+
+
+def test_render_reconstructed_pdf_preserves_ocr_and_label_text_rotation(text):
+    ocr_word = text(text="Up", bbox=(90, 40, 110, 160), direction=(0.0, 1.0), source="ocr")
+    pdf_ocr = render_reconstructed_pdf(_meta(width=200, height=200), ocr_results=[ocr_word])
+    assert _reconstructed_line_dirs(pdf_ocr) == [(0.0, 1.0)]
+
+    pdf_box = render_reconstructed_pdf(
+        _meta(width=200, height=200), text_boxes=[("Up", (90, 40, 110, 160), 90.0)],
+    )
+    assert _reconstructed_line_dirs(pdf_box) == [(0.0, 1.0)]
+
+
+def test_render_reconstructed_pdf_reproduces_blend_mode(vector):
+    # A Multiply-blended stroke over a solid fill must composite the way the
+    # source did (here red x cyan -> ~black), not paint fully opaque red.
+    cyan = vector(kind="re", bbox=(0, 70, 200, 130), fill=(0, 1, 1))
+    red = vector(kind="l", bbox=(0, 100, 200, 100), color=(1, 0, 0), width=30, blendmode="Multiply")
+
+    pdf = render_reconstructed_pdf(_meta(width=200, height=200), drawing_vectors=[cyan, red])
+
+    doc = fitz.open("pdf", pdf)
+    try:
+        assert len(doc[0].get_drawings()) == 2
+        pm = doc[0].get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+        px = np.frombuffer(pm.samples, dtype=np.uint8).reshape(pm.height, pm.width, 3)
+        crossing = px[200, 200]  # centre of the page, on the red line over cyan
+        assert int(crossing.max()) < 60, f"blend not applied, got {crossing.tolist()}"
+    finally:
+        doc.close()
+
+
 def test_render_reconstructed_page_skips_blank_text(text):
     blank_word = text(text="   ")
 

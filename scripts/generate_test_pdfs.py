@@ -57,9 +57,12 @@ def _add_texts(page: "fitz.Page", rng: random.Random) -> None:
         color = _rand_color(rng)
         fontsize = rng.uniform(10.0, 20.0)
         center = fitz.Point(origin)
+        # -angle: morph rotation turns opposite to the get_text `dir` angle
+        # convention, so the extracted text direction matches `angle` (same
+        # sign fix as rastervec/renderer/pdf.py).
         page.insert_text(
             origin, text, fontsize=fontsize, color=color, rotate=0,
-            morph=(center, fitz.Matrix(1, 1).prerotate(angle)),
+            morph=(center, fitz.Matrix(1, 1).prerotate(-angle)),
         )
 
 

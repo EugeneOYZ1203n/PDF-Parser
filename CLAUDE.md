@@ -539,16 +539,23 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `_shapes.path_color_hex(path)` returns a path's real PDF stroke/fill color as hex (used by both the
   visualization notebook and OCR input rendering) — any B/W-style simplification stays purely
   internal to classification, never substituted into a rendered/displayed color.
-  `_shapes.replay_drawing_paths(shape, paths, *, dx, dy)` is the accuracy-critical helper shared by
-  png/pdf: it regroups `paths` by their parent drawing (`VectorPath.seq`), replays every item of a
-  drawing into the `fitz.Shape`, then calls `shape.finish()` **once per drawing** carrying that
-  drawing's real `even_odd` / `line_join` / `line_cap` / stroke+fill opacity (ported from
-  `archive/raster_parser/rendering/pdf_render/reconstruct.py`). This is why a multi-contour filled
+  `_shapes.replay_drawing_paths(page, vectors, *, dx, dy)` is the accuracy-critical helper shared by
+  png/pdf (takes a `fitz.Page`, not a pre-made `Shape` — it owns its own `new_shape()`/`commit()`
+  now): it replays every item of each `Vector` (one whole `get_drawings()` drawing) into a shape,
+  then calls `shape.finish()` **once per `Vector`** carrying that drawing's real `even_odd` /
+  `line_join` / `line_cap` / stroke+fill opacity (ported from
+  `archive/raster_parser/rendering/pdf_render/reconstruct.py`). Vectors are processed in consecutive
+  `(blendmode, opacity)` runs — one `Shape`+`commit()` per run — and a run with a non-Normal blend
+  mode or group opacity < 1 has its committed content stream wrapped in a `/BM`+`/ca`+`/CA`
+  ExtGState (`_wrap_run_gstate`), since `Shape.finish()` has no blendmode param; without it a
+  Multiply-blended line reconstructs fully opaque. `Vector.blendmode`/`opacity` are populated by
+  `extract_vectors` reading `get_drawings(extended=True)` and folding in the enclosing
+  transparency-group's blend/opacity (plain `get_drawings()` drops `/BM` entirely). This is why a multi-contour filled
   glyph (an "o", "e", "8", "A" — outer contour + inner counter, one drawing, `even_odd`) renders
   with its counter as a white hole instead of filled solid; drawing each `VectorPath` primitive on
   its own and calling `finish(closePath=True)` per primitive (the pre-split behaviour) filled every
-  counter solid — a direct hit to OCR of vector text. `finish()` is per drawing but `commit()` is
-  left to the caller (one commit per render). A drawing whose paths carry neither `stroke_color` nor
+  counter solid — a direct hit to OCR of vector text. `finish()` is per drawing; `commit()` is now
+  internal to `replay_drawing_paths` (once per `(blendmode, opacity)` run). A drawing whose paths carry neither `stroke_color` nor
   `fill_color` is skipped outright: `finish()` emits a stroke operator whenever `fill` is `None`
   regardless of `color`, falling back to the default-black graphics state instead of staying
   invisible. `even_odd` / `line_cap` / `line_join` are drawing-level fields now copied onto every
@@ -599,8 +606,10 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `fitz.Font.text_length` vs `bbox_width`) so it never spills past the box/page. Rotation is
   exact at any angle: since `insert_text`'s own `rotate` param only accepts multiples of 90, rotation
   is applied instead via its `morph=(fixpoint, matrix)` param — `(bbox_center, fitz.Matrix(1,
-  1).prerotate(angle))`, PyMuPDF's mechanism for arbitrary-angle text (a `cm` transform applied
-  before drawing). The fixpoint is the bbox's own center, not the baseline origin — using origin as
+  1).prerotate(-angle))`, PyMuPDF's mechanism for arbitrary-angle text (a `cm` transform applied
+  before drawing). The angle is **negated**: `Text.angle()` is in `get_text`'s `dir` convention
+  (y down) and morph rotation turns the other way in that frame, so without the sign flip a word
+  whose direction has a non-zero y component reconstructs mirrored about the x-axis. The fixpoint is the bbox's own center, not the baseline origin — using origin as
   the fixpoint (an earlier version of this code did) rotates the text around its own left edge
   instead of turning it in place, drifting visibly off the bbox at any non-zero angle — a "does this
   look roughly right" preview, not a byte-accurate reconstruction. A
