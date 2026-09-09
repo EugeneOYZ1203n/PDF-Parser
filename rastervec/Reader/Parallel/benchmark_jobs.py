@@ -20,6 +20,11 @@ output PDFs go into `RECONSTRUCT_DIR/<stem>_p<N>_<variant>/`
 `boxes.pdf`). Every failure -- whole job or one of the runs -- is captured
 into `PageResult.error` / a `report_blocks` line; the pool never sees an
 exception.
+
+The `current` engine is always run `verbose=True` here -- `build_eval_
+inputs` needs `PipelineResult.clustering`/`fast_dropped_vectors` (both
+verbose-only) for `attribute_miss`, and the showcase sampler needs
+`unique_segments`/`unique_texts` (also verbose-only).
 """
 from __future__ import annotations
 
@@ -39,7 +44,7 @@ from rastervec.Evaluation.conversion import (
 from rastervec.Evaluation.Evaluate.adapters import (
     build_eval_inputs,
     gt_regions_from_labelset,
-    predictions_from_cluster_ocr,
+    predictions_from_texts,
     text_candidate_boxes,
 )
 from rastervec.Evaluation.Evaluate.benchmark import format_report
@@ -129,11 +134,12 @@ def _page_inputs(task: PageTask, has_manual: bool) -> tuple[bytes, bytes | None]
 
 
 def _run_pipeline(input_bytes: bytes, *, enable_fast: bool = True, compute=None):
-    """Full current-pipeline run on one input PDF -> its PipelineResult."""
+    """Full current-pipeline run on one input PDF -> its PipelineResult.
+    Always `verbose=True` -- see this module's docstring."""
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "in.pdf"
         path.write_bytes(input_bytes)
-        return run_pipeline(str(path), 0, enable_fast=enable_fast, compute=compute)
+        return run_pipeline(str(path), 0, enable_fast=enable_fast, verbose=True, compute=compute)
 
 
 def _original_page_meta(pdf_path: str, page_index: int) -> PageMeta:
@@ -141,42 +147,47 @@ def _original_page_meta(pdf_path: str, page_index: int) -> PageMeta:
         return reader.get_page(page_index).meta
 
 
-def _render_ocr_input(cluster, dpi: int = 300):
-    """The exact image RenderOCR.ocr_cluster feeds PaddleOCR for this
-    cluster (dpi bumped up the same way for a tiny cluster)."""
-    width_pt, height_pt = cluster_frame_size(cluster)
+def _render_ocr_input(vectors, dpi: int = 300):
+    """The exact image OCR's own render step feeds PaddleOCR for one
+    UniqueSegment/cluster (dpi bumped up the same way for a tiny render)."""
+    width_pt, height_pt = cluster_frame_size(vectors)
     min_side_pt = min(width_pt, height_pt)
     if min_side_pt > 0:
         dpi = max(
             dpi,
             math.ceil(MIN_RENDER_SIDE_PX * PDF_POINTS_PER_INCH / min_side_pt),
         )
-    return render_vector_cluster(cluster, dpi)
+    return render_vector_cluster(vectors, dpi)
 
 
-def _showcase(cluster_ocr_results, per_page: int, seed: int) -> list[ShowcaseSample]:
-    if per_page <= 0 or not cluster_ocr_results:
+def _showcase(
+    unique_pairs: list[tuple], per_page: int, seed: int,
+) -> list[ShowcaseSample]:
+    """`unique_pairs` is `[(UniqueSegment, Text), ...]` -- one real render +
+    OCR call per pair (mirrors the old per-cluster showcase, now sampling
+    the deduped unique segments instead of every candidate cluster)."""
+    if per_page <= 0 or not unique_pairs:
         return []
-    passed = [r for r in cluster_ocr_results if r.resolved.text.strip()]
-    blank = [r for r in cluster_ocr_results if not r.resolved.text.strip()]
+    passed = [(seg, t) for seg, t in unique_pairs if t.text.strip()]
+    blank = [(seg, t) for seg, t in unique_pairs if not t.text.strip()]
     rng = random.Random(seed)
     half = per_page // 2
     pick = rng.sample(passed, min(half, len(passed)))
     pick += rng.sample(blank, min(per_page - len(pick), len(blank)))
-    chosen = {id(r) for r in pick}
-    rest = [r for r in cluster_ocr_results if id(r) not in chosen]
+    chosen = {id(seg) for seg, _t in pick}
+    rest = [(seg, t) for seg, t in unique_pairs if id(seg) not in chosen]
     rng.shuffle(rest)
     pick += rest[: max(0, per_page - len(pick))]
 
     out: list[ShowcaseSample] = []
-    for r in pick:
+    for seg, t in pick:
         try:
-            image = _render_ocr_input(r.cluster)
+            image = _render_ocr_input(seg.vectors)
         except Exception:  # noqa: BLE001 -- a bad crop shouldn't kill the page
             continue
         buf = io.BytesIO()
         image.save(buf, format="PNG")
-        text = r.resolved.text.strip()
+        text = t.text.strip()
         out.append(ShowcaseSample(png=buf.getvalue(), text=text, passed=bool(text)))
     return out
 
@@ -255,11 +266,16 @@ def _run_current(
     result.stage_durations = dict((auto_ctx.step_durations or {}) if auto_ctx else {})
     result.total_seconds = total
 
-    cocr = list((auto_ctx.cluster_ocr_results or []) if auto_ctx else [])
-    if manual_ctx:
-        cocr += list(manual_ctx.cluster_ocr_results or [])
-    result.showcase = _showcase(cocr, task.showcase_per_page, task.showcase_seed)
+    unique_pairs: list[tuple] = []
+    for ctx in (auto_ctx, manual_ctx):
+        if ctx is not None:
+            unique_pairs.extend(zip(ctx.unique_segments or [], ctx.unique_texts or []))
+    result.showcase = _showcase(unique_pairs, task.showcase_per_page, task.showcase_seed)
 
+    ocr_texts = [
+        t for ctx in (auto_ctx, manual_ctx) if ctx is not None
+        for t in ctx.texts if t.source == "ocr"
+    ]
     _write_current_outputs(
         task,
         page_meta=(
@@ -268,10 +284,7 @@ def _run_current(
         ),
         auto_input=auto_input,
         manual_input=manual_input if has_manual else None,
-        merged_ocr_results=(
-            list((auto_ctx.ocr_results or []) if auto_ctx else [])
-            + list(manual_ctx.ocr_results or [] if manual_ctx else [])
-        ),
+        merged_ocr_results=ocr_texts,
         auto_gt=auto_gt, auto_preds=auto_preds,
         manual_gt=manual_gt if has_manual else [], manual_preds=manual_preds,
         cfg=cfg,
@@ -305,10 +318,7 @@ def _write_current_outputs(
 # the job -- legacy pipeline (run twice)
 # --------------------------------------------------------------------------
 def _run_legacy(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
-    from rastervec.Evaluation.Evaluate.legacy_adapter import (
-        run_archive_pipeline,
-        to_cluster_ocr_results,
-    )
+    from rastervec.Evaluation.Evaluate.legacy_adapter import run_archive_pipeline, to_texts
 
     by_src = split_labelset_by_source(gt)
     auto_gt = gt_regions_from_labelset(by_src["auto"])
@@ -333,11 +343,11 @@ def _run_legacy(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
                 str(path), 0, enable_raster_pass=task.enable_archive_raster_pass,
             )
             total += time.perf_counter() - t0
-        cor = to_cluster_ocr_results(elements, page_index=task.page_index)
-        merged_ocr.extend(c.resolved for c in cor)
+        texts = to_texts(elements, page_index=task.page_index)
+        merged_ocr.extend(texts)
         res = evaluate_metrics(
-            gt_regions, predictions_from_cluster_ocr(cor),
-            text_candidate_boxes(None, cor), cfg=cfg,
+            gt_regions, predictions_from_texts(texts),
+            text_candidate_boxes(texts), cfg=cfg,
         )
         result.report_blocks.append(
             format_report(f"[{lbl}/{label}] {task.pdf_path}", task.page_index, res)

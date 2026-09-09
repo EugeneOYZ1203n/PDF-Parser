@@ -142,3 +142,152 @@ def test_make_oriented_quad_vertical_direction():
     assert hypot(ur[0] - ul[0], ur[1] - ul[1]) == pytest.approx(10.0)
     assert hypot(ll[0] - ul[0], ll[1] - ul[1]) == pytest.approx(4.0)
 
+
+# --------------------------------------------------------------------------
+# compute_origin
+# --------------------------------------------------------------------------
+def test_compute_origin_horizontal_is_bottom_left():
+    origin = geometry.compute_origin((0.0, 0.0, 10.0, 4.0), (1.0, 0.0))
+    assert origin == pytest.approx((0.0, 2.0))
+
+
+def test_compute_origin_matches_leading_edge_for_rotated_direction():
+    # direction pointing straight down (0, 1): the "leading" (along-min)
+    # edge is the bbox's top, centered on the normal (x) axis.
+    origin = geometry.compute_origin((0.0, 0.0, 10.0, 4.0), (0.0, 1.0))
+    assert origin == pytest.approx((5.0, 0.0))
+
+
+# --------------------------------------------------------------------------
+# Vector.items geometry -- item_points / item_bbox
+# --------------------------------------------------------------------------
+def test_item_points_line():
+    assert geometry.item_points(("l", (0.0, 1.0), (2.0, 3.0))) == [(0.0, 1.0), (2.0, 3.0)]
+
+
+def test_item_points_rect():
+    assert geometry.item_points(("re", (0.0, 0.0, 10.0, 5.0))) == [(0.0, 0.0), (10.0, 5.0)]
+
+
+def test_item_points_quad():
+    corners = ((0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0))
+    assert geometry.item_points(("qu", corners)) == list(corners)
+
+
+def test_item_points_curve():
+    pts = geometry.item_points(("c", (0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0)))
+    assert pts == [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0)]
+
+
+def test_item_points_unknown_kind_is_empty():
+    assert geometry.item_points(("x", 1, 2)) == []
+
+
+def test_item_bbox_line():
+    assert geometry.item_bbox(("l", (0.0, 5.0), (10.0, 0.0))) == (0.0, 0.0, 10.0, 5.0)
+
+
+def test_item_bbox_empty_for_unknown_kind():
+    assert geometry.item_bbox(("x",)) == (0.0, 0.0, 0.0, 0.0)
+
+
+# --------------------------------------------------------------------------
+# transform_point / transform_item / transform_bbox / transform_direction
+# --------------------------------------------------------------------------
+def test_transform_point_translation_only():
+    assert geometry.transform_point((1.0, 2.0), offset=(10.0, 20.0), rotation_deg=0.0) == pytest.approx((11.0, 22.0))
+
+
+def test_transform_point_rotation_90():
+    x, y = geometry.transform_point((1.0, 0.0), offset=(0.0, 0.0), rotation_deg=90.0)
+    assert x == pytest.approx(0.0, abs=1e-9)
+    assert y == pytest.approx(1.0, abs=1e-9)
+
+
+def test_transform_point_rotation_then_translation_order():
+    # rotate (1, 0) by 90 -> (0, 1), then translate by (5, 5) -> (5, 6).
+    x, y = geometry.transform_point((1.0, 0.0), offset=(5.0, 5.0), rotation_deg=90.0)
+    assert x == pytest.approx(5.0, abs=1e-9)
+    assert y == pytest.approx(6.0, abs=1e-9)
+
+
+def test_transform_item_line_preserves_kind():
+    item = geometry.transform_item(("l", (0.0, 0.0), (1.0, 0.0)), offset=(10.0, 0.0), rotation_deg=0.0)
+    assert item == ("l", (10.0, 0.0), (11.0, 0.0))
+
+
+def test_transform_item_rect_keeps_trailing_extra_element():
+    item = geometry.transform_item(("re", (0.0, 0.0, 10.0, 5.0), 1), offset=(0.0, 0.0), rotation_deg=0.0)
+    assert item[0] == "re"
+    assert item[1] == pytest.approx((0.0, 0.0, 10.0, 5.0))
+    assert item[2:] == (1,)
+
+
+def test_transform_bbox_pure_translation():
+    bbox = geometry.transform_bbox((0.0, 0.0, 10.0, 5.0), offset=(2.0, 3.0), rotation_deg=0.0)
+    assert bbox == pytest.approx((2.0, 3.0, 12.0, 8.0))
+
+
+def test_transform_bbox_rotation_90_about_origin():
+    # a bbox in the first quadrant, rotated 90 degrees about the origin,
+    # ends up in the second quadrant.
+    bbox = geometry.transform_bbox((0.0, 0.0, 10.0, 4.0), offset=(0.0, 0.0), rotation_deg=90.0)
+    assert bbox == pytest.approx((-4.0, 0.0, 0.0, 10.0), abs=1e-9)
+
+
+def test_transform_direction_rotates_without_translating():
+    direction = geometry.transform_direction((1.0, 0.0), rotation_deg=90.0)
+    assert direction == pytest.approx((0.0, 1.0), abs=1e-9)
+
+
+def test_transform_direction_is_unaffected_by_position():
+    # transform_direction never takes an offset -- confirm rotating a
+    # direction gives the same result regardless of any notional position.
+    a = geometry.transform_direction((1.0, 0.0), rotation_deg=45.0)
+    b = geometry.transform_direction((1.0, 0.0), rotation_deg=45.0)
+    assert a == b
+
+
+# --------------------------------------------------------------------------
+# transform_vector
+# --------------------------------------------------------------------------
+def test_transform_vector_translates_items_and_rect(vector):
+    v = vector(kind="l", bbox=(0.0, 0.0, 10.0, 5.0))
+    moved = geometry.transform_vector(v, offset=(100.0, 200.0), rotation_deg=0.0)
+
+    assert moved.items == [("l", (100.0, 200.0), (110.0, 205.0))]
+    assert moved.rect == pytest.approx((100.0, 200.0, 110.0, 205.0))
+    # original untouched
+    assert v.rect == (0.0, 0.0, 10.0, 5.0)
+
+
+def test_transform_vector_rotation_recomputes_rect_from_new_items():
+    from rastervec.models import Vector
+
+    v = Vector(
+        type="s", items=[("l", (0.0, 0.0), (10.0, 0.0))], color=(0, 0, 0), fill=None,
+        width=1.0, dashes=None, closePath=False, lineCap=0, lineJoin=0, even_odd=False,
+        stroke_opacity=None, fill_opacity=None, layer=None, rect=(0.0, 0.0, 10.0, 0.0),
+        scissor=None, seqno=0, blendmode=None, isolated=False, knockout=False,
+        opacity=None, page_index=0,
+    )
+    rotated = geometry.transform_vector(v, offset=(0.0, 0.0), rotation_deg=90.0)
+
+    (kind, p0, p1) = rotated.items[0]
+    assert kind == "l"
+    assert p0 == pytest.approx((0.0, 0.0), abs=1e-9)
+    assert p1 == pytest.approx((0.0, 10.0), abs=1e-9)
+    assert rotated.rect == pytest.approx((0.0, 0.0, 0.0, 10.0), abs=1e-9)
+
+
+def test_transform_vector_moves_scissor_too(vector):
+    v = vector(kind="l", bbox=(0.0, 0.0, 10.0, 5.0), scissor=(0.0, 0.0, 10.0, 5.0))
+    moved = geometry.transform_vector(v, offset=(1.0, 1.0), rotation_deg=0.0)
+    assert moved.scissor == pytest.approx((1.0, 1.0, 11.0, 6.0))
+
+
+def test_transform_vector_no_scissor_stays_none(vector):
+    v = vector(kind="l", bbox=(0.0, 0.0, 10.0, 5.0), scissor=None)
+    moved = geometry.transform_vector(v, offset=(1.0, 1.0), rotation_deg=0.0)
+    assert moved.scissor is None
+

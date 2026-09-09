@@ -3,20 +3,8 @@ from __future__ import annotations
 import pymupdf as fitz
 import pytest
 
-from rastervec.models import TextVectorResult
 from rastervec.pipelines import _cli
 from rastervec.pipelines.sub_pipelines import ocr as ocr_mod
-
-
-class _StubRenderOCR:
-    def __init__(self, backend=None):
-        pass
-
-    def recognize_segmented(self, seg, cluster, page):
-        return TextVectorResult(
-            paths=cluster, text="TXT", confidence=0.9, bbox=(0, 0, 1, 1),
-            ocr_bbox=None, rotation_used=0, page_index=page.meta.index, words=None,
-        )
 
 
 def test_build_arg_parser_current_has_no_fast():
@@ -31,8 +19,11 @@ def test_build_arg_parser_legacy_rejects_no_fast():
         p.parse_args(["--pdf", "x.pdf", "--no-fast"])
 
 
-def test_main_current_returns_zero(tmp_pdf_path, monkeypatch):
-    monkeypatch.setattr(ocr_mod, "RenderOCR", _StubRenderOCR)
+def test_main_current_returns_zero(tmp_pdf_path, monkeypatch, text):
+    def fake_recognize_unique_segments(uniques, *, recognize_fn=None):
+        return [text(text="TXT", bbox=(0.0, 0.0, 1.0, 1.0), source="ocr") for _ in uniques]
+
+    monkeypatch.setattr(ocr_mod, "_recognize_unique_segments", fake_recognize_unique_segments)
     doc = fitz.open()
     doc.new_page(width=200, height=100).insert_text((10, 20), "Hi", fontsize=10)
     path = tmp_pdf_path(doc)

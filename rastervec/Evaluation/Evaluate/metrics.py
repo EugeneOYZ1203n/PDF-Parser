@@ -9,7 +9,7 @@ accuracy corrupt together. Here each metric is an independent reduction
 over `OverlapGraph`, which keeps every (gt, prediction) overlap edge and an
 explicit N:1 assignment.
 
-Two normalisation rules, both documented in full in `EVAL_METRICS.md`:
+Two normalisation rules, both documented in full in `docs/EVAL_METRICS.md`:
 
 1. **Text** -- every gt/prediction string goes through
    `text_metrics.normalize_text` (upper-case, trim, collapse whitespace)

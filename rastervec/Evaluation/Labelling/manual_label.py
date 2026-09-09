@@ -1,12 +1,12 @@
 """Manual labelling: a small Tk UI for editing vector-text clusters on a
 rendered page and typing their ground-truth text, saved via
 `label_schema.save_labels`. `_get_display_matrix` (the page-space ->
-canvas-space transform rule, see `rastervec/models.py`'s coordinate-space
-docstring) and the `Tooltip` class were ported from the former
-`debug_app.py` when it was removed. `classify_vectors` (sub_pipelines) gets the
-same text-candidate clusters the pipeline's "Text Candidates" stage
-produces, rather than re-implementing extraction/clustering/rendering
-here.
+canvas-space transform rule, see `rastervec/models/__init__.py`'s
+coordinate-space docstring) and the `Tooltip` class were ported from the
+former `debug_app.py` when it was removed. `classify_vectors`
+(sub_pipelines) gets the same text-candidate clusters the pipeline's "Text
+Candidates" stage produces, rather than re-implementing extraction/
+clustering/rendering here.
 
 Beyond plain labelling it's a light cluster *editor*: the pipeline's
 clustering is not always right (a word split across two clusters, or two
@@ -15,14 +15,20 @@ edit modes:
 
 - **cluster mode** -- left-click toggles a whole cluster's selection;
   `Group` merges every selected cluster into one; `Ungroup` splits a
-  selected cluster back into its pre-spatial "groups" (or, for an
-  already-edited cluster, into one-path-per-cluster).
-- **path mode** -- left-click toggles an individual `VectorPath`; `Group`
-  builds a brand-new cluster from exactly the selected paths, pulling
-  each out of whatever cluster currently owns it.
+  selected cluster back into its own member groups (real, nested
+  structure on `ClassificationResult.text_clusters` now -- no separate
+  lineage lookup needed), or -- for a cluster with only one group (e.g.
+  one built by a prior `Group` in path mode) -- into one-`Vector`-per-
+  cluster.
+- **path mode** -- left-click toggles an individual `Vector` (the atomic
+  unit now that a `Vector` is never decomposed into its own items --
+  "path mode" operates one level coarser than it used to, at whole-
+  drawing granularity); `Group` builds a brand-new single-group cluster
+  from exactly the selected `Vector`s, pulling each out of whatever
+  cluster currently owns it.
 
 Instead of a single click you can also left-click-drag a rubber-band box:
-every cluster/path (mode-dependent) whose bbox intersects the box is
+every cluster/vector (mode-dependent) whose bbox intersects the box is
 added to the selection, or -- if all of them were already selected --
 removed from it, so the same drag both selects and deselects an area.
 
@@ -63,8 +69,8 @@ Not unit-testable (a real Tk event loop). Smoke-test manually:
    `Group` -- one merged bbox. Select it and `Ungroup` -- it splits back.
    Drag a box across several clusters -- all turn orange; drag the same
    box again -- they all clear.
-3. Switch to path mode, click or drag-box a few paths, `Group` -- a new
-   cluster of exactly those paths; the clusters they came from lose them
+3. Switch to path mode, click or drag-box a few vectors, `Group` -- a new
+   cluster of exactly those vectors; the clusters they came from lose them
    (empty ones vanish). `Ctrl+Z` reverts.
 4. Right-click a cluster -- the label bar shows it as the target; type
    text, pick a rotation, `Apply` -- the bbox turns green, the selection
@@ -101,10 +107,11 @@ from rastervec.helpers.geometry import (
     bbox_area,
     bbox_contains,
     bboxes_intersect,
+    item_points,
     union_bbox,
 )
 from rastervec.logging_setup import configure_logging, get_logger
-from rastervec.models import VectorPath
+from rastervec.models import Vector
 from rastervec.paths import output_dir
 from rastervec.pipelines._steps import extract_vectors
 from rastervec.pipelines.sub_pipelines.vector_classification import classify_vectors
@@ -116,6 +123,15 @@ _LOG = get_logger("manual_label")
 MIN_ZOOM = 0.25
 MAX_ZOOM = 6.0
 ZOOM_STEP = 1.25
+
+# A cluster, as this editor works with it: a tiered list of groups of
+# Vectors -- real structure now, matching ClassificationResult.text_
+# clusters directly, no separate id()-keyed lineage dict.
+Cluster = list[list[Vector]]
+
+
+def _flatten(cluster: Cluster) -> list[Vector]:
+    return [v for group in cluster for v in group]
 
 
 def _get_display_matrix(fitz_page: "fitz.Page", zoom: float) -> "fitz.Matrix":
@@ -161,19 +177,21 @@ _ENTRY_COLOR = "#999999"
 _PATH_COLOR = "#7a7a7a"
 
 
-def _draw_path(canvas: tk.Canvas, matrix: "fitz.Matrix", path: VectorPath, color: str, width: int):
-    """Port of debug_app._draw_vector_path: polyline of path.points through
-    the display matrix (polygon outline for re/qu, line otherwise)."""
-    coords: list[float] = []
-    for x, y in path.points:
-        p = fitz.Point(x, y) * matrix
-        coords.extend([p.x, p.y])
-    if len(coords) < 4:
-        return
-    if path.kind in ("re", "qu"):
-        canvas.create_polygon(*coords, outline=color, fill="", width=width, tags=("overlay",))
-    else:
-        canvas.create_line(*coords, fill=color, width=width, tags=("overlay",))
+def _draw_vector(canvas: tk.Canvas, matrix: "fitz.Matrix", vector: Vector, color: str, width: int):
+    """Polyline of every item's own points through the display matrix
+    (polygon outline for re/qu, line otherwise) -- one `Vector` can carry
+    several items, all drawn."""
+    for item in vector.items:
+        coords: list[float] = []
+        for x, y in item_points(item):
+            p = fitz.Point(x, y) * matrix
+            coords.extend([p.x, p.y])
+        if len(coords) < 4:
+            continue
+        if item[0] in ("re", "qu"):
+            canvas.create_polygon(*coords, outline=color, fill="", width=width, tags=("overlay",))
+        else:
+            canvas.create_line(*coords, fill=color, width=width, tags=("overlay",))
 
 
 # Canvas-pixel movement below which a press/release is treated as a plain click.
@@ -199,7 +217,7 @@ class ManualLabelApp:
         self._drag_start: tuple[float, float] | None = None
         self._drag_moved = False
         self._drag_rect_id: int | None = None
-        self._undo_stack: list[list[list[VectorPath]]] = []
+        self._undo_stack: list[list[Cluster]] = []
         # (cluster_signature, cluster_bbox) the label bar currently edits.
         self._label_target: tuple[str, tuple[float, float, float, float]] | None = None
         self.zoom = _ZOOM
@@ -220,19 +238,14 @@ class ManualLabelApp:
         self.page_index = max(0, min(self.reader.page_count() - 1, page_index))
         self.page = self.reader.get_page(self.page_index)
         vectors = extract_vectors(self.page)
-        self.classification = classify_vectors(vectors.paths, self.page, verbose=True)
+        self.classification = classify_vectors(vectors, self.page, verbose=True)
 
-        # Mutable working list -- all rendering/hit-testing/labelling uses this.
-        # classify_vectors' own cluster lists are referenced directly (never
-        # mutated in place -- every edit builds new lists) so their id() still
-        # matches classification.cluster_groups keys for Ungroup.
-        self.working_clusters: list[list[VectorPath]] = [
+        # Mutable working list -- all rendering/hit-testing/labelling uses
+        # this. classify_vectors' own tiered clusters are referenced
+        # directly (never mutated in place -- every edit builds new lists).
+        self.working_clusters: list[Cluster] = [
             cluster for cluster in (self.classification.text_clusters or []) if cluster
         ]
-        # id(original cluster) -> its pre-spatial "groups", for Ungroup.
-        self._lineage: dict[int, list[list[VectorPath]]] = dict(
-            self.classification.cluster_groups or {}
-        )
 
         self.selected.clear()
         self._undo_stack.clear()
@@ -353,13 +366,13 @@ class ManualLabelApp:
         cx, cy = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
         return fitz.Point(cx, cy) * ~self.matrix
 
-    def _cluster_bbox(self, cluster: list[VectorPath]):
-        return union_bbox([p.bbox for p in cluster])
+    def _cluster_bbox(self, cluster: Cluster):
+        return union_bbox([v.bbox for v in _flatten(cluster)])
 
-    def _iter_paths(self):
+    def _iter_vectors(self):
         for ci, cluster in enumerate(self.working_clusters):
-            for path in cluster:
-                yield ci, path
+            for v in _flatten(cluster):
+                yield ci, v
 
     # ---- rendering ----------------------------------------------------
 
@@ -378,7 +391,8 @@ class ManualLabelApp:
             for idx, cluster in enumerate(self.working_clusters):
                 if not cluster:
                     continue
-                sig = cluster_signature(cluster)
+                flat = _flatten(cluster)
+                sig = cluster_signature(flat)
                 live_sigs.add(sig)
                 rect = fitz.Rect(self._cluster_bbox(cluster)) * self.matrix
                 if idx in self.selected:
@@ -392,14 +406,14 @@ class ManualLabelApp:
                     tags=("cluster", f"c{idx}"),
                 )
         else:
-            for _ci, path in self._iter_paths():
-                selected = id(path) in self.selected
-                _draw_path(
-                    self.canvas, self.matrix, path,
+            for _ci, v in self._iter_vectors():
+                selected = id(v) in self.selected
+                _draw_vector(
+                    self.canvas, self.matrix, v,
                     _SELECTED_COLOR if selected else _PATH_COLOR,
                     3 if selected else 1,
                 )
-            live_sigs = {cluster_signature(c) for c in self.working_clusters if c}
+            live_sigs = {cluster_signature(_flatten(c)) for c in self.working_clusters if c}
 
         # Entries with no matching live cluster (auto labels, stale manual edits).
         for entry in page_entries:
@@ -470,8 +484,9 @@ class ManualLabelApp:
     # ---- selection / editing --------------------------------------------
 
     def _push_undo(self) -> None:
-        # Outer list only -- inner cluster lists are never mutated in place, so
-        # sharing the references keeps id()-based lineage valid after an undo.
+        # Outer list only -- inner cluster/group lists are never mutated in
+        # place, so sharing the references keeps id()-based selection valid
+        # after an undo.
         self._undo_stack.append(list(self.working_clusters))
 
     def _undo(self) -> None:
@@ -531,25 +546,25 @@ class ManualLabelApp:
                     break
         else:
             hit = None
-            for _ci, path in self._iter_paths():
-                if bbox_contains(path.bbox, pt.x, pt.y):
-                    if hit is None or bbox_area(path.bbox) < bbox_area(hit.bbox):
-                        hit = path
+            for _ci, v in self._iter_vectors():
+                if bbox_contains(v.bbox, pt.x, pt.y):
+                    if hit is None or bbox_area(v.bbox) < bbox_area(hit.bbox):
+                        hit = v
             if hit is not None:
                 self.selected.symmetric_difference_update({id(hit)})
         self._render()
 
     def _items_in_rect(self, rect) -> set[int]:
-        """Selection keys (cluster index / id(path)) whose bbox intersects `rect`."""
+        """Selection keys (cluster index / id(vector)) whose bbox intersects `rect`."""
         hits: set[int] = set()
         if self.mode == "cluster":
             for idx, cluster in enumerate(self.working_clusters):
                 if cluster and bboxes_intersect(self._cluster_bbox(cluster), rect):
                     hits.add(idx)
         else:
-            for _ci, path in self._iter_paths():
-                if bboxes_intersect(path.bbox, rect):
-                    hits.add(id(path))
+            for _ci, v in self._iter_vectors():
+                if bboxes_intersect(v.bbox, rect):
+                    hits.add(id(v))
         return hits
 
     def _area_select(self, rect) -> None:
@@ -569,29 +584,32 @@ class ManualLabelApp:
         self._push_undo()
         if self.mode == "cluster":
             chosen = [self.working_clusters[i] for i in sorted(self.selected)]
-            merged: list[VectorPath] = [p for cluster in chosen for p in cluster]
-            carried = next((c for c in chosen if cluster_signature(c) in
-                            {e.cluster_signature for e in self._page_entries()}), None)
+            merged: Cluster = [group for cluster in chosen for group in cluster]
+            labelled_sigs = {e.cluster_signature for e in self._page_entries()}
+            carried = next((c for c in chosen if cluster_signature(_flatten(c)) in labelled_sigs), None)
             self.working_clusters = [
                 c for i, c in enumerate(self.working_clusters) if i not in self.selected
             ]
             self.working_clusters.append(merged)
             if carried is not None:
-                self._retarget_entry(cluster_signature(carried), merged)
+                self._retarget_entry(cluster_signature(_flatten(carried)), merged)
         else:
             chosen_ids = set(self.selected)
-            picked: list[VectorPath] = []
-            new_clusters: list[list[VectorPath]] = []
+            picked: list[Vector] = []
+            new_clusters: list[Cluster] = []
             for cluster in self.working_clusters:
-                kept = []
-                for path in cluster:
-                    (picked if id(path) in chosen_ids else kept).append(path)
-                if kept:
-                    new_clusters.append(kept)
+                kept_groups: Cluster = []
+                for group in cluster:
+                    kept = [v for v in group if id(v) not in chosen_ids]
+                    picked.extend(v for v in group if id(v) in chosen_ids)
+                    if kept:
+                        kept_groups.append(kept)
+                if kept_groups:
+                    new_clusters.append(kept_groups)
             if len(picked) < 2:
                 self._undo_stack.pop()
                 return
-            new_clusters.append(picked)
+            new_clusters.append([picked])
             self.working_clusters = new_clusters
         self.selected.clear()
         self._render()
@@ -600,26 +618,29 @@ class ManualLabelApp:
         if self.mode != "cluster" or not self.selected:
             return
         self._push_undo()
-        result: list[list[VectorPath]] = []
+        result: list[Cluster] = []
         for idx, cluster in enumerate(self.working_clusters):
             if idx not in self.selected:
                 result.append(cluster)
                 continue
-            groups = self._lineage.get(id(cluster))
-            if groups:
-                result.extend([list(g) for g in groups if g])
+            real_groups = [g for g in cluster if g]
+            if len(real_groups) > 1:
+                result.extend([[g] for g in real_groups])
             else:
-                result.extend([[p] for p in cluster])
+                # Only one group (or an already-flattened, manually-built
+                # cluster) -- nothing finer to split by group, so split
+                # down to one Vector per cluster instead.
+                result.extend([[[v]] for v in _flatten(cluster)])
         self.working_clusters = result
         self.selected.clear()
         self._render()
 
     # ---- labelling ----------------------------------------------------
 
-    def _retarget_entry(self, old_sig: str, cluster: list[VectorPath]) -> None:
+    def _retarget_entry(self, old_sig: str, cluster: Cluster) -> None:
         for entry in self._page_entries():
             if entry.cluster_signature == old_sig:
-                entry.cluster_signature = cluster_signature(cluster)
+                entry.cluster_signature = cluster_signature(_flatten(cluster))
                 entry.cluster_bbox = self._cluster_bbox(cluster)
                 break
 
@@ -657,7 +678,7 @@ class ManualLabelApp:
         )
         if hit is None:
             return
-        sig = cluster_signature(hit)
+        sig = cluster_signature(_flatten(hit))
         bbox = self._cluster_bbox(hit)
         # Right-click targets one specific cluster -- drop any multi-selection
         # so Apply is unambiguous.
@@ -682,7 +703,7 @@ class ManualLabelApp:
         right-click target."""
         if self.mode == "cluster" and self.selected:
             return [
-                (cluster_signature(c), self._cluster_bbox(c))
+                (cluster_signature(_flatten(c)), self._cluster_bbox(c))
                 for i, c in enumerate(self.working_clusters)
                 if i in self.selected and c
             ]
@@ -742,21 +763,21 @@ class ManualLabelApp:
             for cluster in self.working_clusters:
                 if not cluster or not bbox_contains(self._cluster_bbox(cluster), pt.x, pt.y):
                     continue
-                entry = entries_by_sig.get(cluster_signature(cluster))
+                entry = entries_by_sig.get(cluster_signature(_flatten(cluster)))
                 text = (
                     f'"{entry.text}"  rot={entry.expected_rotation}'
-                    if entry else f"{len(cluster)} path(s) - unlabelled"
+                    if entry else f"{len(_flatten(cluster))} vector(s) - unlabelled"
                 )
                 self.tooltip.show(event.x_root, event.y_root, text)
                 return
         else:
             hit = None
-            for _ci, path in self._iter_paths():
-                if bbox_contains(path.bbox, pt.x, pt.y):
-                    if hit is None or bbox_area(path.bbox) < bbox_area(hit.bbox):
-                        hit = path
+            for _ci, v in self._iter_vectors():
+                if bbox_contains(v.bbox, pt.x, pt.y):
+                    if hit is None or bbox_area(v.bbox) < bbox_area(hit.bbox):
+                        hit = v
             if hit is not None:
-                self.tooltip.show(event.x_root, event.y_root, f"{hit.kind}  seq={hit.seq}")
+                self.tooltip.show(event.x_root, event.y_root, f"{hit.type}  seqno={hit.seqno}")
                 return
 
         for entry in page_entries:

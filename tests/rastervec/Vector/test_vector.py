@@ -1,47 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pymupdf as fitz
 import pytest
 
-from rastervec.models import VectorPath
 from rastervec.Reader.reader import Reader
 from rastervec.Vector import vector
 
-
-def _make_path(
-    *,
-    seq=0,
-    item_index=0,
-    kind="re",
-    bbox=(0, 0, 1, 1),
-    fill_rule="",
-    stroke_color=None,
-    fill_color=None,
-    stroke_opacity=None,
-    fill_opacity=None,
-    stroke_width=None,
-    dashes=None,
-    closed=None,
-    layer=None,
-    page_index=0,
-) -> VectorPath:
-    return VectorPath(
-        seq=seq,
-        item_index=item_index,
-        kind=kind,
-        fill_rule=fill_rule,
-        points=[(bbox[0], bbox[1]), (bbox[2], bbox[3])],
-        bbox=bbox,
-        stroke_color=stroke_color,
-        fill_color=fill_color,
-        stroke_opacity=stroke_opacity,
-        fill_opacity=fill_opacity,
-        stroke_width=stroke_width,
-        dashes=dashes,
-        closed=closed,
-        layer=layer,
-        page_index=page_index,
-    )
+REFERENCES_DIR = Path(__file__).resolve().parents[2] / "references"
+REFERENCE_PDFS = sorted(REFERENCES_DIR.glob("test_pdfs_*.pdf"))
 
 
 def _build_test_page(tmp_pdf_path) -> "Reader":
@@ -68,72 +36,112 @@ def _build_test_page(tmp_pdf_path) -> "Reader":
     return Reader(path)
 
 
-def test_extract_paths_basic(tmp_pdf_path):
+def test_extract_vectors_count_matches_get_drawings(tmp_pdf_path):
     with _build_test_page(tmp_pdf_path) as reader:
         page = reader.get_page(0)
-        paths = vector.extract_paths(page)
+        vectors = vector.extract_vectors(page)
+        n_drawings = len(page.fitz_page.get_drawings())
 
-    assert len(paths) > 0
-    kinds = {p.kind for p in paths}
+    assert len(vectors) == n_drawings
+    assert all(v.page_index == 0 for v in vectors)
+    kinds = {item[0] for v in vectors for item in v.items}
     assert kinds <= {"l", "re", "qu", "c"}
-    assert all(p.page_index == 0 for p in paths)
 
 
-def test_extract_paths_rect_bbox_matches(tmp_pdf_path):
+def test_extract_vectors_round_trip_to_pymupdf_matches_source(tmp_pdf_path):
     with _build_test_page(tmp_pdf_path) as reader:
         page = reader.get_page(0)
-        paths = vector.extract_paths(page)
+        vectors = vector.extract_vectors(page)
+        drawings = page.fitz_page.get_drawings()
 
-    small_rects = [p for p in paths if p.kind == "re" and (p.bbox[2] - p.bbox[0]) < 10]
+    for v, drawing in zip(vectors, drawings):
+        back = v.to_pymupdf()
+        assert back["rect"] == drawing["rect"]
+        assert back["type"] == drawing["type"]
+        assert [item[0] for item in back["items"]] == [item[0] for item in drawing["items"]]
+
+
+def test_extract_vectors_rect_bbox_matches(tmp_pdf_path):
+    with _build_test_page(tmp_pdf_path) as reader:
+        page = reader.get_page(0)
+        vectors = vector.extract_vectors(page)
+
+    small_rects = [
+        v for v in vectors
+        if any(item[0] == "re" for item in v.items) and (v.bbox[2] - v.bbox[0]) < 10
+    ]
     assert len(small_rects) == 4
-    first = sorted(small_rects, key=lambda p: p.bbox[0])[0]
+    first = sorted(small_rects, key=lambda v: v.bbox[0])[0]
     assert first.bbox == pytest.approx((10, 10, 13, 16))
-    assert first.fill_color == (0.0, 0.0, 0.0)
+    assert first.fill == (0.0, 0.0, 0.0)
 
 
-def test_extract_records_carries_drawing_level_fields(tmp_pdf_path):
-    with _build_test_page(tmp_pdf_path) as reader:
+@pytest.mark.skipif(not REFERENCE_PDFS, reason="tests/references/test_pdfs_*.pdf not generated")
+@pytest.mark.parametrize("pdf_path", REFERENCE_PDFS, ids=lambda p: p.stem)
+def test_extract_vectors_matches_reference_pdf_drawings(pdf_path):
+    with Reader(str(pdf_path)) as reader:
         page = reader.get_page(0)
-        records = vector.extract_records(page)
+        vectors = vector.extract_vectors(page)
+        n_drawings = len(page.fitz_page.get_drawings())
 
-    assert len(records) > 0
-    assert all(isinstance(r.items, list) and r.items for r in records)
-    assert all(r.groups is None and r.role is None for r in records)
-    small_rect_records = [
-        r for r in records
-        if any(p.kind == "re" and (p.bbox[2] - p.bbox[0]) < 10 for p in r.items)
-    ]
-    assert len(small_rect_records) == 4
+    assert len(vectors) == n_drawings
+    assert len(vectors) > 0
 
 
-def test_separate_by_layer_groups_by_layer_field():
-    paths = [
-        _make_path(layer="A"),
-        _make_path(layer="A"),
-        _make_path(layer="B"),
-        _make_path(layer=None),
+def test_separate_by_layer_groups_by_layer_field(vector):
+    from rastervec.Vector.vector import separate_by_layer
+
+    vectors = [
+        vector(layer="A"),
+        vector(layer="A"),
+        vector(layer="B"),
+        vector(layer=None),
     ]
 
-    groups = vector.separate_by_layer(paths)
+    groups = separate_by_layer(vectors)
 
     assert set(groups.keys()) == {"A", "B", ""}
     assert len(groups["A"]) == 2
     assert len(groups["B"]) == 1
     assert len(groups[""]) == 1
+    for key, members in groups.items():
+        assert all((v.layer or "") == key for v in members)
 
 
-def test_separate_by_color_groups_by_stroke_fill_and_opacity():
-    paths = [
-        _make_path(stroke_color=(1, 0, 0), fill_color=(0, 1, 0)),
-        _make_path(stroke_color=None, fill_color=(0, 1, 0)),
-        _make_path(stroke_color=None, fill_color=None),
-        # same stroke/fill as paths[0] but different opacity -> its own group.
-        _make_path(stroke_color=(1, 0, 0), fill_color=(0, 1, 0), stroke_opacity=0.5),
-    ]
+def test_separate_by_color_groups_by_color_fill_and_opacity(vector):
+    from rastervec.Vector.vector import separate_by_color
 
-    groups = vector.separate_by_color(paths)
+    v0 = vector(color=(1, 0, 0), fill=(0, 1, 0))
+    v1 = vector(color=None, fill=(0, 1, 0))
+    v2 = vector(color=None, fill=None)
+    # same color/fill as v0 but different opacity -> its own group.
+    v3 = vector(color=(1, 0, 0), fill=(0, 1, 0), stroke_opacity=0.5)
+    vectors = [v0, v1, v2, v3]
 
-    assert groups[(1, 0, 0), (0, 1, 0), None, None] == [paths[0]]
-    assert groups[None, (0, 1, 0), None, None] == [paths[1]]
-    assert groups[None, None, None, None] == [paths[2]]
-    assert groups[(1, 0, 0), (0, 1, 0), 0.5, None] == [paths[3]]
+    groups = separate_by_color(vectors)
+
+    assert groups[(1, 0, 0), (0, 1, 0), None, None] == [v0]
+    assert groups[None, (0, 1, 0), None, None] == [v1]
+    assert groups[None, None, None, None] == [v2]
+    assert groups[(1, 0, 0), (0, 1, 0), 0.5, None] == [v3]
+    for key, members in groups.items():
+        for v in members:
+            assert (v.color, v.fill, v.stroke_opacity, v.fill_opacity) == key
+
+
+@pytest.mark.skipif(not REFERENCE_PDFS, reason="tests/references/test_pdfs_*.pdf not generated")
+def test_separation_invariants_hold_for_reference_pdf_vectors():
+    from rastervec.Vector.vector import separate_by_color, separate_by_layer
+
+    with Reader(str(REFERENCE_PDFS[0])) as reader:
+        page = reader.get_page(0)
+        vectors = vector.extract_vectors(page)
+
+    by_layer = separate_by_layer(vectors)
+    for layer, members in by_layer.items():
+        assert all((v.layer or "") == layer for v in members)
+
+    by_color = separate_by_color(vectors)
+    for key, members in by_color.items():
+        for v in members:
+            assert (v.color, v.fill, v.stroke_opacity, v.fill_opacity) == key

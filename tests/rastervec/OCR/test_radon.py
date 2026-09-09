@@ -5,7 +5,35 @@ import pytest
 from PIL import Image, ImageDraw
 from skimage.transform import rotate as sk_rotate
 
+from rastervec.helpers.geometry import transform_vector
+from rastervec.models import Vector
 from rastervec.OCR import radon
+
+
+def _word_vector(bbox: tuple[float, float, float, float], seqno: int) -> Vector:
+    """A single filled rect Vector -- stands in for a "dash" of ink in a
+    synthetic text-like cluster, the same role _text_image's PIL rectangles
+    play for the pure-image tests above."""
+    return Vector(
+        type="f", items=[("re", bbox, 1)], color=None, fill=(0, 0, 0), width=None,
+        dashes=None, closePath=True, lineCap=0, lineJoin=0, even_odd=False,
+        stroke_opacity=None, fill_opacity=None, layer=None, rect=bbox,
+        scissor=None, seqno=seqno, blendmode=None, isolated=False, knockout=False,
+        opacity=None, page_index=0,
+    )
+
+
+def _two_word_cluster() -> list[Vector]:
+    """Two words, each three short dashes close together, well separated
+    horizontally -- mirrors _text_image's per-word dash pattern."""
+    vectors: list[Vector] = []
+    seq = 0
+    for word_x in (20, 100):
+        for i in range(3):
+            x = word_x + i * 12
+            vectors.append(_word_vector((x, 20, x + 8, 36), seq))
+            seq += 1
+    return vectors
 
 
 def _text_image(lines: int = 3, w: int = 240, line_h: int = 16, gap: int = 14) -> np.ndarray:
@@ -93,56 +121,74 @@ def test_line_bands_counts_lines():
 
 
 # --------------------------------------------------------------------------
-# segment_cluster end to end
+# segment_clusters end to end (operates on Vector clusters, not raw images
+# -- it renders each cluster itself via render_cluster_for_radon)
 # --------------------------------------------------------------------------
-def test_segment_cluster_upright_splits_words_and_lines():
-    img = _text_image(lines=3)
-    seg = radon.segment_cluster(Image.fromarray(img))
-    assert abs(seg.skew_deg) < 2.0
-    # 3 lines x 3 words each
-    assert len(seg.word_crops) >= 9
-    assert len(seg.word_corners) == len(seg.word_crops)
-    for corners in seg.word_corners:
-        assert len(corners) == 4
-        xs = [x for x, _ in corners]
-        ys = [y for _, y in corners]
-        assert 0 <= min(xs) and max(xs) <= img.shape[1] + 2
-        assert 0 <= min(ys) and max(ys) <= img.shape[0] + 2
+def test_segment_clusters_splits_into_one_segment_per_word():
+    cluster = _two_word_cluster()
+
+    segments = radon.segment_clusters([cluster])
+
+    assert len(segments) == 2
+    # every input Vector accounted for, none lost or duplicated
+    seen = {v.seqno for seg in segments for v in seg.vectors}
+    assert seen == {v.seqno for v in cluster}
+    for seg in segments:
+        assert abs(seg.angle) < 2.0
 
 
-def test_segment_cluster_deskews_before_splitting():
-    img = _text_image(lines=3)
-    rotated = sk_rotate(img, -7.0, resize=True, cval=255, preserve_range=True).astype(np.uint8)
-    seg = radon.segment_cluster(Image.fromarray(rotated))
-    assert seg.skew_deg == pytest.approx(7.0, abs=1.5)
-    assert len(seg.word_crops) >= 9
+def test_segment_clusters_angle_is_full_precision_not_quarter_turn():
+    # A cluster rotated by an arbitrary, non-quarter-turn angle -- the
+    # returned Segment.angle must reflect that precisely, never rounded to
+    # the nearest 90 degrees (see OCR/radon.py's standing precision note).
+    cluster = [transform_vector(v, offset=(0.0, 0.0), rotation_deg=6.0) for v in _two_word_cluster()]
+
+    segments = radon.segment_clusters([cluster])
+
+    assert segments
+    for seg in segments:
+        assert seg.angle == pytest.approx(6.0, abs=radon.RADON_ANGLE_STEP_DEG * 2)
+        # explicitly not snapped to a quarter turn
+        assert seg.angle not in (0.0, 90.0, 180.0, 270.0, -90.0)
 
 
-def test_segment_cluster_blank_is_empty():
-    seg = radon.segment_cluster(Image.new("L", (40, 40), 255))
-    assert seg.word_crops == [] and seg.word_corners == []
+def test_segment_clusters_blank_cluster_yields_no_segments():
+    # A single, tiny Vector with a degenerate rect -- effectively no ink to
+    # detect any line bands from.
+    v = _word_vector((0.0, 0.0, 0.001, 0.001), 0)
+    assert radon.segment_clusters([[v]]) == []
 
 
-def test_segment_cluster_pools_gap_threshold_across_lines():
-    """Line A has 3 ink runs with its own gaps [4, 20]px; judged on its own
-    (median 12, no pooling) its 20px gap would exceed that and split it
-    into two words. Line B has 4 runs with three 40px gaps, pulling the
-    cluster-wide pooled median up to 40 -- above line A's 20px gap -- so
-    with the shared threshold line A's runs merge into a single word
-    instead. This is the behavioral difference between a per-line and a
-    cluster-wide gap threshold."""
-    w, h = 240, 86
-    img = Image.new("L", (w, h), 255)
-    d = ImageDraw.Draw(img)
+def test_segment_clusters_empty_input():
+    assert radon.segment_clusters([]) == []
+
+
+def test_segment_clusters_pools_gap_threshold_across_lines():
+    """Line A's own 3 runs have gaps [4, 20]px -- judged on its own
+    (median ~12) its 20px gap would split it into two words. Line B's 4
+    runs have three 40px gaps, pulling the cluster-wide *pooled* median up
+    well past line A's own 20px gap, so with the shared threshold line A's
+    runs merge into a single word instead of two -- the behavioral
+    difference a per-line-only threshold would not produce."""
+    vectors: list[Vector] = []
+    seq = 0
     # line A: 3 runs, gaps [4, 20]
     for x0 in (10, 24, 54):
-        d.rectangle([x0, 20, x0 + 9, 35], fill=0)
+        vectors.append(_word_vector((x0, 20, x0 + 9, 35), seq))
+        seq += 1
     # line B: 4 runs, gaps [40, 40, 40]
     for x0 in (10, 60, 110, 160):
-        d.rectangle([x0, 50, x0 + 9, 65], fill=0)
+        vectors.append(_word_vector((x0, 50, x0 + 9, 65), seq))
+        seq += 1
 
-    seg = radon.segment_cluster(img)
-    assert len(seg.word_crops) == 2
+    segments = radon.segment_clusters([vectors])
+
+    # line A's 3 runs merged into 1 word (pooled threshold > its own 20px
+    # gap) + line B's 4 runs, which stay separate at that same threshold.
+    line_a_seqnos = {0, 1, 2}
+    line_a_segments = [seg for seg in segments if {v.seqno for v in seg.vectors} & line_a_seqnos]
+    assert len(line_a_segments) == 1
+    assert {v.seqno for v in line_a_segments[0].vectors} == line_a_seqnos
 
 
 def test_rotation_inverse_round_trips():

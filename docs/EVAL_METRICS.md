@@ -35,7 +35,7 @@ that reduces the `OverlapGraph`, add its name to `_RATIO_FIELDS` + `METRIC_GROUP
 - `localized_gt_idxs` / `missed_gt_idxs`, and `gt_has_overlap[i]` (any edge at all).
 
 All bboxes are `(x0, y0, x1, y1)` in PDF **unrotated MediaBox** space, y-axis
-down — the same space `LabelEntry.cluster_bbox` and `TextVectorResult.bbox` use,
+down — the same space `LabelEntry.cluster_bbox` and `Text.bbox` use,
 so no coordinate transform is needed.
 
 **Auto vs. manual are scored from separate pipeline runs.** The benchmark runs
@@ -272,16 +272,18 @@ levenshtein(norm(gt_i), norm(hyp_i)))` (i.e. `1 − CER` clamped at 0);
 - **Measures** rotation correctness among the GT regions that were actually
   found — N:1-aware replacement for the legacy `rotation_accuracy`.
 - **`n/a`** when no GT is localized.
-- **Rotation signal** is `TextVectorResult.rotation_used ∈ {0, 90, 180, 270}`.
-  (There is no rotation-correction stage in the current pipeline.) It is
-  `round(Radon skew / 90) * 90` plus the 0-vs-180 flip `RenderOCR.recognize_segmented`
-  resolves by re-recognising the 180-rotated crops and keeping the higher
-  length-weighted-confidence set (`OCR/radon.py` + `render_ocr.py`).
+- **Rotation signal** is `Text.angle()` (full precision -- Radon's own skew
+  estimate combined with PaddleOCR's cls-detected 0/180 flip, folded into
+  `direction` before the `Text` is built -- see `docs/PIPELINE.md`),
+  snapped to the nearest quarter turn by `adapters.predictions_from_texts`
+  to compare against `GtRegion.expected_rotation`'s own quarter-turn
+  convention.
 
 ### Vector-classification accuracy
 
-*Text candidate* = a cluster that reached OCR (blank **or** not); box = the union
-bbox of its member paths (`ctx.regrouped_clusters`).
+*Text candidate* = a segment occurrence that reached OCR (blank **or**
+not); box = that occurrence's restored `Text.bbox`
+(`adapters.text_candidate_boxes`).
 
 #### `classification_recall_gt_reached_ocr`
 - Per GT `i`: `reached` iff some `c ∈ C` has `bbox_coverage(gt_i, c) ≥ τ` **or**

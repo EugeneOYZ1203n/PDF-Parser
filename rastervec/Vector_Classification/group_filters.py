@@ -1,7 +1,7 @@
 """Group-level steps of the Vector Classification pipeline (see
 rastervec/Vector_Classification/classification.py for the fixed step
 order these are run in). A "group" is the post-seqno-overlap-merge, pre-
-spatial-clustering unit -- see Glossary.md for the group/cluster
+spatial-clustering unit -- see docs/Glossary.md for the group/cluster
 distinction.
 
 3. `remove_duplicate_runs` + `combine_overlapping_seq` -- sorts by `seqno`,

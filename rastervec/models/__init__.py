@@ -14,7 +14,7 @@ Two core models
 its own items. `Text` mirrors `get_text()`'s field surface and doubles as
 the OCR result type. `Segment`/`UniqueSegment`/`SegmentMeta` are the
 Radon-segmentation-through-OCR handoff types. `Page`/`PageMeta` are Reader's
-own output. See `rastervec/pipelines/PIPELINE.md` for the full data flow.
+own output. See `docs/PIPELINE.md` for the full data flow.
 """
 from __future__ import annotations
 

@@ -30,7 +30,7 @@ from statistics import median
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet
 from rastervec.helpers.geometry import union_bbox
 from rastervec.logging_setup import get_logger
-from rastervec.models import TextWord
+from rastervec.models import Text
 from rastervec.native_text import extract_native_text as extract_native_words
 from rastervec.Reader.reader import Reader
 
@@ -41,10 +41,10 @@ def _quarter_turn(angle: float) -> int:
     return round(angle / 90.0) % 4 * 90
 
 
-def _expected_rotation(words: list[TextWord]) -> int:
+def _expected_rotation(words: list[Text]) -> int:
     """Most common quarter-turn among the line's words (median as a
     tie-break) -- a single stray-angled word no longer mislabels the line."""
-    turns = [_quarter_turn(w.angle) for w in words]
+    turns = [_quarter_turn(w.angle()) for w in words]
     counts = Counter(turns)
     top = max(counts.values())
     winners = [t for t, c in counts.items() if c == top]
@@ -53,7 +53,7 @@ def _expected_rotation(words: list[TextWord]) -> int:
     return int(median(sorted(turns)))
 
 
-def _reading_order_key(word: TextWord) -> float:
+def _reading_order_key(word: Text) -> float:
     """Sort key along the line's reading direction: x for horizontal text,
     y for vertical -- so a rotated line's words concatenate in the right
     order."""
@@ -70,7 +70,7 @@ def auto_label_pdf(pdf_path: str, page_index: int) -> LabelSet:
         page = reader.get_page(page_index)
         native_words = extract_native_words(page)
 
-    lines: dict[tuple[int, int], list[TextWord]] = defaultdict(list)
+    lines: dict[tuple[int, int], list[Text]] = defaultdict(list)
     for word in native_words:
         lines[(word.block_no, word.line_no)].append(word)
 

@@ -3,6 +3,21 @@
 `metrics.py` is deliberately pipeline-agnostic (plain `GtRegion` /
 `Prediction` / bbox lists). This module turns a `LabelSet` and a
 `PipelineResult` into those inputs.
+
+Retargeted for the segment-dedup pipeline: there is no more `cluster_ocr_
+results`/`regrouped_clusters` -- every OCR reading is one `Text` (source=
+"ocr") in `PipelineResult.texts`/`restored_texts`, one per real segment
+occurrence (blank readings included, same as the old design's blank-kept
+`ClusterOcrResult`s). `attribute_miss`'s `clustering`/`fast_dropped` need
+the pipeline run with `verbose=True` (see `build_eval_inputs`'s call
+site in `Reader/Parallel/benchmark_jobs.py`) -- both are verbose-only on
+the new `PipelineResult`. There is no longer a distinct "OCR failed"
+drop bucket (Phase F's FAST gate is the sole page-content pass/fail
+decision; a blank OCR reading still becomes a `Prediction(ocr_blank=
+True)`, already handled by the metrics that check that flag directly),
+so `ocr_failed` is always `None` here -- `attribute_miss`'s "ocr_blank"
+attribution reason is consequently unreachable now, a known, accepted
+simplification.
 """
 from __future__ import annotations
 
@@ -11,8 +26,7 @@ from typing import TYPE_CHECKING
 
 from rastervec.Evaluation.Evaluate.metrics import Bbox, GtRegion, Prediction
 from rastervec.Evaluation.Labelling.label_schema import LabelSet
-from rastervec.helpers.geometry import union_bbox
-from rastervec.models import ClusterOcrResult
+from rastervec.models import Text
 
 if TYPE_CHECKING:
     from rastervec.pipelines.result import ClusteringStageResult, GroupKey, PipelineResult
@@ -30,46 +44,32 @@ def gt_regions_from_labelset(labels: LabelSet) -> list[GtRegion]:
     ]
 
 
-def predictions_from_cluster_ocr(
-    results: list[ClusterOcrResult],
-) -> list[Prediction]:
-    """One `Prediction` per `ClusterOcrResult` -- blank readings kept
-    (`ocr_blank=True`) so the classification metrics can still see that the
-    cluster reached OCR."""
+def predictions_from_texts(texts: list[Text]) -> list[Prediction]:
+    """One `Prediction` per OCR `Text` (`source="ocr"`) -- blank readings
+    kept (`ocr_blank=True`) so the classification metrics can still see
+    that the segment reached OCR. `rotation` is `Text.angle()` snapped to
+    the nearest quarter turn, matching `GtRegion.expected_rotation`'s own
+    convention (`auto_label.py`'s "most common quarter turn" label)."""
     preds: list[Prediction] = []
-    for r in results:
-        resolved = r.resolved
+    for t in texts:
+        rotation = int(round(t.angle() / 90.0) * 90) % 360
         preds.append(
             Prediction(
-                text=resolved.text,
-                bbox=tuple(resolved.bbox),  # type: ignore[arg-type]
-                rotation=int(resolved.rotation_used),
+                text=t.text,
+                bbox=tuple(t.bbox),  # type: ignore[arg-type]
+                rotation=rotation,
                 reached_ocr=True,
-                ocr_blank=not resolved.text.strip(),
-                source_cluster_id=id(r.cluster),
+                ocr_blank=not t.text.strip(),
+                source_cluster_id=id(t),
             )
         )
     return preds
 
 
-def text_candidate_boxes(
-    regrouped_clusters: list | None,
-    cluster_ocr_results: list[ClusterOcrResult] | None,
-) -> list[Bbox]:
-    """Union bbox per cluster that reached OCR (blank or not). Prefers
-    `regrouped_clusters` (exactly what `ocr_compare` ran on); falls back to
-    each OCR result's own resolved bbox (the archive legacy path, which has
-    no `regrouped_clusters`)."""
-    if regrouped_clusters:
-        return [
-            union_bbox([p.bbox for p in cluster])
-            for cluster in regrouped_clusters
-            if cluster
-        ]
-    return [
-        tuple(r.resolved.bbox)  # type: ignore[misc]
-        for r in (cluster_ocr_results or [])
-    ]
+def text_candidate_boxes(texts: list[Text]) -> list[Bbox]:
+    """Bbox per OCR `Text` (`source="ocr"`) -- every segment occurrence
+    that reached OCR, blank or not."""
+    return [tuple(t.bbox) for t in texts]  # type: ignore[misc]
 
 
 @dataclass
@@ -77,19 +77,23 @@ class EvalInputs:
     predictions: list[Prediction]
     text_candidate_boxes: list[Bbox]
     clustering: "dict[GroupKey, ClusteringStageResult] | None"
-    fast_dropped: list | None
-    ocr_failed: list | None
+    fast_dropped: list[list] | None
+    ocr_failed: list[list] | None
 
 
 def build_eval_inputs(res: "PipelineResult") -> EvalInputs:
     """The pipeline-derived half of the metric inputs (everything except
-    the ground truth, which varies by label source)."""
+    the ground truth, which varies by label source). Requires `res` from a
+    `verbose=True` run for `clustering`/`fast_dropped_vectors` to be
+    populated -- see this module's docstring."""
+    ocr_texts = [t for t in res.texts if t.source == "ocr"]
     return EvalInputs(
-        predictions=predictions_from_cluster_ocr(res.cluster_ocr_results or []),
-        text_candidate_boxes=text_candidate_boxes(
-            res.regrouped_clusters, res.cluster_ocr_results
-        ),
+        predictions=predictions_from_texts(ocr_texts),
+        text_candidate_boxes=text_candidate_boxes(ocr_texts),
         clustering=res.clustering,
-        fast_dropped=res.fast_dropped,
-        ocr_failed=res.ocr_failed,
+        # `_region_matches_groups` expects list[list[<has .bbox>]] -- each
+        # dropped Vector becomes its own singleton "group" now that FAST
+        # drops flat Vectors rather than whole candidate clusters.
+        fast_dropped=[[v] for v in (res.fast_dropped_vectors or [])],
+        ocr_failed=None,
     )

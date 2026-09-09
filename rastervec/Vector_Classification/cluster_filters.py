@@ -1,7 +1,7 @@
 """Cluster-level steps of the Vector Classification pipeline (see
 rastervec/Vector_Classification/classification.py for the fixed step
 order these are run in). A "cluster" is the final classification output
-for one (layer, color) bucket -- see Glossary.md for the group/cluster
+for one (layer, color) bucket -- see docs/Glossary.md for the group/cluster
 distinction.
 
 6. `cluster_spatial_groups` -- single-linkage spatial merge of the

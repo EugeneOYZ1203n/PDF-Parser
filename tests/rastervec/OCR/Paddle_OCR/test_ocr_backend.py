@@ -1,13 +1,43 @@
 from __future__ import annotations
 
+import os
+
 import numpy as np
+import pytest
 
 from rastervec.config import OCR_LANG, OCR_VERSION
+from rastervec.models import UniqueSegment
 from rastervec.OCR.Paddle_OCR.ocr_backend import (
     OcrBox,
     PaddleRecBackend,
     _recognize_crops_job,
+    recognize_unique_segments,
 )
+
+_RUN_OCR_TESTS = os.environ.get("RASTERVEC_RUN_OCR_TESTS") == "1"
+
+
+class _FakeEngine:
+    """`text_classifier` flags every crop past index 0 as upright (label
+    "0"); crop 0 is flagged "180" -- exercises the flip-detection path
+    without needing a real model. `text_recognizer` returns fixed text per
+    (already-flip-corrected) crop, in input order."""
+
+    def __init__(self, texts: list[str], confidences: list[float] | None = None) -> None:
+        self.texts = texts
+        self.confidences = confidences or [0.9] * len(texts)
+        self.classifier_calls = 0
+        self.recognizer_calls = 0
+
+    def text_classifier(self, crops):
+        self.classifier_calls += 1
+        labels = [("180" if i == 0 else "0", 0.99) for i in range(len(crops))]
+        return crops, labels, 0.0
+
+    def text_recognizer(self, crops):
+        self.recognizer_calls += 1
+        rows = list(zip(self.texts[: len(crops)], self.confidences[: len(crops)]))
+        return rows, 0.0
 
 
 def test_backend_key_uses_config_defaults():
@@ -15,27 +45,38 @@ def test_backend_key_uses_config_defaults():
 
 
 def test_recognize_crops_maps_engine_results_to_boxes(monkeypatch):
-    class _FakeEngine:
-        def text_recognizer(self, crops):
-            return [("AB", 0.7), ("", 0.0)], 0.0
-
     backend = PaddleRecBackend()
-    monkeypatch.setattr(backend, "_engine", lambda: _FakeEngine())
+    engine = _FakeEngine(["AB", ""])
+    monkeypatch.setattr(backend, "_engine", lambda: engine)
 
     boxes = backend.recognize_crops([np.zeros((8, 10, 3), np.uint8), np.zeros((8, 10, 3), np.uint8)])
+
     assert [b.text for b in boxes] == ["AB", ""]
     assert isinstance(boxes[0], OcrBox)
-    assert boxes[0].confidence == 0.7
+    assert boxes[0].confidence == 0.9
     assert boxes[1].confidence == 0.0
+    assert engine.classifier_calls == 1
+    assert engine.recognizer_calls == 1
+
+
+def test_recognize_crops_flags_180_from_classifier(monkeypatch):
+    backend = PaddleRecBackend()
+    engine = _FakeEngine(["FLIPPED", "UPRIGHT"])
+    monkeypatch.setattr(backend, "_engine", lambda: engine)
+
+    boxes = backend.recognize_crops([np.zeros((8, 10, 3), np.uint8), np.zeros((8, 10, 3), np.uint8)])
+
+    assert boxes[0].flip_deg == 180
+    assert boxes[1].flip_deg == 0
 
 
 def test_recognize_crops_accepts_bare_list_result(monkeypatch):
-    class _FakeEngine:
+    class _BareEngine(_FakeEngine):
         def text_recognizer(self, crops):
-            return [("HI", 0.9)]
+            return list(zip(self.texts[: len(crops)], self.confidences[: len(crops)]))
 
     backend = PaddleRecBackend()
-    monkeypatch.setattr(backend, "_engine", lambda: _FakeEngine())
+    monkeypatch.setattr(backend, "_engine", lambda: _BareEngine(["HI"]))
     boxes = backend.recognize_crops([np.zeros((8, 10, 3), np.uint8)])
     assert boxes[0].text == "HI"
     assert boxes[0].confidence == 0.9
@@ -50,10 +91,103 @@ def test_recognize_crops_job_delegates_to_backend(monkeypatch):
 
     def fake_recognize_crops(self, crops):
         calls.append((self.key, len(crops)))
-        return [OcrBox(text="OK", confidence=1.0, corners=[])]
+        return [OcrBox(text="OK", confidence=1.0)]
 
     monkeypatch.setattr(PaddleRecBackend, "recognize_crops", fake_recognize_crops)
     crops = [np.zeros((8, 10, 3), np.uint8)]
     boxes = _recognize_crops_job(crops, ocr_version="PP-OCRvX", lang="de")
     assert calls == [(("PP-OCRvX", "de"), 1)]
     assert boxes[0].text == "OK"
+
+
+# --------------------------------------------------------------------------
+# recognize_unique_segments -- rendering + batching + Text construction,
+# with a stubbed recognize_fn (no real model needed).
+# --------------------------------------------------------------------------
+def _rect_unique_segment(vector, bbox=(0.0, 0.0, 40.0, 20.0)) -> UniqueSegment:
+    return UniqueSegment(vectors=[vector(kind="re", bbox=bbox, fill=(0, 0, 0))])
+
+
+def test_recognize_unique_segments_returns_one_text_per_unique(vector):
+    uniques = [_rect_unique_segment(vector), _rect_unique_segment(vector, bbox=(0.0, 0.0, 60.0, 30.0))]
+
+    def stub_recognize(crops):
+        return [OcrBox(text=f"W{i}", confidence=0.8, flip_deg=0) for i, _c in enumerate(crops)]
+
+    texts = recognize_unique_segments(uniques, recognize_fn=stub_recognize)
+
+    assert [t.text for t in texts] == ["W0", "W1"]
+    assert all(t.source == "ocr" for t in texts)
+    assert all(t.confidence == 0.8 for t in texts)
+
+
+def test_recognize_unique_segments_respects_batch_size(vector):
+    uniques = [_rect_unique_segment(vector) for _ in range(5)]
+    batch_sizes = []
+
+    def stub_recognize(crops):
+        batch_sizes.append(len(crops))
+        return [OcrBox(text="X", confidence=0.5) for _ in crops]
+
+    recognize_unique_segments(uniques, batch_size=2, recognize_fn=stub_recognize)
+
+    assert batch_sizes == [2, 2, 1]
+
+
+def test_recognize_unique_segments_flip_deg_sets_direction(vector):
+    uniques = [_rect_unique_segment(vector)]
+
+    def stub_recognize(crops):
+        return [OcrBox(text="UPSIDE", confidence=0.9, flip_deg=180)]
+
+    texts = recognize_unique_segments(uniques, recognize_fn=stub_recognize)
+
+    assert round(texts[0].angle()) % 360 == 180
+
+
+def test_recognize_unique_segments_empty_input():
+    assert recognize_unique_segments([]) == []
+
+
+@pytest.mark.skipif(
+    not _RUN_OCR_TESTS,
+    reason="real PaddleOCR round-trip; opt in via RASTERVEC_RUN_OCR_TESTS=1",
+)
+def test_recognize_unique_segments_reads_real_rendered_text(tmp_pdf_path):
+    """End-to-end smoke test with the real PaddleOCR engine: a real vector-
+    text page, run through classification + Radon segmentation, its first
+    segment's own real vectors wrapped as a UniqueSegment (no normalization
+    needed -- recognize_unique_segments only renders `unique.vectors`, it
+    doesn't care whether they're in a canonical or real-position frame)."""
+    from rastervec.Evaluation.conversion import convert_page_text_only
+    from rastervec.OCR.radon import segment_clusters
+    from rastervec.pipelines.sub_pipelines.vector_classification import classify_vectors
+    from rastervec.Reader.reader import Reader
+    from rastervec.Vector.vector import extract_vectors
+    import pymupdf as fitz
+    import tempfile
+    from pathlib import Path
+
+    doc = fitz.open()
+    page = doc.new_page(width=200, height=100)
+    page.insert_text((20, 50), "HELLO", fontsize=28)
+    src_path = tmp_pdf_path(doc)
+
+    text_only_bytes = convert_page_text_only(src_path, 0)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "text_only.pdf"
+        path.write_bytes(text_only_bytes)
+        with Reader(str(path)) as reader:
+            page = reader.get_page(0)
+            vectors = extract_vectors(page)
+            cls = classify_vectors(vectors, page)
+            flat_clusters = [[v for group in c for v in group] for c in cls.text_clusters]
+            segments = segment_clusters(flat_clusters)
+
+    assert segments, "expected at least one Radon segment from the rendered text"
+    unique = UniqueSegment(vectors=segments[0].vectors)
+    texts = recognize_unique_segments([unique])
+
+    assert len(texts) == 1
+    # spacing/case varies by rec model; the point is the glyphs were read.
+    assert "HELLO" in texts[0].text.upper().replace(" ", "")

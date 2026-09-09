@@ -79,6 +79,26 @@ def matrix_scale(matrix: fitz.Matrix) -> tuple[float, float]:
     return (sx, sy)
 
 
+def fitz_item(item: tuple) -> tuple:
+    """The exact inverse of `plain_item`: convert one `Vector.items` entry
+    (plain float tuples) back into the fitz-object item shape
+    `get_drawings()['items']` itself uses -- `fitz.Point`/`Rect`/`Quad`
+    per kind. Used by `models.Vector.to_pymupdf()`; trailing elements past
+    the geometry (e.g. a "re" item's orientation flag) pass through
+    unchanged, mirroring `plain_item`."""
+    kind = item[0]
+    if kind == "l":
+        return (kind, fitz.Point(item[1]), fitz.Point(item[2]))
+    if kind == "re":
+        return (kind, fitz.Rect(item[1]), *item[2:])
+    if kind == "qu":
+        ul, ur, lr, ll = item[1]
+        return (kind, fitz.Quad(fitz.Point(ul), fitz.Point(ur), fitz.Point(ll), fitz.Point(lr)))
+    if kind == "c":
+        return (kind, *[fitz.Point(p) for p in item[1:5]], *item[5:])
+    return item
+
+
 def plain_item(item: tuple) -> tuple:
     """Convert one raw `get_drawings()['items']` tuple (carrying fitz
     `Point`/`Rect`/`Quad` objects) into the same `(kind, *geometry)` shape

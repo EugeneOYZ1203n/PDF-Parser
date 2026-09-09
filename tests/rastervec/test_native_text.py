@@ -12,6 +12,7 @@ def _span(bbox: fitz.Rect, **overrides) -> _Span:
     defaults = dict(
         bbox=bbox, text="x", font="helv", font_size=10.0, flags=0, color=None,
         origin=None, direction=(1.0, 0.0), ascender=None, descender=None, wmode=0,
+        raw={"dir": (1.0, 0.0), "wmode": 0, "font": "helv", "size": 10.0},
     )
     defaults.update(overrides)
     return _Span(**defaults)
@@ -30,8 +31,9 @@ def test_extract_text_basic_horizontal(synthetic_pdf_factory, tmp_pdf_path):
     assert len(words) == 1
     word = words[0]
     assert word.text == "Hello"
-    assert word.angle == pytest.approx(0.0, abs=1e-6)
-    assert word.orientation_source == "text-span"
+    assert word.angle() == pytest.approx(0.0, abs=1e-6)
+    assert word.source == "native"
+    assert word.raw_span is not None
     assert word.bbox[0] == pytest.approx(10, abs=1)
 
 
@@ -82,7 +84,7 @@ def test_extract_text_rotated(synthetic_pdf_factory, tmp_pdf_path):
     assert len(words) == 1
     word = words[0]
     assert word.text == "VertText"
-    assert word.orientation_source == "text-span"
+    assert word.raw_span is not None
     # rotate=90 in pymupdf's insert_text produces dir=(0, -1)
     assert word.direction[0] == pytest.approx(0.0, abs=1e-6)
     assert word.direction[1] == pytest.approx(-1.0, abs=1e-6)
@@ -93,14 +95,10 @@ def test_extract_text_rotated(synthetic_pdf_factory, tmp_pdf_path):
     # tall (~height) -- along the text's reading direction (vertical),
     # the quad's "along" extent (projected onto direction) must roughly
     # equal the axis-aligned bbox HEIGHT, and its "normal" extent must
-    # roughly equal the bbox WIDTH. If _build_oriented_quad regressed to
-    # using bbox.width/height directly as along/normal, this still passes
-    # for exactly-vertical text (since it only swaps which axis is which,
-    # not more subtly) -- so we additionally assert the quad is NOT
-    # axis-aligned (its corners' x-coordinates must differ from a simple
-    # bbox rectangle in the expected rotated pattern).
-    quad_xs = [p[0] for p in word.quad]
-    quad_ys = [p[1] for p in word.quad]
+    # roughly equal the bbox WIDTH.
+    quad = word.quad()
+    quad_xs = [p[0] for p in quad]
+    quad_ys = [p[1] for p in quad]
     bbox_x0, bbox_y0, bbox_x1, bbox_y1 = word.bbox
 
     # direction (0, -1): "along" axis is vertical, "normal" axis is
@@ -133,40 +131,6 @@ def test_match_word_to_span_no_spans_returns_none():
     assert native._match_word_to_span(fitz.Rect(0, 0, 10, 10), []) is None
 
 
-def test_build_oriented_quad_horizontal_matches_bbox_corners():
-    bbox = fitz.Rect(0, 0, 10, 4)
-
-    ul, ur, lr, ll = native._oriented_quad(bbox, 1.0, 0.0)
-
-    assert ul == pytest.approx((0.0, 0.0))
-    assert ur == pytest.approx((10.0, 0.0))
-    assert lr == pytest.approx((10.0, 4.0))
-
-
-def test_build_oriented_quad_vertical_swaps_extents():
-    """Regression test for the along/normal-extent bug: for a bbox whose
-    axis-aligned width/height do NOT match the text's along/normal
-    extents (i.e. vertical direction on a wide-short bbox), the quad must
-    still come out oriented along (dx, dy), not simply matching bbox
-    corners in the naive horizontal order.
-    """
-    # A bbox that is wide (20) and short (5) -- but the text direction is
-    # vertical, so a correct implementation reorients around that
-    # direction rather than reusing bbox.width as the along-extent.
-    bbox = fitz.Rect(0, 0, 20, 5)
-
-    ul, ur, lr, ll = native._oriented_quad(bbox, 0.0, 1.0)
-
-    # Naive (buggy) horizontal-order corners would be:
-    naive_ul = (bbox.x0, bbox.y0)
-    naive_ur = (bbox.x1, bbox.y0)
-
-    quad_ul = (round(ul[0], 3), round(ul[1], 3))
-    quad_ur = (round(ur[0], 3), round(ur[1], 3))
-
-    assert (quad_ul, quad_ur) != (naive_ul, naive_ur)
-
-
 def test_seq_assigns_reading_order(synthetic_pdf_factory, tmp_pdf_path):
     doc = synthetic_pdf_factory(
         [
@@ -186,7 +150,7 @@ def test_seq_assigns_reading_order(synthetic_pdf_factory, tmp_pdf_path):
         page = reader.get_page(0)
         words = native.extract_native_text(page)
 
-    words_by_seq = sorted(words, key=lambda w: w.seq)
+    words_by_seq = sorted(words, key=lambda w: w.seqno)
     assert [w.text for w in words_by_seq] == ["First", "Second"]
 
 
@@ -209,13 +173,10 @@ def test_extract_records_carries_word_and_line_metadata(synthetic_pdf_factory, t
 
 
 def test_no_matching_span_falls_back():
-    bbox = fitz.Rect(0, 0, 10, 10)
+    raw_word = (0.0, 0.0, 10.0, 10.0, "orphan", 0, 0, 0)
 
-    word = native._to_word(
-        bbox, "orphan", None, page_index=0, seq=0,
-        block_no=0, line_no=0, word_no=0,
-    )
+    word = native._to_word(0, 0, raw_word, None)
 
-    assert word.angle == 0.0
-    assert word.orientation_source == "fallback"
+    assert word.angle() == 0.0
+    assert word.raw_span is None
     assert word.text == "orphan"

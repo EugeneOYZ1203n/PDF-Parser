@@ -276,6 +276,30 @@ def build_drawing_output(
     return vectors
 
 
+def render_similarity(res: "PipelineResult") -> "RenderResult":
+    """Notebook visualization for the similarity-grouping step: every
+    segment's bbox, plus a note on how much the grouping is expected to
+    save Phase G's OCR call count (each group beyond size 1 means every
+    extra member reuses one render+recognition instead of paying for its
+    own)."""
+    from rastervec.renderer.notebook import RenderResult
+
+    segments = res.segments or []
+    groups = res.similarity_groups or []
+    dup_groups = [g for g in groups if len(g) > 1]
+    saved = sum(len(g) - 1 for g in dup_groups)
+    return RenderResult(
+        categories=[{
+            "name": f"segments ({len(segments)}) in {len(groups)} similarity group(s)",
+            "bboxes": [union_bbox([v.bbox for v in seg.vectors]) for seg in segments if seg.vectors],
+        }],
+        note=(
+            f"{len(segments)} segment(s) -> {len(groups)} group(s) "
+            f"({len(dup_groups)} with >1 member, dedup saves {saved} OCR call(s) if all pass FAST)"
+        ),
+    )
+
+
 def render_drawing(res: "PipelineResult", *, zoom: float = 1.0) -> "RenderResult":
     """Notebook visualization for the drawing-vectors output: dashed vs
     solid bboxes, plus a full page reconstruction."""

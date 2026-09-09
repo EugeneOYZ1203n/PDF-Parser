@@ -12,10 +12,16 @@ occurrence's real page position/rotation.
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from rastervec.helpers.geometry import transform_bbox, transform_direction, transform_point
 from rastervec.models import SegmentMeta, Text, UniqueSegment
+from rastervec.OCR.Paddle_OCR.ocr_backend import _recognize_crops_job
 from rastervec.OCR.Paddle_OCR.ocr_backend import recognize_unique_segments as _recognize_unique_segments
+
+if TYPE_CHECKING:
+    from rastervec.pipelines.result import PipelineResult
+    from rastervec.renderer.notebook import RenderResult
 
 
 def recognize(
@@ -28,8 +34,6 @@ def recognize(
     `recognize_unique_segments` stays local either way."""
     recognize_fn = None
     if compute is not None:
-        from rastervec.OCR.Paddle_OCR.ocr_backend import _recognize_crops_job
-
         recognize_fn = lambda crops: compute.apply(_recognize_crops_job, (crops,))  # noqa: E731
     return _recognize_unique_segments(uniques, recognize_fn=recognize_fn)
 
@@ -54,3 +58,26 @@ def restore_segment_texts(unique_texts: list[Text], metas: list[SegmentMeta]) ->
             page_index=meta.page_index, seqno=meta.seqno,
         ))
     return restored
+
+
+# --------------------------------------------------------------------------
+# notebook visualization (pipeline_stage_visualization.ipynb's "Restore"
+# section) -- reads a PipelineResult, never called by the real pipeline.
+# --------------------------------------------------------------------------
+def render_restore(res: "PipelineResult") -> "RenderResult":
+    """Every restored `Text`'s real-position bbox -- the dedup payoff made
+    visible: one `UniqueSegment` OCR reading fans back out to every real
+    occurrence it covers."""
+    from rastervec.renderer.notebook import RenderResult
+
+    restored = res.restored_texts or []
+    return RenderResult(
+        categories=[{
+            "name": f"restored text ({len(restored)})",
+            "bboxes": [t.bbox for t in restored],
+        }],
+        note=(
+            f"{len(res.unique_texts or [])} unique OCR call(s) -> "
+            f"{len(restored)} restored Text(s) at their real page positions"
+        ),
+    )

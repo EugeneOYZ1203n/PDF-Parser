@@ -25,28 +25,32 @@ def _drawing_page(tmp_pdf_path):
     return tmp_pdf_path(doc)
 
 
+def _flatten(cluster):
+    return [v for group in cluster for v in group]
+
+
 def test_classify_vectors_splits_candidates_and_drops(tmp_pdf_path):
     with Reader(_drawing_page(tmp_pdf_path)) as reader:
         page = reader.get_page(0)
         vectors = extract_vectors(page)
-        res = classify_vectors(vectors.paths, page, verbose=True)
+        res = classify_vectors(vectors, page, verbose=True)
 
     assert isinstance(res, ClassificationResult)
     # oversized panel dropped as drawing content
-    assert any(p.kind == "re" for p in res.dropped)
-    # small line survives as a text candidate
-    kept = [p for c in res.text_clusters for p in c]
-    assert kept and all(p.kind == "l" for p in kept)
-    # lineage keyed by live identity
-    assert all(id(c) in res.cluster_groups for c in res.text_clusters)
-    assert res.paths_by_layer is not None  # verbose
+    assert any(item[0] == "re" for v in res.drawing_vectors for item in v.items)
+    # small line survives as a text candidate (tiered: clusters of groups of Vectors)
+    kept = [v for cluster in res.text_clusters for v in _flatten(cluster)]
+    assert kept and all(item[0] == "l" for v in kept for item in v.items)
+    assert res.vectors_by_layer is not None  # verbose
 
 
 def test_classify_bucket_returns_twelve_step_results(tmp_pdf_path):
     with Reader(_drawing_page(tmp_pdf_path)) as reader:
         page = reader.get_page(0)
         vectors = extract_vectors(page)
-        steps = _classify_bucket(vectors.paths, page)
+        steps = _classify_bucket(vectors, page)
     assert len(steps) == 12
     assert all("kept" in s.categories for s in steps)
-    assert steps[-1].cluster_groups is not None
+    # the final step's kept category is tiered: clusters of groups of Vectors
+    final_kept = steps[-1].categories["kept"].groups
+    assert all(isinstance(group, list) for cluster in final_kept for group in cluster)

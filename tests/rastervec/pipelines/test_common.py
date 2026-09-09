@@ -3,28 +3,32 @@ from __future__ import annotations
 import pymupdf as fitz
 import pytest
 
-from rastervec.models import Page, TextVectorResult
+from rastervec.models import Page
 from rastervec.pipelines import _common
 from rastervec.pipelines.current import STEP_NAMES, run_pipeline
 from rastervec.pipelines.sub_pipelines import ocr as ocr_mod
 
 
-class _StubRenderOCR:
-    def __init__(self, backend=None, recognize_fn=None):
-        self.backend = backend
-        self.recognize_fn = recognize_fn
-
-    def recognize_segmented(self, seg, cluster, page):
-        return TextVectorResult(
-            paths=cluster, text="TXT", confidence=0.9, bbox=(0.0, 0.0, 1.0, 1.0),
-            ocr_bbox=(0.0, 0.0, 1.0, 1.0), rotation_used=0,
-            page_index=page.meta.index, words=None,
-        )
-
-
 @pytest.fixture(autouse=True)
 def _stub_ocr(monkeypatch):
-    monkeypatch.setattr(ocr_mod, "RenderOCR", _StubRenderOCR)
+    def fake_recognize_unique_segments(uniques, *, recognize_fn=None):
+        from rastervec.helpers.geometry import compute_origin, union_bbox
+        from rastervec.models import Text
+
+        texts = []
+        for u in uniques:
+            bbox = union_bbox([v.bbox for v in u.vectors]) if u.vectors else (0.0, 0.0, 1.0, 1.0)
+            direction = (1.0, 0.0)
+            texts.append(Text(
+                text="TXT", bbox=bbox, direction=direction, origin=compute_origin(bbox, direction),
+                font="", font_size=0.0, color=None, flags=0,
+                ascender=None, descender=None, wmode=0,
+                block_no=0, line_no=0, word_no=0, page_index=0, seqno=0,
+                confidence=0.9, source="ocr",
+            ))
+        return texts
+
+    monkeypatch.setattr(ocr_mod, "_recognize_unique_segments", fake_recognize_unique_segments)
 
 
 def _text_pdf(tmp_pdf_path):
@@ -44,13 +48,20 @@ def _drawing_pdf(tmp_pdf_path):
     return tmp_pdf_path(doc)
 
 
+def _native_texts(res):
+    return [t for t in res.texts if t.source == "native"]
+
+
+def _ocr_texts(res):
+    return [t for t in res.texts if t.source == "ocr"]
+
+
 def test_run_pipeline_text_only_page(tmp_pdf_path):
     res = run_pipeline(_text_pdf(tmp_pdf_path), 0, enable_fast=False)
     assert isinstance(res.page, Page)
-    assert [w.text for w in res.native_words] == ["Hello"]
-    assert res.text_clusters == []
-    assert res.ocr_results == []
-    assert res.drawing_vectors == []
+    assert [w.text for w in _native_texts(res)] == ["Hello"]
+    assert _ocr_texts(res) == []
+    assert res.vectors == []
     assert list(res.step_durations) == STEP_NAMES
     assert res.engine == "current"
 
@@ -59,30 +70,31 @@ def test_run_pipeline_verbose_toggles_intermediates(tmp_pdf_path):
     path = _drawing_pdf(tmp_pdf_path)
 
     lean = run_pipeline(path, 0, enable_fast=False, verbose=False)
-    assert lean.vector_paths is None
+    assert lean.vectors_raw is None
     assert lean.similarity_groups is None
     assert lean.step_outputs is None
-    assert lean.segmentations is None
+    assert lean.segments is None
 
     full = run_pipeline(path, 0, enable_fast=False, verbose=True)
-    assert full.vector_paths is not None
-    assert full.paths_by_layer is not None
+    assert full.vectors_raw is not None
+    assert full.vectors_by_layer is not None
     assert full.similarity_groups is not None
     assert full.step_outputs is not None and set(full.step_outputs) == set(STEP_NAMES)
-    assert full.segmentations is not None
+    assert full.segments is not None
 
 
 def test_run_pipeline_drawing_pdf_ocrs_candidate(tmp_pdf_path):
     res = run_pipeline(_drawing_pdf(tmp_pdf_path), 0, enable_fast=False)
-    assert res.text_clusters  # the small line survives classification
-    assert res.cluster_ocr_results
-    assert all(r.resolved.text == "TXT" for r in res.cluster_ocr_results)
+    ocr_texts = _ocr_texts(res)
+    assert ocr_texts  # the small line survives classification and gets OCR'd
+    assert all(t.text == "TXT" for t in ocr_texts)
 
 
-def test_cluster_groups_keyed_by_live_cluster_identity(tmp_pdf_path):
-    res = run_pipeline(_drawing_pdf(tmp_pdf_path), 0, enable_fast=False)
+def test_verbose_text_clusters_are_tiered(tmp_pdf_path):
+    res = run_pipeline(_drawing_pdf(tmp_pdf_path), 0, enable_fast=False, verbose=True)
     assert res.text_clusters
-    assert all(id(c) in res.cluster_groups for c in res.text_clusters)
+    for cluster in res.text_clusters:
+        assert all(isinstance(group, list) for group in cluster)
 
 
 def test_result_page_is_detached_and_open_page_reopens(tmp_pdf_path):

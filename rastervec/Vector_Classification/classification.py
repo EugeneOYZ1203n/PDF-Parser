@@ -10,7 +10,7 @@ descriptions):
   clusters/cluster_filters.py -- steps 6-7, 9-12 (spatial cluster, mixed fill-rule,
                                  perimeter/density/constant-spacing/low-variety)
 
-See Glossary.md for standardized group/cluster/global-group/similarity-group
+See docs/Glossary.md for standardized group/cluster/global-group/similarity-group
 terminology.
 
 A `Vector` is never decomposed into standalone items anywhere in this chain

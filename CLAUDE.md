@@ -138,7 +138,7 @@ text — don't reintroduce a bbox-width/height shortcut there, anywhere it's use
 
 ## `rastervec/` architecture
 
-See `rastervec/Glossary.md` for standardized group/cluster/global-group/similarity-group
+See `docs/Glossary.md` for standardized group/cluster/global-group/similarity-group
 terminology used throughout this section. `rastervec/` is organized into one folder per pipeline
 concern (`Reader/`, `native_text.py`, `Vector/`, `Vector_Classification/`, `OCR/`, `Evaluation/`),
 plus cross-cutting modules that don't belong to one concern (`models.py`, `output_types.py`,
@@ -214,7 +214,7 @@ independently of the others (every stage's *output* is a plain dataclass from `m
     `compute_vector_signatures` — informational: per-signature occurrence counts, reused below.
   - `groups/group_filters.py` (steps 3-5, 8): `remove_duplicate_runs` + `combine_overlapping_seq` —
     drop long runs of exact-duplicate shapes, then chain-merge the rest by `seq` order into "groups"
-    (see Glossary.md). `filter_tiny_groups` / `filter_large_groups` — drop undersized/oversized
+    (see docs/Glossary.md). `filter_tiny_groups` / `filter_large_groups` — drop undersized/oversized
     groups. `compute_group_stats` — informational per-cluster stats (member/signature counts, bbox).
   - `clusters/cluster_filters.py` (steps 6-7, 9-12, plus `group_similar_clusters`, not one of the
     numbered steps): `cluster_spatial_groups` — single-linkage spatial merge of groups into
@@ -226,7 +226,7 @@ independently of the others (every stage's *output* is a plain dataclass from `m
     clusters where most members belong to a near-perfectly-regular repeated same-shape sub-group
     (hatching, tick marks). `filter_low_variety_clusters` — drop clusters below a
     member-count-scaled minimum distinct-shape-type count. `group_similar_clusters` — whole-page
-    similarity grouping of text-candidate clusters (see "similarity group" in Glossary.md).
+    similarity grouping of text-candidate clusters (see "similarity group" in docs/Glossary.md).
 
   There is deliberately **no drawing-vs-text heuristic** anywhere in this chain — every group/cluster
   any filter step drops along the way is drawing content (`pipelines._steps.build_drawing_output`
@@ -364,7 +364,7 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   (`attribute_miss`). `METRIC_GROUPS` is the display-order source
   for `benchmark.format_report` + the notebook charts. `overlay_boxes` / `overlay_boxes_split` are
   data-only helpers (no rendering) returning `(bbox, rgb[, dashes])` for the benchmark's `boxes.pdf`
-  pred-vs-GT overlay. **`EVAL_METRICS.md`** documents every metric's formula, both normalisation
+  pred-vs-GT overlay. **`docs/EVAL_METRICS.md`** documents every metric's formula, both normalisation
   rules (text + aggregation), and the ~36-metric catalogue not yet built.
 - **`Evaluation/Evaluate/adapters.py`** *(implemented)*: the only `Evaluation/Evaluate/` module that
   imports `rastervec.pipeline`. `gt_regions_from_labelset` / `predictions_from_cluster_ocr` /

@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 
 import pymupdf as fitz
 
-from rastervec.helpers.geometry import compute_origin
 from rastervec.logging_setup import get_logger
 from rastervec.models import Page, Text
 from rastervec.renderer import render_reconstructed_page
@@ -61,7 +60,7 @@ def extract_native_text(page: Page) -> list[Text]:
 
     result: list[Text] = []
     for seq, raw_word in enumerate(words):
-        x0, y0, x1, y1, text, block_no, line_no, word_no = raw_word
+        x0, y0, x1, y1, text, _block_no, _line_no, _word_no = raw_word
         bbox = fitz.Rect(x0, y0, x1, y1)
         span = _match_word_to_span(bbox, spans)
         if span is None:
@@ -69,9 +68,7 @@ def extract_native_text(page: Page) -> list[Text]:
                 "page %d: no matching span for word %r at %s",
                 page_index, text, bbox,
             )
-        result.append(
-            _to_word(bbox, text, span, page_index, seq, block_no, line_no, word_no, raw_word)
-        )
+        result.append(_to_word(page_index, seq, raw_word, span))
     return result
 
 
@@ -103,7 +100,11 @@ def _extract_spans(fitz_page: "fitz.Page") -> list[_Span]:
                         ascender=span.get("ascender", None),
                         descender=span.get("descender", None),
                         wmode=line_wmode,
-                        raw=span,
+                        # `dir`/`wmode` live on the enclosing *line*, not the
+                        # span itself -- merged in here so `raw` alone is
+                        # enough for `Text.from_pymupdf` to reconstruct this
+                        # Text without a separate line argument.
+                        raw={**span, "dir": line_dir, "wmode": line_wmode},
                     )
                 )
     return spans
@@ -142,37 +143,14 @@ def _match_word_to_span(bbox: "fitz.Rect", spans: list[_Span]) -> "_Span | None"
 
 
 def _to_word(
-    bbox: "fitz.Rect",
-    text: str,
-    span: "_Span | None",
     page_index: int,
     seq: int,
-    block_no: int,
-    line_no: int,
-    word_no: int,
     raw_word: tuple,
+    span: "_Span | None",
 ) -> Text:
-    bbox_tuple = (bbox.x0, bbox.y0, bbox.x1, bbox.y1)
-    if span is None:
-        return Text(
-            text=text, bbox=bbox_tuple,
-            direction=(1.0, 0.0), origin=compute_origin(bbox_tuple, (1.0, 0.0)),
-            font="", font_size=0.0, color=None, flags=0,
-            ascender=None, descender=None, wmode=0,
-            block_no=block_no, line_no=line_no, word_no=word_no,
-            page_index=page_index, seqno=seq, source="native",
-            raw_word=raw_word, raw_span=None,
-        )
-
-    dx, dy = span.direction
-    return Text(
-        text=text, bbox=bbox_tuple,
-        direction=(dx, dy), origin=compute_origin(bbox_tuple, (dx, dy)),
-        font=span.font, font_size=span.font_size, color=span.color,
-        flags=span.flags, ascender=span.ascender, descender=span.descender,
-        wmode=span.wmode, block_no=block_no, line_no=line_no, word_no=word_no,
-        page_index=page_index, seqno=seq, source="native",
-        raw_word=raw_word, raw_span=span.raw,
+    return Text.from_pymupdf(
+        raw_word, span.raw if span is not None else None,
+        page_index=page_index, seqno=seq,
     )
 
 

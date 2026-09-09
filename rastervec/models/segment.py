@@ -9,7 +9,7 @@ member of a passing group keeps only a `SegmentMeta` (offset + rotation back
 to its own real position), so the single `Text` OCR produces for the
 `UniqueSegment` can be duplicated and repositioned for every real occurrence
 without re-rendering or re-recognizing it. See
-`rastervec/pipelines/PIPELINE.md` for the worked dedup example.
+`docs/PIPELINE.md` for the worked dedup example.
 """
 from __future__ import annotations
 
