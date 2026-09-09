@@ -4,11 +4,13 @@ Orientation is stored purely as `direction` (a unit vector) -- `angle()` and
 `quad()` are derived on demand (`quad()` reuses the existing
 `helpers.geometry.make_oriented_quad`, which already builds an oriented quad
 from an axis-aligned bbox + direction, so nothing new is invented). There is
-no `rotation_used` field: an OCR result's final orientation is Radon's
-precise skew angle combined with PaddleOCR's cls-detected 180-degree
-correction, folded into `direction` once, before the `Text` is built (see
-`OCR/ocr_backend.py::recognize_unique_segments` and
-`pipelines/_steps.py::restore_segment_texts`).
+no `rotation_used` field: an OCR result's final orientation is a word's
+own Radon residual skew angle combined with PaddleOCR's cls-detected
+180-degree correction, folded into `direction` once, before the `Text` is
+built (see `OCR/Paddle_OCR/ocr_backend.py::recognize_segments`); a
+cluster's own PCA-estimated rotation is layered on top of that afterward
+when restoring onto each real occurrence (see
+`pipelines/sub_pipelines/ocr.py::restore_cluster_texts`).
 
 `origin` is computed the same way for native and OCR text via
 `helpers.geometry.compute_origin(bbox, direction)`, so the field means the
@@ -16,7 +18,7 @@ same thing regardless of `source`.
 
 `from_pymupdf`/`to_pymupdf` are the fitz boundary for *native* text (an
 OCR `Text` is hand-built by `OCR/Paddle_OCR/ocr_backend.py` /
-`pipelines/sub_pipelines/ocr.py::restore_segment_texts` instead, never via
+`pipelines/sub_pipelines/ocr.py::restore_cluster_texts` instead, never via
 `from_pymupdf`). `raw_span`, note, is not the bare `get_text("dict")` span
 dict -- `direction`/`wmode` live on that span's *line*, one level up, not
 on the span itself, so `native_text.py::_extract_spans` merges the line's

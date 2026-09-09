@@ -229,22 +229,24 @@ def render_text_candidates(res: "PipelineResult") -> "RenderResult":
 # Segment / Radon (OCR/radon.py)
 # --------------------------------------------------------------------------
 def render_radon(res: "PipelineResult") -> "RenderResult":
-    """One row per segmented cluster (grouped back by original cluster
-    index via `Segment`'s own vectors): re-render each cluster and draw its
-    words' page-space bboxes, mapped to this render's pixel space, on
-    top."""
+    """One row per elected representative cluster (Radon now runs only on
+    these, not every surviving cluster -- see `pipelines/_steps.py::
+    segment_unique_clusters`): re-render that representative's own
+    (cluster-canonical-frame) vectors and draw its words' bboxes, mapped to
+    this render's pixel space, on top. `res.word_segments[i]` already
+    corresponds directly to `res.unique_segments[i]` -- no id-matching
+    against `text_clusters` needed."""
     from rastervec.renderer.notebook import RenderResult
 
-    segments = res.segments or []
-    clusters = res.text_clusters or []
+    uniques = res.unique_segments or []
+    word_segments = res.word_segments or []
+    total_words = sum(len(ws) for ws in word_segments)
 
     rows = []
-    for cluster_entry in clusters[:8]:
-        cluster = _entry_vectors(cluster_entry)
-        cluster_ids = {id(v) for v in cluster}
-        own_segments = [s for s in segments if any(id(v) in cluster_ids for v in s.vectors)]
+    for unique, own_segments in list(zip(uniques, word_segments))[:8]:
         if not own_segments:
             continue
+        cluster = unique.vectors
         base = render_vector_cluster(cluster, 300).convert("RGB")
         d = ImageDraw.Draw(base)
         for seg in own_segments:
@@ -256,7 +258,7 @@ def render_radon(res: "PipelineResult") -> "RenderResult":
 
     return RenderResult(
         categories=rows,
-        note=f"{len(segments)} segment(s) across {len(clusters)} cluster(s)",
+        note=f"{total_words} word(s) across {len(uniques)} representative cluster(s)",
     )
 
 
@@ -264,34 +266,35 @@ def render_radon(res: "PipelineResult") -> "RenderResult":
 # Similarity / FAST / drawing output (pipelines/_steps.py)
 # --------------------------------------------------------------------------
 def render_similarity(res: "PipelineResult") -> "RenderResult":
-    """Notebook visualization for the similarity-grouping step: every
-    segment's bbox, plus a note on how much the grouping is expected to
-    save Phase G's OCR call count (each group beyond size 1 means every
-    extra member reuses one render+recognition instead of paying for its
-    own)."""
+    """Notebook visualization for the (now pre-Radon, cluster-level)
+    similarity-grouping step: every cluster candidate's bbox, plus a note
+    on how much the grouping is expected to save Phase G/H's Radon+OCR call
+    count (each group beyond size 1 means every extra member skips Radon
+    segmentation and recognition entirely, reusing the representative's
+    instead)."""
     from rastervec.renderer.notebook import RenderResult
 
-    segments = res.segments or []
+    segments = res.cluster_segments or []
     groups = res.similarity_groups or []
     dup_groups = [g for g in groups if len(g) > 1]
     saved = sum(len(g) - 1 for g in dup_groups)
     return RenderResult(
         categories=[{
-            "name": f"segments ({len(segments)}) in {len(groups)} similarity group(s)",
+            "name": f"clusters ({len(segments)}) in {len(groups)} similarity group(s)",
             "bboxes": [union_bbox([v.bbox for v in seg.vectors]) for seg in segments if seg.vectors],
         }],
         note=(
-            f"{len(segments)} segment(s) -> {len(groups)} group(s) "
-            f"({len(dup_groups)} with >1 member, dedup saves {saved} OCR call(s) if all pass FAST)"
+            f"{len(segments)} cluster(s) -> {len(groups)} group(s) "
+            f"({len(dup_groups)} with >1 member, dedup saves {saved} Radon+OCR call(s) if all pass FAST)"
         ),
     )
 
 
 def render_fast(res: "PipelineResult", *, enable_fast: bool) -> "RenderResult":
     """The whole-page render, its detection heatmap, and passed (kept as
-    `UniqueSegment`s)/dropped (folded into drawing vectors) segment boxes.
-    `enable_fast=False` and a page with no segments both render as a note
-    only (no pixels to show)."""
+    `UniqueSegment`s, one per representative cluster)/dropped (folded into
+    drawing vectors) cluster boxes. `enable_fast=False` and a page with no
+    clusters both render as a note only (no pixels to show)."""
     from rastervec.renderer.notebook import RenderResult
 
     fr = res.fast_result
@@ -343,37 +346,38 @@ def render_drawing(res: "PipelineResult", *, zoom: float = 1.0) -> "RenderResult
 # OCR (OCR/Paddle_OCR/ocr_backend.py, pipelines/sub_pipelines/ocr.py)
 # --------------------------------------------------------------------------
 def render_ocr_results(res: "PipelineResult", *, zoom: float = 1.0) -> "RenderResult":
-    """Passed (non-blank) vs failed (blank) unique-segment OCR readings, in
-    their own canonical frame (not restored to real page position -- there
-    can be many restored instances per unique reading)."""
+    """Passed (non-blank) vs failed (blank) word-level OCR readings from
+    every representative cluster, in canonical frame (not restored to real
+    page position -- there can be many restored instances per reading)."""
     from rastervec.renderer.notebook import RenderResult
 
-    unique_texts = res.unique_texts or []
+    unique_texts = [t for words in (res.unique_texts or []) for t in words]
     passed = [t for t in unique_texts if t.text.strip()]
     failed = [t for t in unique_texts if not t.text.strip()]
     return RenderResult(categories=[
         {"name": f"passed ({len(passed)})", "color": _PASSED_COLOR, "bboxes": [t.bbox for t in passed]},
         {"name": f"failed ({len(failed)})", "color": _FAILED_COLOR, "bboxes": [t.bbox for t in failed]},
     ], note=(
-        f"{len(unique_texts)} unique segment(s) OCR'd -> "
-        f"{len(res.restored_texts or [])} restored Text(s) across all occurrences"
+        f"{len(unique_texts)} word(s) OCR'd across {len(res.unique_segments or [])} representative "
+        f"cluster(s) -> {len(res.restored_texts or [])} restored Text(s) across all occurrences"
     ))
 
 
 def render_restore(res: "PipelineResult") -> "RenderResult":
     """Every restored `Text`'s real-position bbox -- the dedup payoff made
-    visible: one `UniqueSegment` OCR reading fans back out to every real
-    occurrence it covers."""
+    visible: one representative cluster's word-level OCR readings fan back
+    out onto every real occurrence it covers."""
     from rastervec.renderer.notebook import RenderResult
 
     restored = res.restored_texts or []
+    unique_word_count = sum(len(words) for words in (res.unique_texts or []))
     return RenderResult(
         categories=[{
             "name": f"restored text ({len(restored)})",
             "bboxes": [t.bbox for t in restored],
         }],
         note=(
-            f"{len(res.unique_texts or [])} unique OCR call(s) -> "
+            f"{unique_word_count} unique word OCR reading(s) -> "
             f"{len(restored)} restored Text(s) at their real page positions"
         ),
     )

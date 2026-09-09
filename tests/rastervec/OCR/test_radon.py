@@ -164,6 +164,26 @@ def test_segment_clusters_splits_into_one_segment_per_word():
         assert abs(seg.angle) < 2.0
 
 
+def test_segment_clusters_captures_each_words_own_crop_image():
+    """Each Segment's `image` is captured directly from the deskewed
+    render during segmentation, so OCR never has to re-render from
+    vectors -- non-empty, 2-D, and distinct per word."""
+    cluster = _two_word_cluster()
+
+    segments = radon.segment_clusters([cluster])
+
+    assert len(segments) == 2
+    for seg in segments:
+        assert seg.image is not None
+        assert seg.image.ndim == 2
+        assert seg.image.size > 0
+    # the two words' crops are independently sized/positioned, not the same
+    # array reused
+    assert segments[0].image.shape != segments[1].image.shape or not np.array_equal(
+        segments[0].image, segments[1].image,
+    )
+
+
 def test_segment_clusters_angle_is_full_precision_not_quarter_turn():
     # A cluster rotated by an arbitrary, non-quarter-turn angle -- the
     # returned Segment.angle must reflect that precisely, never rounded to

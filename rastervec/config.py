@@ -185,5 +185,5 @@ REC_LINE_MAX_WIDTH_PX = 1024
 
 # batch size for both the classification (`cls_batch_num`) and
 # recognition (`rec_batch_num`) PaddleOCR calls, and for
-# `recognize_unique_segments`'s own batching over `UniqueSegment`s.
+# `recognize_segments`'s own batching over `Segment`s.
 OCR_BATCH_SIZE = 128

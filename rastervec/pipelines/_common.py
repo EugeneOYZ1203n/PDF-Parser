@@ -6,25 +6,26 @@ from __future__ import annotations
 import time
 
 from rastervec.logging_setup import get_logger
-from rastervec.OCR.radon import segment_clusters
 from rastervec.pipelines._steps import (
+    build_cluster_candidates,
     build_drawing_output,
     detect_text_fast,
     extract_native_text,
     extract_vectors,
     group_similar_segments,
     read_page,
+    segment_unique_clusters,
 )
 from rastervec.pipelines.result import PipelineResult, StepOutcome
-from rastervec.pipelines.sub_pipelines.ocr import recognize, restore_segment_texts
+from rastervec.pipelines.sub_pipelines.ocr import recognize_unique_clusters, restore_cluster_texts
 from rastervec.pipelines.sub_pipelines.vector_classification import classify_vectors
 from rastervec.Reader.reader import Reader
 
 _LOG = get_logger("pipelines.current")
 
 STEP_NAMES = [
-    "read", "native", "vectors", "classify", "segment",
-    "similarity", "fast", "ocr", "restore", "drawing",
+    "read", "native", "vectors", "classify",
+    "similarity", "fast", "segment", "ocr", "restore", "drawing",
 ]
 
 
@@ -66,8 +67,8 @@ def run_current_pipeline(
     compute=None, progress_counter=None,
 ) -> PipelineResult:
     timer = StepTimer(verbose=verbose)
-    page = native = vectors = cls = segments = groups = fast = None
-    unique_texts = restored = drawing = None
+    page = native = vectors = cls = cluster_segments = groups = fast = None
+    word_segments = unique_texts = restored = drawing = None
 
     with Reader(pdf_path) as reader:
         with timer("read"):
@@ -78,25 +79,26 @@ def run_current_pipeline(
             vectors = extract_vectors(page)
         with timer("classify"):
             cls = classify_vectors(vectors, page, verbose=verbose)
-        with timer("segment"):
+        with timer("similarity"):
             flat_clusters = [
                 [v for group in cluster for v in group] for cluster in (cls.text_clusters if cls else [])
             ]
-            segments = segment_clusters(flat_clusters)
-        with timer("similarity"):
-            groups = group_similar_segments(segments)
+            cluster_segments = build_cluster_candidates(flat_clusters)
+            groups = group_similar_segments(cluster_segments)
         with timer("fast"):
             fast = detect_text_fast(
-                segments, groups, page,
+                cluster_segments, groups, page,
                 enable_fast=enable_fast, verbose=verbose, compute=compute,
                 progress_counter=progress_counter,
             )
+        with timer("segment"):
+            word_segments = segment_unique_clusters(fast.uniques if fast else [])
         with timer("ocr"):
-            unique_texts = recognize(
-                fast.uniques if fast else [], compute=compute, progress_counter=progress_counter,
+            unique_texts = recognize_unique_clusters(
+                word_segments or [], compute=compute, progress_counter=progress_counter,
             )
         with timer("restore"):
-            restored = restore_segment_texts(unique_texts or [], fast.metas if fast else [])
+            restored = restore_cluster_texts(unique_texts or [], fast.metas if fast else [])
         with timer("drawing"):
             drawing = build_drawing_output(
                 cls.drawing_vectors if cls else [], fast.dropped_vectors if fast else [],
@@ -124,12 +126,13 @@ def run_current_pipeline(
         text_clusters=(cls.text_clusters if verbose and cls else None),
         clustering=(cls.clustering if verbose and cls else None),
         classification_dropped=(cls.drawing_vectors if verbose and cls else None),
-        segments=(segments if verbose else None),
+        cluster_segments=(cluster_segments if verbose else None),
         similarity_groups=(groups if verbose else None),
         fast_result=(fast.page_result if verbose and fast else None),
         unique_segments=(fast.uniques if verbose and fast else None),
         segment_metas=(fast.metas if verbose and fast else None),
         fast_dropped_vectors=(fast.dropped_vectors if verbose and fast else None),
+        word_segments=(word_segments if verbose else None),
         unique_texts=(unique_texts if verbose else None),
         restored_texts=(restored if verbose else None),
         step_outputs=(timer.outcomes if verbose else None),

@@ -20,10 +20,10 @@ def test_build_arg_parser_legacy_rejects_no_fast():
 
 
 def test_main_current_returns_zero(tmp_pdf_path, monkeypatch, text):
-    def fake_recognize_unique_segments(uniques, *, recognize_fn=None):
-        return [text(text="TXT", bbox=(0.0, 0.0, 1.0, 1.0), source="ocr") for _ in uniques]
+    def fake_recognize_segments(segments, *, recognize_fn=None):
+        return [text(text="TXT", bbox=(0.0, 0.0, 1.0, 1.0), source="ocr") for _ in segments]
 
-    monkeypatch.setattr(ocr_mod, "_recognize_unique_segments", fake_recognize_unique_segments)
+    monkeypatch.setattr(ocr_mod, "_recognize_segments", fake_recognize_segments)
     doc = fitz.open()
     doc.new_page(width=200, height=100).insert_text((10, 20), "Hi", fontsize=10)
     path = tmp_pdf_path(doc)

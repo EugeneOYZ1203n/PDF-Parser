@@ -298,7 +298,7 @@ def transform_bbox(bbox: BBox, offset: Point, rotation_deg: float) -> BBox:
     return the new axis-aligned bbox of the transformed corners. Used to
     restore OCR `Text` geometry from a `UniqueSegment`'s canonical frame
     back onto one real `SegmentMeta` occurrence (see
-    `pipelines/sub_pipelines/ocr.py::restore_segment_texts`)."""
+    `pipelines/sub_pipelines/ocr.py::restore_cluster_texts`)."""
     x0, y0, x1, y1 = bbox
     corners = [transform_point(p, offset, rotation_deg) for p in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]]
     xs = [p[0] for p in corners]

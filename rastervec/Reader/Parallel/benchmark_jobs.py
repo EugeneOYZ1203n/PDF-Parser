@@ -165,16 +165,27 @@ def _render_ocr_input(vectors, dpi: int = 300):
     return render_vector_cluster(vectors, dpi)
 
 
+def _joined_text(words: list) -> str:
+    """A representative cluster's own word-level `Text`s, joined into one
+    display string for the showcase -- `unique_texts` is now `list[Text]`
+    per representative (one entry per word Radon found in it), not a
+    single `Text`, since a representative can be a whole multi-word
+    cluster."""
+    return " ".join(w.text.strip() for w in words if w.text.strip())
+
+
 def _showcase(
     unique_pairs: list[tuple], per_page: int, seed: int,
 ) -> list[ShowcaseSample]:
-    """`unique_pairs` is `[(UniqueSegment, Text), ...]` -- one real render +
-    OCR call per pair (mirrors the old per-cluster showcase, now sampling
-    the deduped unique segments instead of every candidate cluster)."""
+    """`unique_pairs` is `[(UniqueSegment, list[Text]), ...]` -- one real
+    render per pair (mirrors the old per-cluster showcase, now sampling the
+    deduped representative clusters instead of every candidate cluster);
+    the pair's displayed text is every one of that representative's own
+    words joined together (see `_joined_text`)."""
     if per_page <= 0 or not unique_pairs:
         return []
-    passed = [(seg, t) for seg, t in unique_pairs if t.text.strip()]
-    blank = [(seg, t) for seg, t in unique_pairs if not t.text.strip()]
+    passed = [(seg, t) for seg, t in unique_pairs if _joined_text(t)]
+    blank = [(seg, t) for seg, t in unique_pairs if not _joined_text(t)]
     rng = random.Random(seed)
     half = per_page // 2
     pick = rng.sample(passed, min(half, len(passed)))
@@ -192,7 +203,7 @@ def _showcase(
             continue
         buf = io.BytesIO()
         image.save(buf, format="PNG")
-        text = t.text.strip()
+        text = _joined_text(t)
         out.append(ShowcaseSample(png=buf.getvalue(), text=text, passed=bool(text)))
     return out
 

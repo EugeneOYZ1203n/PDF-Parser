@@ -1,14 +1,18 @@
 """The current extraction pipeline.
 
-    native          = extract_native_text(page)                # list[Text]
-    vectors         = extract_vectors(page)                     # list[Vector]
-    classification  = classify_vectors(vectors, page)           # tiered text clusters + drawing drops
-    segments        = segment_clusters(flat_clusters)           # Radon deskew + word split -> list[Segment]
-    groups          = group_similar_segments(segments)          # rotation-exact shape dedup -> list[list[int]]
-    fast            = detect_text_fast(segments, groups, page)  # all-must-pass -> UniqueSegments + SegmentMetas
-    unique_texts    = recognize(fast.uniques)                   # one OCR Text per UniqueSegment
-    restored        = restore_segment_texts(unique_texts, ...)  # duplicated back onto every real occurrence
-    drawing_vectors = build_drawing_output(...)
+    native           = extract_native_text(page)                      # list[Text]
+    vectors          = extract_vectors(page)                          # list[Vector]
+    classification   = classify_vectors(vectors, page)                # tiered text clusters + drawing drops
+    cluster_segments = build_cluster_candidates(flat_clusters)        # PCA angle estimate -> list[Segment]
+    groups           = group_similar_segments(cluster_segments)       # shape dedup -> list[list[int]]
+    fast             = detect_text_fast(cluster_segments, groups, page)  # all-must-pass -> UniqueSegments
+                                                                          # (one representative CLUSTER each)
+                                                                          # + SegmentMetas (real occurrences)
+    word_segments    = segment_unique_clusters(fast.uniques)          # Radon, representatives only -> per-unique
+                                                                       # list[Segment] (word-level, w/ .image)
+    unique_texts     = recognize_unique_clusters(word_segments)       # per-unique list[Text]
+    restored         = restore_cluster_texts(unique_texts, ...)       # every word, onto every real occurrence
+    drawing_vectors  = build_drawing_output(...)
 
 See `_common.run_current_pipeline` for the real block sequence and
 `_steps.py` / `sub_pipelines/` for each call.

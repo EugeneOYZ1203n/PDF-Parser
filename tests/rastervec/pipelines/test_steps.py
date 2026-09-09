@@ -3,14 +3,19 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from rastervec.models import Segment
+from rastervec.helpers.geometry import transform_vector
+from rastervec.models import Segment, UniqueSegment
 from rastervec.pipelines import _steps
 from rastervec.pipelines._steps import (
     _candidate_tile_bboxes,
+    _cluster_angle,
+    _normalize_segment,
     _sample_mask,
+    build_cluster_candidates,
     build_drawing_output,
     detect_text_fast,
     group_similar_segments,
+    segment_unique_clusters,
 )
 
 
@@ -201,3 +206,91 @@ def test_detect_text_fast_all_must_pass_not_just_the_group_min(monkeypatch, vect
 
     assert res.uniques == []
     assert {id(v) for v in res.dropped_vectors} == {id(strong), id(weak)}
+
+
+# --------------------------------------------------------------------------
+# _cluster_angle / build_cluster_candidates (Phase C.5, cluster-level, pre-Radon)
+# --------------------------------------------------------------------------
+def _l_shape_cluster(vector) -> list:
+    """A long horizontal segment + a much shorter vertical one -- an
+    asymmetric point cloud whose PCA principal axis is dominated by, and
+    stays close to, the long segment's own direction."""
+    long_arm = vector(kind="l", items=[("l", (0.0, 0.0), (200.0, 0.0))])
+    short_arm = vector(kind="l", items=[("l", (0.0, 0.0), (0.0, 1.0))])
+    return [long_arm, short_arm]
+
+
+def test_cluster_angle_recovers_known_rotation(vector):
+    unrotated = _l_shape_cluster(vector)
+    rotation_deg = 25.0
+    rotated = [transform_vector(v, offset=(0.0, 0.0), rotation_deg=rotation_deg) for v in unrotated]
+
+    angle = _cluster_angle(rotated)
+
+    assert angle == pytest.approx(rotation_deg, abs=2.0)
+
+
+def test_cluster_angle_empty_is_zero():
+    assert _cluster_angle([]) == 0.0
+
+
+def test_normalize_segment_undoes_cluster_angle_rotation(vector):
+    """Rotating an L-shaped cluster by a known angle, estimating that angle
+    back via `_cluster_angle`, and normalizing by it should recover a
+    cluster whose bbox is wide-not-tall again -- i.e. the same orientation
+    as the original, unrotated cluster (matching `_normalize_segment`'s
+    existing use with a Radon angle, now fed a PCA angle instead)."""
+    unrotated = _l_shape_cluster(vector)
+    rotated = [transform_vector(v, offset=(0.0, 0.0), rotation_deg=40.0) for v in unrotated]
+
+    seg = Segment(vectors=rotated, angle=_cluster_angle(rotated))
+    canonical, _offset = _normalize_segment(seg)
+
+    x0, y0, x1, y1 = canonical[0].bbox
+    for v in canonical[1:]:
+        vx0, vy0, vx1, vy1 = v.bbox
+        x0, y0, x1, y1 = min(x0, vx0), min(y0, vy0), max(x1, vx1), max(y1, vy1)
+    assert (x1 - x0) > (y1 - y0)  # wide, not tall -- same shape as the original
+
+
+def test_build_cluster_candidates_one_segment_per_non_empty_cluster(vector):
+    v1 = vector(bbox=(0, 0, 10, 5))
+    v2 = vector(bbox=(50, 50, 60, 55))
+
+    segments = build_cluster_candidates([[v1], [], [v2]])
+
+    assert len(segments) == 2
+    assert segments[0].vectors == [v1]
+    assert segments[1].vectors == [v2]
+
+
+def test_build_cluster_candidates_empty_input():
+    assert build_cluster_candidates([]) == []
+
+
+# --------------------------------------------------------------------------
+# segment_unique_clusters (Phase G, Radon on representatives only)
+# --------------------------------------------------------------------------
+def test_segment_unique_clusters_calls_segment_clusters_once_per_unique(monkeypatch, vector):
+    calls = []
+
+    def fake_segment_clusters(clusters):
+        calls.append(clusters)
+        return [Segment(vectors=clusters[0], angle=0.0, image=np.zeros((2, 2), dtype=np.uint8))]
+
+    monkeypatch.setattr(_steps, "segment_clusters", fake_segment_clusters)
+
+    u1 = UniqueSegment(vectors=[vector(bbox=(0, 0, 10, 5))])
+    u2 = UniqueSegment(vectors=[vector(bbox=(20, 20, 30, 25))])
+
+    result = segment_unique_clusters([u1, u2])
+
+    assert len(calls) == 2
+    assert calls[0] == [u1.vectors]
+    assert calls[1] == [u2.vectors]
+    assert len(result) == 2
+    assert all(len(word_segs) == 1 for word_segs in result)
+
+
+def test_segment_unique_clusters_empty_input():
+    assert segment_unique_clusters([]) == []

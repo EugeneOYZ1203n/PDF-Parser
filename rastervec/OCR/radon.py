@@ -25,18 +25,23 @@ combines this angle with PaddleOCR's cls-detected 180-degree flip) depend
 on the full-precision value; rounding it here would silently degrade every
 downstream angle to blocky 90-degree steps.
 
-Pipeline use: this now runs directly on Vector_Classification's kept
-clusters, *before* similarity grouping and FAST detection (moved earlier
-in the pipeline vs. the pre-refactor design, where Radon ran right before
-OCR on already-deduped/FAST-passed clusters) -- see
-`pipelines/_common.py`. `segment_clusters` renders each cluster once
-(transient -- the image itself is never returned or kept) purely to
-estimate its skew and word boundaries, then maps each word's crop region
-back onto the cluster's own `Vector`s (by bbox overlap) to build a flat
-`list[Segment]`, one per word, at real page position. The 0-vs-180 (and
-90-vs-270) ambiguity Radon cannot resolve is left to
-`OCR/Paddle_OCR/ocr_backend.py`'s PaddleOCR `cls` pass, once a segment's
-been deduped down to a `UniqueSegment` and is actually being OCR'd.
+Pipeline use: this runs *after* similarity grouping and FAST detection have
+already deduped Vector_Classification's kept clusters down to one elected
+representative per similarity group (the pre-refactor design -- see
+`pipelines/_steps.py::segment_unique_clusters`, called once per
+`UniqueSegment`, never on a whole page's clusters at once). Cluster-level
+grouping/FAST use a cheap PCA-based rotation estimate instead of Radon's
+(see `pipelines/_steps.py::_cluster_angle`), precisely because running
+Radon itself is the expensive, render-dependent step this reordering
+defers until after dedup. `segment_clusters` renders each input cluster
+once, estimates its skew and word boundaries, then maps each word's crop
+region back onto the cluster's own `Vector`s (by bbox overlap) to build a
+flat `list[Segment]`, one per word, in that cluster's own frame -- and
+now also captures each word's own deskewed pixel crop directly into
+`Segment.image`, so OCR (`OCR/Paddle_OCR/ocr_backend.py::
+recognize_segments`) never has to re-render from vectors a second time.
+The 0-vs-180 (and 90-vs-270) ambiguity Radon cannot resolve is left to
+PaddleOCR's `cls` pass once a word is actually being OCR'd.
 """
 from __future__ import annotations
 
@@ -411,14 +416,16 @@ def _assign_vectors_to_words(
 
 def segment_clusters(clusters: list[list[Vector]], *, dpi: int = 300) -> list[Segment]:
     """Radon-segments every cluster into word-level `Segment`s at real page
-    position. For each cluster: render (transient, not kept) -> estimate
-    skew (full precision) -> deskew -> split into line/word crops ->
-    map each word's crop region back onto the cluster's own `Vector`s (by
-    bbox overlap, see `_assign_vectors_to_words`) -> one `Segment` per
-    non-empty word. A cluster with no ink, or whose deskewed profile
-    yields no word bands, is skipped (its Vectors are lost from this
-    step's output -- callers should already know FAST/similarity only see
-    clusters with real ink)."""
+    position. For each cluster: render (transient, not kept as a whole --
+    but each word's own crop *is* kept, see below) -> estimate skew (full
+    precision) -> deskew -> split into line/word crops -> map each word's
+    crop region back onto the cluster's own `Vector`s (by bbox overlap, see
+    `_assign_vectors_to_words`) -> one `Segment` per non-empty word, its
+    `image` the word's own deskewed pixel crop (so OCR never has to
+    re-render from vectors). A cluster with no ink, or whose deskewed
+    profile yields no word bands, is skipped (its Vectors are lost from
+    this step's output -- callers should already know FAST/similarity only
+    see clusters with real ink)."""
     segments: list[Segment] = []
     for cluster in clusters:
         if not cluster:
@@ -443,6 +450,7 @@ def segment_clusters(clusters: list[list[Vector]], *, dpi: int = 300) -> list[Se
         gap_threshold = _cluster_gap_threshold([w for cols in line_cols for w in _line_run_widths(cols)])
 
         word_bboxes: list[tuple[float, float, float, float]] = []
+        word_images: list[np.ndarray] = []
         for by0, by1 in bands:
             line = deskewed[by0:by1 + 1, :]
             for wx0, wy0, wx1, wy1 in split_words(line, gap_threshold=gap_threshold):
@@ -453,12 +461,14 @@ def segment_clusters(clusters: list[list[Vector]], *, dpi: int = 300) -> list[Se
                     cluster, dpi_used, [(float(x), float(y)) for x, y in mapped],
                 )
                 word_bboxes.append(page_bbox)
+                word_images.append(deskewed[gy0:gy1, wx0:wx1])
 
         if not word_bboxes:
             continue
 
-        for word_vectors in _assign_vectors_to_words(cluster, word_bboxes):
+        assignments = _assign_vectors_to_words(cluster, word_bboxes)
+        for word_vectors, image in zip(assignments, word_images):
             if word_vectors:
-                segments.append(Segment(vectors=word_vectors, angle=float(skew)))
+                segments.append(Segment(vectors=word_vectors, angle=float(skew), image=image))
 
     return segments

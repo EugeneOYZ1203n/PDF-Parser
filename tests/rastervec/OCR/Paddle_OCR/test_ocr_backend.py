@@ -6,12 +6,12 @@ import numpy as np
 import pytest
 
 from rastervec.config import OCR_LANG, OCR_VERSION
-from rastervec.models import UniqueSegment
+from rastervec.models import Segment
 from rastervec.OCR.Paddle_OCR.ocr_backend import (
     OcrBox,
     PaddleRecBackend,
     _recognize_crops_job,
-    recognize_unique_segments,
+    recognize_segments,
 )
 
 _RUN_OCR_TESTS = os.environ.get("RASTERVEC_RUN_OCR_TESTS") == "1"
@@ -101,64 +101,84 @@ def test_recognize_crops_job_delegates_to_backend(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# recognize_unique_segments -- rendering + batching + Text construction,
-# with a stubbed recognize_fn (no real model needed).
+# recognize_segments -- batching + Text construction from an already-
+# rendered `Segment.image`, with a stubbed recognize_fn (no real model
+# needed, and no render call to stub either).
 # --------------------------------------------------------------------------
-def _rect_unique_segment(vector, bbox=(0.0, 0.0, 40.0, 20.0)) -> UniqueSegment:
-    return UniqueSegment(vectors=[vector(kind="re", bbox=bbox, fill=(0, 0, 0))])
+def _word_segment(vector, bbox=(0.0, 0.0, 40.0, 20.0), angle=0.0) -> Segment:
+    return Segment(
+        vectors=[vector(kind="re", bbox=bbox, fill=(0, 0, 0))],
+        angle=angle,
+        image=np.zeros((10, 10), dtype=np.uint8),
+    )
 
 
-def test_recognize_unique_segments_returns_one_text_per_unique(vector):
-    uniques = [_rect_unique_segment(vector), _rect_unique_segment(vector, bbox=(0.0, 0.0, 60.0, 30.0))]
+def test_recognize_segments_returns_one_text_per_segment(vector):
+    segments = [_word_segment(vector), _word_segment(vector, bbox=(0.0, 0.0, 60.0, 30.0))]
 
     def stub_recognize(crops):
         return [OcrBox(text=f"W{i}", confidence=0.8, flip_deg=0) for i, _c in enumerate(crops)]
 
-    texts = recognize_unique_segments(uniques, recognize_fn=stub_recognize)
+    texts = recognize_segments(segments, recognize_fn=stub_recognize)
 
     assert [t.text for t in texts] == ["W0", "W1"]
     assert all(t.source == "ocr" for t in texts)
     assert all(t.confidence == 0.8 for t in texts)
 
 
-def test_recognize_unique_segments_respects_batch_size(vector):
-    uniques = [_rect_unique_segment(vector) for _ in range(5)]
+def test_recognize_segments_respects_batch_size(vector):
+    segments = [_word_segment(vector) for _ in range(5)]
     batch_sizes = []
 
     def stub_recognize(crops):
         batch_sizes.append(len(crops))
         return [OcrBox(text="X", confidence=0.5) for _ in crops]
 
-    recognize_unique_segments(uniques, batch_size=2, recognize_fn=stub_recognize)
+    recognize_segments(segments, batch_size=2, recognize_fn=stub_recognize)
 
     assert batch_sizes == [2, 2, 1]
 
 
-def test_recognize_unique_segments_flip_deg_sets_direction(vector):
-    uniques = [_rect_unique_segment(vector)]
+def test_recognize_segments_flip_deg_sets_direction(vector):
+    segments = [_word_segment(vector)]
 
     def stub_recognize(crops):
         return [OcrBox(text="UPSIDE", confidence=0.9, flip_deg=180)]
 
-    texts = recognize_unique_segments(uniques, recognize_fn=stub_recognize)
+    texts = recognize_segments(segments, recognize_fn=stub_recognize)
 
     assert round(texts[0].angle()) % 360 == 180
 
 
-def test_recognize_unique_segments_empty_input():
-    assert recognize_unique_segments([]) == []
+def test_recognize_segments_combines_own_angle_with_flip(vector):
+    """`direction` folds in the word's own Radon residual `angle` (not just
+    the classifier's flip) -- these vectors are still in the representative
+    cluster's canonical frame, not re-zeroed per word."""
+    segments = [_word_segment(vector, angle=10.0)]
+
+    def stub_recognize(crops):
+        return [OcrBox(text="TILTED", confidence=0.9, flip_deg=0)]
+
+    texts = recognize_segments(segments, recognize_fn=stub_recognize)
+
+    assert texts[0].angle() == pytest.approx(10.0)
+
+
+def test_recognize_segments_empty_input():
+    assert recognize_segments([]) == []
 
 
 @pytest.mark.skipif(
     not _RUN_OCR_TESTS,
     reason="real PaddleOCR round-trip; opt in via RASTERVEC_RUN_OCR_TESTS=1",
 )
-def test_recognize_unique_segments_reads_real_rendered_text(tmp_pdf_path):
+def test_recognize_segments_reads_real_rendered_text(tmp_pdf_path):
     """End-to-end smoke test with the real PaddleOCR engine: a real vector-
-    text page, run through classification + Radon segmentation, its first
-    segment's own real vectors wrapped as a UniqueSegment (no normalization
-    needed -- recognize_unique_segments only renders `unique.vectors`, it
-    doesn't care whether they're in a canonical or real-position frame)."""
+    text page, run through classification, then Radon segmentation on that
+    one surviving cluster's own vectors (standing in for a `UniqueSegment`
+    -- the new pipeline only ever Radon-segments a representative cluster,
+    never a whole page's clusters at once), recognizing the real word-level
+    `Segment`s (with their real captured crop images) it produces."""
     from rastervec.Evaluation.conversion import convert_page_text_only
     from rastervec.OCR.radon import segment_clusters
     from rastervec.pipelines.sub_pipelines.vector_classification import classify_vectors
@@ -182,12 +202,13 @@ def test_recognize_unique_segments_reads_real_rendered_text(tmp_pdf_path):
             vectors = extract_vectors(page)
             cls = classify_vectors(vectors, page)
             flat_clusters = [[v for group in c for v in group] for c in cls.text_clusters]
-            segments = segment_clusters(flat_clusters)
+            representative = flat_clusters[0]
+            word_segments = segment_clusters([representative])
 
-    assert segments, "expected at least one Radon segment from the rendered text"
-    unique = UniqueSegment(vectors=segments[0].vectors)
-    texts = recognize_unique_segments([unique])
+    assert word_segments, "expected at least one Radon segment from the rendered text"
+    texts = recognize_segments(word_segments)
 
-    assert len(texts) == 1
+    assert len(texts) >= 1
+    joined = "".join(t.text for t in texts).upper().replace(" ", "")
     # spacing/case varies by rec model; the point is the glyphs were read.
-    assert "HELLO" in texts[0].text.upper().replace(" ", "")
+    assert "HELLO" in joined

@@ -27,45 +27,56 @@ survives the whole chain becomes a *text candidate* (see below).
 
 ## Segment
 
-One Radon-segmented word (`OCR/radon.py::segment_clusters`), at its real
-page position -- the unit similarity grouping and FAST detection both
-operate on. Runs directly on classification's kept clusters (flattened to
-`list[Vector]` per cluster), *before* similarity grouping and FAST, so
-dedup happens as early as possible. Carries the cluster's own Radon-
-estimated skew `angle`, at full precision (never rounded to a quarter
-turn -- see `docs/PIPELINE.md`'s angle-precision invariant).
+The same dataclass (`vectors`, `angle`, optionally `image`) shared by two
+dedup passes at two granularities -- see `docs/PIPELINE.md`'s step
+sequence and `models/segment.py`'s docstring:
+
+- **Cluster-level (pre-Radon)**: one `Segment` per classification cluster,
+  `angle` a cheap PCA principal-axis estimate over the cluster's own point
+  cloud (`pipelines._steps._cluster_angle`) -- pure vector-geometry math,
+  no rendering. The unit similarity grouping and FAST detection both
+  operate on, run directly on classification's kept clusters, *before*
+  Radon or OCR ever touch them.
+- **Word-level (post-Radon, representatives only)**: one `Segment` per
+  word, produced by `OCR/radon.py::segment_clusters` when run on just an
+  elected representative's own canonical-frame vectors -- Radon's precise
+  residual skew `angle`, at full precision (never rounded to a quarter
+  turn -- see `docs/PIPELINE.md`'s angle-precision invariant), plus that
+  word's own captured crop in `image`.
 
 ## Similarity group
 
-A whole-page grouping of *segments* judged geometrically equivalent --
-same shapes, translation/rotation-exact (using each segment's own known
-`angle` to normalize rotation directly, rather than searching for it) --
-computed by `pipelines._steps.group_similar_segments`, after `segment` and
-before `fast`. Segments in the same similarity group (e.g. repeated
-instances of the same label or symbol at different positions/orientations
-on the page) share one FAST verdict: a group passes only if *every*
-member's own combined FAST score individually exceeds
+A whole-page grouping of geometrically equivalent *clusters* --
+same shapes, translation/rotation-tolerant (using each cluster's own PCA
+angle estimate to normalize rotation) -- computed by
+`pipelines._steps.group_similar_segments`, after `classify` and before
+`fast`, i.e. *before* Radon ever runs. Clusters in the same similarity
+group (e.g. repeated instances of the same label or symbol at different
+positions/orientations on the page) share one FAST verdict: a group passes
+only if *every* member's own combined FAST score individually exceeds
 `FAST_COMBINED_KEEP_THRESHOLD` -- one weak instance drops the whole group.
 
 ## Unique segment
 
-The single representative of a passing similarity group that actually
-gets rendered and OCR'd (`UniqueSegment`) -- its `vectors` are normalized
-to a canonical frame (translated so the segment's own bbox origin is
-`(0, 0)`, rotated by `-angle` so it's upright). Every other member of the
-group keeps only a `SegmentMeta` (offset + rotation back to its own real
-position), so the one OCR `Text` a `UniqueSegment` produces can be
-duplicated and repositioned for every real occurrence without
-re-rendering or re-recognizing it.
+The single representative *cluster* of a passing similarity group --
+its `vectors` are normalized to a canonical frame (translated so the
+cluster's own bbox origin is `(0, 0)`, rotated by `-angle` so it's
+upright). Every other member of the group keeps only a `SegmentMeta`
+(offset + rotation back to its own real position). Only this
+representative is Radon-segmented into words and OCR'd (`pipelines.
+_steps.segment_unique_clusters` -> `OCR.Paddle_OCR.ocr_backend.
+recognize_segments`); the resulting word-level `Text`s are then replayed
+onto every other member's real position (`pipelines.sub_pipelines.ocr.
+restore_cluster_texts`) without re-rendering or re-recognizing anything.
 
 ## Text candidate
 
 A cluster that survived the entire vector-classification chain
 (`classification.cluster()`'s final "kept" category) -- handed downstream
-to Radon segmentation, similarity grouping, FAST, and OCR. There is no
+to similarity grouping, FAST, Radon segmentation, and OCR. There is no
 separate drawing-vs-text heuristic inside the classification chain
 itself; a text candidate is just "whatever wasn't filtered out." OCR
-success/failure (via the FAST gate a segment's similarity group must
+success/failure (via the FAST gate a cluster's similarity group must
 clear) is the real, final signal for whether it was actually text.
 
 ## Drawing vector

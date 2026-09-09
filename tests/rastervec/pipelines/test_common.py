@@ -11,13 +11,13 @@ from rastervec.pipelines.sub_pipelines import ocr as ocr_mod
 
 @pytest.fixture(autouse=True)
 def _stub_ocr(monkeypatch):
-    def fake_recognize_unique_segments(uniques, *, recognize_fn=None):
+    def fake_recognize_segments(segments, *, recognize_fn=None):
         from rastervec.helpers.geometry import compute_origin, union_bbox
         from rastervec.models import Text
 
         texts = []
-        for u in uniques:
-            bbox = union_bbox([v.bbox for v in u.vectors]) if u.vectors else (0.0, 0.0, 1.0, 1.0)
+        for seg in segments:
+            bbox = union_bbox([v.bbox for v in seg.vectors]) if seg.vectors else (0.0, 0.0, 1.0, 1.0)
             direction = (1.0, 0.0)
             texts.append(Text(
                 text="TXT", bbox=bbox, direction=direction, origin=compute_origin(bbox, direction),
@@ -28,7 +28,7 @@ def _stub_ocr(monkeypatch):
             ))
         return texts
 
-    monkeypatch.setattr(ocr_mod, "_recognize_unique_segments", fake_recognize_unique_segments)
+    monkeypatch.setattr(ocr_mod, "_recognize_segments", fake_recognize_segments)
 
 
 def _text_pdf(tmp_pdf_path):
@@ -73,14 +73,18 @@ def test_run_pipeline_verbose_toggles_intermediates(tmp_pdf_path):
     assert lean.vectors_raw is None
     assert lean.similarity_groups is None
     assert lean.step_outputs is None
-    assert lean.segments is None
+    assert lean.cluster_segments is None
+    assert lean.word_segments is None
+    assert lean.unique_texts is None
 
     full = run_pipeline(path, 0, enable_fast=False, verbose=True)
     assert full.vectors_raw is not None
     assert full.vectors_by_layer is not None
     assert full.similarity_groups is not None
     assert full.step_outputs is not None and set(full.step_outputs) == set(STEP_NAMES)
-    assert full.segments is not None
+    assert full.cluster_segments is not None
+    assert full.word_segments is not None
+    assert full.unique_texts is not None
 
 
 def test_run_pipeline_drawing_pdf_ocrs_candidate(tmp_pdf_path):
@@ -119,14 +123,14 @@ def test_run_current_pipeline_threads_compute_to_fast_and_ocr(tmp_pdf_path, monk
         captured["fast"] = kwargs.get("compute")
         return real_detect_text_fast(*args, **kwargs)
 
-    real_recognize = _common.recognize
+    real_recognize = _common.recognize_unique_clusters
 
     def spy_recognize(*args, **kwargs):
         captured["ocr"] = kwargs.get("compute")
         return real_recognize(*args, **kwargs)
 
     monkeypatch.setattr(_common, "detect_text_fast", spy_detect_text_fast)
-    monkeypatch.setattr(_common, "recognize", spy_recognize)
+    monkeypatch.setattr(_common, "recognize_unique_clusters", spy_recognize)
 
     run_pipeline(_text_pdf(tmp_pdf_path), 0, enable_fast=False, compute=sentinel)
     assert captured["fast"] is sentinel

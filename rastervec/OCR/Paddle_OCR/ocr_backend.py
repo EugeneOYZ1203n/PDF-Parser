@@ -1,21 +1,24 @@
-"""The OCR backend: renders each `UniqueSegment`, recognises it with
-PaddleOCR, and returns one `Text` per unique segment.
+"""The OCR backend: recognises pre-segmented word crops with PaddleOCR and
+returns one `Text` per word.
 
-Text *detection* is not PaddleOCR's job in this pipeline -- Radon
-segmentation (`OCR/radon.py`) already split every text-candidate cluster
-into word-level `Segment`s, and Phase E/F's similarity+FAST dedup already
-narrowed those down to the small set of `UniqueSegment`s that actually need
-OCR. So by the time a `UniqueSegment` reaches this module it *is* one word,
-already rotated to (approximately) upright in its own canonical frame --
-the only remaining ambiguity Radon's projection-profile skew estimate
-cannot resolve is a 0-vs-180-degree flip (a baseline is a line, not an
-arrow). Per review, that flip is no longer resolved by hand (recognising
-both orientations and keeping the higher-confidence reading) -- PaddleOCR's
-own angle classifier (`use_angle_cls=True`, re-enabled here) does it in one
-extra pass, then `text_recognizer` runs once per batch. Radon's precise
-skew angle and the classifier's 0/180 correction are combined into one
-final `direction` before the `Text` is returned -- see `recognize_unique_
-segments`.
+Text *detection* is not PaddleOCR's job in this pipeline -- similarity+FAST
+dedup (Phase E/F, `pipelines/_steps.py`) first narrows every surviving
+classification cluster down to the small set of elected representatives
+that actually need processing, then Radon segmentation
+(`OCR/radon.py::segment_clusters`, called only on those representatives)
+splits each one into word-level `Segment`s, each already carrying its own
+deskewed crop (`Segment.image`) -- so by the time a `Segment` reaches this
+module it *is* one word, already rotated to (approximately) upright, and no
+render happens here at all. The only remaining ambiguity Radon's
+projection-profile skew estimate cannot resolve is a 0-vs-180-degree flip (a
+baseline is a line, not an arrow) -- PaddleOCR's own angle classifier
+(`use_angle_cls=True`) resolves it in one extra pass, then `text_recognizer`
+runs once per batch. Radon's own residual skew angle and the classifier's
+0/180 correction are combined into one final `direction` before the `Text`
+is returned -- see `recognize_segments`. (A cluster's own PCA-estimated
+rotation, on top of this, is applied afterward by `pipelines/sub_pipelines/
+ocr.py::restore_cluster_texts` when placing a representative's words back
+onto each real cluster occurrence -- this module never sees that.)
 
 `PaddleRecBackend` builds one `paddleocr.PaddleOCR` engine
 (`config.OCR_VERSION` = PP-OCRv4, `config.OCR_LANG`), cached at class scope
@@ -33,9 +36,8 @@ import numpy as np
 from rastervec.config import OCR_BATCH_SIZE, OCR_LANG, OCR_VERSION
 from rastervec.helpers.geometry import compute_origin, transform_direction, union_bbox
 from rastervec.logging_setup import get_logger
-from rastervec.models import Text, UniqueSegment
+from rastervec.models import Segment, Text
 from rastervec.OCR.Paddle_OCR.crop_normalize import normalize_line_crop
-from rastervec.OCR.radon import render_cluster_for_radon
 from rastervec.renderer.stages import render_ocr_results  # noqa: F401 -- re-exported for callers
 
 _LOG = get_logger("ocr.backend")
@@ -141,44 +143,39 @@ def _recognize_crops_job(
     return PaddleRecBackend(ocr_version, lang).recognize_crops(crops)
 
 
-def recognize_unique_segments(
-    uniques: list[UniqueSegment],
+def recognize_segments(
+    segments: list[Segment],
     *,
     batch_size: int = OCR_BATCH_SIZE,
     recognize_fn: "Callable[[list[np.ndarray]], list[OcrBox]] | None" = None,
 ) -> list[Text]:
-    """Renders + recognises every `UniqueSegment` (each already isolated to
-    one word, in its own canonical upright-ish frame from Phase E) in
-    batches of `batch_size`, and returns one canonical-frame `Text` per
-    input `UniqueSegment`, `source="ocr"`. `recognize_fn` defaults to a
-    fresh `PaddleRecBackend().recognize_crops`; pass one (e.g. dispatching
-    to a shared compute pool -- see `Reader/Parallel`) to replace the
-    actual engine call without changing anything else here.
+    """Recognises every word-level `Segment` (each already carrying its own
+    deskewed crop in `.image` -- no render happens here) in batches of
+    `batch_size`, and returns one `Text` per input `Segment`, `source=
+    "ocr"`, in the same coordinate frame `segment.vectors` already live in
+    (a representative cluster's own canonical frame -- see `models/
+    segment.py`'s docstring). `recognize_fn` defaults to a fresh
+    `PaddleRecBackend().recognize_crops`; pass one (e.g. dispatching to a
+    shared compute pool -- see `Reader/Parallel`) to replace the actual
+    engine call without changing anything else here.
 
-    `direction` combines Radon's own precise skew (implicit in `uniques[i]`
-    already being upright in its canonical frame -- 0 degrees there) with
-    the classifier's 0/180 flip correction: a flip means the segment was
-    actually upside-down, so its real direction is the canonical frame's
-    horizontal axis rotated 180 degrees."""
+    `direction` combines that word's own Radon residual skew
+    (`segment.angle` -- typically small, since `segment.vectors` were
+    already once coarsely upright via the cluster-level PCA canonicalization
+    that ran before Radon) with the classifier's 0/180 flip correction. A
+    cluster's own PCA rotation is layered on top of this by `pipelines/
+    sub_pipelines/ocr.py::restore_cluster_texts` when placing these words
+    back onto each real cluster occurrence -- not here."""
     recognize_fn = recognize_fn if recognize_fn is not None else PaddleRecBackend().recognize_crops
 
-    renders: list[tuple[np.ndarray, tuple[float, float, float, float]]] = []
-    for unique in uniques:
-        gray, _dpi_used = render_cluster_for_radon(unique.vectors)
-        # Canonical-frame bbox -- the same frame `unique.vectors` already
-        # live in (bbox origin at (0, 0) post Phase-E normalization), not
-        # the OCR render's own padded pixel frame -- so Phase H can restore
-        # it with the exact same `SegmentMeta.offset`/`rotation` used for
-        # `unique.vectors` itself.
-        bbox = union_bbox([v.bbox for v in unique.vectors])
-        renders.append((gray, bbox))
+    bboxes = [union_bbox([v.bbox for v in seg.vectors]) for seg in segments]
 
     texts: list[Text] = []
-    for start in range(0, len(uniques), max(1, batch_size)):
-        batch = renders[start:start + batch_size]
-        boxes = recognize_fn([gray for gray, _bbox in batch])
-        for (gray, bbox), box in zip(batch, boxes):
-            direction = transform_direction((1.0, 0.0), box.flip_deg)
+    for start in range(0, len(segments), max(1, batch_size)):
+        batch = list(zip(segments[start:start + batch_size], bboxes[start:start + batch_size]))
+        boxes = recognize_fn([seg.image for seg, _bbox in batch])
+        for (seg, bbox), box in zip(batch, boxes):
+            direction = transform_direction((1.0, 0.0), seg.angle + box.flip_deg)
             texts.append(Text(
                 text=box.text,
                 bbox=bbox,

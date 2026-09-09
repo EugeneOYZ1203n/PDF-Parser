@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from math import atan2, degrees
 
 import numpy as np
 
@@ -31,6 +32,7 @@ from rastervec.logging_setup import get_logger
 from rastervec.models import Page, Segment, SegmentMeta, UniqueSegment, Vector
 from rastervec.native_text import extract_native_text as _extract_native_text
 from rastervec.OCR.fast_detect import FastDetector
+from rastervec.OCR.radon import segment_clusters
 from rastervec.pipelines.result import FastPageResult
 from rastervec.renderer import render_page_paths
 from rastervec.renderer.stages import render_drawing, render_similarity  # noqa: F401 -- re-exported for callers
@@ -48,9 +50,50 @@ def read_page(reader, page_index: int) -> Page:
 
 
 # --------------------------------------------------------------------------
-# Phase E: segment similarity grouping (post-Radon -- rotation-exact via
-# each Segment's own known precise angle, instead of a PCA-based rotation
-# search over pre-Radon clusters)
+# Phase C.5: cluster-level dedup candidates (pre-Radon)
+# --------------------------------------------------------------------------
+def _cluster_angle(vectors: list[Vector]) -> float:
+    """PCA principal-axis angle (degrees) over `vectors`' own point cloud:
+    translate to the centroid, then the angle of the eigenvector of largest
+    variance. Pure point-cloud math -- no rendering, no Radon transform --
+    so it's cheap enough to run on every surviving classification cluster,
+    unlike Radon's precise (but render-dependent) skew estimate. Ported from
+    the pre-refactor `Vector_Classification/cluster_filters.py::
+    group_similar_clusters`'s own `_normalized_point_cloud` (removed when
+    similarity grouping moved to post-Radon `Segment`s; revived here now
+    that grouping needs to run before Radon again). Sign convention matches
+    `_normalize_segment`'s `-seg.angle` rotation and `helpers.geometry.
+    transform_point`'s counter-clockwise matrix directly -- no adjustment
+    needed to slot this into the same canonicalization code as a Radon
+    angle."""
+    pts = [pt for v in vectors for item in v.items for pt in item_points(item)]
+    if not pts:
+        return 0.0
+    cx = sum(x for x, _y in pts) / len(pts)
+    cy = sum(y for _x, y in pts) / len(pts)
+    sxx = sum((x - cx) ** 2 for x, _y in pts)
+    syy = sum((y - cy) ** 2 for _x, y in pts)
+    sxy = sum((x - cx) * (y - cy) for x, y in pts)
+    theta = 0.5 * atan2(2 * sxy, sxx - syy)
+    return degrees(theta)
+
+
+def build_cluster_candidates(clusters: list[list[Vector]]) -> list[Segment]:
+    """One `Segment` per non-empty classification cluster, `angle` a PCA
+    estimate (`_cluster_angle`) rather than Radon's precise skew -- the
+    "similarity" step's input, feeding the same `group_similar_segments`/
+    `detect_text_fast` used by the old word-level dedup, now one level up.
+    `Segment.image` stays `None` here (see `models/segment.py`'s
+    docstring)."""
+    return [Segment(vectors=c, angle=_cluster_angle(c)) for c in clusters if c]
+
+
+# --------------------------------------------------------------------------
+# Phase E: similarity grouping, shared by both the cluster-level pass
+# (pre-Radon, PCA-estimated angle -- see `build_cluster_candidates` above)
+# and, historically, a word-level pass (post-Radon, exact angle) this
+# function never actually needed to distinguish: it only ever reads
+# `Segment.vectors`/`.angle`, whichever lifecycle produced them.
 # --------------------------------------------------------------------------
 def _normalize_segment(seg: Segment) -> tuple[list[Vector], tuple[float, float]]:
     """Canonical-frame vectors for one Segment: rotate every member Vector
@@ -83,11 +126,11 @@ def _clouds_close(a: list[tuple[float, float]], b: list[tuple[float, float]], to
 def _segments_similar(a: Segment, b: Segment, canon_a, canon_b, tolerance: float) -> bool:
     """True if `a` and `b` are the same shape (same multiset of item kinds)
     and, once both are normalized to their own canonical (translation +
-    exact-Radon-angle-rotation) frame, every corresponding point pair sits
-    within `tolerance * max(scale_a, scale_b)` of each other -- checked
-    against both the direct normalization and its 180-degree-flipped
-    mirror (Radon's own 0-vs-180 ambiguity can leave two otherwise-identical
-    segments canonicalized a half-turn apart)."""
+    `angle`-rotation) frame, every corresponding point pair sits within
+    `tolerance * max(scale_a, scale_b)` of each other -- checked against
+    both the direct normalization and its 180-degree-flipped mirror (a
+    genuine ambiguity for a PCA principal axis, which is always mod-180;
+    also historically true of Radon's own 0-vs-180 skew ambiguity)."""
     if _segment_signature(a) != _segment_signature(b):
         return False
     vecs_a, _ = canon_a
@@ -107,14 +150,16 @@ def _segments_similar(a: Segment, b: Segment, canon_a, canon_b, tolerance: float
 def group_similar_segments(
     segments: list[Segment], tolerance: float = UNIQUE_CLUSTER_TOLERANCE,
 ) -> list[list[int]]:
-    """Groups `segments` by whole-page, translation+rotation-exact shape
+    """Groups `segments` by whole-page, translation+rotation-tolerant shape
     equivalence -- each inner list is the indices (into `segments`) of one
     similarity group, e.g. every occurrence of the same repeated dimension
     label. Greedy O(n^2): each segment joins the first existing group whose
     representative it's `_segments_similar` to, else starts a new group.
-    Rotation is removed using each segment's own precise Radon `angle`
-    (never a search), so this is cheaper and more accurate than the old
-    pre-Radon PCA-based cluster-similarity check it replaces."""
+    Rotation is removed using each segment's own `angle` -- generic over
+    whichever lifecycle produced `segments` (see `models/segment.py`'s
+    docstring): a PCA estimate for the cluster-level pass this function is
+    actually called with today, or Radon's exact skew for a word-level
+    pass."""
     canon = [_normalize_segment(seg) for seg in segments]
     groups: list[list[int]] = []
     reps: list[int] = []
@@ -132,7 +177,11 @@ def group_similar_segments(
 
 
 # --------------------------------------------------------------------------
-# Phase F: FAST detection on segments (real page position), all-must-pass
+# Phase F: FAST detection on segments (real page position), all-must-pass.
+# Called today with the cluster-level candidates `build_cluster_candidates`
+# produces -- so a passing group's `UniqueSegment` is one whole
+# representative cluster, and each `SegmentMeta` a real cluster occurrence
+# -- but, like Phase E, generic over whatever `Segment`s it's given.
 # --------------------------------------------------------------------------
 @dataclass
 class FastStepResult:
@@ -292,6 +341,23 @@ def detect_text_fast(
         detect_seconds, scores_by_group,
     )
     return FastStepResult(uniques, metas, dropped_vectors, result)
+
+
+# --------------------------------------------------------------------------
+# Phase G: Radon segmentation, now run only on the small set of elected
+# representative clusters Phase F dedup down to (was: every surviving
+# classification cluster, before dedup) -- see `OCR/radon.py`'s own
+# docstring for the segmentation logic itself.
+# --------------------------------------------------------------------------
+def segment_unique_clusters(uniques: list[UniqueSegment]) -> list[list[Segment]]:
+    """Radon-segments each representative cluster's own (already
+    cluster-canonical-frame) vectors into word-level `Segment`s -- one
+    `segment_clusters([u.vectors])` call per unique, so a non-representative
+    cluster instance is never rendered or Radon-processed at all. Returns
+    one inner list per input `unique`, same order, each entry that
+    representative's own words (with `Segment.image` populated -- see
+    `models/segment.py`'s docstring)."""
+    return [segment_clusters([u.vectors]) for u in uniques]
 
 
 # --------------------------------------------------------------------------

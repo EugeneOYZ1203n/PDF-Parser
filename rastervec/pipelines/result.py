@@ -43,7 +43,7 @@ class ClusteringStageResult:
 @dataclass
 class FastPageResult:
     """FAST text detection's whole-page result (see
-    `pipelines/_steps.detect_text_fast`). `scores` is keyed by a segment
+    `pipelines/_steps.detect_text_fast`). `scores` is keyed by a cluster
     similarity group's own index into that step's `groups` list (the
     group's combined, min-across-members score)."""
 
@@ -80,13 +80,21 @@ class PipelineResult:
     text_clusters: "list[list[list[Vector]]] | None" = None
     clustering: dict | None = None
     classification_dropped: "list[Vector] | None" = None
-    segments: "list[Segment] | None" = None
+    cluster_segments: "list[Segment] | None" = None  # pre-Radon, PCA-angle,
+    # one per surviving classification cluster -- similarity+FAST's input
     similarity_groups: "list[list[int]] | None" = None
     fast_result: FastPageResult | None = None
-    unique_segments: "list[UniqueSegment] | None" = None
-    segment_metas: "list[SegmentMeta] | None" = None
+    unique_segments: "list[UniqueSegment] | None" = None  # one whole
+    # representative CLUSTER per passing similarity group (its vectors)
+    segment_metas: "list[SegmentMeta] | None" = None  # one per real cluster
+    # occurrence (including the representative's own)
     fast_dropped_vectors: "list[Vector] | None" = None
-    unique_texts: "list[Text] | None" = None
+    word_segments: "list[list[Segment]] | None" = None  # Radon's output,
+    # representatives only -- word-level Segments (with `.image`), one
+    # inner list per `unique_segments` entry, same order
+    unique_texts: "list[list[Text]] | None" = None  # one inner list per
+    # `unique_segments`/`word_segments` entry -- that representative's own
+    # word-level OCR Texts, in canonical frame
     restored_texts: "list[Text] | None" = None
     step_outputs: dict | None = None
 
