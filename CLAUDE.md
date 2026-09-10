@@ -309,8 +309,13 @@ independently of the others (every stage's *output* is a plain dataclass from `m
     longer used by the benchmark; kept as a general utility + for its tests.
 - **`Evaluation/Labelling/`** *(implemented)*: ground-truth labelling for vector-text regions.
   `label_schema.py`'s `LabelEntry` (`page_index`, `cluster_bbox`, `cluster_signature`, `text`,
-  `source: "manual"|"auto"`, `expected_rotation`) + `LabelSet` are the sidecar JSON format
-  (`save_labels`/`load_labels`); `cluster_signature`'s meaning depends on `source` —
+  `source: "manual"|"auto"`, `expected_rotation`, `vector_signatures`) + `LabelSet` are the
+  sidecar JSON format (`save_labels`/`load_labels`). `vector_signatures` is the sorted list of
+  `path_signature(v)` (SHA1 of absolute page-space geometry + `seqno` + paint attrs — run-stable,
+  collision-resistant, **not** translation-invariant unlike `item_filters.vector_signature`) for
+  every `Vector` in a `source="manual"` cluster, so an external script re-running `extract_vectors`
+  on the same PDF can match a label to its exact paths; empty for `source="auto"`.
+  `cluster_signature`'s meaning depends on `source` —
   `"manual"` entries use `cluster_signature(cluster)`, a deterministic member-count + rounded-bbox
   string identifying a real clustered-run's cluster across repeated pipeline runs (VectorPath
   objects have no identity across runs); `"auto"` entries use a
@@ -331,7 +336,10 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   need real clusters (a human has to click something), so it's the one place that still runs the
   real pipeline — via `classify_vectors(vectors.paths, page, verbose=True)` (sub_pipelines)
   — with a `_get_display_matrix` / `Tooltip` for the page-space → canvas-space transform and hover
-  tooltip, both ported from the former `debug_app.py` when it was removed. It's also a light cluster
+  tooltip, both ported from the former `debug_app.py` when it was removed. `_get_display_matrix`
+  (`rotation_matrix * zoom`) is **overlay-only**; `_render` rasterizes the page pixmap zoom-only
+  because `get_pixmap()` bakes `/Rotate` itself (passing the full matrix double-rotates the bitmap
+  vs. the overlays on rotated pages — same split as `inspector/pdf_model.py`). It's also a light cluster
   *editor* (the pipeline's clustering isn't always right): scroll + `Zoom -`/`Zoom +` + Ctrl-wheel
   zoom, and two edit modes — **cluster mode** (left-click toggles a whole cluster; `Group` merges
   the selected clusters, `Ungroup` splits one back into its pre-spatial `ctx.cluster_groups`

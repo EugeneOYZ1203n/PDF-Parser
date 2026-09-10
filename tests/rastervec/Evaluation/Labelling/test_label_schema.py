@@ -5,6 +5,7 @@ from rastervec.Evaluation.Labelling.label_schema import (
     LabelSet,
     cluster_signature,
     load_labels,
+    path_signature,
     save_labels,
 )
 def test_cluster_signature_deterministic_for_same_members(vector):
@@ -18,6 +19,19 @@ def test_cluster_signature_differs_for_different_bboxes(vector):
     assert cluster_signature(a) != cluster_signature(b)
 
 
+def test_path_signature_stable_across_rebuilds(vector):
+    a = vector(bbox=(1, 2, 3, 4), seqno=7, items=[("l", (1, 2), (3, 4))])
+    b = vector(bbox=(1, 2, 3, 4), seqno=7, items=[("l", (1, 2), (3, 4))])
+    assert path_signature(a) == path_signature(b)
+
+
+def test_path_signature_differs_for_different_vectors(vector):
+    a = vector(bbox=(1, 2, 3, 4), seqno=7)
+    assert path_signature(a) != path_signature(vector(bbox=(1, 2, 3, 4), seqno=8))
+    assert path_signature(a) != path_signature(vector(bbox=(5, 6, 7, 8), seqno=7))
+    assert path_signature(a) != path_signature(vector(bbox=(1, 2, 3, 4), seqno=7, color=(1.0, 0.0, 0.0)))
+
+
 def test_save_and_load_labels_round_trip(tmp_path):
     labels = LabelSet(
         pdf_path="foo.pdf",
@@ -25,7 +39,7 @@ def test_save_and_load_labels_round_trip(tmp_path):
             LabelEntry(
                 page_index=0, cluster_bbox=(0, 0, 10, 10),
                 cluster_signature="1:0.0:0.0:10.0:10.0", text="Hello",
-                source="manual",
+                source="manual", vector_signatures=["abc123", "def456"],
             )
         ],
     )

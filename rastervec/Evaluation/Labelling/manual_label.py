@@ -101,6 +101,7 @@ from rastervec.Evaluation.Labelling.label_schema import (
     LabelSet,
     cluster_signature,
     load_labels,
+    path_signature,
     save_labels,
 )
 from rastervec.helpers.geometry import (
@@ -134,8 +135,15 @@ def _flatten(cluster: Cluster) -> list[Vector]:
     return [v for group in cluster for v in group]
 
 
+def _sigs(cluster: Cluster) -> list[str]:
+    """Sorted, deduped `path_signature` of every Vector in the cluster."""
+    return sorted({path_signature(v) for v in _flatten(cluster)})
+
+
 def _get_display_matrix(fitz_page: "fitz.Page", zoom: float) -> "fitz.Matrix":
-    """page-space (unrotated MediaBox) -> canvas-space, page rotation baked in."""
+    """page-space (unrotated MediaBox) -> canvas-space, page rotation baked
+    in. OVERLAY-ONLY: the page pixmap must be rendered zoom-only, since
+    get_pixmap() bakes /Rotate itself (double-rotates otherwise)."""
     return fitz_page.rotation_matrix * fitz.Matrix(zoom, zoom)
 
 
@@ -218,8 +226,11 @@ class ManualLabelApp:
         self._drag_moved = False
         self._drag_rect_id: int | None = None
         self._undo_stack: list[list[Cluster]] = []
-        # (cluster_signature, cluster_bbox) the label bar currently edits.
-        self._label_target: tuple[str, tuple[float, float, float, float]] | None = None
+        # (cluster_signature, cluster_bbox, vector_signatures) the label bar
+        # currently edits.
+        self._label_target: (
+            tuple[str, tuple[float, float, float, float], list[str]] | None
+        ) = None
         self.zoom = _ZOOM
 
         self.root = tk.Tk()
@@ -378,7 +389,10 @@ class ManualLabelApp:
 
     def _render(self) -> None:
         self.canvas.delete("all")
-        pix = self.page.fitz_page.get_pixmap(matrix=self.matrix)
+        # Zoom-only: get_pixmap() bakes the page's /Rotate itself, so passing
+        # self.matrix (rotation already folded in) would double-rotate the
+        # bitmap relative to the overlays. self.matrix stays overlay-only.
+        pix = self.page.fitz_page.get_pixmap(matrix=fitz.Matrix(self.zoom, self.zoom))
         self._photo = tk.PhotoImage(data=pix.tobytes("ppm"))
         self.canvas.create_image(0, 0, anchor="nw", image=self._photo)
         self.canvas.config(scrollregion=(0, 0, pix.width, pix.height))
@@ -642,6 +656,7 @@ class ManualLabelApp:
             if entry.cluster_signature == old_sig:
                 entry.cluster_signature = cluster_signature(_flatten(cluster))
                 entry.cluster_bbox = self._cluster_bbox(cluster)
+                entry.vector_signatures = _sigs(cluster)
                 break
 
     # ---- inline label bar ------------------------------------------------
@@ -657,7 +672,7 @@ class ManualLabelApp:
         target wins, else a cluster-mode selection (Apply labels all of it),
         else the idle prompt."""
         if self._label_target is not None:
-            sig, bbox = self._label_target
+            sig, bbox, _vsigs = self._label_target
             self._label_target_lbl.config(text=f"1 cluster @ ({bbox[0]:.0f}, {bbox[1]:.0f})")
         elif self.mode == "cluster" and self.selected:
             self._label_target_lbl.config(
@@ -683,7 +698,7 @@ class ManualLabelApp:
         # Right-click targets one specific cluster -- drop any multi-selection
         # so Apply is unambiguous.
         self.selected.clear()
-        self._label_target = (sig, bbox)
+        self._label_target = (sig, bbox, _sigs(hit))
         existing = next((e for e in self._page_entries() if e.cluster_signature == sig), None)
         self._text_var.set(existing.text if existing else "")
         self._rot_var.set(str(existing.expected_rotation if existing else 0))
@@ -697,13 +712,15 @@ class ManualLabelApp:
                 return i
         return None
 
-    def _label_targets(self) -> list[tuple[str, tuple[float, float, float, float]]]:
-        """(signature, bbox) for every cluster Apply/Delete should act on: a
-        whole cluster-mode selection if there is one, else the single
-        right-click target."""
+    def _label_targets(
+        self,
+    ) -> list[tuple[str, tuple[float, float, float, float], list[str]]]:
+        """(signature, bbox, vector_signatures) for every cluster Apply/Delete
+        should act on: a whole cluster-mode selection if there is one, else
+        the single right-click target."""
         if self.mode == "cluster" and self.selected:
             return [
-                (cluster_signature(_flatten(c)), self._cluster_bbox(c))
+                (cluster_signature(_flatten(c)), self._cluster_bbox(c), _sigs(c))
                 for i, c in enumerate(self.working_clusters)
                 if i in self.selected and c
             ]
@@ -722,10 +739,11 @@ class ManualLabelApp:
             rotation = int(self._rot_var.get())
         except ValueError:
             rotation = 0
-        for sig, bbox in targets:
+        for sig, bbox, vsigs in targets:
             entry = LabelEntry(
                 page_index=self.page_index, cluster_bbox=bbox, cluster_signature=sig,
                 text=text, source="manual", expected_rotation=rotation,
+                vector_signatures=vsigs,
             )
             existing = self._matching_entry_index(sig)
             if existing is not None:
@@ -741,7 +759,7 @@ class ManualLabelApp:
         if not targets:
             return
         removed = False
-        for sig, _bbox in targets:
+        for sig, _bbox, _vsigs in targets:
             existing = self._matching_entry_index(sig)
             if existing is not None:
                 del self.labels.entries[existing]

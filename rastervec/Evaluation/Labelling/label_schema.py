@@ -17,15 +17,16 @@ instead, not a VectorPath-cluster signature.
 """
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 
-from rastervec.helpers.geometry import union_bbox
+from rastervec.helpers.geometry import item_points, union_bbox
 
 if TYPE_CHECKING:
-    from rastervec.models import VectorPath
+    from rastervec.models import Vector
 
 LabelSource = Literal["manual", "auto"]
 
@@ -41,6 +42,11 @@ class LabelEntry(BaseModel):
     # manual labeller can set this explicitly for a rotated cluster. Used
     # by Evaluation/Evaluate/evaluate.py's rotation-accuracy metric.
     expected_rotation: int = 0
+    # `path_signature()` of every `Vector` that composed this cluster, sorted,
+    # deduped. Lets an external script re-run `extract_vectors` on the same
+    # PDF and match each label back to its exact drawing paths. Empty for
+    # `source="auto"` (native-text based, no vectors).
+    vector_signatures: list[str] = Field(default_factory=list)
 
 
 class LabelSet(BaseModel):
@@ -57,6 +63,25 @@ def cluster_signature(cluster: "list[VectorPath]") -> str:
     survive a fresh pipeline run) produce the same signature."""
     x0, y0, x1, y1 = union_bbox([p.bbox for p in cluster])
     return f"{len(cluster)}:{x0:.1f}:{y0:.1f}:{x1:.1f}:{y1:.1f}"
+
+
+def path_signature(v: "Vector") -> str:
+    """Stable, collision-resistant id for one drawing path (`Vector`),
+    matchable across fresh `extract_vectors` runs over the same PDF (same
+    PyMuPDF version). Uses absolute page-space geometry plus paint attrs --
+    deliberately NOT translation-invariant, unlike
+    `Vector_Classification.item_filters.vector_signature`."""
+    items = []
+    for item in v.items:
+        pts = tuple((round(x, 1), round(y, 1)) for x, y in item_points(item))
+        items.append((item[0], pts))
+    payload = repr((
+        v.page_index, v.seqno, v.type, tuple(items),
+        tuple(round(c, 1) for c in v.rect),
+        v.color, v.fill, v.width, v.dashes,
+        bool(v.closePath), bool(v.even_odd), v.layer,
+    ))
+    return hashlib.sha1(payload.encode()).hexdigest()[:16]
 
 
 def split_labelset_by_source(labels: LabelSet) -> dict[LabelSource, LabelSet]:
