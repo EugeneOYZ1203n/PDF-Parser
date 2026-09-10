@@ -22,6 +22,10 @@ def build_arg_parser(pipeline_name: str) -> argparse.ArgumentParser:
             "--no-fast", action="store_true",
             help="Turn FAST text detection into a pass-through (speed-testing).",
         )
+        parser.add_argument(
+            "--stop-after", default=None, metavar="STEP",
+            help="Skip every pipeline step after STEP (one of the STEP_NAMES).",
+        )
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument("-v", "--verbose", action="store_true", help="DEBUG logging + keep intermediates.")
     verbosity.add_argument("-q", "--quiet", action="store_true", help="Only WARNING and above.")
@@ -43,7 +47,7 @@ def main(pipeline_name: str, argv: list[str] | None = None) -> int:
 
         result = run_pipeline(
             args.pdf, args.page, enable_fast=not getattr(args, "no_fast", False),
-            verbose=args.verbose,
+            verbose=args.verbose, stop_after=getattr(args, "stop_after", None),
         )
 
     n_native = sum(1 for t in result.texts if t.source == "native")

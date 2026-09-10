@@ -52,6 +52,13 @@ class FastPageResult:
     page_mask: "np.ndarray | None"
     detect_seconds: float | None
     scores: dict[int, float]
+    # verbose-only tiling diagnostics (see pipelines/_steps.detect_text_fast):
+    # `skipped_tiles` are page-space bboxes of tiles that overlapped no text
+    # candidate and were never run; `tile_count` is the whole tile grid;
+    # `tile_seconds` is per-run-tile wall time (local runs only, else []).
+    skipped_tiles: "list[tuple[float, float, float, float]] | None" = None
+    tile_count: int | None = None
+    tile_seconds: "list[float] | None" = None
 
 
 @dataclass
@@ -98,6 +105,8 @@ class PipelineResult:
     # `unique_segments` entry, in canonical frame
     restored_texts: "list[Text] | None" = None
     step_outputs: dict | None = None
+    segmentation_debug: list | None = None  # one dict per segmented cluster:
+    # cluster_bbox, line_gap_lines, word_gap_lines, segment_bboxes (page space)
 
     @contextmanager
     def open_page(self) -> "Iterator[Page]":

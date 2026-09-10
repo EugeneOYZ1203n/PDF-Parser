@@ -31,7 +31,7 @@ __all__ = ["run_pipeline", "run_current_pipeline", "STEP_NAMES", "PipelineResult
 
 def run_pipeline(
     pdf_path: str, page_index: int = 0, *, enable_fast: bool = True, verbose: bool = False,
-    compute=None, progress_counter=None,
+    compute=None, progress_counter=None, stop_after: str | None = None,
 ) -> PipelineResult:
     """Run the current pipeline on one page. `verbose=True` also retains
     every intermediate value on the returned `PipelineResult`. `compute`,
@@ -42,10 +42,13 @@ def run_pipeline(
     `progress_counter`, when given a shared counter (see `Reader/Parallel/
     pool.py::run_parallel`), is incremented as FAST tiles / OCR crop
     batches complete instead of driving a local `tqdm` bar -- `None` (the
-    default) preserves today's local-tqdm-or-nothing behavior."""
+    default) preserves today's local-tqdm-or-nothing behavior. `stop_after`,
+    when given one of `STEP_NAMES`, skips every step after it (its
+    `PipelineResult` fields stay `None`) -- for stage-report runs that only
+    need the earlier stages."""
     return run_current_pipeline(
         pdf_path, page_index, enable_fast=enable_fast, verbose=verbose, compute=compute,
-        progress_counter=progress_counter,
+        progress_counter=progress_counter, stop_after=stop_after,
     )
 
 

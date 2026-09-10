@@ -138,11 +138,13 @@ def detect_text_fast(
             clusters, zoom=zoom, tile_scale=FAST_TILE_SCALE_FACTOR,
             margin=FAST_TILE_BLOCK_SIZE * FAST_TILE_CANDIDATE_MARGIN_FRAC,
         )
+        tile_report: list = [] if verbose else None
         start = time.perf_counter()
         try:
             page_mask = detector.detect_tiled(
                 page_image, desc="FAST text detection", compute=compute,
                 candidate_bboxes=candidate_bboxes, progress_counter=progress_counter,
+                tile_report=tile_report,
             )
         except FileNotFoundError as exc:
             log.warning("FAST detection skipped (keeping every cluster): %s", exc)
@@ -165,10 +167,23 @@ def detect_text_fast(
         else:
             dropped_vectors.extend(cluster)
 
+    skipped_tiles = tile_count = tile_seconds = None
+    if verbose and all_vectors:
+        px_scale = zoom * FAST_TILE_SCALE_FACTOR
+
+        def _to_page(rect):
+            x0, y0, x1, y1 = rect
+            return (x0 / px_scale, y0 / px_scale, x1 / px_scale, y1 / px_scale)
+
+        tile_count = len(tile_report)
+        skipped_tiles = [_to_page(e["rect_scaled"]) for e in tile_report if not e["detected"]]
+        tile_seconds = [e["seconds"] for e in tile_report if e.get("seconds") is not None]
+
     result = FastPageResult(
         page_image if verbose else None,
         page_mask if verbose else None,
         detect_seconds, scores_by_cluster,
+        skipped_tiles=skipped_tiles, tile_count=tile_count, tile_seconds=tile_seconds,
     )
     return FastStepResult(passed, dropped_vectors, result)
 

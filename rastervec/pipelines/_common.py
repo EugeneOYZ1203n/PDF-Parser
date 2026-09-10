@@ -64,45 +64,64 @@ class StepTimer:
 
 def run_current_pipeline(
     pdf_path: str, page_index: int, *, enable_fast: bool = True, verbose: bool = False,
-    compute=None, progress_counter=None,
+    compute=None, progress_counter=None, stop_after: str | None = None,
 ) -> PipelineResult:
     timer = StepTimer(verbose=verbose)
     page = native = vectors = cls = fast = word_segments = groups = None
     uniques = metas = unique_texts = restored = drawing = None
+    segmentation_debug: list | None = [] if verbose else None
+
+    if stop_after is not None and stop_after not in STEP_NAMES:
+        raise ValueError(f"stop_after must be one of {STEP_NAMES}, got {stop_after!r}")
+    stop_idx = len(STEP_NAMES) - 1 if stop_after is None else STEP_NAMES.index(stop_after)
+
+    def _reached(step: str) -> bool:
+        return STEP_NAMES.index(step) <= stop_idx
 
     with Reader(pdf_path) as reader:
         with timer("read"):
             page = read_page(reader, page_index)
-        with timer("native"):
-            native = extract_native_text(page)
-        with timer("vectors"):
-            vectors = extract_vectors(page)
-        with timer("classify"):
-            cls = classify_vectors(vectors, page, verbose=verbose)
-        with timer("fast"):
-            flat_clusters = [
-                [v for group in cluster for v in group] for cluster in (cls.text_clusters if cls else [])
-            ]
-            fast = detect_text_fast(
-                flat_clusters, page,
-                enable_fast=enable_fast, verbose=verbose, compute=compute,
-                progress_counter=progress_counter,
-            )
-        with timer("segment"):
-            word_segments = segment_clusters(fast.passed if fast else [])
-        with timer("similarity"):
-            groups = group_similar_segments(word_segments or [])
-            uniques, metas = elect_unique_segments(word_segments or [], groups)
-        with timer("ocr"):
-            unique_texts = recognize_unique_words(
-                uniques or [], compute=compute, progress_counter=progress_counter,
-            )
-        with timer("restore"):
-            restored = restore_word_texts(unique_texts or [], metas or [])
-        with timer("drawing"):
-            drawing = build_drawing_output(
-                cls.drawing_vectors if cls else [], fast.dropped_vectors if fast else [],
-            )
+        if _reached("native"):
+            with timer("native"):
+                native = extract_native_text(page)
+        if _reached("vectors"):
+            with timer("vectors"):
+                vectors = extract_vectors(page)
+        if _reached("classify"):
+            with timer("classify"):
+                cls = classify_vectors(vectors or [], page, verbose=verbose)
+        if _reached("fast"):
+            with timer("fast"):
+                flat_clusters = [
+                    [v for group in cluster for v in group] for cluster in (cls.text_clusters if cls else [])
+                ]
+                fast = detect_text_fast(
+                    flat_clusters, page,
+                    enable_fast=enable_fast, verbose=verbose, compute=compute,
+                    progress_counter=progress_counter,
+                )
+        if _reached("segment"):
+            with timer("segment"):
+                word_segments = segment_clusters(
+                    fast.passed if fast else [], debug_out=segmentation_debug,
+                )
+        if _reached("similarity"):
+            with timer("similarity"):
+                groups = group_similar_segments(word_segments or [])
+                uniques, metas = elect_unique_segments(word_segments or [], groups)
+        if _reached("ocr"):
+            with timer("ocr"):
+                unique_texts = recognize_unique_words(
+                    uniques or [], compute=compute, progress_counter=progress_counter,
+                )
+        if _reached("restore"):
+            with timer("restore"):
+                restored = restore_word_texts(unique_texts or [], metas or [])
+        if _reached("drawing"):
+            with timer("drawing"):
+                drawing = build_drawing_output(
+                    cls.drawing_vectors if cls else [], fast.dropped_vectors if fast else [],
+                )
 
     # The Reader (and its fitz document) is closed now -- detach the dead page
     # handle so a stale-pointer render crashes loudly at the call site instead.
@@ -136,4 +155,5 @@ def run_current_pipeline(
         unique_texts=(unique_texts if verbose else None),
         restored_texts=(restored if verbose else None),
         step_outputs=(timer.outcomes if verbose else None),
+        segmentation_debug=(segmentation_debug if verbose else None),
     )

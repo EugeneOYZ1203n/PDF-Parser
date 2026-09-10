@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 
 import numpy as np
 from PIL import Image
@@ -446,6 +447,7 @@ class FastDetector:
         compute=None,
         candidate_bboxes: "list[tuple[float, float, float, float]] | None" = None,
         progress_counter=None,
+        tile_report: "list | None" = None,
     ) -> "np.ndarray":
         """Runs FAST over `image` upscaled by `scale` and split into
         non-overlapping `block_size`-square tiles (the last row/column of
@@ -509,16 +511,25 @@ class FastDetector:
                 block = padded
             return block, (x0, y0, x1, y1)
 
-        tile_positions = [(r, c) for r in range(n_rows) for c in range(n_cols)]
+        all_positions = [(r, c) for r in range(n_rows) for c in range(n_cols)]
+
+        def _tile_rect(r: int, c: int) -> tuple[int, int, int, int]:
+            return (c * block_size, r * block_size,
+                    min(c * block_size + block_size, sw), min(r * block_size + block_size, sh))
+
         if candidate_bboxes is not None:
             tile_positions = [
-                (r, c) for r, c in tile_positions
-                if _tile_has_candidate(
-                    (c * block_size, r * block_size,
-                     min(c * block_size + block_size, sw), min(r * block_size + block_size, sh)),
-                    candidate_bboxes,
-                )
+                (r, c) for r, c in all_positions
+                if _tile_has_candidate(_tile_rect(r, c), candidate_bboxes)
             ]
+        else:
+            tile_positions = list(all_positions)
+
+        if tile_report is not None:
+            detected = set(tile_positions)
+            for r, c in all_positions:
+                tile_report.append({"rect_scaled": _tile_rect(r, c), "detected": (r, c) in detected})
+
         blocks = [_block(r, c) for r, c in tile_positions]
 
         args_list = [(self.weights_path, np.asarray(block)) for block, _ in blocks]
@@ -539,7 +550,17 @@ class FastDetector:
                 progress_counter.value += 1
         else:
             iterator = tqdm(blocks, desc=desc, unit="block") if show_progress else blocks
-            masks = [self.detect(block) for block, _ in iterator]
+            masks = []
+            tile_seconds: list[float] = []
+            for block, _ in iterator:
+                _t0 = time.perf_counter()
+                masks.append(self.detect(block))
+                tile_seconds.append(time.perf_counter() - _t0)
+            if tile_report is not None:
+                for entry, secs in zip(
+                    [e for e in tile_report if e["detected"]], tile_seconds
+                ):
+                    entry["seconds"] = secs
 
         full_mask = np.zeros((sh, sw), dtype=np.float32)
         for (_, (x0, y0, x1, y1)), mask in zip(blocks, masks):

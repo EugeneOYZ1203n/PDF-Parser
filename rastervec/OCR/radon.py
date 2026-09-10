@@ -718,7 +718,9 @@ def _assign_vectors_to_segments(
     return assignment
 
 
-def segment_clusters(clusters: list[list[Vector]], *, dpi: int = 300) -> list[Segment]:
+def segment_clusters(
+    clusters: list[list[Vector]], *, dpi: int = 300, debug_out: "list | None" = None,
+) -> list[Segment]:
     """Radon-segments every cluster into aspect-bounded word `Segment`s at
     real page position. For each cluster: render (transient) -> **pad** ->
     estimate skew (full precision) -> deskew -> split into line bands on the
@@ -775,6 +777,30 @@ def segment_clusters(clusters: list[list[Vector]], *, dpi: int = 300) -> list[Se
             [g for cols in line_cols for g in _line_gaps(cols)]
         )
 
+        def _px_to_page_bbox(pts_px):
+            mapped = inverse(np.array(pts_px, dtype=np.float64))
+            return pixel_to_page_bbox(
+                cluster, dpi_used,
+                [(float(x) - pad_x_px, float(y) - pad_y_px) for x, y in mapped],
+            )
+
+        dbg = None
+        if debug_out is not None:
+            line_gap_lines = []
+            for by0, by1 in [(bands[0][0], bands[0][0])] + [
+                ((bands[i - 1][1] + bands[i][0]) // 2,) * 2 for i in range(1, len(bands))
+            ] + [(bands[-1][1], bands[-1][1])]:
+                line_gap_lines.append(
+                    _px_to_page_bbox([(0, by0), (width, by0), (width, by1), (0, by1)])
+                )
+            dbg = {
+                "cluster_bbox": union_bbox([v.bbox for v in cluster]),
+                "line_gap_lines": line_gap_lines,
+                "word_gap_lines": [],
+                "segment_bboxes": [],
+            }
+            debug_out.append(dbg)
+
         seg_bboxes: list[tuple[float, float, float, float]] = []
         seg_images: list[np.ndarray] = []
         for bi, (by0, by1) in enumerate(bands):
@@ -784,10 +810,17 @@ def segment_clusters(clusters: list[list[Vector]], *, dpi: int = 300) -> list[Se
                 height if bi == len(bands) - 1
                 else (bands[bi][1] + bands[bi + 1][0]) // 2 + 1
             )
+            _prev_wx1 = None
             for wx0, wy0, wx1, wy1 in group_by_aspect(
                 line, gap_threshold=gap_threshold, pad=0,
             ):
                 gy0, gy1 = by0 + wy0, by0 + wy1
+                if dbg is not None and _prev_wx1 is not None:
+                    xm = (_prev_wx1 + wx0) / 2.0
+                    dbg["word_gap_lines"].append(
+                        _px_to_page_bbox([(xm, by0), (xm, by0), (xm, by1), (xm, by1)])
+                    )
+                _prev_wx1 = wx1
                 # page bbox from the TIGHT box: `inverse` lands in the
                 # *padded* render's pixel space; `pixel_to_page_bbox`
                 # inverts the unpadded one.
@@ -800,6 +833,8 @@ def segment_clusters(clusters: list[list[Vector]], *, dpi: int = 300) -> list[Se
                     [(float(x) - pad_x_px, float(y) - pad_y_px) for x, y in mapped],
                 )
                 seg_bboxes.append(page_bbox)
+                if dbg is not None:
+                    dbg["segment_bboxes"].append(page_bbox)
 
                 # OCR crop from the GROWN box (ascenders/descenders the line
                 # band clipped), capped at +100 % per axis and clamped to
