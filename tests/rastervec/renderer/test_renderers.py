@@ -175,6 +175,55 @@ def test_render_reconstructed_pdf_preserves_native_text_direction(text, directio
     assert _reconstructed_line_dirs(pdf) == [expected]
 
 
+def _reconstructed_line_origins(pdf_bytes: bytes) -> list[tuple[float, float]]:
+    doc = fitz.open("pdf", pdf_bytes)
+    try:
+        return [
+            tuple(round(c, 2) for c in span["origin"])
+            for b in doc[0].get_text("dict")["blocks"]
+            for ln in b.get("lines", [])
+            for span in ln.get("spans", [])
+        ]
+    finally:
+        doc.close()
+
+
+def test_render_reconstructed_pdf_native_word_origin_survives_rotation(text):
+    # `insert_text(point, ..., morph=(fixpoint, matrix))` carries `point`
+    # along by the same transform as the glyphs -- a word whose baseline
+    # origin sits far from its own bbox center must still land at its real
+    # origin after rotation, not drift off by an angle/distance-dependent
+    # amount (see `_premorph` in renderer/pdf.py).
+    bbox = (60.0, 90.0, 140.0, 110.0)
+    origin = (60.0, 105.0)  # far from the bbox center (100, 100)
+    word = text(text="Hi", bbox=bbox, direction=(0.6, 0.8), origin=origin, font_size=12)
+
+    pdf = render_reconstructed_pdf(_meta(width=200, height=200), native_words=[word])
+
+    [rendered_origin] = _reconstructed_line_origins(pdf)
+    assert rendered_origin == pytest.approx(origin, abs=0.5)
+
+
+def test_render_reconstructed_pdf_single_word_box_origin_survives_rotation():
+    # Exercises _place_text's single-word horizontal-stretch branch, which
+    # used to hand-correct only for the scale component of its morph matrix
+    # and silently ignored the rotation component.
+    bbox = (60.0, 90.0, 140.0, 110.0)
+    rotation = 37.0
+
+    pdf = render_reconstructed_pdf(
+        _meta(width=200, height=200), text_boxes=[("WIDE", bbox, rotation)],
+    )
+
+    base_font = fitz.Font("helv")
+    font_span = base_font.ascender - base_font.descender
+    fontsize = (bbox[3] - bbox[1]) / font_span
+    expected_origin = (bbox[0], bbox[1] + base_font.ascender * fontsize)
+
+    [rendered_origin] = _reconstructed_line_origins(pdf)
+    assert rendered_origin == pytest.approx(expected_origin, abs=0.5)
+
+
 def test_render_reconstructed_pdf_preserves_ocr_and_label_text_rotation(text):
     ocr_word = text(text="Up", bbox=(90, 40, 110, 160), direction=(0.0, 1.0), source="ocr")
     pdf_ocr = render_reconstructed_pdf(_meta(width=200, height=200), ocr_results=[ocr_word])

@@ -46,6 +46,32 @@ def _text_color(color: int | None) -> tuple[float, float, float]:
     )
 
 
+# PyMuPDF applies `morph`'s rotation in its own internal, already-y-flipped
+# PDF frame -- conjugating any morph matrix by this flip gives the map that
+# actually applies to a page-space (y-down) vector.
+_FLIP = fitz.Matrix(1, 0, 0, -1, 0, 0)
+
+
+def _premorph(target: "fitz.Point", fixpoint: "fitz.Point", matrix: "fitz.Matrix") -> "fitz.Point":
+    """`insert_text(point, ..., morph=(fixpoint, matrix))` doesn't just morph
+    the glyphs -- it carries `point` along by the exact same transform,
+    landing the rendered text at `fixpoint + (point - fixpoint) @ effective`
+    (confirmed against PyMuPDF's own `Shape.insert_text`, which applies
+    `morph` as a `cm` op before the `Tm` that positions `point`), where
+    `effective` is `matrix`'s inverse conjugated by the internal y-flip --
+    not `matrix` itself, though the two coincide for a pure rotation (an
+    orthogonal matrix's flip-conjugated inverse is itself), which is why
+    this bug was easy to miss on a rotation-only call site. Every caller
+    here wants `point` to end up at a specific page-space `target`
+    (a word's real baseline origin, a box's left edge, ...), so solve the
+    above for `point` and pre-transform it before handing it to
+    `insert_text` -- otherwise the rendered position silently drifts off
+    `target` by an amount that grows with the rotation angle and the
+    distance from `fixpoint`."""
+    effective = _FLIP * ~matrix * _FLIP
+    return fixpoint + (target - fixpoint) * effective
+
+
 def _build_reconstructed_doc(
     page_meta: PageMeta,
     *,
@@ -86,12 +112,13 @@ def _build_reconstructed_doc(
         # the angle is negated here -- without it a word whose direction has a
         # non-zero y component reconstructs mirrored about the x-axis (e.g.
         # text reading up comes out reading down).
+        matrix = fitz.Matrix(1, 1).prerotate(-word.angle())
         page.insert_text(
-            word.origin, word.text,
+            _premorph(fitz.Point(word.origin), center, matrix), word.text,
             fontsize=max(word.font_size, 1.0),
             color=_text_color(word.color),
             rotate=0,
-            morph=(center, fitz.Matrix(1, 1).prerotate(-word.angle())),
+            morph=(center, matrix),
         )
 
     if native_words:
@@ -127,7 +154,8 @@ def _build_reconstructed_doc(
         # `rotation` is in the get_text `dir` convention (y down); morph turns
         # the other way in that frame, hence `-rotation` (see `_place_word`).
         center = fitz.Point((x0 + x1) / 2, (y0 + y1) / 2)
-        morph = (center, fitz.Matrix(1, 1).prerotate(-rotation))
+        matrix = fitz.Matrix(1, 1).prerotate(-rotation)
+        morph = (center, matrix)
 
         natural = base_font.text_length(text, fontsize=fontsize)
 
@@ -135,9 +163,10 @@ def _build_reconstructed_doc(
         # font uniformly so the text never spills past the box (and page).
         if bbox_width > 0 and natural > bbox_width:
             fontsize = max(fontsize * bbox_width / natural, 1.0)
-            origin = (x0, y0 + base_font.ascender * fontsize)
+            origin = fitz.Point(x0, y0 + base_font.ascender * fontsize)
             page.insert_text(
-                origin, text, fontsize=fontsize, color=color, rotate=0, morph=morph,
+                _premorph(origin, center, matrix), text,
+                fontsize=fontsize, color=color, rotate=0, morph=morph,
             )
             return
 
@@ -146,7 +175,8 @@ def _build_reconstructed_doc(
         # Already fits, or no width to fill -> one call at natural spacing.
         if bbox_width <= 0 or natural >= bbox_width - 1e-3:
             page.insert_text(
-                (x0, origin_y), text, fontsize=fontsize, color=color, rotate=0, morph=morph,
+                _premorph(fitz.Point(x0, origin_y), center, matrix), text,
+                fontsize=fontsize, color=color, rotate=0, morph=morph,
             )
             return
 
@@ -160,7 +190,7 @@ def _build_reconstructed_doc(
             cursor = x0
             for token in tokens:
                 page.insert_text(
-                    (cursor, origin_y), token,
+                    _premorph(fitz.Point(cursor, origin_y), center, matrix), token,
                     fontsize=fontsize, color=color, rotate=0, morph=morph,
                 )
                 cursor += base_font.text_length(token, fontsize=fontsize) + gap
@@ -169,14 +199,15 @@ def _build_reconstructed_doc(
         # A single word: no gaps to widen, so stretch it horizontally to
         # the box width via a non-uniform scale in the morph transform
         # (kept to one draw call so the text stays selectable). Cap the
-        # stretch so a very short token in a wide box isn't grotesque, and
-        # pre-shift the origin so that after scaling about the box centre
-        # the glyphs still start at the box's left edge.
+        # stretch so a very short token in a wide box isn't grotesque --
+        # `_premorph` (not a hand-rolled pre-shift) places the origin so the
+        # glyphs still start at the box's left edge after the scale+rotate.
         scale = min(bbox_width / natural, 3.0) if natural > 0 else 1.0
-        start_x = center.x - (bbox_width / 2.0) / scale
+        stretch_matrix = fitz.Matrix(scale, 1.0).prerotate(-rotation)
         page.insert_text(
-            (start_x, origin_y), text, fontsize=fontsize, color=color, rotate=0,
-            morph=(center, fitz.Matrix(scale, 1.0).prerotate(-rotation)),
+            _premorph(fitz.Point(x0, origin_y), center, stretch_matrix), text,
+            fontsize=fontsize, color=color, rotate=0,
+            morph=(center, stretch_matrix),
         )
 
     if ocr_results:
