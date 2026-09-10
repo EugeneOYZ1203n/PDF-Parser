@@ -521,10 +521,13 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `render_text_pdf` / `render_vectors_pdf`, the two colour-callback stage-report primitives), `svg.py`
   (`render_page_svg`, a thin `get_svg_image()` wrapper), and `_shapes.py` (shared). Import straight
   from `rastervec.renderer` (`from rastervec.renderer import render_vector_cluster`, etc.).
-  `stages.py` holds one `render_<stage>(res) -> bytes` per pipeline stage, each returning a one-page
-  **stage PDF** built on those three primitives + a local `_compose` multi-layer helper — the data
-  source for `scripts/generate_pipeline_report.py`. It also owns `STAGE_COLOR_LEGEND` /
-  `STAGE_ARTIFACTS`, the colour-legend the viewer reads. Every stage module keeps its one-line
+  `stages.py` holds one `render_<stage>(res) -> bytes` per pipeline stage (one-page composite
+  **stage PDF**, still used by tests / the notebook) plus `render_stage_layers(res, stage_key)
+  -> [(label, hex, pdf_bytes)]` — the same visuals **split one single-purpose one-page PDF per
+  visual element**, which is what `scripts/generate_pipeline_report.py` writes now
+  (`<stage>__<layer>.pdf`) so the viewer toggles a layer by loading/not-loading its file (no
+  colour-keying, no fringe). Both build on those three primitives + the local `_compose`
+  helper. It also owns `STAGE_COLOR_LEGEND` / `STAGE_ARTIFACTS`. Every stage module keeps its one-line
   `from rastervec.renderer.stages import render_x` re-export. `notebook.py` is the leftover
   matplotlib display plumbing (`RenderResult`, `visualize`, `show_row`, ...) kept only for
   `golden_case_curation.ipynb`; deliberately **not** re-exported through `renderer/__init__.py`
@@ -737,21 +740,27 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `input_dir`/`input_files`, per-PDF `pages`, `vectorise` + `vectorise_mode` = an
   `Evaluation/conversion.py` mode), runs `run_pipeline(..., verbose=True, stop_after=final_stage)`
   once per (pdf, page), and writes `outputs/pipeline_report/<ts>__<config-stem>/<pdf-stem>/` with:
-  one multi-page PDF per stage (`native_text.pdf`, `vector_extraction.pdf`, `separation.pdf`,
-  `vector_classification.pdf`, `fast_heatmap.pdf`, `segmentation.pdf`, `similarity.pdf`,
-  `paddle_ocr.pdf`, `drawing_vectors.pdf`, `reconstructed.pdf` — via `renderer/stages.py`), one
-  `<stage>.txt` of numeric stats per stage (`Evaluation/Report/stage_stats.py`, reusing
-  `benchmark.distribution_stats`), `dump.json` (`Evaluation/dump_io.py` — every `Text` + `Vector`,
-  reloadable), `config_and_hyperparameters.txt` (config + every `rastervec.config` constant),
-  `manifest.json`, and `radon_images/` + `paddle_images/` (the Radon word crops and the elected
-  OCR crops). `stop_after` (new kwarg on `run_pipeline`/`run_current_pipeline`, also
+  one multi-page PDF **per visual layer** (`<stage>__<layer>.pdf` — e.g.
+  `vector_classification__group_bbox.pdf`, `fast_heatmap__text_heatmap.pdf` — via
+  `renderer/stages.py::render_stage_layers`; the layer set per stage is fixed so every layer PDF
+  has the same page count), one `<stage>.txt` of numeric stats per stage
+  (`Evaluation/Report/stage_stats.py`, reusing `benchmark.distribution_stats`), `dump.json`
+  (`Evaluation/dump_io.py` — every `Text` + `Vector`, reloadable), `config_and_hyperparameters.txt`
+  (config + every `rastervec.config` constant), `manifest.json` (its `layers` list — `{stage,
+  layer, file, color}` — drives the viewer), and `radon_images/` (one PNG per FAST-surviving
+  cluster: the render Radon segments, *before* deskew/split, detected boxes drawn) + `paddle_images/`
+  (one PNG per elected unique segment: the exact deskewed padded crop handed to PaddleOCR, *before*
+  recognition, recognised text in the filename). `stop_after` (new kwarg on
+  `run_pipeline`/`run_current_pipeline`, also
   `--stop-after` on the CLI) skips every step after the named one. Two verbose-only additions feed
   the finer overlays: `FastPageResult.skipped_tiles`/`tile_count`/`tile_seconds` (from
   `detect_tiled`'s new `tile_report` out-param) and `PipelineResult.segmentation_debug`
   (line/word-gap cut lines, from `segment_clusters(debug_out=...)`).
-  `scripts/pipeline_report_viewer.py` is the Tkinter counterpart: a per-PDF folder → source page +
-  one checkbox per stage PDF, each toggled layer alpha-composited over the page (near-white made
-  transparent), zoom/pan/page-flip, colour legend from `manifest.json` (`stages.STAGE_COLOR_LEGEND`).
+  `scripts/pipeline_report_viewer.py` is the Tkinter counterpart: a per-PDF folder → toggleable
+  source page + one checkbox per layer PDF (grouped by stage, `all`/`none` per group), each checked
+  layer rasterized with a real alpha channel (`get_pixmap(alpha=True)` — a layer PDF page has no
+  background, so it composites with no white-key halo) and alpha-composited over the base;
+  zoom/pan/page-flip.
 
 `scripts/rasterize_pdf.py` (outside `rastervec/`, a one-off utility not a pipeline stage): flattens
 every page of a PDF to an image and rebuilds a pure-raster PDF from those images — not currently
@@ -781,9 +790,11 @@ Three things, all following the existing pattern:
 3. Add a `render_<stage_name>(res: PipelineResult, *, page_meta=None) -> bytes` function to
    `rastervec/renderer/stages.py` returning a one-page stage PDF (build on `render_text_pdf` /
    `render_vectors_pdf` / `render_boxes_pdf` / the local `_compose` helper; no matplotlib, no
-   `rastervec.pipelines` import at module level), add its filename to `STAGE_ARTIFACTS` +
-   `STAGE_COLOR_LEGEND` and a row to `_ARTIFACTS` in `scripts/generate_pipeline_report.py`, plus a
-   `stats_<stage>` in `rastervec/Evaluation/Report/stage_stats.py`.
+   `rastervec.pipelines` import at module level), add a branch for the stage to
+   `render_stage_layers` (one `(label, hex, bytes)` per visual layer, fixed set), add its filename
+   to `STAGE_ARTIFACTS` + `STAGE_COLOR_LEGEND` and a row to `_ARTIFACTS` in
+   `scripts/generate_pipeline_report.py`, plus a `stats_<stage>` in
+   `rastervec/Evaluation/Report/stage_stats.py`.
 Also add tests under the matching `tests/rastervec/` subfolder using the synthetic PDF fixtures,
 and new third-party dependencies to `requirements.txt` only when the stage that needs them is
 actually implemented.

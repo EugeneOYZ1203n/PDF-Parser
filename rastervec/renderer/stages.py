@@ -453,3 +453,114 @@ def render_reconstructed(res: "PipelineResult", *, page_meta: "PageMeta | None" 
         _meta(res, page_meta),
         native_words=native, drawing_vectors=res.vectors or [], ocr_results=ocr,
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-layer split -- one single-purpose PDF per visual element, so the viewer
+# toggles a layer by loading / not loading its PDF (no colour-keying, so no
+# anti-alias fringe from a partially-knocked-out colour).
+#
+# `render_stage_layers(res, stage_key)` returns `[(label, hex, pdf_bytes)]`
+# in draw order. The layer set for a stage is FIXED (an empty layer still
+# emits a blank one-page PDF) so every layer PDF has the same page count as
+# every other and the viewer can index them all by the same page position.
+# The composite `render_<stage>` functions above are unchanged (still used by
+# tests / the notebook).
+# ---------------------------------------------------------------------------
+def _drop_vectors(res: "PipelineResult", name: str) -> list:
+    vs: list = []
+    for stage in (res.clustering or {}).values():
+        for step in stage.steps:
+            cat = step.categories.get(name)
+            if cat is not None and cat.role == "dropped":
+                for entry in cat.groups:
+                    vs.extend(_entry_vectors(entry))
+    return vs
+
+
+def _blank(page_meta: "PageMeta") -> bytes:
+    return _compose(page_meta)
+
+
+def render_stage_layers(
+    res: "PipelineResult", stage_key: str, *, page_meta: "PageMeta | None" = None
+) -> "list[tuple[str, str, bytes]]":
+    pm = _meta(res, page_meta)
+    V = lambda vs, hx: _compose(pm, vector_layers=[(vs, hx)]) if vs else _blank(pm)  # noqa: E731
+    R = lambda bx, hx, fill=False: _compose(pm, rect_layers=[(bx, hx, fill)]) if bx else _blank(pm)  # noqa: E731
+
+    if stage_key == "native":
+        return [("native word", C_NATIVE, render_native(res, page_meta=pm))]
+
+    if stage_key == "vectors":
+        return [("vectors (colour per type)", "#888888", render_vectors(res, page_meta=pm))]
+
+    if stage_key == "separation":
+        return [("bucket (colour per layer+colour)", "#888888",
+                 render_layer_color_buckets(res, page_meta=pm))]
+
+    if stage_key == "classify":
+        groups, clusters = _classification_groups_and_clusters(res)
+        cand = [v for c in (res.text_clusters or []) for v in _entry_vectors(c)]
+        out = [
+            ("text candidate", C_TEXT_CANDIDATE, V(cand, C_TEXT_CANDIDATE)),
+            ("group bbox", C_GROUP_BBOX, R(groups, C_GROUP_BBOX)),
+            ("cluster bbox", C_CLUSTER_BBOX, R(clusters, C_CLUSTER_BBOX)),
+        ]
+        for name in _DROP_CATEGORIES:
+            out.append((name, _drop_color(name), V(_drop_vectors(res, name), _drop_color(name))))
+        return out
+
+    if stage_key == "fast":
+        fr = res.fast_result
+        heat = None
+        if fr is not None and fr.page_image is not None:
+            heat = _compose(pm, image=_fast_heat_image(fr.page_image, fr.page_mask))
+        passed = [union_bbox([v.bbox for v in c]) for c in (res.fast_passed or []) if c]
+        dropped = [v.bbox for v in (res.fast_dropped_vectors or [])]
+        return [
+            ("text heatmap", "#dc2626", heat if heat is not None else _blank(pm)),
+            ("skipped tile", C_TILE_SKIP,
+             R(list(getattr(fr, "skipped_tiles", None) or []), C_TILE_SKIP, True)),
+            ("passed cluster", C_FAST_PASS, R(passed, C_FAST_PASS)),
+            ("dropped vector", C_FAST_DROP, R(dropped, C_FAST_DROP)),
+        ]
+
+    if stage_key == "segment":
+        dbg = res.segmentation_debug or []
+        return [
+            ("original cluster bbox", C_ORIG_BBOX,
+             R([d["cluster_bbox"] for d in dbg], C_ORIG_BBOX)),
+            ("segment bbox", C_SEGMENT_BBOX,
+             R([b for d in dbg for b in d["segment_bboxes"]], C_SEGMENT_BBOX)),
+            ("line gap", C_LINE_GAP,
+             R([b for d in dbg for b in d["line_gap_lines"]], C_LINE_GAP, True)),
+            ("word gap", C_WORD_GAP,
+             R([b for d in dbg for b in d["word_gap_lines"]], C_WORD_GAP, True)),
+        ]
+
+    if stage_key == "similarity":
+        return [("similarity group (colour per group)", "#888888",
+                 render_similarity(res, page_meta=pm))]
+
+    if stage_key == "ocr":
+        restored = res.restored_texts or []
+        ok = [t for t in restored if (t.text or "").strip()]
+        blank = [t for t in restored if not (t.text or "").strip()]
+        ok_text = [
+            (t.text, tuple(t.bbox), t.angle(), _hex_to_rgb01(C_OCR_PASS)) for t in ok
+        ]
+        return [
+            ("recognised text", C_OCR_PASS,
+             _compose(pm, text_layer=ok_text) if ok_text else _blank(pm)),
+            ("blank-read box", C_OCR_FAIL, R([tuple(t.bbox) for t in blank], C_OCR_FAIL)),
+            ("OCR box", C_OCR_BOX, R([tuple(t.bbox) for t in restored], C_OCR_BOX)),
+        ]
+
+    if stage_key == "drawing":
+        return [("drawing vector", C_DRAWING, render_drawing(res, page_meta=pm))]
+
+    if stage_key == "reconstructed":
+        return [("reconstructed page", "#111827", render_reconstructed(res, page_meta=pm))]
+
+    raise ValueError(f"unknown stage_key {stage_key!r}")

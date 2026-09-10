@@ -51,3 +51,18 @@ def test_render_returns_valid_pdf(result, fn):
     doc = fitz.open("pdf", data)
     assert doc.page_count == 1
     doc.close()
+
+
+@pytest.mark.parametrize("stage_key", [
+    "native", "vectors", "separation", "classify", "fast", "segment",
+    "similarity", "ocr", "drawing", "reconstructed",
+])
+def test_render_stage_layers(result, stage_key):
+    layers = stages.render_stage_layers(result, stage_key)
+    assert layers and all(len(t) == 3 for t in layers)
+    for label, hexc, data in layers:
+        assert isinstance(label, str) and hexc.startswith("#")
+        assert data[:4] == b"%PDF"
+        doc = fitz.open("pdf", data)
+        assert doc.page_count == 1
+        doc.close()
