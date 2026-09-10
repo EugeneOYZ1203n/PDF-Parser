@@ -275,10 +275,16 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   (numpy array in, mask out) that a Pool-2 worker actually runs.
 - **`OCR/radon.py`** *(implemented)*: replaces the deleted
   `OCR/Paddle_OCR/ink_segment.py` — Radon-transform deskew + line/word split. See the
-  `pipelines/` bullet below.
-- **`OCR/Paddle_OCR/crop_normalize.py`** *(implemented, PIL only)*: `normalize_line_crop` — PIL port
-  of `archive`'s `normalise_crop_for_ocr` (asymmetric 5%/30%-of-height white pad + resize to a fixed
-  48px recognition line height, aspect preserved, width ≤ 1024).
+  `pipelines/` bullet below. Also the home of **`pad_image(img, fraction=RADON_PAD_FRACTION)`
+  → `(padded, (pad_x_px, pad_y_px))`, the pipeline's one and only padding step**: a white
+  border of 10% of the image's own width (left/right) and height (top/bottom).
+  `renderer.render_vector_cluster` renders a bare `union_bbox` and `ocr_backend` hands
+  `Segment.image` to PaddleOCR verbatim, so *every* margin the OCR path needs comes from
+  `segment_clusters`' two explicit calls — one around the whole cluster render (before
+  skew/deskew/word-split), one around each word crop (before it becomes `Segment.image`). Both
+  are inline at the call site on purpose; don't push either back into the renderer or the
+  backend. The price is the one correctness-critical `- pad_x_px / - pad_y_px` correction
+  before `pixel_to_page_bbox`, which inverts the *unpadded* frame.
 - **`OCR/Paddle_OCR/ocr_backend.py` + `render_ocr.py`** — see the `pipelines/` bullet below
   (`PaddleRecBackend`, the one recognition-only backend; `RenderOCR.recognize_segmented` /
   `ocr_cluster` / `ocr`). Text *detection* is the Radon segmentation step
@@ -562,22 +568,21 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `VectorPath` of a drawing (like `fill_rule`), defaulted so existing constructions are unaffected;
   `vector.extract_records` normalises a tuple `lineCap` from `get_drawings()` to a plain int.
   `png.render_vector_cluster(paths, dpi)` *(implemented)*
-  isolates a cluster onto a fresh single-page PyMuPDF document sized to the cluster's own bbox plus
-  an asymmetric OCR render border, computed by the private `_cluster_frame` helper: each side is at
-  least `max(4pt, largest member's stroke_width)` (clipping safety), then further widened per axis
-  by a fraction of the cluster's own bbox height — tight vertically (5%, keeps glyphs filling the
-  frame) and generous horizontally (30%, keeps edge glyphs from clipping) — ported from
-  `archive/raster_parser`'s Type-2 full native-to-OCR pipeline
-  (`parsing/parser.py::normalise_crop_for_ocr`), which padded an already-rasterized crop with
-  `cv2.copyMakeBorder` before resizing it for PaddleOCR; here the same ratios expand the render
-  frame itself, in PDF-point space, before the page is rasterized, rather than as a post-render
-  pixel-fill step. `render_vector_cluster` then replays each drawing's items via `replay_drawing_paths`,
-  then rasterizes at `dpi` and returns a PIL `Image` — reusing PyMuPDF's own path/curve/fill
+  isolates a cluster onto a page of the shared per-process render document sized to **exactly**
+  the cluster's own `union_bbox` — **no padding of any kind**. There is no `_cluster_frame` /
+  `cluster_frame_size` helper any more, and no `MIN_CLUSTER_PADDING` / `OCR_*_PADDING_FRACTION`
+  config: all padding in the pipeline is one explicit pixel-space step,
+  `OCR/radon.py::pad_image` (see that bullet). The only margin logic left here is a
+  `_MIN_CANVAS_SIDE = 1.0`pt floor on each side — a degeneracy guard so a flat cluster (a single
+  horizontal rule, zero extent on one axis) doesn't build a 0-px pixmap, not padding. Don't
+  reintroduce a border: `pixel_to_page_bbox`/`page_points_to_pixel` assume the bbox *is* the
+  frame. `render_vector_cluster` then replays each drawing's items via `replay_drawing_paths`,
+  rasterizes at `dpi` and returns a PIL `Image` — reusing PyMuPDF's own path/curve/fill
   rendering rather than reimplementing rasterization by hand.
-  `png.pixel_to_page_bbox(paths, dpi, pixel_points)` inverts
-  `_cluster_frame`'s same transform to map pixel-space points (e.g. Paddle's detected text-region
-  corners, from a render of that exact `paths`/`dpi`) back into PDF page space — used by
-  `RenderOCR.ocr_cluster` to compute a `TextVectorResult.ocr_bbox`.
+  `png.pixel_to_page_bbox(paths, dpi, pixel_points)` inverts that same transform (pixel `(0,0)`
+  *is* the bbox origin) to map pixel-space points back into PDF page space. A caller working in
+  a *padded* copy of the render (`radon.segment_clusters`) must subtract `pad_image`'s returned
+  pixel offset first.
   `png.page_points_to_pixel(paths, dpi, page_points)` is its exact forward inverse (page space →
   that render's pixel space) — used by the visualization notebook to draw Paddle's returned
   page-space boxes back onto the rendered cluster image. `png.render_page_paths(paths,
@@ -690,11 +695,14 @@ independently of the others (every stage's *output* is a plain dataclass from `m
     parallel to the text baseline), coarse full sweep + fine sweep (`RADON_*` config), maps to a
     `(-90, 90]` deskew angle; `_rotation` builds the exact forward/inverse affine so word-box
     corners map back to the original render. `split_words` splits the column (x-extent) profile
-    on a `gap_threshold` via `_split_on_gaps`/`_ink_runs`/`_group_runs` — `segment_cluster`
+    on a `gap_threshold` via `_split_on_gaps`/`_ink_runs`/`_group_runs` — `segment_clusters`
     computes that threshold once per cluster (`_cluster_gap_threshold`, floored by
-    `RADON_MIN_GAP_PX`), as the median of every line's inter-run gaps (`_line_gaps`) pooled
-    together, so every line in the cluster splits on the same shared threshold rather than each
-    line recomputing its own from just its own (often noisy, small-sample) gaps. Each word's
+    `RADON_MIN_GAP_PX`), as `RADON_GAP_MEDIAN_MULTIPLIER` (1.3) × the median of every line's
+    inter-run gaps (`_line_gaps`) pooled together. Letter gaps outnumber word gaps, so that
+    pooled median *is* the typical intra-word letter gap and sitting just above it separates
+    words from letters; pooling means every line in the cluster splits on the same shared
+    threshold rather than each line recomputing its own from just its own (often noisy,
+    small-sample) gaps. Each word's
     y-extent is then taken from ink within just that word's own column slice, not the whole
     line's ink bbox — so two words on the same line with different
     glyph heights (e.g. one with a descender, one without) get genuinely different, tight
@@ -713,8 +721,11 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   implementation): a **paddleocr 2.x** `PaddleOCR(ocr_version=config.OCR_VERSION,
   lang=config.OCR_LANG, use_angle_cls=False, rec_batch_num=REC_BATCH_SIZE)` engine, cached at class
   scope by `(ocr_version, lang)`, whose **`.text_recognizer`** (recognition only, PP-OCRv4) is
-  called directly on `normalize_line_crop`'d, RGB→BGR crops → one `OcrBox` per crop in input order
-  (blank text ⇒ 0.0 confidence, still a box). `warmup()`. **No text detection here** — that's the
+  called directly on the `Segment.image` crops, **converted to BGR and nothing else** (`_normalize_bgr`,
+  numpy-only) → one `OcrBox` per crop in input order (blank text ⇒ 0.0 confidence, still a box).
+  There is **no crop-normalization pass** — `crop_normalize.py`/`normalize_line_crop` was deleted:
+  the crop already carries its white margin from `radon.pad_image`, and `text_recognizer` resizes
+  to its own `rec_image_shape` internally. `warmup()`. **No text detection here** — that's the
   Radon step; the detector model is never invoked. This is the same API surface `archive/`'s
   `raster_parser` OCR uses, so `legacy` needs no shim. `PaddleOcrBackend`/`LightPaddleOcrBackend`/
   `_paddle_compat._PaddleOCRv2Compat` and the 3.x `TextRecognition`/`DocImgOrientationClassification`

@@ -7,18 +7,16 @@ the whole-page counterpart (FAST detection input). Both replay each
 drawing's items as one composite path via
 `_shapes.replay_drawing_paths`, so multi-contour filled glyphs render with
 their counters as holes rather than filled solid. `pixel_to_page_bbox`
-inverts `render_vector_cluster`'s own isolated-canvas transform (shared via
-`_cluster_frame`) to map a detected-in-pixel-space bbox back into PDF page
-space.
+inverts `render_vector_cluster`'s own isolated-canvas transform to map a
+detected-in-pixel-space bbox back into PDF page space.
 
-`_cluster_frame`'s border around the cluster's own bbox is asymmetric --
-tight vertically, generous horizontally -- ported from archive/raster_parser's
-Type-2 full native-to-OCR pipeline (`parsing/parser.py::normalise_crop_for_ocr`,
-used by `archive/scripts/type2_full_native_to_ocr_pipeline.py`), which padded
-an already-rasterized crop with `cv2.copyMakeBorder` before resizing it for
-PaddleOCR. Here the same ratios are applied to the render frame itself, in
-PDF-point space, before the page is even rasterized -- the border is part of
-the render, not a separate post-render pixel-fill step.
+**No padding happens here.** A cluster render's canvas is exactly the
+members' `union_bbox` -- nothing added on any side. Every margin the OCR
+path needs (breathing room around glyphs, clipping slack) is one explicit
+pixel-space step in `OCR/radon.py::pad_image`, applied by `segment_clusters`
+after this render, so a reader can see the padding happen instead of
+inferring it from a renderer's internals. Don't reintroduce a border here:
+`pixel_to_page_bbox`/`page_points_to_pixel` assume the bbox *is* the frame.
 
 Coordinate space: everything here stays in unrotated MediaBox space, like
 every other rastervec stage -- no page rotation is applied (see
@@ -29,11 +27,6 @@ from __future__ import annotations
 import pymupdf as fitz
 from PIL import Image
 
-from rastervec.config import (
-    MIN_CLUSTER_PADDING,
-    OCR_HORIZONTAL_PADDING_FRACTION,
-    OCR_VERTICAL_PADDING_FRACTION,
-)
 from rastervec.helpers.geometry import PDF_POINTS_PER_INCH, union_bbox
 from rastervec.models import PageMeta, Vector
 from rastervec.renderer._shapes import replay_drawing_paths
@@ -49,6 +42,11 @@ from rastervec.renderer._shapes import replay_drawing_paths
 # (like `FastDetector`'s/`PaddleRecBackend`'s own model caches), safe under
 # Pool-2 multiprocessing since each worker process gets its own.
 _render_doc: "fitz.Document | None" = None
+
+# Floor (PDF points) on a cluster canvas's own width/height -- see
+# `render_vector_cluster`. Not padding: it only ever applies to an axis
+# whose extent is genuinely zero.
+_MIN_CANVAS_SIDE = 1.0
 
 
 def _get_render_doc() -> "fitz.Document":
@@ -70,52 +68,27 @@ def _rasterize(page: "fitz.Page", dpi: int) -> "Image.Image":
     ).copy()
 
 
-def _cluster_frame(vectors: list[Vector]) -> tuple[float, float, float, float]:
-    """The isolated-canvas geometry shared by `render_vector_cluster` and
-    `pixel_to_page_bbox`: `(x0, y0, pad_x, pad_y)` where `x0`/`y0` are the
-    cluster's own bbox origin (page space) and `pad_x`/`pad_y` are the
-    (asymmetric -- see module docstring) margins added around it, each
-    >= `MIN_CLUSTER_PADDING` or a member's own stroke width if wider. A
-    page-space point maps to canvas space via
-    `(x - x0 + pad_x, y - y0 + pad_y)`."""
-    x0, y0, _x1, y1 = union_bbox([v.bbox for v in vectors])
-    height = y1 - y0
-    stroke_floor = max(MIN_CLUSTER_PADDING, max((v.width or 0.0) for v in vectors))
-    pad_y = max(stroke_floor, height * OCR_VERTICAL_PADDING_FRACTION)
-    pad_x = max(stroke_floor, height * OCR_HORIZONTAL_PADDING_FRACTION)
-    return x0, y0, pad_x, pad_y
-
-
-def cluster_frame_size(vectors: list[Vector]) -> tuple[float, float]:
-    """(width, height) in PDF points of the isolated canvas
-    `render_vector_cluster` would build for `vectors` (bbox plus
-    `_cluster_frame`'s asymmetric padding) -- lets a caller
-    (`RenderOCR.ocr_cluster`) pick a dpi that keeps the rendered pixel size
-    above some minimum without duplicating `_cluster_frame`'s own padding
-    math."""
-    x0, y0, x1, y1 = union_bbox([v.bbox for v in vectors])
-    _frame_x0, _frame_y0, pad_x, pad_y = _cluster_frame(vectors)
-    return (x1 - x0) + 2 * pad_x, (y1 - y0) + 2 * pad_y
-
-
 def render_vector_cluster(vectors: list[Vector], dpi: int) -> "Image.Image":
     """High-resolution render of an isolated vector cluster, used as OCR
-    input. Adds one page (sized to the cluster's own bbox plus the
-    asymmetric OCR border, via `_cluster_frame`) to this process's shared
-    render document (see `_get_render_doc` -- called at real-pipeline scale,
-    once per text-candidate cluster and again per deduped unique segment, so
-    a fresh `fitz.open()` per call would be pure overhead), replays each
-    Vector's items as one composite path via `_shapes.replay_drawing_paths`,
-    then rasterizes at `dpi` -- reusing PyMuPDF's own rendering rather than
-    re-implementing curve/fill rasterization by hand."""
+    input. Adds one page -- sized to the members' `union_bbox` exactly, no
+    border of any kind (see the module docstring) -- to this process's
+    shared render document (see `_get_render_doc`: called at real-pipeline
+    scale, once per text-candidate cluster and again per deduped unique
+    segment, so a fresh `fitz.open()` per call would be pure overhead),
+    replays each Vector's items as one composite path via
+    `_shapes.replay_drawing_paths`, then rasterizes at `dpi` -- reusing
+    PyMuPDF's own rendering rather than re-implementing curve/fill
+    rasterization by hand."""
     if not vectors:
         raise ValueError("render_vector_cluster requires at least one vector")
 
     x0, y0, x1, y1 = union_bbox([v.bbox for v in vectors])
-    frame_x0, frame_y0, pad_x, pad_y = _cluster_frame(vectors)
-    dx, dy = pad_x - frame_x0, pad_y - frame_y0
-    width = (x1 - x0) + 2 * pad_x
-    height = (y1 - y0) + 2 * pad_y
+    dx, dy = -x0, -y0
+    # Degeneracy guard, not padding: a flat cluster (a single horizontal
+    # rule) has zero extent on one axis, and a 0-pt page rasterizes to a
+    # 0-px pixmap that `Image.frombuffer` cannot build.
+    width = max(x1 - x0, _MIN_CANVAS_SIDE)
+    height = max(y1 - y0, _MIN_CANVAS_SIDE)
 
     doc = _get_render_doc()
     cluster_page = doc.new_page(width=width, height=height)
@@ -132,13 +105,18 @@ def pixel_to_page_bbox(
     pixel_points: list[tuple[float, float]],
 ) -> tuple[float, float, float, float]:
     """Inverts `render_vector_cluster`'s own (dx, dy, zoom) transform to
-    map a set of pixel-space points (e.g. Paddle's detected polygon
-    corners, from a render of this exact `vectors`/`dpi` pair) back into
-    PDF page space, returning their bbox."""
-    x0, y0, pad_x, pad_y = _cluster_frame(vectors)
+    map a set of pixel-space points (e.g. a segmented word's corners, from
+    a render of this exact `vectors`/`dpi` pair) back into PDF page space,
+    returning their bbox. Pixel `(0, 0)` is the cluster's own bbox origin,
+    since the render carries no border.
+
+    A caller working in a *padded* copy of that render (`OCR/radon.py::
+    segment_clusters`) must subtract `pad_image`'s own returned pixel
+    offset before calling this."""
+    x0, y0, _x1, _y1 = union_bbox([v.bbox for v in vectors])
     zoom = dpi / PDF_POINTS_PER_INCH
-    xs = [px / zoom - pad_x + x0 for px, _py in pixel_points]
-    ys = [py / zoom - pad_y + y0 for _px, py in pixel_points]
+    xs = [px / zoom + x0 for px, _py in pixel_points]
+    ys = [py / zoom + y0 for _px, py in pixel_points]
     return (min(xs), min(ys), max(xs), max(ys))
 
 
@@ -149,12 +127,12 @@ def page_points_to_pixel(
 ) -> list[tuple[float, float]]:
     """Map page-space points into the pixel space of
     `render_vector_cluster(vectors, dpi)` -- the exact inverse of
-    `pixel_to_page_bbox` (same `_cluster_frame` + `zoom`). Lets the
-    visualization notebook draw PaddleOCR's returned page-space boxes back
+    `pixel_to_page_bbox` (same bbox origin + `zoom`). Lets the
+    visualization notebook draw OCR's returned page-space boxes back
     onto the rendered cluster image the backend actually saw."""
-    x0, y0, pad_x, pad_y = _cluster_frame(vectors)
+    x0, y0, _x1, _y1 = union_bbox([v.bbox for v in vectors])
     zoom = dpi / PDF_POINTS_PER_INCH
-    return [((px - x0 + pad_x) * zoom, (py - y0 + pad_y) * zoom) for px, py in page_points]
+    return [((px - x0) * zoom, (py - y0) * zoom) for px, py in page_points]
 
 
 def render_page_paths(

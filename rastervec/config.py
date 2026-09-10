@@ -151,10 +151,21 @@ RADON_LINE_BAND_MIN_FRAC = 0.10
 # estimation is scale-invariant, so a big merged bbox is downscaled to
 # this first to keep the O(pixels * angles) transform fast.
 RADON_MAX_RENDER_SIDE_PX = 1000
-# Floor (px) on the cluster-wide word-split gap threshold (15% of the
-# widest ink-run/character width pooled across every line in the cluster)
-# -- guards the degenerate case where every run is vanishingly thin.
+# Floor (px) on the cluster-wide word-split gap threshold (1.3x the median
+# inter-run gap pooled across every line in the cluster) -- guards the
+# degenerate case where that median is at or near zero (very tight kerning,
+# or mostly single-run lines).
 RADON_MIN_GAP_PX = 2.0
+# Multiplier on that pooled median gap. The median inter-run gap in a
+# cluster is the typical *intra-word* letter gap (letter gaps outnumber
+# word gaps), so a threshold just above it separates words from letters.
+RADON_GAP_MEDIAN_MULTIPLIER = 1.3
+# White border `OCR/radon.py::pad_image` adds, as a fraction of the image's
+# own width (left/right) and height (top/bottom). The pipeline's *only*
+# padding: applied once to a whole cluster render before deskew/word-split,
+# and once to each word crop before it becomes `Segment.image` -- the crop
+# PaddleOCR recognizes. `renderer/png.py` adds no border of its own.
+RADON_PAD_FRACTION = 0.1
 # Minimum ink-run count (the pre-OCR proxy for character count) a split
 # word must have -- a shorter word merges into a neighbor regardless of
 # the gap between them, since PaddleOCR reads a too-short word's
@@ -165,25 +176,12 @@ RADON_MIN_WORD_CHARS = 3
 # pixels at the requested dpi is bumped to a higher effective dpi instead
 # -- PaddleOCR reads tiny crops poorly.
 MIN_RENDER_SIDE_PX = 50
-
-# ======================================================================
-# renderer/png.py -- OCR / FAST input rasterization
-# ======================================================================
-
-# Minimum padding (PDF points) around a cluster's bbox before rendering,
-# so a thin stroke right at the edge isn't clipped.
-MIN_CLUSTER_PADDING = 4.0
-# OCR render-border expansion, as fractions of the cluster bbox height,
-# applied asymmetrically: tight vertically (glyphs stay tall), generous
-# horizontally (edge glyphs don't clip). Also used by
-# OCR/Paddle_OCR/crop_normalize.py for the post-render crop pad.
-OCR_VERTICAL_PADDING_FRACTION = 0.05
-OCR_HORIZONTAL_PADDING_FRACTION = 0.30
-
-# crop_normalize.py: fixed recognition line height / max width (px) the
-# legacy PaddleOCR crop is resized to.
-REC_LINE_HEIGHT_PX = 48
-REC_LINE_MAX_WIDTH_PX = 1024
+# Hard ceiling on that bump. A degenerate cluster (a sub-point bbox from
+# stray CAD geometry) would otherwise demand an unbounded dpi to reach
+# MIN_RENDER_SIDE_PX and rasterize to a multi-gigabyte pixmap. Content that
+# small carries no readable glyph anyway -- it renders blank and is dropped
+# by segment_clusters' own no-ink check.
+MAX_RENDER_DPI = 4800
 
 # batch size for both the classification (`cls_batch_num`) and
 # recognition (`rec_batch_num`) PaddleOCR calls, and for

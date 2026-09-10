@@ -4,7 +4,9 @@ words, OCR results) into pixels. Not a pipeline stage.
 Split by output concern:
 - `png.py`  -- rasterize vector paths for OCR / FAST detection input
   (`render_vector_cluster`, `render_page_paths`, plus the
-  `pixel_to_page_bbox` / `cluster_frame_size` transform helpers).
+  `pixel_to_page_bbox` / `page_points_to_pixel` transform helpers). Renders
+  a cluster's bare `union_bbox` -- no padding; that lives in
+  `OCR/radon.py::pad_image`.
 - `pdf.py`  -- `render_reconstructed_page`, the notebook's reconstruction
   preview, plus `render_boxes_pdf`, a generic colored-bbox-outline
   primitive used by the benchmark's pred-vs-GT box overlay.
@@ -32,7 +34,6 @@ from rastervec.renderer.pdf import (
     render_reconstructed_pdf,
 )
 from rastervec.renderer.png import (
-    cluster_frame_size,
     page_points_to_pixel,
     pixel_to_page_bbox,
     render_page_paths,
@@ -50,6 +51,5 @@ __all__ = [
     "render_page_paths",
     "pixel_to_page_bbox",
     "page_points_to_pixel",
-    "cluster_frame_size",
     "render_page_svg",
 ]

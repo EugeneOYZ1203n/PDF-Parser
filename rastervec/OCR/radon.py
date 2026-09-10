@@ -25,6 +25,15 @@ combines this angle with PaddleOCR's cls-detected 180-degree flip) depend
 on the full-precision value; rounding it here would silently degrade every
 downstream angle to blocky 90-degree steps.
 
+**Padding lives here, and only here.** `pad_image` is the pipeline's single
+padding step: `renderer.render_vector_cluster` renders a cluster's bare
+`union_bbox` with no border, and the OCR backend hands `Segment.image` to
+PaddleOCR verbatim (there is no crop-normalization pass anymore), so both
+margins the OCR path needs come from `segment_clusters`' two explicit
+`pad_image` calls -- one around the whole cluster render, one around each
+word crop. Don't push either back into the renderer or the backend; the
+point of the current shape is that the padding is readable at the call site.
+
 Pipeline use: this runs directly after FAST detection (`pipelines/
 _steps.py::detect_text_fast`) and before similarity grouping -- every
 FAST-surviving classification cluster gets Radon-segmented here, not just a
@@ -55,20 +64,24 @@ import numpy as np
 from skimage.transform import SimilarityTransform, radon, resize, warp
 
 from rastervec.config import (
+    MAX_RENDER_DPI,
     MIN_RENDER_SIDE_PX,
     RADON_ANGLE_STEP_DEG,
+    RADON_GAP_MEDIAN_MULTIPLIER,
     RADON_LINE_BAND_MIN_FRAC,
     RADON_MAX_RENDER_SIDE_PX,
     RADON_MIN_GAP_PX,
     RADON_MIN_WORD_CHARS,
+    RADON_PAD_FRACTION,
     RADON_SKEW_LIMIT_DEG,
 )
 from rastervec.helpers.geometry import (
     PDF_POINTS_PER_INCH,
     bbox_intersection_area,
+    union_bbox,
 )
 from rastervec.models import Segment, Vector
-from rastervec.renderer import cluster_frame_size, pixel_to_page_bbox, render_vector_cluster
+from rastervec.renderer import pixel_to_page_bbox, render_vector_cluster
 from rastervec.renderer.stages import render_radon  # noqa: F401 -- re-exported for callers
 
 # A pixel darker than this counts as glyph ink (0 = black, 255 = white).
@@ -167,23 +180,29 @@ def _split_columns_into_words(
     return [(s, e) for s, e, _c in spans]
 
 
-def _line_run_widths(has_ink: np.ndarray) -> list[float]:
-    """This line's own ink-run widths (px) -- the character-width samples
-    pooled into the cluster-wide word-split gap threshold (see
-    `_cluster_gap_threshold`). ``[]`` if the line has no ink."""
-    return [float(end - start + 1) for start, end in _ink_runs(has_ink)]
+def _line_gaps(has_ink: np.ndarray) -> list[float]:
+    """This line's own inter-run gaps (px) -- the samples pooled into the
+    cluster-wide word-split gap threshold (see `_cluster_gap_threshold`).
+    ``[]`` if the line has fewer than two ink runs."""
+    runs = _ink_runs(has_ink)
+    if len(runs) < 2:
+        return []
+    return [float(runs[i + 1][0] - runs[i][1] - 1) for i in range(len(runs) - 1)]
 
 
-def _cluster_gap_threshold(all_run_widths: list[float], *, min_gap: float = RADON_MIN_GAP_PX) -> float:
-    """One shared word-split threshold for the whole cluster: 15% of the
-    widest ink run (character) found anywhere in the cluster, pooled
-    across every line (not one line's own runs) -- a gap wider than this
-    starts a new word. `min_gap` floors the degenerate case (no runs, or
-    every run vanishingly thin), so splitting doesn't collapse to "every
-    run is its own word."""
-    if not all_run_widths:
+def _cluster_gap_threshold(all_gaps: list[float], *, min_gap: float = RADON_MIN_GAP_PX) -> float:
+    """One shared word-split threshold for the whole cluster:
+    `RADON_GAP_MEDIAN_MULTIPLIER` times the median inter-run gap, pooled
+    across every line (not one line's own gaps) -- a gap wider than this
+    starts a new word. Letter gaps outnumber word gaps, so that pooled
+    median *is* the typical intra-word letter gap; sitting just above it
+    separates words from letters. `min_gap` floors the degenerate case
+    (no gaps at all, or a median at/near zero from very tight kerning or
+    mostly single-run lines), so splitting doesn't collapse to "every run
+    is its own word."""
+    if not all_gaps:
         return min_gap
-    return max(min_gap, 0.15 * max(all_run_widths))
+    return max(min_gap, RADON_GAP_MEDIAN_MULTIPLIER * float(np.median(all_gaps)))
 
 
 # --------------------------------------------------------------------------
@@ -288,7 +307,7 @@ def split_words(line_gray: np.ndarray, *, gap_threshold: float,
     """`(x0, y0, x1, y1)` pixel boxes, one per word, within one deskewed
     line crop. Both x- and y-extent are each word's own tight ink bbox:
     the column profile is split on `gap_threshold` (the cluster-wide
-    pooled 15%-of-widest-character gap, see `_cluster_gap_threshold`)
+    pooled 1.3x-median-gap, see `_cluster_gap_threshold`)
     first, then any resulting span with fewer than `min_chars` ink runs
     (the pre-OCR proxy for character count) is merged into a neighbor --
     overriding the gap split, since PaddleOCR reads a too-short word's
@@ -373,17 +392,49 @@ def _downscale_ink_for_radon(gray: np.ndarray) -> np.ndarray:
 def render_cluster_for_radon(vectors: list[Vector], dpi: int = 300) -> tuple["np.ndarray", int]:
     """Render `vectors` as Radon/OCR sees it: `dpi` bumped upward (never
     down) so the rendered image's shorter side is at least
-    `MIN_RENDER_SIDE_PX`. Returns `(gray, dpi_used)`. Shared by
-    `segment_clusters` (Phase D, one render per cluster) and OCR's own
-    unique-segment render (Phase G, one render per unique segment) -- same
-    "don't hand PaddleOCR a tiny crop" rationale either way."""
-    width_pt, height_pt = cluster_frame_size(vectors)
-    min_side_pt = min(width_pt, height_pt)
+    `MIN_RENDER_SIDE_PX` -- "don't hand PaddleOCR a tiny crop" -- and
+    capped at `MAX_RENDER_DPI`, since the render frame is the bare bbox
+    and a degenerate sub-point cluster would otherwise demand an unbounded
+    dpi to reach that minimum. Returns `(gray, dpi_used)`, the cluster's
+    bare `union_bbox` with no border (`renderer/png.py` pads nothing);
+    `segment_clusters` adds the margin itself, in pixel space, via
+    `pad_image`."""
+    x0, y0, x1, y1 = union_bbox([v.bbox for v in vectors])
+    min_side_pt = min(x1 - x0, y1 - y0)
     if min_side_pt > 0:
         needed_dpi = math.ceil(MIN_RENDER_SIDE_PX * PDF_POINTS_PER_INCH / min_side_pt)
-        dpi = max(dpi, needed_dpi)
+        dpi = min(max(dpi, needed_dpi), MAX_RENDER_DPI)
     image = render_vector_cluster(vectors, dpi)
     return to_gray(image), dpi
+
+
+def pad_image(
+    img: np.ndarray, fraction: float = RADON_PAD_FRACTION,
+) -> tuple[np.ndarray, tuple[int, int]]:
+    """Surround `img` with a white border of `fraction * width` px left and
+    right and `fraction * height` px top and bottom, returning
+    `(padded, (pad_x_px, pad_y_px))`.
+
+    **This is the pipeline's only padding step.** Nothing upstream adds a
+    margin -- `renderer.render_vector_cluster` renders a cluster's bare
+    `union_bbox`, and PaddleOCR is handed `Segment.image` as-is -- so both
+    the room Radon's deskew/line-band pass needs at the frame edge and the
+    breathing room the recognizer wants around a word come from here. It is
+    called twice in `segment_clusters` (whole cluster render, then each
+    word crop) precisely so both are visible at the call site.
+
+    `pad_x_px`/`pad_y_px` are what a caller must subtract to get back into
+    the *unpadded* render's pixel space -- which is what
+    `renderer.pixel_to_page_bbox` inverts. A zero-area image is returned
+    unchanged with a `(0, 0)` offset."""
+    if img.size == 0:
+        return img, (0, 0)
+    pad_y = int(round(img.shape[0] * fraction))
+    pad_x = int(round(img.shape[1] * fraction))
+    padded = np.pad(
+        img, ((pad_y, pad_y), (pad_x, pad_x)), mode="constant", constant_values=255,
+    )
+    return padded, (pad_x, pad_y)
 
 
 def _bbox_center(bbox: tuple[float, float, float, float]) -> tuple[float, float]:
@@ -420,15 +471,23 @@ def _assign_vectors_to_words(
 def segment_clusters(clusters: list[list[Vector]], *, dpi: int = 300) -> list[Segment]:
     """Radon-segments every cluster into word-level `Segment`s at real page
     position. For each cluster: render (transient, not kept as a whole --
-    but each word's own crop *is* kept, see below) -> estimate skew (full
-    precision) -> deskew -> split into line/word crops -> map each word's
-    crop region back onto the cluster's own `Vector`s (by bbox overlap, see
-    `_assign_vectors_to_words`) -> one `Segment` per non-empty word, its
-    `image` the word's own deskewed pixel crop (so OCR never has to
-    re-render from vectors). A cluster with no ink, or whose deskewed
-    profile yields no word bands, is skipped (its Vectors are lost from
-    this step's output -- callers should already know FAST/similarity only
-    see clusters with real ink)."""
+    but each word's own crop *is* kept, see below) -> **pad** -> estimate
+    skew (full precision) -> deskew -> split into line/word crops -> map
+    each word's crop region back onto the cluster's own `Vector`s (by bbox
+    overlap, see `_assign_vectors_to_words`) -> one `Segment` per non-empty
+    word, its `image` that word's own **padded** deskewed pixel crop (so
+    OCR never has to re-render from vectors, and needs no normalization
+    pass of its own).
+
+    The two `pad_image` calls are the only padding in the pipeline -- see
+    that function's docstring. Both are inline here rather than hidden in
+    the renderer or the OCR backend so the margins are visible where they
+    happen; the price is the `- pad_x_px / - pad_y_px` correction on the
+    way back out to page space.
+
+    A cluster with no ink, or whose deskewed profile yields no word bands,
+    is skipped (its Vectors are lost from this step's output -- callers
+    should already know FAST/similarity only see clusters with real ink)."""
     segments: list[Segment] = []
     for cluster in clusters:
         if not cluster:
@@ -436,6 +495,11 @@ def segment_clusters(clusters: list[list[Vector]], *, dpi: int = 300) -> list[Se
         gray, dpi_used = render_cluster_for_radon(cluster, dpi)
         if gray.size == 0 or not to_ink(gray).any():
             continue
+        # Pad 1 of 2: the whole cluster render, so deskew's warp and
+        # `line_bands`' band padding have room at the frame edge. Every
+        # pixel coordinate below is in this padded space until it's mapped
+        # back out by subtracting (pad_x_px, pad_y_px).
+        gray, (pad_x_px, pad_y_px) = pad_image(gray)
 
         skew = estimate_skew_from_mask(_downscale_ink_for_radon(gray))
         out_shape, forward, inverse = _rotation(gray.shape, skew)
@@ -450,7 +514,7 @@ def segment_clusters(clusters: list[list[Vector]], *, dpi: int = 300) -> list[Se
             continue
 
         line_cols = [to_ink(deskewed[by0:by1 + 1, :]).any(axis=0) for by0, by1 in bands]
-        gap_threshold = _cluster_gap_threshold([w for cols in line_cols for w in _line_run_widths(cols)])
+        gap_threshold = _cluster_gap_threshold([g for cols in line_cols for g in _line_gaps(cols)])
 
         word_bboxes: list[tuple[float, float, float, float]] = []
         word_images: list[np.ndarray] = []
@@ -459,12 +523,18 @@ def segment_clusters(clusters: list[list[Vector]], *, dpi: int = 300) -> list[Se
             for wx0, wy0, wx1, wy1 in split_words(line, gap_threshold=gap_threshold):
                 gy0, gy1 = by0 + wy0, by0 + wy1
                 box = np.array([(wx0, gy0), (wx1, gy0), (wx1, gy1), (wx0, gy1)], dtype=np.float64)
+                # `inverse` lands in the *padded* render's pixel space;
+                # `pixel_to_page_bbox` inverts the unpadded one.
                 mapped = inverse(box)
                 page_bbox = pixel_to_page_bbox(
-                    cluster, dpi_used, [(float(x), float(y)) for x, y in mapped],
+                    cluster, dpi_used,
+                    [(float(x) - pad_x_px, float(y) - pad_y_px) for x, y in mapped],
                 )
                 word_bboxes.append(page_bbox)
-                word_images.append(deskewed[gy0:gy1, wx0:wx1])
+                # Pad 2 of 2: this word's own crop, which is handed to
+                # PaddleOCR verbatim as `Segment.image`.
+                crop, _offset = pad_image(deskewed[gy0:gy1, wx0:wx1])
+                word_images.append(crop)
 
         if not word_bboxes:
             continue

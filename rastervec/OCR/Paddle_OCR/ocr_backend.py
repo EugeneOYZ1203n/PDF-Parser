@@ -6,9 +6,10 @@ Text *detection* is not PaddleOCR's job in this pipeline -- FAST (Phase D,
 clusters down to the ones that look like text, then Radon segmentation
 (`OCR/radon.py::segment_clusters`, Phase E, called on every FAST-surviving
 cluster) splits each one into word-level `Segment`s, each already carrying
-its own deskewed crop (`Segment.image`) -- so by the time a `Segment`
-reaches this module it *is* one word, already rotated to (approximately)
-upright, and no render happens here at all. Similarity dedup (Phase F,
+its own deskewed, white-padded crop (`Segment.image`) -- so by the time a
+`Segment` reaches this module it *is* one word, already rotated to
+(approximately) upright and already OCR-ready: no render and no crop
+normalization happen here at all, only a BGR conversion. Similarity dedup (Phase F,
 `pipelines/_steps.py::elect_unique_segments`) then elects one representative
 `Segment` per repeated shape and it's only those representatives this
 module actually recognizes. The only remaining ambiguity Radon's
@@ -40,7 +41,6 @@ from rastervec.config import OCR_BATCH_SIZE, OCR_LANG, OCR_VERSION
 from rastervec.helpers.geometry import compute_origin, transform_direction, union_bbox
 from rastervec.logging_setup import get_logger
 from rastervec.models import Segment, Text
-from rastervec.OCR.Paddle_OCR.crop_normalize import normalize_line_crop
 from rastervec.renderer.stages import render_ocr_results  # noqa: F401 -- re-exported for callers
 
 _LOG = get_logger("ocr.backend")
@@ -98,7 +98,9 @@ class PaddleRecBackend:
         orientation (0/180), rotate the ones flagged 180, then recognise
         the whole (now-upright) batch in a single `text_recognizer` pass --
         one recognition call total, not the old upright-and-flipped double
-        call."""
+        call. Each crop is used as handed over, only converted to BGR: it
+        arrives already deskewed and already white-padded from
+        `OCR/radon.py`, and `text_recognizer` does its own resize."""
         if not crops:
             return []
         bgr = [_normalize_bgr(c) for c in crops]
@@ -119,19 +121,15 @@ class PaddleRecBackend:
 
 
 def _normalize_bgr(crop: np.ndarray) -> np.ndarray:
-    """normalise -> RGB -> BGR (paddleocr 2.x's TextClassifier/TextRecognizer
-    are cv2/BGR)."""
-    return np.ascontiguousarray(
-        np.asarray(normalize_line_crop(_as_pil(crop)).convert("RGB"))[:, :, ::-1]
-    )
-
-
-def _as_pil(arr: np.ndarray):
-    from PIL import Image
-
-    if arr.ndim == 2:
-        return Image.fromarray(arr.astype(np.uint8), mode="L")
-    return Image.fromarray(arr.astype(np.uint8))
+    """A `Segment.image` -> a 3-channel BGR array (paddleocr 2.x's
+    TextClassifier/TextRecognizer are cv2/BGR). Nothing else happens here:
+    the crop already carries its white margin from `OCR/radon.py::pad_image`,
+    and `text_recognizer` resizes to its own `rec_image_shape` internally,
+    so there is no separate crop-normalization pass to run."""
+    arr = np.asarray(crop, dtype=np.uint8)
+    if arr.ndim == 2:  # grayscale -- gray RGB and gray BGR are identical
+        return np.ascontiguousarray(np.repeat(arr[:, :, None], 3, axis=2))
+    return np.ascontiguousarray(arr[:, :, :3][:, :, ::-1])
 
 
 def _recognize_crops_job(

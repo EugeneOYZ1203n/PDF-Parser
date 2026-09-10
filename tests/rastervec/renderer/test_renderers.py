@@ -22,7 +22,6 @@ from rastervec.models import PageMeta, Text, Vector
 from rastervec.native_text import extract_native_text
 from rastervec.Reader.reader import Reader
 from rastervec.renderer import (
-    cluster_frame_size,
     page_points_to_pixel,
     pixel_to_page_bbox,
     render_boxes_pdf,
@@ -31,7 +30,6 @@ from rastervec.renderer import (
     render_reconstructed_pdf,
     render_vector_cluster,
 )
-from rastervec.renderer.png import _cluster_frame
 from rastervec.Vector.vector import extract_vectors
 
 REFERENCES_DIR = Path(__file__).resolve().parents[2] / "references"
@@ -431,18 +429,15 @@ def test_render_vector_cluster_reuses_doc_without_bleeding_between_calls(vector)
     assert image_blank.convert("L").getextrema()[0] == 255
 
 
-def test_pixel_to_page_bbox_round_trips_cluster_frame(vector):
-    v = vector(kind="re", bbox=(0, 0, 20, 10), fill=(0, 0, 0))
+def test_pixel_to_page_bbox_maps_origin_to_bbox_origin(vector):
+    """The render carries no border, so pixel (0, 0) *is* the cluster's own
+    bbox origin -- nothing to subtract."""
+    v = vector(kind="re", bbox=(3, 7, 23, 17), fill=(0, 0, 0))
     dpi = 150
     zoom = dpi / 72.0
-    x0, y0, pad_x, pad_y = _cluster_frame([v])
 
-    # A pixel-space point at the padded top-left corner should map back to
-    # the cluster's own bbox origin in page space.
-    page_bbox = pixel_to_page_bbox(
-        [v], dpi, [(pad_x * zoom, pad_y * zoom), ((pad_x + 20) * zoom, (pad_y + 10) * zoom)],
-    )
-    assert page_bbox == pytest.approx((x0, y0, x0 + 20, y0 + 10))
+    page_bbox = pixel_to_page_bbox([v], dpi, [(0.0, 0.0), (20 * zoom, 10 * zoom)])
+    assert page_bbox == pytest.approx((3, 7, 23, 17))
 
 
 def test_page_points_to_pixel_inverts_pixel_to_page_bbox(vector):
@@ -456,23 +451,23 @@ def test_page_points_to_pixel_inverts_pixel_to_page_bbox(vector):
     assert back == pytest.approx((5.0, 9.0, 21.0, 15.0))
 
 
-def test_cluster_frame_horizontal_padding_more_generous_than_vertical(vector):
-    # A tall bbox (height 200) pushes both fraction-based margins well past
-    # the stroke-safety floor, so the asymmetry actually engages: pad_x
-    # (30% of height) should end up well past pad_y (5% of height).
-    v = vector(kind="re", bbox=(0, 0, 20, 200), fill=(0, 0, 0))
-    _x0, _y0, pad_x, pad_y = _cluster_frame([v])
-    assert pad_x == pytest.approx(60.0)  # 200 * 0.30
-    assert pad_y == pytest.approx(10.0)  # 200 * 0.05
-    assert pad_x > pad_y
+def test_render_vector_cluster_canvas_is_exactly_the_union_bbox(vector):
+    """No border of any kind: all padding lives in OCR/radon.py::pad_image,
+    and pixel_to_page_bbox depends on the bbox *being* the frame."""
+    v = vector(kind="re", bbox=(5, 5, 25, 15), fill=(0, 0, 0))
+    image = render_vector_cluster([v], dpi=144)  # zoom 2.0
+
+    assert (image.width, image.height) == (40, 20)
 
 
-def test_cluster_frame_size_matches_render_vector_cluster_bbox_plus_padding(vector):
-    v = vector(kind="re", bbox=(0, 0, 20, 10), fill=(0, 0, 0))
-    width, height = cluster_frame_size([v])
-    x0, y0, pad_x, pad_y = _cluster_frame([v])
-    assert width == pytest.approx(20 + 2 * pad_x)
-    assert height == pytest.approx(10 + 2 * pad_y)
+def test_render_vector_cluster_degenerate_flat_cluster_still_renders(vector):
+    """A zero-height cluster (a single horizontal rule) must not build a
+    0-px canvas -- the canvas-side floor is a degeneracy guard, not
+    padding."""
+    v = vector(kind="l", bbox=(0, 10, 40, 10), color=(0, 0, 0), width=1)
+    image = render_vector_cluster([v], dpi=144)
+
+    assert image.width > 0 and image.height > 0
 
 
 # --------------------------------------------------------------------------

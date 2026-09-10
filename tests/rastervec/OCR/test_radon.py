@@ -77,19 +77,25 @@ def test_split_on_gaps_breaks_on_wide_gap():
     assert radon._split_on_gaps(arr, gap_threshold=2.0) == [(0, 7), (40, 41)]
 
 
-def test_line_run_widths_returns_ink_run_widths():
+def test_line_gaps_returns_inter_run_gaps():
     arr = np.zeros(50, dtype=bool)
     for s, e in [(0, 4), (10, 11), (20, 29)]:
         arr[s:e + 1] = True
-    assert radon._line_run_widths(arr) == [5.0, 2.0, 10.0]
-    assert radon._line_run_widths(np.zeros(5, dtype=bool)) == []
+    assert radon._line_gaps(arr) == [5.0, 8.0]
+    # fewer than two runs -> no gaps to sample
+    assert radon._line_gaps(np.zeros(5, dtype=bool)) == []
+    single = np.zeros(10, dtype=bool)
+    single[2:5] = True
+    assert radon._line_gaps(single) == []
 
 
-def test_cluster_gap_threshold_is_15pct_of_widest_run_and_floors():
-    assert radon._cluster_gap_threshold([4.0, 8.0, 40.0]) == pytest.approx(6.0)
+def test_cluster_gap_threshold_is_1_3x_median_gap_and_floors():
+    # median([2, 4, 30]) == 4 -> 1.3 * 4
+    assert radon._cluster_gap_threshold([2.0, 4.0, 30.0]) == pytest.approx(5.2)
     assert radon._cluster_gap_threshold([]) == radon.RADON_MIN_GAP_PX
+    # a median at/near zero falls back to the floor
     assert radon._cluster_gap_threshold([1.0, 1.0]) == radon.RADON_MIN_GAP_PX
-    assert radon._cluster_gap_threshold([10.0], min_gap=0.5) == pytest.approx(1.5)
+    assert radon._cluster_gap_threshold([10.0], min_gap=0.5) == pytest.approx(13.0)
 
 
 def test_enforce_min_run_count_merges_short_spans_regardless_of_gap():
@@ -118,6 +124,47 @@ def test_split_columns_into_words_overrides_gap_threshold_for_short_words():
     arr[0:2] = True    # run 1 (1 run)
     arr[40:42] = True  # run 2 (1 run) -- 38px gap, way over gap_threshold=2.0
     assert radon._split_columns_into_words(arr, gap_threshold=2.0, min_chars=3) == [(0, 41)]
+
+
+# --------------------------------------------------------------------------
+# pad_image -- the pipeline's only padding step
+# --------------------------------------------------------------------------
+def test_pad_image_adds_white_border_of_the_configured_fraction():
+    img = np.zeros((50, 200), dtype=np.uint8)  # all-black, so the border stands out
+
+    padded, (pad_x, pad_y) = radon.pad_image(img, fraction=0.1)
+
+    assert (pad_x, pad_y) == (20, 5)
+    assert padded.shape == (50 + 2 * 5, 200 + 2 * 20)
+    # the added border is white...
+    assert (padded[:pad_y, :] == 255).all()
+    assert (padded[-pad_y:, :] == 255).all()
+    assert (padded[:, :pad_x] == 255).all()
+    assert (padded[:, -pad_x:] == 255).all()
+    # ...and the original lands exactly at (pad_y, pad_x)
+    assert np.array_equal(padded[pad_y:pad_y + 50, pad_x:pad_x + 200], img)
+
+
+def test_pad_image_defaults_to_the_config_fraction():
+    padded, (pad_x, pad_y) = radon.pad_image(np.zeros((30, 40), dtype=np.uint8))
+    assert (pad_x, pad_y) == (
+        round(40 * radon.RADON_PAD_FRACTION), round(30 * radon.RADON_PAD_FRACTION),
+    )
+    assert padded.shape == (30 + 2 * pad_y, 40 + 2 * pad_x)
+
+
+def test_pad_image_zero_area_returned_unchanged():
+    empty = np.zeros((0, 5), dtype=np.uint8)
+    padded, offset = radon.pad_image(empty)
+    assert padded is empty
+    assert offset == (0, 0)
+
+
+def test_pad_image_copies_rather_than_viewing_its_input():
+    img = np.zeros((20, 20), dtype=np.uint8)
+    padded, (pad_x, pad_y) = radon.pad_image(img)
+    img[:] = 128
+    assert (padded[pad_y:pad_y + 20, pad_x:pad_x + 20] == 0).all()
 
 
 # --------------------------------------------------------------------------
@@ -167,7 +214,9 @@ def test_segment_clusters_splits_into_one_segment_per_word():
 def test_segment_clusters_captures_each_words_own_crop_image():
     """Each Segment's `image` is captured directly from the deskewed
     render during segmentation, so OCR never has to re-render from
-    vectors -- non-empty, 2-D, and distinct per word."""
+    vectors -- non-empty, 2-D, and distinct per word. It is also already
+    white-padded (`pad_image`), since the OCR backend does no crop
+    normalization of its own."""
     cluster = _two_word_cluster()
 
     segments = radon.segment_clusters([cluster])
@@ -177,6 +226,11 @@ def test_segment_clusters_captures_each_words_own_crop_image():
         assert seg.image is not None
         assert seg.image.ndim == 2
         assert seg.image.size > 0
+        # the per-word pad ran: every outer edge is blank white
+        assert (seg.image[0, :] == 255).all()
+        assert (seg.image[-1, :] == 255).all()
+        assert (seg.image[:, 0] == 255).all()
+        assert (seg.image[:, -1] == 255).all()
     # the two words' crops are independently sized/positioned, not the same
     # array reused
     assert segments[0].image.shape != segments[1].image.shape or not np.array_equal(
@@ -210,24 +264,25 @@ def test_segment_clusters_empty_input():
     assert radon.segment_clusters([]) == []
 
 
-def test_segment_clusters_pools_widest_run_across_lines():
-    """Line A's wide (40pt) runs push the cluster-wide pooled gap
-    threshold (15% of the widest run anywhere in the cluster) up to 6pt.
-    Line B's own runs are narrow (4pt) -- judged on its own, its threshold
-    would be a mere 0.6pt, well under the 5pt gap separating its two
-    3-run "words" (each already clearing the 3-character minimum on its
-    own, so item 4's merge doesn't confound this), which would stay
-    separate at that local threshold. With the cluster-wide pool, that
-    same 5pt gap falls under the shared 6pt threshold, so line B's two
-    words merge into one 6-run segment -- the cross-line pooling
-    behavioral difference a per-line-only threshold would not produce."""
+def test_segment_clusters_pools_gaps_across_lines():
+    """Line A's five wide (20pt) gaps drag the cluster-wide pooled median
+    gap up to ~12pt, so the shared threshold (1.3x that) lands near ~16pt.
+    Line B's own gaps are narrow -- judged on its own, its median gap is
+    1pt and its threshold a mere 1.3pt, well under the 5pt gap separating
+    its two 3-run "words" (each already clearing the 3-character minimum on
+    its own, so `_enforce_min_run_count` doesn't confound this), which
+    would therefore stay separate at that local threshold. Against the
+    cluster-wide pool, that same 5pt gap falls under the shared threshold,
+    so line B's two words merge into one 6-run segment -- the cross-line
+    pooling behavioral difference a per-line-only threshold would not
+    produce."""
     vectors: list[Vector] = []
     seq = 0
-    # line A: 3 runs, 40pt wide each, 2pt gaps -- sets the pooled max.
-    for x0 in (10, 52, 94):
-        vectors.append(_word_vector((x0, 20, x0 + 40, 35), seq))
+    # line A: 6 runs separated by 20pt gaps -- pulls the pooled median up.
+    for x0 in (10, 34, 58, 82, 106, 130):
+        vectors.append(_word_vector((x0, 20, x0 + 4, 35), seq))
         seq += 1
-    # line B, word 1: 3 runs, 4pt wide each, 1pt gaps.
+    # line B, word 1: 3 runs, 1pt gaps.
     for x0 in (10, 15, 20):
         vectors.append(_word_vector((x0, 50, x0 + 4, 65), seq))
         seq += 1
@@ -235,7 +290,7 @@ def test_segment_clusters_pools_widest_run_across_lines():
     for x0 in (29, 34, 39):
         vectors.append(_word_vector((x0, 50, x0 + 4, 65), seq))
         seq += 1
-    line_b_seqnos = {v.seqno for v in vectors[3:]}
+    line_b_seqnos = {v.seqno for v in vectors[6:]}
 
     segments = radon.segment_clusters([vectors])
 
