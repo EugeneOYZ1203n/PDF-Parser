@@ -24,12 +24,15 @@ def _word_vector(bbox: tuple[float, float, float, float], seqno: int) -> Vector:
 
 
 def _two_word_cluster() -> list[Vector]:
-    """Two words, each three short dashes close together, well separated
-    horizontally -- mirrors _text_image's per-word dash pattern."""
+    """Two words on one baseline, separated far enough horizontally that
+    `group_by_aspect` keeps them two segments (combined width / line height
+    clears RADON_MAX_SEGMENT_ASPECT). The first word is 3 dashes, the
+    second 4, so their crops are genuinely distinct -- mirrors
+    _text_image's per-word dash pattern."""
     vectors: list[Vector] = []
     seq = 0
-    for word_x in (20, 100):
-        for i in range(3):
+    for word_x, n in ((20, 3), (160, 4)):
+        for i in range(n):
             x = word_x + i * 12
             vectors.append(_word_vector((x, 20, x + 8, 36), seq))
             seq += 1
@@ -168,6 +171,60 @@ def test_pad_image_copies_rather_than_viewing_its_input():
 
 
 # --------------------------------------------------------------------------
+# gap-quality objective
+# --------------------------------------------------------------------------
+def test_profile_peaks_bands_two_plateaus():
+    prof = np.zeros(60, dtype=np.float64)
+    prof[5:15] = 10.0
+    prof[40:50] = 10.0
+    peaks = radon._profile_peaks(prof)
+    assert len(peaks) == 2
+    # smoothing widens each plateau by ~1 bin on each side
+    (s0, e0), (s1, e1) = peaks
+    assert s0 <= 5 and e0 >= 14
+    assert s1 <= 40 and e1 >= 49
+
+
+def test_gap_scores_formula():
+    eps = radon.RADON_GAP_SCORE_EPS
+    # a tall third peak sets the peak-detection threshold high enough that a
+    # partially-filled valley (floor 40) still separates its two 100-peaks.
+    prof = np.zeros(120, dtype=np.float64)
+    prof[5:15] = 100.0
+    prof[15:30] = 40.0     # valley floor between peak A and peak B
+    prof[30:40] = 100.0
+    prof[95:105] = 1000.0  # dominates -> threshold ~50
+    partial, deep = radon._gap_scores(prof)
+    # L = R = 100, mid = 100, M = 40 -> g = 1 - (100 - 40)/(100 + eps)
+    assert partial == pytest.approx(1.0 - 60.0 / (100.0 + eps), abs=0.08)
+    # B..C valley is a true zero -> near-perfect (near-zero) gap score
+    assert deep < 0.05
+    assert deep < partial
+
+
+def test_gap_scores_needs_two_peaks():
+    one = np.zeros(40, dtype=np.float64)
+    one[10:20] = 10.0
+    assert radon._gap_scores(one) == []
+
+
+def test_skew_objective_infinite_for_single_peak():
+    prof = np.zeros(40, dtype=np.float64)
+    prof[10:20] = 5.0
+    assert radon._skew_objective(prof) == float("inf")
+
+
+def test_skew_objective_prefers_few_clean_gaps():
+    clean = np.zeros(90, dtype=np.float64)
+    for c in (10, 45, 78):
+        clean[c:c + 6] = 10.0                      # 3 peaks, 2 deep gaps
+    combed = np.zeros(90, dtype=np.float64)
+    for c in range(6, 86, 8):
+        combed[c:c + 3] = 10.0                     # ~10 peaks, many gaps
+    assert radon._skew_objective(clean) < radon._skew_objective(combed)
+
+
+# --------------------------------------------------------------------------
 # skew estimate
 # --------------------------------------------------------------------------
 @pytest.mark.parametrize("true_skew", [-6.0, -2.0, 0.0, 3.0, 8.0])
@@ -178,6 +235,23 @@ def test_estimate_skew_recovers_small_rotation(true_skew):
     rotated = sk_rotate(upright, -true_skew, resize=True, cval=255, preserve_range=True)
     est = radon.estimate_skew(rotated.astype(np.uint8))
     assert est == pytest.approx(true_skew, abs=1.5)
+
+
+def test_estimate_skew_single_line_via_90_degree_rule():
+    """One text line has no line gaps, so the sweep locks onto the
+    along-baseline letter comb; the 90-degrees-from-best check turns that
+    back into the real skew."""
+    w, h = 260, 60
+    img = Image.new("L", (w, h), 255)
+    d = ImageDraw.Draw(img)
+    for word_x in (20, 100, 170):
+        for i in range(3):
+            x = word_x + i * 12
+            d.rectangle([x, 24, x + 8, 40], fill=0)
+    for true_skew in (0.0, 4.0):
+        rotated = sk_rotate(np.asarray(img), -true_skew, resize=True, cval=255, preserve_range=True)
+        est = radon.estimate_skew(rotated.astype(np.uint8))
+        assert est == pytest.approx(true_skew, abs=2.0)
 
 
 def test_estimate_skew_blank_is_zero():
@@ -192,6 +266,22 @@ def test_line_bands_counts_lines():
     prof = radon.row_profile(radon.to_ink(img))
     assert len(radon.line_bands(prof)) == 4
     assert radon.line_spacing(prof) > 0
+
+
+def test_line_bands_keeps_a_shallow_valley_as_one_line():
+    """Two peaks whose separating valley never drops toward zero (a bad
+    gap -- overlapping ascenders/descenders) stay a single band; a deep
+    white valley splits."""
+    peak = 100.0
+    good = np.zeros(90, dtype=np.float64)
+    good[10:25] = peak
+    good[65:80] = peak                       # deep zero valley between them
+    assert len(radon.line_bands(good)) == 2
+
+    bad = np.full(90, 0.55 * peak, dtype=np.float64)  # valley floor ~55% of peak
+    bad[10:25] = peak
+    bad[65:80] = peak
+    assert len(radon.line_bands(bad)) == 1
 
 
 # --------------------------------------------------------------------------
@@ -306,14 +396,13 @@ def test_rotation_inverse_round_trips():
     assert np.allclose(back, pts, atol=1e-6)
 
 
-def test_split_words_gives_each_word_its_own_tight_y_extent():
+def test_group_by_aspect_gives_each_segment_its_own_tight_y_extent():
     """Two words on one baseline with different glyph heights (a short
     word, then a tall one) must get different y-extents -- not the whole
-    line's shared ink bbox repeated for both words. Each "word" is two
-    small ink runs (like _text_image's dashes) with a small intra-word gap
-    and a wide inter-word gap, since _split_on_gaps can't split apart a
-    column profile with only one gap in it (as a single solid rectangle
-    per word would produce)."""
+    line's shared ink bbox repeated for both. Each "word" is two small ink
+    runs (like _text_image's dashes) with a small intra-word gap and a wide
+    inter-word gap. `max_aspect` is set low so the two stay separate
+    segments rather than grouping into one."""
     w, h = 200, 40
     img = Image.new("L", (w, h), 255)
     d = ImageDraw.Draw(img)
@@ -327,8 +416,37 @@ def test_split_words_gives_each_word_its_own_tight_y_extent():
     # min_chars=1: each word here is only 2 ink runs, below the real
     # 3-character minimum -- irrelevant to what this test checks (y-extent
     # tightness), so disabled here to keep the two words from merging.
-    boxes = radon.split_words(np.asarray(img), gap_threshold=10.0, min_chars=1)
+    boxes = radon.group_by_aspect(
+        np.asarray(img), gap_threshold=10.0, min_chars=1, max_aspect=3.0,
+    )
     assert len(boxes) == 2
     (_, short_y0, _, short_y1), (_, tall_y0, _, tall_y1) = boxes
     assert (short_y0, short_y1) != (tall_y0, tall_y1)
     assert (short_y1 - short_y0) < (tall_y1 - tall_y0)
+
+
+def test_group_by_aspect_caps_segment_aspect_ratio():
+    """A long single baseline of many equal words is split into several
+    segments, each roughly under the aspect-ratio cap -- and a single word
+    is never split, even when it alone is wider than the cap."""
+    w, h = 600, 30
+    img = Image.new("L", (w, h), 255)
+    d = ImageDraw.Draw(img)
+    x = 10
+    for _ in range(8):
+        for _ in range(4):  # 4 ticks per word -> clears min_chars
+            d.rectangle([x, 8, x + 4, 22], fill=0)
+            x += 8
+        x += 24  # wide inter-word gap
+
+    boxes = radon.group_by_aspect(np.asarray(img), gap_threshold=12.0)
+
+    assert len(boxes) >= 2  # 8 words, line ink height ~15 -> total aspect ~35
+    line_h = 15
+    for x0, _y0, x1, _y1 in boxes:
+        assert (x1 - x0) / line_h < radon.RADON_MAX_SEGMENT_ASPECT + 2
+
+    # one solid wide word (no internal gaps) is one segment, not split
+    solid = Image.new("L", (400, 30), 255)
+    ImageDraw.Draw(solid).rectangle([10, 8, 380, 22], fill=0)
+    assert len(radon.group_by_aspect(np.asarray(solid), gap_threshold=12.0)) == 1

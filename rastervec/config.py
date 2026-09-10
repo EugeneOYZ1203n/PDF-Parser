@@ -140,17 +140,53 @@ OCR_LANG = "en"
 # Radon text segmentation (OCR/radon.py)
 # ======================================================================
 
-# Fine skew sweep half-range (degrees) around the coarse Radon peak.
-RADON_SKEW_LIMIT_DEG = 15.0
+# Coarse skew full-sweep step (degrees), 0..180 -- locates the sweep regime
+# (multi-line line-gap basin vs single-line `inf` band) and a rough angle
+# that the fine sweep then pins. The gap-score objective is used at both
+# stages; Postl/variance is only the fallback when neither structure shows.
+RADON_COARSE_STEP_DEG = 3.0
+# Fine skew-sweep half-range (degrees) around the rough coarse angle. The
+# reported skew is NOT clamped to this -- the coarse sweep already found
+# the basin/band wherever it is, so this only needs to cover the coarse
+# grid's own +/-1.5-degree quantisation plus a margin.
+RADON_SKEW_LIMIT_DEG = 8.0
+# Max width (degrees) of the finite-objective window around the sweep
+# minimum for it to count as a real multi-line line-gap basin (its centre
+# is then the skew). A wider finite window means the projection keeps
+# splitting into peaks at almost every angle -- a single text line -- and
+# the skew comes from the narrow `inf` band instead.
+RADON_MULTILINE_BASIN_MAX_DEG = 30.0
 # Fine skew sweep step (degrees).
 RADON_ANGLE_STEP_DEG = 0.25
-# A deskewed row-projection value below this fraction of the profile's
-# peak is an inter-line gap, not part of a text line.
-RADON_LINE_BAND_MIN_FRAC = 0.10
+# Moving-average window (px) applied to a projection profile before its
+# peak / valley (gap) detection.
+RADON_PROFILE_SMOOTH_PX = 3
+# A smoothed-profile bin below this fraction of the profile's peak is not
+# part of a peak (text-line) band.
+RADON_PEAK_MIN_FRAC = 0.05
+# eps in the gap-quality score
+# `gap_score = 1 - ((L+R)/2 - M) / ((L+R)/2 + eps)` (L/R = the two peak
+# heights, M = the valley minimum between them). Profile values are
+# ink-pixel counts, so an absolute 1.0 keeps a literally-zero valley near
+# gap_score 0 ("clean gap") and never divides by zero.
+RADON_GAP_SCORE_EPS = 1.0
+# A profile valley whose gap_score is below this is a real line/word
+# boundary; above it the two peaks belong to the same text line (a shallow
+# valley bridged by descenders, dotted rows, ...).
+RADON_GOOD_GAP_MAX = 0.5
+# A text line is split at word gaps only as far as needed to keep every
+# segment's aspect ratio (segment width / line ink height) under this -- so
+# "I love pineapples very much" becomes a few OCR-friendly chunks rather
+# than one absurdly wide crop. A single word wider than this is never split.
+RADON_MAX_SEGMENT_ASPECT = 10.0
+# Max fractional growth of a segment's OCR crop per axis when it is grown
+# outward to a fully ink-free border (recovering clipped ascenders /
+# descenders). 1.0 -> at most +100% width and +100% height.
+RADON_WORD_GROW_MAX_FRAC = 1.0
 # Cap (px) on a cluster render's long side before the Radon sweep -- angle
 # estimation is scale-invariant, so a big merged bbox is downscaled to
 # this first to keep the O(pixels * angles) transform fast.
-RADON_MAX_RENDER_SIDE_PX = 1000
+RADON_MAX_RENDER_SIDE_PX = 800
 # Floor (px) on the cluster-wide word-split gap threshold (1.3x the median
 # inter-run gap pooled across every line in the cluster) -- guards the
 # degenerate case where that median is at or near zero (very tight kerning,
@@ -174,8 +210,9 @@ RADON_MIN_WORD_CHARS = 3
 
 # RenderOCR: a cluster render whose shorter side would fall under this many
 # pixels at the requested dpi is bumped to a higher effective dpi instead
-# -- PaddleOCR reads tiny crops poorly.
-MIN_RENDER_SIDE_PX = 50
+# -- PaddleOCR reads tiny crops poorly, and the Radon skew sweep needs
+# enough rows to resolve the inter-line gaps of a multi-line block.
+MIN_RENDER_SIDE_PX = 100
 # Hard ceiling on that bump. A degenerate cluster (a sub-point bbox from
 # stray CAD geometry) would otherwise demand an unbounded dpi to reach
 # MIN_RENDER_SIDE_PX and rasterize to a multi-gigabyte pixmap. Content that

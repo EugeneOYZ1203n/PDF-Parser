@@ -1,21 +1,44 @@
 """Radon-transform text deskew + word segmentation.
 
 A rendered vector-text cluster is usually *roughly* upright but can carry a
-small skew (or a 90/180/270 turn, for rotated CAD text). Projecting the ink
-onto a swept set of directions -- a Radon transform -- and scoring each
-direction by how spiky its 1-D profile is (the classic
-projection-profile-variance / Postl criterion) recovers the true baseline
-angle: the sharpest profile comes from projecting *along* the text lines,
-where the gaps between lines read as deep troughs.
+small skew (or a 90/180/270 turn, for rotated CAD text). Rotating the ink
+mask through a swept set of angles, taking each rotation's row-projection
+profile (`scipy.ndimage.rotate` then `sum(axis=1)` -- much faster per angle
+than a full `skimage` Radon sinogram), and scoring each by the *quality of
+the whitespace gaps* in that profile recovers the true baseline angle: when
+the rows run cleanly between the text lines, the inter-line valleys drop to
+(near) zero and there are only a handful of them; a misaligned angle smears
+the lines together (shallow valleys) and a 90-degrees-off angle resolves
+individual words/characters instead (many valleys).
 
-Intuition (the "shine a light through the page" picture): each glyph is
-a little wall. Rotate a light source around the page; the detector on the
-far side sees the most light when the beam runs cleanly *between* the
-lines of text. The beam angle that maximises that contrast is the text
-angle.
+**The objective (per candidate angle `theta`, minimised):**
+`mean(gap_score) * sqrt(n_gaps)`.
+
+  * A *gap* is a profile valley strictly between two detected peaks -- it
+    must have a peak on the left *and* the right; a leading/trailing margin
+    is not a gap.
+  * `gap_score = 1 - ((L+R)/2 - M) / ((L+R)/2 + eps)` where `L`/`R` are the
+    bounding peak heights and `M` the valley minimum. `g -> 0` is a clean
+    (deep) gap, `g = 1` a bad (shallow) one, so a *lower* mean score is a
+    *better* angle.
+  * `sqrt(n_gaps)` penalises angles that fragment the ink into many gaps
+    (word/character combs, not line gaps) and makes the single-line case
+    fall out: with one text line the across-lines projection has no gaps at
+    all (objective `inf`), so the sweep locks onto the along-lines comb
+    instead -- and the 90-degrees-from-best check below turns that back into
+    the real skew.
+
+**Single line:** with only one text line there is no inter-line gap
+structure for the objective to lock onto (its finite window spans almost
+the whole sweep rather than a narrow basin), so `_across_lines_angle`
+returns `None` and `_sweep_deskew` falls back to the classic Postl
+`sum(profile**2)` criterion -- the rotation that concentrates the one line
+into the sharpest single band. (This is the weakest part of the estimate:
+Postl is reliable for bold text but can mis-call thin single-line text by a
+quarter turn -- see the module's caller notes.)
 
 **Precision note (standing invariant -- read before touching this file):**
-`Segment.angle` is Radon's raw, full-precision fine-sweep result
+`Segment.angle` is Radon's raw, full-precision sweep result
 (`RADON_ANGLE_STEP_DEG` resolution, e.g. 0.25 deg) -- it must NEVER be
 rounded or snapped to a multiple of 90 anywhere in this pipeline. Both the
 post-segmentation similarity check (`pipelines/_steps.py`'s
@@ -39,41 +62,46 @@ _steps.py::detect_text_fast`) and before similarity grouping -- every
 FAST-surviving classification cluster gets Radon-segmented here, not just a
 deduped set of elected representatives, since dedup itself now happens
 *after* this step, at word granularity, using this module's own precise
-per-word `angle` instead of a coarser pre-Radon estimate (there is no such
-estimate anymore -- FAST never needed a rotation at all, since it scores
-each cluster independently). `_common.py` calls `segment_clusters` once
-with every FAST-surviving cluster at once. `segment_clusters` renders each
-input cluster once, estimates its skew and word boundaries, then maps each
-word's crop region back onto the cluster's own `Vector`s (by bbox overlap)
-to build a flat `list[Segment]`, one per word, in that cluster's own
-frame -- and also captures each word's own deskewed pixel crop directly
-into `Segment.image`, so OCR (`OCR/Paddle_OCR/ocr_backend.py::
-recognize_segments`) never has to re-render from vectors a second time; an
-elected similarity-group representative's canonicalized copy
-(`pipelines/_steps.py::elect_unique_segments`) carries that same real image
-over unchanged, so OCR never re-renders there either. The 0-vs-180 (and
-90-vs-270) ambiguity Radon cannot resolve is left to PaddleOCR's `cls` pass
-once a word is actually being OCR'd.
+per-cluster `angle` instead of a coarser pre-Radon estimate. `_common.py`
+calls `segment_clusters` once with every FAST-surviving cluster at once.
+`segment_clusters` renders each input cluster once, estimates its skew,
+splits it into line bands (on the *good* gaps) and then into
+aspect-ratio-bounded word segments, then maps each segment's crop region
+back onto the cluster's own `Vector`s (by bbox overlap) to build a flat
+`list[Segment]`, one per segment. It also captures each segment's own
+deskewed pixel crop -- grown outward to a fully ink-free border so clipped
+ascenders/descenders are recovered -- directly into `Segment.image`, so OCR
+(`OCR/Paddle_OCR/ocr_backend.py::recognize_segments`) never has to
+re-render from vectors. The 0-vs-180 (and 90-vs-270) ambiguity Radon cannot
+resolve is left to PaddleOCR's `cls` pass once a word is actually being
+OCR'd.
 """
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 
 import numpy as np
-from skimage.transform import SimilarityTransform, radon, resize, warp
+from scipy.ndimage import rotate as _nd_rotate
+from skimage.transform import SimilarityTransform, resize, warp
 
 from rastervec.config import (
     MAX_RENDER_DPI,
     MIN_RENDER_SIDE_PX,
     RADON_ANGLE_STEP_DEG,
+    RADON_COARSE_STEP_DEG,
     RADON_GAP_MEDIAN_MULTIPLIER,
-    RADON_LINE_BAND_MIN_FRAC,
+    RADON_GAP_SCORE_EPS,
+    RADON_GOOD_GAP_MAX,
     RADON_MAX_RENDER_SIDE_PX,
+    RADON_MAX_SEGMENT_ASPECT,
     RADON_MIN_GAP_PX,
+    RADON_MULTILINE_BASIN_MAX_DEG,
     RADON_MIN_WORD_CHARS,
     RADON_PAD_FRACTION,
+    RADON_PEAK_MIN_FRAC,
+    RADON_PROFILE_SMOOTH_PX,
     RADON_SKEW_LIMIT_DEG,
+    RADON_WORD_GROW_MAX_FRAC,
 )
 from rastervec.helpers.geometry import (
     PDF_POINTS_PER_INCH,
@@ -223,44 +251,159 @@ def to_ink(gray: np.ndarray) -> np.ndarray:
     return gray < INK_LEVEL
 
 
-def _objective(sinogram: np.ndarray) -> np.ndarray:
-    """Per-projection alignment score: sum of squared projection values
-    (the Postl criterion). Radon roughly preserves total mass across
-    angles, so this is maximal for the angle whose profile piles the ink
-    into the fewest, sharpest bins -- i.e. projecting perpendicular to the
-    text lines, where inter-line whitespace reads as true zeros."""
-    return np.sum(sinogram ** 2, axis=0)
+# --------------------------------------------------------------------------
+# gap-quality skew objective
+# --------------------------------------------------------------------------
+def _smooth(profile: np.ndarray, *, window: int | None = None) -> np.ndarray:
+    """`profile` blurred with a moving average of `window`
+    (`RADON_PROFILE_SMOOTH_PX`) bins -- so single-bin noise doesn't split a
+    real peak or spike a valley."""
+    window = RADON_PROFILE_SMOOTH_PX if window is None else window
+    p = np.asarray(profile, dtype=np.float64)
+    k = max(1, int(round(window)))
+    if k <= 1 or p.size == 0:
+        return p
+    return np.convolve(p, np.ones(k) / k, mode="same")
 
 
-def best_theta(ink: np.ndarray, *, limit_deg: float, step_deg: float) -> float:
-    """The projection angle (degrees, skimage convention, in [0, 180)) whose
-    1-D profile is sharpest -- i.e. parallel to the text baseline. A coarse
-    full sweep fixes the gross orientation (0/90/180 ~ horizontal vs
-    vertical text), then a fine sweep around that peak refines it to full
-    `step_deg` precision -- see this module's precision note."""
-    img = ink.astype(np.float64)
-    coarse = np.arange(0.0, 180.0, 2.0)
-    coarse_best = float(coarse[int(np.argmax(_objective(radon(img, theta=coarse, circle=False))))])
-    fine = coarse_best + np.arange(-2.0, 2.0 + step_deg, step_deg)
-    fine_best = float(fine[int(np.argmax(_objective(radon(img, theta=fine, circle=False))))])
-    return fine_best % 180.0
+def _profile_peaks(profile: np.ndarray, *, min_frac: float | None = None) -> list[tuple[int, int]]:
+    """Inclusive `(start, end)` index runs of the smoothed `profile` above
+    `min_frac` (`RADON_PEAK_MIN_FRAC`) of its peak -- one run per text-line
+    band. A line projects to a plateau, not a spike, so a contiguous
+    above-threshold run *is* the peak."""
+    min_frac = RADON_PEAK_MIN_FRAC if min_frac is None else min_frac
+    sm = _smooth(profile)
+    if sm.size == 0 or sm.max() <= 0:
+        return []
+    return _ink_runs(sm > min_frac * sm.max())
+
+
+def _gap_scores(profile: np.ndarray) -> list[float]:
+    """One `gap_score` per valley strictly between two consecutive
+    `_profile_peaks` (so every gap has both a left and a right peak):
+    `1 - ((L+R)/2 - M) / ((L+R)/2 + eps)` with `L`/`R` the bounding peak
+    heights and `M` the valley minimum. `0.0` = a clean, deep gap;
+    `1.0` = a shallow one. `[]` for fewer than two peaks."""
+    sm = _smooth(profile)
+    peaks = _profile_peaks(profile)
+    scores: list[float] = []
+    for (s0, e0), (s1, e1) in zip(peaks, peaks[1:]):
+        left = float(sm[s0:e0 + 1].max())
+        right = float(sm[s1:e1 + 1].max())
+        mid = (left + right) / 2.0
+        between = sm[e0 + 1:s1]
+        valley = float(between.min()) if between.size else min(left, right)
+        g = 1.0 - (mid - valley) / (mid + RADON_GAP_SCORE_EPS)
+        scores.append(float(np.clip(g, 0.0, 1.0)))
+    return scores
+
+
+def _skew_objective(profile: np.ndarray) -> float:
+    """`mean(gap_score) * sqrt(n_gaps)` for one projection profile -- lower
+    is a better-aligned angle. `inf` when the profile has fewer than two
+    peaks (no gap to align on -- e.g. a single text line projected across
+    its baseline), so an argmin sweep never *prefers* a zero-gap angle."""
+    scores = _gap_scores(profile)
+    if not scores:
+        return math.inf
+    return float(np.mean(scores) * math.sqrt(len(scores)))
+
+
+def _project(mask: np.ndarray, angle_deg: float) -> np.ndarray:
+    """Row-projection profile of `mask` (a float ink mask) after rotating it
+    `angle_deg` counter-clockwise -- `angle_deg = 0` is the raw
+    `sum(axis=1)`. `scipy.ndimage.rotate` is ~7x faster per angle than
+    `skimage.transform.radon`, which rebuilds a full sinogram."""
+    if abs(angle_deg) < 1e-6:
+        return mask.sum(axis=1).astype(np.float64)
+    rot = _nd_rotate(mask, angle_deg, reshape=True, order=1, cval=0.0, prefilter=False)
+    return rot.sum(axis=1).astype(np.float64)
+
+
+def _objective_sweep(mask: np.ndarray, angles: np.ndarray) -> np.ndarray:
+    return np.array([_skew_objective(_project(mask, float(a))) for a in angles])
+
+
+def _postl_deskew(mask: np.ndarray) -> float:
+    """Deskew angle (degrees) by the classic Postl criterion -- the
+    `sum(profile**2)`-maximising rotation, i.e. the one whose profile is
+    most concentrated (the across-lines direction). Robust when the gap
+    objective degenerates (a single glyph, or a single line seen from
+    almost every angle), so it's the fallback there."""
+    coarse = np.arange(-90.0, 90.0, RADON_COARSE_STEP_DEG)
+    scores = np.array([float(np.sum(_project(mask, float(a)) ** 2)) for a in coarse])
+    c_best = float(coarse[int(np.argmax(scores))])
+    fine = c_best + np.arange(
+        -RADON_COARSE_STEP_DEG, RADON_COARSE_STEP_DEG + RADON_ANGLE_STEP_DEG, RADON_ANGLE_STEP_DEG,
+    )
+    scores = np.array([float(np.sum(_project(mask, float(a)) ** 2)) for a in fine])
+    return float(fine[int(np.argmax(scores))])
+
+
+def _run_containing(runs: list[tuple[int, int]], idx: int) -> tuple[int, int] | None:
+    for s, e in runs:
+        if s <= idx <= e:
+            return (s, e)
+    return None
+
+
+def _across_lines_angle(angles: np.ndarray, objs: np.ndarray) -> float | None:
+    """The deskew angle from one `_skew_objective` sweep -- the centre of
+    the multi-line line-gap basin -- or `None` when the sweep shows no such
+    basin (a single line, or a single glyph), so the caller falls back to
+    `_postl_deskew`.
+
+    Rotating a *multi-line* block away from its baseline shears the line
+    peaks until they merge and the objective jumps to `inf`, so the
+    finite-objective window around the minimum is narrow and bounded by
+    `inf` on both sides; its centre is a far more stable estimate than the
+    near-flat interior argmin. A single line keeps >= 2 word/letter peaks
+    at almost every angle, so its finite window is wide (or the whole
+    sweep) -- not a basin -- and this returns `None`."""
+    finite = np.isfinite(objs)
+    if not finite.any() or finite.all():
+        return None
+    best = int(np.argmin(np.where(finite, objs, np.inf)))
+    frun = _run_containing(_ink_runs(finite), best)
+    if frun is None:
+        return None
+    lo, hi = frun
+    bounded = lo > 0 and hi < len(objs) - 1
+    if bounded and (angles[hi] - angles[lo]) <= RADON_MULTILINE_BASIN_MAX_DEG:
+        return float((angles[lo] + angles[hi]) / 2.0)
+    return None
+
+
+def _sweep_deskew(mask: np.ndarray) -> float:
+    """Deskew angle (degrees, counter-clockwise positive) that makes the
+    text baseline horizontal. A coarse full `[-90, 90)` sweep at
+    `RADON_COARSE_STEP_DEG` locates the regime and a rough angle; a fine
+    sweep at `RADON_ANGLE_STEP_DEG` over `+/- RADON_SKEW_LIMIT_DEG` around
+    it pins the edges. Falls back to the Postl criterion when the gap
+    objective has no usable structure."""
+    coarse = np.arange(-90.0, 90.0, RADON_COARSE_STEP_DEG)
+    rough = _across_lines_angle(coarse, _objective_sweep(mask, coarse))
+    if rough is None:
+        return _postl_deskew(mask)
+
+    fine = rough + np.arange(
+        -RADON_SKEW_LIMIT_DEG, RADON_SKEW_LIMIT_DEG + RADON_ANGLE_STEP_DEG, RADON_ANGLE_STEP_DEG,
+    )
+    refined = _across_lines_angle(fine, _objective_sweep(mask, fine))
+    return float(refined if refined is not None else rough)
 
 
 def estimate_skew_from_mask(ink: np.ndarray) -> float:
     """`estimate_skew` for a pre-computed (possibly downscaled) ink mask.
-    Full precision -- see this module's precision note."""
+    Full precision -- see this module's precision note. The 0-vs-180 flip is
+    *not* resolved here."""
     if not ink.any():
         return 0.0
-    theta = best_theta(ink, limit_deg=RADON_SKEW_LIMIT_DEG, step_deg=RADON_ANGLE_STEP_DEG)
-    # skimage's `radon` theta=90 projects along image rows -> a horizontal
-    # baseline. The counter-clockwise rotation that makes the baseline
-    # horizontal is (90 - theta), mapped into (-90, 90].
-    skew = 90.0 - theta
-    if skew <= -90.0:
-        skew += 180.0
-    elif skew > 90.0:
+    mask = ink.astype(np.float64)
+    skew = _sweep_deskew(mask) % 180.0
+    if skew > 90.0:
         skew -= 180.0
-    return skew
+    return float(skew)
 
 
 def estimate_skew(gray: np.ndarray) -> float:
@@ -277,18 +420,38 @@ def row_profile(ink: np.ndarray) -> np.ndarray:
     return ink.sum(axis=1).astype(np.float64)
 
 
-def line_bands(profile: np.ndarray, *, min_frac: float | None = None,
-               pad: int = 1) -> list[tuple[int, int]]:
-    """`(y0, y1)` inclusive row bands where `profile` exceeds
-    `min_frac * profile.max()` -- one band per text line."""
-    min_frac = RADON_LINE_BAND_MIN_FRAC if min_frac is None else min_frac
-    if profile.size == 0 or profile.max() <= 0:
+# --------------------------------------------------------------------------
+# line / segment splitting
+# --------------------------------------------------------------------------
+def line_bands(profile: np.ndarray, *, pad: int = 1) -> list[tuple[int, int]]:
+    """`(y0, y1)` inclusive row bands, one per text line, from the deskewed
+    row `profile`. Peaks come from `_profile_peaks`; two consecutive peaks
+    are a genuine line boundary only when the valley between them is a
+    *good* gap (`_gap_scores` value below `RADON_GOOD_GAP_MAX`) -- peaks
+    separated by a shallow valley (descenders bridging the gap, dotted
+    rows) stay one band. Each band is padded `pad` rows on each side
+    (clamped)."""
+    peaks = _profile_peaks(profile)
+    if not peaks:
         return []
-    has_ink = profile > min_frac * profile.max()
     n = profile.size
-    return [
-        (max(0, s - pad), min(n - 1, e + pad)) for s, e in _ink_runs(has_ink)
-    ]
+
+    def _clamp(s: int, e: int) -> tuple[int, int]:
+        return (max(0, s - pad), min(n - 1, e + pad))
+
+    if len(peaks) == 1:
+        return [_clamp(*peaks[0])]
+
+    scores = _gap_scores(profile)  # exactly len(peaks) - 1 of them
+    bands: list[tuple[int, int]] = []
+    grp_s, grp_e = peaks[0]
+    for (s1, e1), g in zip(peaks[1:], scores):
+        if g < RADON_GOOD_GAP_MAX:
+            bands.append((grp_s, grp_e))
+            grp_s = s1
+        grp_e = e1
+    bands.append((grp_s, grp_e))
+    return [_clamp(s, e) for s, e in bands]
 
 
 def line_spacing(profile: np.ndarray) -> float:
@@ -301,35 +464,61 @@ def line_spacing(profile: np.ndarray) -> float:
     return float(np.median(np.diff(centres)))
 
 
-def split_words(line_gray: np.ndarray, *, gap_threshold: float,
-                min_chars: int = RADON_MIN_WORD_CHARS,
-                pad: int = 1) -> list[tuple[int, int, int, int]]:
-    """`(x0, y0, x1, y1)` pixel boxes, one per word, within one deskewed
-    line crop. Both x- and y-extent are each word's own tight ink bbox:
-    the column profile is split on `gap_threshold` (the cluster-wide
-    pooled 1.3x-median-gap, see `_cluster_gap_threshold`)
-    first, then any resulting span with fewer than `min_chars` ink runs
-    (the pre-OCR proxy for character count) is merged into a neighbor --
-    overriding the gap split, since PaddleOCR reads a too-short word's
-    orientation poorly -- via `_split_columns_into_words`. Each word's
-    y-extent then comes from ink within just that word's own column slice
-    -- not the whole line -- so a short word doesn't inherit an
-    ascender/descender that only exists in a different word on the same
-    line."""
+def group_by_aspect(
+    line_gray: np.ndarray, *, gap_threshold: float,
+    max_aspect: float = RADON_MAX_SEGMENT_ASPECT,
+    min_chars: int = RADON_MIN_WORD_CHARS, pad: int = 1,
+) -> list[tuple[int, int, int, int]]:
+    """`(x0, y0, x1, y1)` pixel boxes, one per OCR segment, within one
+    deskewed line crop.
+
+    The line is first split into words exactly as before -- the column
+    profile is split on `gap_threshold` (the cluster-wide pooled
+    1.3x-median-gap, see `_cluster_gap_threshold`), then any span with
+    fewer than `min_chars` ink runs is merged into a neighbor
+    (`_split_columns_into_words`) -- then consecutive words are greedily
+    grouped left to right into segments, closing a segment (and starting a
+    new one) as soon as adding the next word would push its aspect ratio
+    (segment width / the line's own ink height) to `max_aspect` or above.
+    So "I love pineapples very much" becomes a few OCR-friendly chunks
+    instead of one absurdly wide crop; a single word already wider than the
+    limit is its own segment (words are never split).
+
+    Each segment's y-extent is the tight ink bbox within just that
+    segment's own column slice -- not the whole line -- so a short segment
+    does not inherit a tall neighbour's ascender/descender."""
     if line_gray.ndim != 2 or line_gray.size == 0:
         return []
     h, w = line_gray.shape
     ink = to_ink(line_gray)
     if not ink.any():
         return []
-    boxes: list[tuple[int, int, int, int]] = []
-    for sx0, sx1 in _split_columns_into_words(
+
+    row_runs = _ink_runs(ink.any(axis=1))
+    line_ink_h = max(1, row_runs[-1][1] - row_runs[0][0] + 1) if row_runs else 1
+
+    word_spans = _split_columns_into_words(
         ink.any(axis=0), gap_threshold=gap_threshold, min_chars=min_chars,
-    ):
-        word_rows = ink[:, sx0:sx1 + 1].any(axis=1)
-        if not word_rows.any():
+    )
+    if not word_spans:
+        return []
+
+    groups: list[tuple[int, int]] = []
+    grp_s, grp_e = word_spans[0]
+    for sx0, sx1 in word_spans[1:]:
+        if (sx1 - grp_s) / line_ink_h < max_aspect:
+            grp_e = sx1
+        else:
+            groups.append((grp_s, grp_e))
+            grp_s, grp_e = sx0, sx1
+    groups.append((grp_s, grp_e))
+
+    boxes: list[tuple[int, int, int, int]] = []
+    for sx0, sx1 in groups:
+        seg_rows = ink[:, sx0:sx1 + 1].any(axis=1)
+        if not seg_rows.any():
             continue  # defensive; every column span has ink by construction
-        ys = np.flatnonzero(word_rows)
+        ys = np.flatnonzero(seg_rows)
         wy0, wy1 = int(ys[0]), int(ys[-1]) + 1
         boxes.append((
             max(0, sx0 - pad), max(0, wy0 - pad),
@@ -437,31 +626,75 @@ def pad_image(
     return padded, (pad_x, pad_y)
 
 
+# --------------------------------------------------------------------------
+# crop growth + vector assignment
+# --------------------------------------------------------------------------
+def _grow_box_to_ink_free_border(
+    ink: np.ndarray, box: tuple[int, int, int, int],
+    *, bounds: tuple[float, float, float, float],
+) -> tuple[int, int, int, int]:
+    """Expand `box` (x0, y0, x1, y1; x1/y1 exclusive) outward one pixel per
+    side while the row/column just outside that side still touches ink in
+    `ink` (the FULL deskewed cluster mask, so an ascender/descender the
+    line band clipped is recovered). Stops when all four just-outside
+    borders are ink-free, or a side hits `bounds` (x0, y0, x1, y1;
+    typically the neighbour-band midpoints and the +100 % growth cap) or
+    the image edge."""
+    height, width = ink.shape
+    bx0 = max(0, int(round(bounds[0])))
+    by0 = max(0, int(round(bounds[1])))
+    bx1 = min(width, int(round(bounds[2])))
+    by1 = min(height, int(round(bounds[3])))
+
+    x0, y0, x1, y1 = box
+    x0 = max(0, min(int(x0), width))
+    x1 = max(x0, min(int(x1), width))
+    y0 = max(0, min(int(y0), height))
+    y1 = max(y0, min(int(y1), height))
+
+    changed = True
+    while changed:
+        changed = False
+        if y0 > by0 and ink[y0 - 1, x0:x1].any():
+            y0 -= 1
+            changed = True
+        if y1 < by1 and ink[y1, x0:x1].any():
+            y1 += 1
+            changed = True
+        if x0 > bx0 and ink[y0:y1, x0 - 1].any():
+            x0 -= 1
+            changed = True
+        if x1 < bx1 and ink[y0:y1, x1].any():
+            x1 += 1
+            changed = True
+    return (x0, y0, x1, y1)
+
+
 def _bbox_center(bbox: tuple[float, float, float, float]) -> tuple[float, float]:
     x0, y0, x1, y1 = bbox
     return ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
 
 
-def _assign_vectors_to_words(
-    vectors: list[Vector], word_bboxes: list[tuple[float, float, float, float]],
+def _assign_vectors_to_segments(
+    vectors: list[Vector], segment_bboxes: list[tuple[float, float, float, float]],
 ) -> list[list[Vector]]:
-    """Assigns every one of `vectors` to exactly one word bbox -- the one it
-    overlaps most, or (no overlap at all) the one whose center it's
+    """Assigns every one of `vectors` to exactly one segment bbox -- the one
+    it overlaps most, or (no overlap at all) the one whose center it's
     nearest to -- so a cluster's Vectors are fully partitioned across its
-    words with none lost and none duplicated. A Vector is never split
-    across two words."""
-    assignment: list[list[Vector]] = [[] for _ in word_bboxes]
-    centers = [_bbox_center(b) for b in word_bboxes]
+    segments with none lost and none duplicated. A Vector is never split
+    across two segments."""
+    assignment: list[list[Vector]] = [[] for _ in segment_bboxes]
+    centers = [_bbox_center(b) for b in segment_bboxes]
     for v in vectors:
         best_i, best_score = 0, -1.0
-        for i, wb in enumerate(word_bboxes):
-            score = bbox_intersection_area(v.bbox, wb)
+        for i, sb in enumerate(segment_bboxes):
+            score = bbox_intersection_area(v.bbox, sb)
             if score > best_score:
                 best_score, best_i = score, i
         if best_score <= 0.0:
             vcx, vcy = _bbox_center(v.bbox)
             best_i = min(
-                range(len(word_bboxes)),
+                range(len(segment_bboxes)),
                 key=lambda i: math.hypot(centers[i][0] - vcx, centers[i][1] - vcy),
             )
         assignment[best_i].append(v)
@@ -469,23 +702,28 @@ def _assign_vectors_to_words(
 
 
 def segment_clusters(clusters: list[list[Vector]], *, dpi: int = 300) -> list[Segment]:
-    """Radon-segments every cluster into word-level `Segment`s at real page
-    position. For each cluster: render (transient, not kept as a whole --
-    but each word's own crop *is* kept, see below) -> **pad** -> estimate
-    skew (full precision) -> deskew -> split into line/word crops -> map
-    each word's crop region back onto the cluster's own `Vector`s (by bbox
-    overlap, see `_assign_vectors_to_words`) -> one `Segment` per non-empty
-    word, its `image` that word's own **padded** deskewed pixel crop (so
-    OCR never has to re-render from vectors, and needs no normalization
-    pass of its own).
+    """Radon-segments every cluster into aspect-bounded word `Segment`s at
+    real page position. For each cluster: render (transient) -> **pad** ->
+    estimate skew (full precision) -> deskew -> split into line bands on the
+    good gaps -> split each band into aspect-ratio-bounded word segments
+    (`group_by_aspect`) -> grow each segment's crop outward to an ink-free
+    border (capped at +100 %, clamped to the neighbouring bands) -> map each
+    segment's *tight* crop region back onto the cluster's own `Vector`s (by
+    bbox overlap, see `_assign_vectors_to_segments`) -> one `Segment` per
+    non-empty segment, its `image` that segment's own **padded** grown
+    deskewed pixel crop (so OCR never has to re-render from vectors, and
+    needs no normalization pass of its own).
 
     The two `pad_image` calls are the only padding in the pipeline -- see
     that function's docstring. Both are inline here rather than hidden in
     the renderer or the OCR backend so the margins are visible where they
     happen; the price is the `- pad_x_px / - pad_y_px` correction on the
-    way back out to page space.
+    way back out to page space. The crop is grown from the tight box but
+    the page bbox / vector assignment stays on the tight box, so growth can
+    never enlarge a segment's page footprint or steal a neighbour's
+    vectors.
 
-    A cluster with no ink, or whose deskewed profile yields no word bands,
+    A cluster with no ink, or whose deskewed profile yields no line bands,
     is skipped (its Vectors are lost from this step's output -- callers
     should already know FAST/similarity only see clusters with real ink)."""
     segments: list[Segment] = []
@@ -508,40 +746,69 @@ def segment_clusters(clusters: list[list[Vector]], *, dpi: int = 300) -> list[Se
             cval=255.0, order=1, preserve_range=True,
         ).astype(np.uint8)
 
-        prof = row_profile(to_ink(deskewed))
+        deskew_ink = to_ink(deskewed)
+        height, width = deskewed.shape
+        prof = row_profile(deskew_ink)
         bands = line_bands(prof)
         if not bands:
             continue
 
-        line_cols = [to_ink(deskewed[by0:by1 + 1, :]).any(axis=0) for by0, by1 in bands]
-        gap_threshold = _cluster_gap_threshold([g for cols in line_cols for g in _line_gaps(cols)])
+        line_cols = [deskew_ink[by0:by1 + 1, :].any(axis=0) for by0, by1 in bands]
+        gap_threshold = _cluster_gap_threshold(
+            [g for cols in line_cols for g in _line_gaps(cols)]
+        )
 
-        word_bboxes: list[tuple[float, float, float, float]] = []
-        word_images: list[np.ndarray] = []
-        for by0, by1 in bands:
+        seg_bboxes: list[tuple[float, float, float, float]] = []
+        seg_images: list[np.ndarray] = []
+        for bi, (by0, by1) in enumerate(bands):
             line = deskewed[by0:by1 + 1, :]
-            for wx0, wy0, wx1, wy1 in split_words(line, gap_threshold=gap_threshold):
+            prev_mid = 0 if bi == 0 else (bands[bi - 1][1] + bands[bi][0]) // 2
+            next_mid = (
+                height if bi == len(bands) - 1
+                else (bands[bi][1] + bands[bi + 1][0]) // 2 + 1
+            )
+            for wx0, wy0, wx1, wy1 in group_by_aspect(
+                line, gap_threshold=gap_threshold, pad=0,
+            ):
                 gy0, gy1 = by0 + wy0, by0 + wy1
-                box = np.array([(wx0, gy0), (wx1, gy0), (wx1, gy1), (wx0, gy1)], dtype=np.float64)
-                # `inverse` lands in the *padded* render's pixel space;
-                # `pixel_to_page_bbox` inverts the unpadded one.
+                # page bbox from the TIGHT box: `inverse` lands in the
+                # *padded* render's pixel space; `pixel_to_page_bbox`
+                # inverts the unpadded one.
+                box = np.array(
+                    [(wx0, gy0), (wx1, gy0), (wx1, gy1), (wx0, gy1)], dtype=np.float64,
+                )
                 mapped = inverse(box)
                 page_bbox = pixel_to_page_bbox(
                     cluster, dpi_used,
                     [(float(x) - pad_x_px, float(y) - pad_y_px) for x, y in mapped],
                 )
-                word_bboxes.append(page_bbox)
-                # Pad 2 of 2: this word's own crop, which is handed to
-                # PaddleOCR verbatim as `Segment.image`.
-                crop, _offset = pad_image(deskewed[gy0:gy1, wx0:wx1])
-                word_images.append(crop)
+                seg_bboxes.append(page_bbox)
 
-        if not word_bboxes:
+                # OCR crop from the GROWN box (ascenders/descenders the line
+                # band clipped), capped at +100 % per axis and clamped to
+                # the neighbouring bands.
+                tw = max(1, wx1 - wx0)
+                th = max(1, gy1 - gy0)
+                margin = RADON_WORD_GROW_MAX_FRAC / 2.0
+                grown = _grow_box_to_ink_free_border(
+                    deskew_ink, (wx0, gy0, wx1, gy1),
+                    bounds=(
+                        wx0 - margin * tw, max(prev_mid, gy0 - margin * th),
+                        wx1 + margin * tw, min(next_mid, gy1 + margin * th),
+                    ),
+                )
+                gx0, ggy0, gx1, ggy1 = grown
+                # Pad 2 of 2: this segment's own crop, handed to PaddleOCR
+                # verbatim as `Segment.image`.
+                crop, _offset = pad_image(deskewed[ggy0:ggy1, gx0:gx1])
+                seg_images.append(crop)
+
+        if not seg_bboxes:
             continue
 
-        assignments = _assign_vectors_to_words(cluster, word_bboxes)
-        for word_vectors, image in zip(assignments, word_images):
-            if word_vectors:
-                segments.append(Segment(vectors=word_vectors, angle=float(skew), image=image))
+        assignments = _assign_vectors_to_segments(cluster, seg_bboxes)
+        for seg_vectors, image in zip(assignments, seg_images):
+            if seg_vectors:
+                segments.append(Segment(vectors=seg_vectors, angle=float(skew), image=image))
 
     return segments
