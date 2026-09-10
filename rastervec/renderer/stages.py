@@ -1,376 +1,455 @@
-"""Every `render_<stage_name>` notebook-visualization function, one per
-pipeline stage, centralized here instead of scattered next to each stage's
-own code (the old convention -- see `CLAUDE.md`'s history). Only
-`pipeline_stage_visualization.ipynb` calls these; the real pipeline never
-does.
+"""One `render_<stage>` per pipeline stage, each returning a **one-page
+stage PDF** (bytes) visualizing that stage's output off a
+`run_pipeline(..., verbose=True)` `PipelineResult`.
 
-Each function still does its own `from rastervec.renderer.notebook import
-...` **inside the function body**, never at module level -- same invariant
-`renderer/notebook.py`'s own docstring documents (that module imports
-matplotlib, so importing it eagerly here would drag matplotlib into every
-real pipeline run's import graph, since stage modules do a cheap top-level
-`from rastervec.renderer.stages import render_x` re-export). Everything
-else this module needs (numpy, PIL, pymupdf, `rastervec.helpers.geometry`,
-plain `rastervec.renderer` package symbols) is matplotlib-free and safe at
-module level.
+`scripts/generate_pipeline_report.py` calls these; the real pipeline never
+does. Every function builds on three shared primitives in
+`rastervec/renderer/pdf.py` -- `render_text_pdf` (reconstruct text),
+`render_vectors_pdf` (reconstruct vectors, recoloured), `render_boxes_pdf`
+(bbox outlines) -- plus the local `_compose` helper here for the few stages
+that need several of those layers on one page.
 
-Each stage module that used to define its own `render_<stage_name>` keeps a
-one-line re-export (`from rastervec.renderer.stages import render_x`) for
-backward compatibility.
+Kept matplotlib-free and free of any `rastervec.pipelines` import at module
+level: this module is imported (for its name re-exports) by
+`Vector_Classification/classification.py`, `OCR/fast_detect.py`,
+`pipelines/_steps.py` and others, so a heavy import here would land in the
+real pipeline's import graph. Every stage module keeps its one-line
+`from rastervec.renderer.stages import render_x` re-export.
 """
 from __future__ import annotations
 
+import io
 from typing import TYPE_CHECKING
 
 import numpy as np
 import pymupdf as fitz
-from PIL import Image, ImageDraw
+from PIL import Image
 
-from rastervec.helpers.geometry import is_dashed, item_points, union_bbox
-from rastervec.renderer import render_reconstructed_page
+from rastervec.helpers.geometry import union_bbox
+from rastervec.renderer import render_reconstructed_pdf, render_text_pdf, render_vectors_pdf
 
 if TYPE_CHECKING:
+    from rastervec.models import PageMeta
     from rastervec.pipelines.result import PipelineResult
-    from rastervec.renderer.notebook import RenderResult
 
-# Shared pass/fail/dropped display colors -- previously redefined
-# independently (same hex values) in OCR/fast_detect.py and
-# OCR/Paddle_OCR/ocr_backend.py.
-_PASSED_COLOR = "#059669"
-_DROPPED_COLOR = "#dc2626"
-_FAILED_COLOR = "#dc2626"
+# ---------------------------------------------------------------------------
+# Palette -- also the single source of truth the viewer's colour legend reads.
+# ---------------------------------------------------------------------------
+C_NATIVE = "#1d4ed8"
+C_DRAWING = "#111827"
+C_TEXT_CANDIDATE = "#059669"
+C_GROUP_BBOX = "#7c3aed"
+C_CLUSTER_BBOX = "#ea580c"
+C_ORIG_BBOX = "#2563eb"
+C_SEGMENT_BBOX = "#059669"
+C_LINE_GAP = "#dc2626"
+C_WORD_GAP = "#f59e0b"
+C_FAST_PASS = "#059669"
+C_FAST_DROP = "#dc2626"
+C_TILE_SKIP = "#9ca3af"
+C_OCR_PASS = "#059669"
+C_OCR_FAIL = "#dc2626"
+C_OCR_BOX = "#2563eb"
 
-_NATIVE_WORD_COLOR = "#2563eb"
-_CLUSTER_STEP_COLORS = ["#2563eb", "#7c3aed", "#ea580c", "#0d9488", "#6b7280", "#c026d3", "#65a30d", "#0284c7"]
-_SIDE_CATEGORY_COLORS = ["#9ca3af", "#f59e0b", "#db2777", "#eab308", "#16a34a"]
+_DROP_CATEGORIES = [
+    "dropped_oversized", "duplicate_runs", "dropped_tiny", "dropped_mixed_fill_rule",
+    "dropped_perimeter", "dropped_low_density", "dropped_constant_spacing",
+    "dropped_low_variety",
+]
+
+# Human-readable legend per generated stage PDF (filename -> [(label, hex)]).
+STAGE_COLOR_LEGEND: dict[str, list[tuple[str, str]]] = {
+    "native_text.pdf": [("native word", C_NATIVE)],
+    "vector_extraction.pdf": [("(one colour per vector type)", "#888888")],
+    "separation.pdf": [("(one colour per (layer, colour) bucket)", "#888888")],
+    "vector_classification.pdf": [],  # filled in below, once _drop_color exists
+    "fast_heatmap.pdf": [
+        ("text heatmap", "#dc2626"), ("skipped tile", C_TILE_SKIP),
+        ("passed cluster", C_FAST_PASS), ("dropped vector", C_FAST_DROP),
+    ],
+    "segmentation.pdf": [
+        ("original cluster bbox", C_ORIG_BBOX), ("segment bbox", C_SEGMENT_BBOX),
+        ("line gap", C_LINE_GAP), ("word gap", C_WORD_GAP),
+    ],
+    "similarity.pdf": [("(one colour per similarity group)", "#888888")],
+    "paddle_ocr.pdf": [
+        ("predicted text (ok)", C_OCR_PASS), ("predicted text (blank)", C_OCR_FAIL),
+        ("OCR-detected box", C_OCR_BOX),
+    ],
+    "drawing_vectors.pdf": [("drawing vector", C_DRAWING)],
+    "reconstructed.pdf": [("reconstructed page", "#111827")],
+}
+
+STAGE_ARTIFACTS = {
+    "native": "native_text.pdf",
+    "vectors": "vector_extraction.pdf",
+    "separation": "separation.pdf",
+    "classify": "vector_classification.pdf",
+    "fast": "fast_heatmap.pdf",
+    "segment": "segmentation.pdf",
+    "similarity": "similarity.pdf",
+    "ocr": "paddle_ocr.pdf",
+    "drawing": "drawing_vectors.pdf",
+    "reconstructed": "reconstructed.pdf",
+}
+
+
+def _hex_to_rgb01(h: str) -> tuple[float, float, float]:
+    h = h.lstrip("#")
+    return (int(h[0:2], 16) / 255, int(h[2:4], 16) / 255, int(h[4:6], 16) / 255)
+
+
+def _hash_color(key) -> tuple[float, float, float]:
+    import colorsys
+    import hashlib
+
+    digest = hashlib.md5(repr(key).encode()).hexdigest()
+    hue = (int(digest[:8], 16) % 360) / 360.0
+    return colorsys.hsv_to_rgb(hue, 0.62, 0.85)
+
+
+def _drop_color(name: str) -> str:
+    r, g, b = _hash_color(("drop", name))
+    return "#%02x%02x%02x" % (round(r * 255), round(g * 255), round(b * 255))
+
+
+STAGE_COLOR_LEGEND["vector_classification.pdf"] = (
+    [("text-candidate vectors", C_TEXT_CANDIDATE), ("group bbox", C_GROUP_BBOX),
+     ("cluster bbox", C_CLUSTER_BBOX)]
+    + [(name, _drop_color(name)) for name in _DROP_CATEGORIES]
+)
+
+
+def _meta(res: "PipelineResult", page_meta: "PageMeta | None") -> "PageMeta":
+    return page_meta if page_meta is not None else res.page.meta
 
 
 def _entry_vectors(entry: list) -> list:
-    """Flattens one category entry to a flat `list[Vector]` regardless of
-    whether it's a pre-spatial group (`list[Vector]`) or a post-spatial
-    cluster (`list[list[Vector]]`) -- also used for a Radon `Segment`'s own
-    `vectors` list, which is already flat (single-element `isinstance`
-    check on the first item is `False` for a `Vector`, so it passes
-    through unchanged)."""
+    """Flatten one classification category entry (a group `list[Vector]` or a
+    cluster `list[list[Vector]]`) to a flat `list[Vector]`."""
     if entry and isinstance(entry[0], list):
         return [v for g in entry for v in g]
     return entry
 
 
-def _signature_color(sig) -> str:
-    import colorsys
-    import hashlib
+# ---------------------------------------------------------------------------
+# _compose: several layers onto one page.
+# ---------------------------------------------------------------------------
+def _compose(
+    page_meta: "PageMeta",
+    *,
+    image: "Image.Image | None" = None,
+    vector_layers: "list[tuple[list, str]] | None" = None,
+    rect_layers: "list[tuple[list, str, bool]] | None" = None,
+    text_layer: "list[tuple[str, tuple, float, tuple]] | None" = None,
+) -> bytes:
+    """Build one page sized/rotated to `page_meta`, painting (in order): a
+    full-page raster `image`; each `(vectors, hex)` in `vector_layers` as
+    recoloured strokes; each `(bboxes, hex, filled)` in `rect_layers`; then
+    `text_layer` `(text, bbox, rotation, rgb)` tuples. Returns PDF bytes."""
+    from rastervec.renderer._shapes import replay_drawing_paths
 
-    digest = hashlib.md5(repr(sig).encode()).hexdigest()
-    hue = (int(digest[:8], 16) % 360) / 360.0
-    r, g, b = colorsys.hsv_to_rgb(hue, 0.65, 0.85)
-    return "#%02x%02x%02x" % (round(r * 255), round(g * 255), round(b * 255))
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=page_meta.width, height=page_meta.height)
+        page.set_rotation(page_meta.rotation)
+
+        if image is not None:
+            buf = io.BytesIO()
+            image.convert("RGB").save(buf, format="PNG")
+            page.insert_image(
+                fitz.Rect(0, 0, page_meta.width, page_meta.height),
+                stream=buf.getvalue(), keep_proportion=False,
+            )
+
+        import dataclasses
+
+        for vectors, hexcol in vector_layers or []:
+            rgb = _hex_to_rgb01(hexcol)
+            recol = [
+                dataclasses.replace(
+                    v, type="s", color=rgb, fill=None, dashes=None,
+                    width=max(v.width or 0.0, 1.0), closePath=False,
+                    blendmode="Normal", opacity=1.0, stroke_opacity=1.0, fill_opacity=None,
+                )
+                for v in vectors
+            ]
+            if recol:
+                replay_drawing_paths(page, recol)
+
+        for bboxes, hexcol, filled in rect_layers or []:
+            rgb = _hex_to_rgb01(hexcol)
+            for b in bboxes:
+                if b is None:
+                    continue
+                kw = {"color": rgb, "width": 1.0}
+                if filled:
+                    kw["fill"] = rgb
+                    kw["fill_opacity"] = 0.25
+                page.draw_rect(fitz.Rect(*b), **kw)
+
+        if text_layer:
+            base_font = fitz.Font("helv")
+            span = base_font.ascender - base_font.descender
+            for text, bbox, rotation, rgb in text_layer:
+                if not text or not text.strip():
+                    continue
+                x0, y0, x1, y1 = bbox
+                fs = max((y1 - y0) / span, 1.0)
+                natural = base_font.text_length(text, fontsize=fs)
+                if natural > (x1 - x0) > 0:
+                    fs = max(fs * (x1 - x0) / natural, 1.0)
+                try:
+                    page.insert_text(
+                        fitz.Point(x0, y0 + base_font.ascender * fs), text,
+                        fontsize=fs, color=rgb,
+                    )
+                except Exception:  # noqa: BLE001 -- a preview; never fail the run over one label
+                    pass
+
+        return doc.tobytes()
+    finally:
+        doc.close()
 
 
-def _fast_mask_overlay(base: "Image.Image", mask: "np.ndarray") -> "Image.Image":
-    heat = (np.clip(mask, 0.0, 1.0) * 255).astype("uint8")
-    zeros = Image.new("L", base.size, 0)
-    heat_img = Image.merge("RGB", (Image.fromarray(heat), zeros, zeros))
-    return Image.blend(base.convert("RGB"), heat_img, alpha=0.5)
+# ---------------------------------------------------------------------------
+# Native text
+# ---------------------------------------------------------------------------
+def render_native(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
+    return render_text_pdf(
+        _meta(res, page_meta), res.native_words or [],
+        color_of=lambda _t: _hex_to_rgb01(C_NATIVE),
+    )
 
 
-# --------------------------------------------------------------------------
-# Vector extraction (Vector/vector.py)
-# --------------------------------------------------------------------------
-def render_vectors(res: "PipelineResult") -> "RenderResult":
-    """One category per distinct `Vector.type`."""
-    from rastervec.renderer.notebook import RenderResult
-
+# ---------------------------------------------------------------------------
+# Vector extraction -- one colour per Vector.type
+# ---------------------------------------------------------------------------
+def render_vectors(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
     vectors = res.vectors_raw or []
-    kinds = sorted({v.type for v in vectors})
-    return RenderResult(
-        categories=[
-            {"name": f"type {k!r} ({sum(v.type == k for v in vectors)})",
-             "vectors": [v for v in vectors if v.type == k]}
-            for k in kinds
-        ],
-        note=f"{len(vectors)} vectors, types={kinds}",
+    return render_vectors_pdf(
+        _meta(res, page_meta), vectors,
+        color_of=lambda v: _hash_color(("type", v.type)),
     )
 
 
-# --------------------------------------------------------------------------
-# Native text (native_text.py)
-# --------------------------------------------------------------------------
-def render_native(res: "PipelineResult", *, zoom: float = 1.0) -> "RenderResult":
-    """Word quads over the page, plus a full page reconstruction built
-    from `native_words` alone."""
-    from rastervec.renderer.notebook import RenderResult
-
-    words = res.native_words or []
-    fallback = sum(1 for w in words if w.orientation_source == "fallback")
-    return RenderResult(categories=[{
-        "name": f"text words ({len(words)})",
-        "color": _NATIVE_WORD_COLOR,
-        "polys": [w.quad() for w in words],
-        "isolated": render_reconstructed_page(res.page.meta, native_words=words, zoom=zoom),
-    }], note=(
-        f"{len(words)} word(s)"
-        + (f"; {fallback} lost their rotation (no matching span, defaulted to horizontal)"
-           if fallback else "")
-    ))
-
-
-# --------------------------------------------------------------------------
-# Vector Classification (Vector_Classification/classification.py)
-# --------------------------------------------------------------------------
-def render_layers(res: "PipelineResult") -> "RenderResult":
-    """Vectors grouped by their PDF layer."""
-    from rastervec.renderer.notebook import RenderResult
-
+# ---------------------------------------------------------------------------
+# Layer / (layer, colour) separation
+# ---------------------------------------------------------------------------
+def render_layers(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
     vbl = res.vectors_by_layer or {}
-    return RenderResult(
-        categories=[
-            {"name": f"layer {name or '(no layer)'} ({len(vs)})", "vectors": vs}
-            for name, vs in vbl.items()
-        ],
-        note=f"{len(vbl)} layer(s)",
+    color_by_id = {
+        id(v): _hash_color(("layer", name))
+        for name, vs in vbl.items() for v in vs
+    }
+    flat = [v for vs in vbl.values() for v in vs]
+    return render_vectors_pdf(
+        _meta(res, page_meta), flat,
+        color_of=lambda v: color_by_id.get(id(v), (0.0, 0.0, 0.0)),
     )
 
 
-def render_layer_color_buckets(res: "PipelineResult") -> "RenderResult":
-    """Vectors grouped by (layer, color) bucket -- the classification
-    chain's own unit of work."""
-    from rastervec.renderer.notebook import RenderResult
-
+def render_layer_color_buckets(
+    res: "PipelineResult", *, page_meta: "PageMeta | None" = None
+) -> bytes:
+    """`separation.pdf`: every vector coloured by its (layer, colour) bucket."""
     vblc = res.vectors_by_layer_color or {}
-    cats = []
+    color_by_id: dict[int, tuple] = {}
+    flat = []
     for layer, by_color in vblc.items():
         for color, vs in by_color.items():
-            cats.append({"name": f"{layer or '(no layer)'} / {color} ({len(vs)})", "vectors": vs})
-    return RenderResult(categories=cats, note=f"{len(cats)} (layer, color) bucket(s)")
-
-
-def render_clustering_steps(res: "PipelineResult", matrix, original) -> "RenderResult":
-    """The 12-step chain's own per-step categories, one row per (step,
-    named category) across every (layer, color) bucket, plus a "colour by
-    vector type" overlay coloring every surviving Vector's items by its
-    `VectorSignature`. `matrix`/`original` come from
-    `renderer.notebook.page_setup()`."""
-    from rastervec.config import SIGNATURE_ROUND_PX
-    from rastervec.renderer.notebook import RenderResult, blank_like
-    from rastervec.Vector_Classification import item_filters as itf
-
-    clustering = res.clustering or {}
-    results = list(clustering.values())[:10]
-    step_labels = [s.label for s in results[0].steps] if results else []
-    cats = []
-    for i, label in enumerate(step_labels):
-        names = []
-        for r in results:
-            for nm in r.steps[i].categories:
-                if nm not in names:
-                    names.append(nm)
-        side_i = 0
-        for nm in names:
-            entries, role = [], "kept"
-            for r in results:
-                cat = r.steps[i].categories.get(nm)
-                if cat is None:
-                    continue
-                role = cat.role
-                entries.extend(e for e in cat.groups if e)
-            if role == "kept":
-                color = _CLUSTER_STEP_COLORS[i % len(_CLUSTER_STEP_COLORS)]
-            else:
-                color = _SIDE_CATEGORY_COLORS[side_i % len(_SIDE_CATEGORY_COLORS)]
-                side_i += 1
-            cats.append({
-                "name": f"step {i + 1} {label} / {nm} [{role}] ({len(entries)} grp)",
-                "color": color,
-                "bboxes": [union_bbox([v.bbox for v in _entry_vectors(e)]) for e in entries],
-            })
-
-    sig_vectors = [
-        v for r in results for s in r.steps
-        if s.signature_counts is not None
-        for e in s.categories["kept"].groups for v in _entry_vectors(e)
-    ]
-    if sig_vectors:
-        iso, ovl = blank_like(original), original.copy()
-        for im in (iso, ovl):
-            d = ImageDraw.Draw(im)
-            for v in sig_vectors:
-                color = _signature_color(itf.vector_signature(v, SIGNATURE_ROUND_PX))
-                for item in v.items:
-                    pts = [(pt.x, pt.y) for pt in (fitz.Point(x, y) * matrix for x, y in item_points(item))]
-                    if len(pts) >= 2:
-                        d.line(pts, fill=color, width=2)
-        cats.append({"name": "colour by vector type", "isolated": iso, "overlay": ovl})
-
-    return RenderResult(
-        categories=cats,
-        note=f"{len(results)} (layer, color) bucket(s), {len(step_labels)} steps",
+            rgb = _hash_color(("bucket", layer, color))
+            for v in vs:
+                color_by_id[id(v)] = rgb
+                flat.append(v)
+    return render_vectors_pdf(
+        _meta(res, page_meta), flat,
+        color_of=lambda v: color_by_id.get(id(v), (0.0, 0.0, 0.0)),
     )
 
 
-def render_text_candidates(res: "PipelineResult") -> "RenderResult":
-    """Surviving text-candidate cluster boxes."""
-    from rastervec.renderer.notebook import RenderResult
+# ---------------------------------------------------------------------------
+# Vector classification
+# ---------------------------------------------------------------------------
+def _classification_groups_and_clusters(res: "PipelineResult"):
+    """`(group_bboxes, cluster_bboxes)` in page space from `res.clustering`."""
+    group_bboxes: list = []
+    cluster_bboxes: list = []
+    for stage in (res.clustering or {}).values():
+        steps = stage.steps
+        spatial_i = next(
+            (i for i, s in enumerate(steps) if s.label.lower().startswith("spatial")), None
+        )
+        if spatial_i is not None and spatial_i > 0:
+            for entry in steps[spatial_i - 1].categories["kept"].groups:
+                vs = _entry_vectors(entry)
+                if vs:
+                    group_bboxes.append(union_bbox([v.bbox for v in vs]))
+        if steps:
+            for entry in steps[-1].categories["kept"].groups:
+                vs = _entry_vectors(entry)
+                if vs:
+                    cluster_bboxes.append(union_bbox([v.bbox for v in vs]))
+    return group_bboxes, cluster_bboxes
 
-    tc = res.text_clusters or []
-    flat_clusters = [_entry_vectors(c) for c in tc]
-    return RenderResult(
-        categories=[{
-            "name": f"text candidate clusters ({len(tc)})",
-            "color": _CLUSTER_STEP_COLORS[0],
-            "bboxes": [union_bbox([v.bbox for v in c]) for c in flat_clusters if c],
-            "vectors": [v for c in flat_clusters for v in c],
-            "path_color": _CLUSTER_STEP_COLORS[0],
-        }],
-        note=f"{len(tc)} text candidate cluster(s)",
+
+def render_clustering_steps(
+    res: "PipelineResult", *, page_meta: "PageMeta | None" = None
+) -> bytes:
+    """`vector_classification.pdf`: every filter-dropped vector coloured by
+    which filter dropped it, the surviving text-candidate vectors in one
+    colour, and group / cluster bboxes."""
+    drop_layers: list[tuple[list, str]] = []
+    for name in _DROP_CATEGORIES:
+        vs: list = []
+        for stage in (res.clustering or {}).values():
+            for step in stage.steps:
+                cat = step.categories.get(name)
+                if cat is not None and cat.role == "dropped":
+                    for entry in cat.groups:
+                        vs.extend(_entry_vectors(entry))
+        if vs:
+            drop_layers.append((vs, _drop_color(name)))
+
+    candidates = [v for c in (res.text_clusters or []) for v in _entry_vectors(c)]
+    if candidates:
+        drop_layers.append((candidates, C_TEXT_CANDIDATE))
+
+    groups, clusters = _classification_groups_and_clusters(res)
+    return _compose(
+        _meta(res, page_meta),
+        vector_layers=drop_layers,
+        rect_layers=[(groups, C_GROUP_BBOX, False), (clusters, C_CLUSTER_BBOX, False)],
     )
 
 
-# --------------------------------------------------------------------------
-# Segment / Radon (OCR/radon.py)
-# --------------------------------------------------------------------------
-def render_radon(res: "PipelineResult") -> "RenderResult":
-    """One row per word `Segment` (capped), from `res.word_segments` --
-    Radon now runs on every FAST-surviving cluster (not just elected
-    representatives -- dedup happens after this step), so there's no
-    per-cluster grouping left to visualize here. Each row shows the word's
-    own captured deskewed crop (`seg.image`) directly -- no re-render
-    needed, it's the exact crop OCR itself will use."""
-    from rastervec.renderer.notebook import RenderResult
-
-    word_segments = res.word_segments or []
-
-    rows = []
-    for seg in word_segments[:8]:
-        if seg.image is None:
-            continue
-        base = Image.fromarray(seg.image).convert("RGB")
-        caption = f"angle={seg.angle:+.2f}deg"
-        rows.append({"name": caption, "isolated": base, "overlay": base})
-
-    return RenderResult(
-        categories=rows,
-        note=f"{len(word_segments)} word(s) across every FAST-surviving cluster",
+def render_text_candidates(
+    res: "PipelineResult", *, page_meta: "PageMeta | None" = None
+) -> bytes:
+    clusters = [_entry_vectors(c) for c in (res.text_clusters or [])]
+    bboxes = [union_bbox([v.bbox for v in c]) for c in clusters if c]
+    return _compose(
+        _meta(res, page_meta),
+        vector_layers=[([v for c in clusters for v in c], C_TEXT_CANDIDATE)],
+        rect_layers=[(bboxes, C_CLUSTER_BBOX, False)],
     )
 
 
-# --------------------------------------------------------------------------
-# Similarity / FAST / drawing output (pipelines/_steps.py)
-# --------------------------------------------------------------------------
-def render_similarity(res: "PipelineResult") -> "RenderResult":
-    """Notebook visualization for the (now post-Radon, word-level)
-    similarity-grouping step: every word `Segment`'s bbox, plus a note on
-    how much the grouping is expected to save OCR call count (Radon already
-    ran on every occurrence by this point, so dedup here only saves OCR,
-    not Radon -- each group beyond size 1 means every extra member skips
-    recognition entirely, reusing the representative's instead)."""
-    from rastervec.renderer.notebook import RenderResult
+# ---------------------------------------------------------------------------
+# Segment (Radon)
+# ---------------------------------------------------------------------------
+def render_radon(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
+    """`segmentation.pdf`: original cluster bbox, per-word segment bbox, and
+    the detected line / word gap markers, from `res.segmentation_debug`."""
+    dbg = res.segmentation_debug or []
+    cluster_b = [d["cluster_bbox"] for d in dbg]
+    seg_b = [b for d in dbg for b in d["segment_bboxes"]]
+    line_g = [b for d in dbg for b in d["line_gap_lines"]]
+    word_g = [b for d in dbg for b in d["word_gap_lines"]]
+    return _compose(
+        _meta(res, page_meta),
+        rect_layers=[
+            (cluster_b, C_ORIG_BBOX, False),
+            (seg_b, C_SEGMENT_BBOX, False),
+            (line_g, C_LINE_GAP, True),
+            (word_g, C_WORD_GAP, True),
+        ],
+    )
 
+
+# ---------------------------------------------------------------------------
+# Similarity
+# ---------------------------------------------------------------------------
+def render_similarity(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
     segments = res.word_segments or []
-    groups = res.similarity_groups or []
-    dup_groups = [g for g in groups if len(g) > 1]
-    saved = sum(len(g) - 1 for g in dup_groups)
-    return RenderResult(
-        categories=[{
-            "name": f"words ({len(segments)}) in {len(groups)} similarity group(s)",
-            "bboxes": [union_bbox([v.bbox for v in seg.vectors]) for seg in segments if seg.vectors],
-        }],
-        note=(
-            f"{len(segments)} word(s) -> {len(groups)} group(s) "
-            f"({len(dup_groups)} with >1 member, dedup saves {saved} OCR call(s))"
-        ),
-    )
+    groups = res.similarity_groups or [[i] for i in range(len(segments))]
+    rect_layers: list = []
+    for gi, group in enumerate(groups):
+        r, g, b = _hash_color(("simgroup", gi))
+        hexc = "#%02x%02x%02x" % (round(r * 255), round(g * 255), round(b * 255))
+        bboxes = [
+            union_bbox([v.bbox for v in segments[i].vectors])
+            for i in group if segments[i].vectors
+        ]
+        if bboxes:
+            rect_layers.append((bboxes, hexc, False))
+    return _compose(_meta(res, page_meta), rect_layers=rect_layers)
 
 
-def render_fast(res: "PipelineResult", *, enable_fast: bool) -> "RenderResult":
-    """The whole-page render, its detection heatmap, and passed/dropped
-    cluster boxes -- FAST runs directly on classification's clusters here
-    (before Radon or any dedup), so "passed" is `res.fast_passed`'s plain
-    clusters, not yet split into words. `enable_fast=False` and a page with
-    no clusters both render as a note only (no pixels to show)."""
-    from rastervec.renderer.notebook import RenderResult
+# ---------------------------------------------------------------------------
+# FAST text detection
+# ---------------------------------------------------------------------------
+def _fast_heat_image(page_image: "Image.Image", mask: "np.ndarray | None") -> "Image.Image":
+    base = page_image.convert("RGB")
+    if mask is None:
+        return base
+    heat = (np.clip(mask, 0.0, 1.0) * 255).astype("uint8")
+    zeros = Image.new("L", base.size, 0)
+    heat_img = Image.merge("RGB", (Image.fromarray(heat).resize(base.size), zeros, zeros))
+    return Image.blend(base, heat_img, alpha=0.5)
 
+
+def render_fast(
+    res: "PipelineResult", *, enable_fast: bool = True, page_meta: "PageMeta | None" = None
+) -> bytes:
+    pm = _meta(res, page_meta)
     fr = res.fast_result
     passed = res.fast_passed or []
-    dropped_vectors = res.fast_dropped_vectors or []
-    if not enable_fast:
-        return RenderResult(note=(
-            f"ENABLE_FAST=False -- pass-through, all {len(passed)} cluster(s) "
-            "kept, none dropped, no render/detection"
-        ))
-    if fr is None or fr.page_image is None:
-        return RenderResult(note="(no clusters on this page)")
-
-    render = fr.page_image.convert("RGB")
-    heat = _fast_mask_overlay(render, fr.page_mask) if fr.page_mask is not None else render
-    return RenderResult(
-        categories=[
-            {"name": "FAST render", "isolated": render, "overlay": render},
-            {"name": "detection heatmap", "isolated": heat, "overlay": heat},
-            {"name": f"passed clusters ({len(passed)})", "color": _PASSED_COLOR,
-             "bboxes": [union_bbox([v.bbox for v in c]) for c in passed if c]},
-            {"name": f"dropped vectors ({len(dropped_vectors)})", "color": _DROPPED_COLOR,
-             "bboxes": [v.bbox for v in dropped_vectors]},
+    dropped = res.fast_dropped_vectors or []
+    image = None
+    if fr is not None and fr.page_image is not None:
+        image = _fast_heat_image(fr.page_image, fr.page_mask)
+    return _compose(
+        pm,
+        image=image,
+        rect_layers=[
+            (list(getattr(fr, "skipped_tiles", None) or []), C_TILE_SKIP, True),
+            ([union_bbox([v.bbox for v in c]) for c in passed if c], C_FAST_PASS, False),
+            ([v.bbox for v in dropped], C_FAST_DROP, False),
         ],
-        note=f"detect_seconds = {fr.detect_seconds}",
     )
 
 
-def render_drawing(res: "PipelineResult", *, zoom: float = 1.0) -> "RenderResult":
-    """Notebook visualization for the drawing-vectors output: dashed vs
-    solid bboxes, plus a full page reconstruction."""
-    from rastervec.renderer.notebook import DEFAULT_PATH_COLOR, RenderResult
-
-    dv = res.vectors or []
-    dashed = [d for d in dv if is_dashed(d.dashes)]
-    solid = [d for d in dv if not is_dashed(d.dashes)]
-    recon = render_reconstructed_page(res.page.meta, drawing_vectors=dv, zoom=zoom)
-    return RenderResult(
-        categories=[
-            {"name": f"dashed ({len(dashed)})", "color": DEFAULT_PATH_COLOR, "bboxes": [d.bbox for d in dashed]},
-            {"name": f"solid ({len(solid)})", "color": DEFAULT_PATH_COLOR, "bboxes": [d.bbox for d in solid]},
-            {"name": "full reconstruction", "isolated": recon, "overlay": recon},
-        ],
-        note=f"{len(dv)} drawing vector(s)",
+# ---------------------------------------------------------------------------
+# Drawing output
+# ---------------------------------------------------------------------------
+def render_drawing(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
+    return render_vectors_pdf(
+        _meta(res, page_meta), res.vectors or [],
+        color_of=lambda _v: _hex_to_rgb01(C_DRAWING),
     )
 
 
-# --------------------------------------------------------------------------
-# OCR (OCR/Paddle_OCR/ocr_backend.py, pipelines/sub_pipelines/ocr.py)
-# --------------------------------------------------------------------------
-def render_ocr_results(res: "PipelineResult", *, zoom: float = 1.0) -> "RenderResult":
-    """Passed (non-blank) vs failed (blank) word-level OCR readings, one per
-    elected representative, in canonical frame (not restored to real page
-    position -- there can be many restored instances per reading)."""
-    from rastervec.renderer.notebook import RenderResult
-
-    unique_texts = res.unique_texts or []
-    passed = [t for t in unique_texts if t.text.strip()]
-    failed = [t for t in unique_texts if not t.text.strip()]
-    return RenderResult(categories=[
-        {"name": f"passed ({len(passed)})", "color": _PASSED_COLOR, "bboxes": [t.bbox for t in passed]},
-        {"name": f"failed ({len(failed)})", "color": _FAILED_COLOR, "bboxes": [t.bbox for t in failed]},
-    ], note=(
-        f"{len(unique_texts)} representative word(s) OCR'd -> "
-        f"{len(res.restored_texts or [])} restored Text(s) across all occurrences"
-    ))
-
-
-def render_restore(res: "PipelineResult") -> "RenderResult":
-    """Every restored `Text`'s real-position bbox -- the dedup payoff made
-    visible: one representative word's OCR reading fans back out onto every
-    real occurrence it covers."""
-    from rastervec.renderer.notebook import RenderResult
-
+# ---------------------------------------------------------------------------
+# OCR / restore
+# ---------------------------------------------------------------------------
+def render_ocr_results(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
+    """`paddle_ocr.pdf`: predicted text drawn at each restored word position
+    (green = read, red = blank) plus the OCR-detected boxes."""
     restored = res.restored_texts or []
-    unique_word_count = len(res.unique_texts or [])
-    return RenderResult(
-        categories=[{
-            "name": f"restored text ({len(restored)})",
-            "bboxes": [t.bbox for t in restored],
-        }],
-        note=(
-            f"{unique_word_count} unique word OCR reading(s) -> "
-            f"{len(restored)} restored Text(s) at their real page positions"
-        ),
+    text_layer = [
+        (t.text or "", tuple(t.bbox), t.angle(),
+         _hex_to_rgb01(C_OCR_PASS if t.text.strip() else C_OCR_FAIL))
+        for t in restored
+    ]
+    return _compose(
+        _meta(res, page_meta),
+        rect_layers=[([tuple(t.bbox) for t in restored], C_OCR_BOX, False)],
+        text_layer=text_layer,
+    )
+
+
+def render_restore(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
+    return render_ocr_results(res, page_meta=page_meta)
+
+
+# ---------------------------------------------------------------------------
+# Final reconstruction
+# ---------------------------------------------------------------------------
+def render_reconstructed(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
+    native = [t for t in (res.texts or []) if t.source == "native"]
+    ocr = [t for t in (res.texts or []) if t.source == "ocr"]
+    return render_reconstructed_pdf(
+        _meta(res, page_meta),
+        native_words=native, drawing_vectors=res.vectors or [], ocr_results=ocr,
     )

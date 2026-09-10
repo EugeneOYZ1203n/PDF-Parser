@@ -32,6 +32,8 @@ from rastervec.renderer.pdf import (
     render_boxes_pdf,
     render_reconstructed_page,
     render_reconstructed_pdf,
+    render_text_pdf,
+    render_vectors_pdf,
 )
 from rastervec.renderer.png import (
     page_points_to_pixel,
@@ -47,6 +49,8 @@ __all__ = [
     "render_reconstructed_page",
     "render_reconstructed_pdf",
     "render_boxes_pdf",
+    "render_text_pdf",
+    "render_vectors_pdf",
     "render_vector_cluster",
     "render_page_paths",
     "pixel_to_page_bbox",

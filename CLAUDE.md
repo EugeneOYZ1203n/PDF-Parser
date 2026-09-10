@@ -30,7 +30,9 @@ those labels; all three implemented) plus the inspector tool — see "rastervec 
 .venv/Scripts/python.exe -m pip install -r requirements.txt                        # install deps
 .venv/Scripts/python.exe -m rastervec.Evaluation.inspector.inspector [path/to.pdf]  # run the PDF layer inspector
 .venv/Scripts/python.exe -m rastervec.pipelines.current --pdf PATH --page N        # run the current extraction pipeline (CLI; also .pipelines.legacy)
-.venv/Scripts/jupyter lab rastervec/notebooks/pipeline_stage_visualization.ipynb   # per-stage pipeline visualization (needs jupyter + matplotlib)
+.venv/Scripts/python.exe scripts/generate_pipeline_report.py --config run.json      # config-driven per-stage report (PDFs + stats + dump.json per source PDF)
+.venv/Scripts/python.exe scripts/pipeline_report_viewer.py <run>/<pdf-stem>         # Tkinter viewer: source page + toggleable stage-PDF overlays
+.venv/Scripts/python.exe scripts/pipeline_report_benchmark.py --dump dump.json --pdf PATH  # score a dump's OCR text vs auto/manual ground truth
 .venv/Scripts/python.exe -m pytest tests/ -v                                        # run rastervec's test suite
 .venv/Scripts/python.exe scripts/rasterize_pdf.py SRC [DST] --dpi 300               # flatten a PDF to pure raster (DST defaults to outputs/rasterize/)
 .venv/Scripts/python.exe -m rastervec.Evaluation.Labelling.manual_label PDF --page N [--out labels.json]  # manual cluster-label editor (GUI; --out defaults to outputs/labels/)
@@ -486,10 +488,7 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   the thin `run_parallel(tasks, run_page_task, …)` wrapper used by both `benchmark.py` and the
   notebook — `compute_workers > 0` builds Pool 2 (`pool.compute_pool`) and threads its proxy into
   every page job via `functools.partial(run_page_task, compute=compute)`, shutting it down after;
-  `compute_workers=0` (default) is fully local, today's behavior. Both notebooks
-  (`benchmark_vector_classification.ipynb`, `pipeline_stage_visualization.ipynb`) expose a
-  `COMPUTE_WORKERS` knob for Pool 2 (the benchmark notebook also has `BENCH_WORKERS` for Pool 1;
-  Pool 1 is meaningless for the single-page visualization notebook). Per-variant reconstruct output goes to
+  `compute_workers=0` (default) is fully local, today's behavior. Per-variant reconstruct output goes to
   `RECONSTRUCT_DIR/<stem>_p<N>_<variant>/`.
 - **`Evaluation/Evaluate/benchmark.py`** *(implemented)* — the CLI wiring Conversion → auto_label →
   a real full pipeline run → `metrics.evaluate_metrics` together: `python -m
@@ -509,39 +508,28 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `format_variant_timing_comparison` / `summarize_stage_timings` are pure and unit-tested; `main()`'s
   actual OCR-backed path is a manual smoke test only (real PaddleOCR, first run downloads models —
   matches the existing `RASTERVEC_RUN_OCR_TESTS`-gated convention for OCR-dependent tests).
-  `notebooks/benchmark_vector_classification.ipynb` is the interactive counterpart: it scores every
-  variant in an editable `VARIANTS_TO_RUN` list (default `["current",
-  "legacy"]`) over a `collect_dataset` tree (mixed `.pdf` + `manual_label.py` sidecar `.json`).
-  `build_tasks(variant)` makes one `PageTask` per deduped `(pdf, page)`; the run cell loops
-  `run_benchmark(build_tasks(v), …)` per variant into `*_by_variant` dicts; `collect_results` splits
-  each variant's `PageResult`s into auto/manual metric lists + stage timings + the showcase pool and
-  writes a per-variant report `.txt` (all output under `outputs/benchmark_notebook/`). Comparison
-  cells print `format_aggregate_comparison` (metric
-  rows × variant columns) and `format_variant_timing_comparison` (per-stage median seconds ×
-  variant, + delta-vs-first). Per page × variant (when `RECONSTRUCT_DIR` is set) the job writes one
-  folder `RECONSTRUCT_DIR/<stem>_p<N>_<variant>/` with five PDFs: `input_auto.pdf` /
-  `input_manual.pdf` (the two disjoint pipeline inputs), `current.pdf` / `legacy.pdf` (each a
-  text-only reconstruction of that run's two halves merged), and `boxes.pdf` — the pred-vs-GT
-  overlay via `metrics.overlay_boxes_split` → `renderer.render_boxes_pdf`: **dashed** = auto GT,
-  **solid** = manual GT, **dotted** = a prediction; green = matched, red = a GT no prediction
-  reached, yellow = a prediction over no GT. A showcase cell plots `SHOWCASE_N` of the
-  `ShowcaseSample` PNGs from the first `current_*` variant, sampled ~50/50 between non-blank (PASS)
-  and blank (FAIL) OCR readings.
+  `scripts/pipeline_report_benchmark.py` is the standalone dump-based counterpart (replaced the old
+  `benchmark_vector_classification.ipynb`): it reloads one or more `dump.json` files
+  (`Evaluation/dump_io.py`), rebuilds `Text`/`Vector`, and scores each dump's OCR text against auto
+  (`--pdf`) or auto+manual (`--labels`) ground truth via `evaluate_metrics(clustering=None)` +
+  `format_aggregate_comparison`. Miss-attribution metrics are absent (a dump has no classification
+  state) — an accepted scope limit until benchmarking reads more than the dump.
 - **`renderer/` — module-level functions, no `Renderer` class** *(rendering helpers, not a pipeline
   stage)*: a package split by output concern — `png.py` (rasterize vector paths for OCR / FAST
-  input), `pdf.py` (`render_reconstructed_page`, `render_reconstructed_pdf`, and `render_boxes_pdf`
-  — colored rectangle outlines, each entry `(bbox, rgb)` or `(bbox, rgb, dashes)` where `dashes` is
-  a PyMuPDF dash string / `None`), `svg.py` (`render_page_svg`, a thin
-  `get_svg_image()` wrapper), and `_shapes.py` (shared). Import straight from `rastervec.renderer`
-  (`from rastervec.renderer import render_vector_cluster`, etc.). `notebook.py` is the exception:
-  notebook-only display plumbing (`RenderResult`, `visualize`, `draw_paths`/`draw_polys`/
-  `draw_bboxes`, `page_setup`, ...) for `pipeline_stage_visualization.ipynb`, deliberately **not**
-  re-exported through `renderer/__init__.py` — it imports matplotlib, and this package is imported
-  by the real pipeline itself (`render_vector_cluster`, `render_reconstructed_page`, ...), so
-  folding it into the package's own `__init__` would drag matplotlib into every pipeline run's
-  import graph. Import it directly (`from rastervec.renderer.notebook import ...`); every
-  `render_<stage_name>` function in `renderer/stages.py` (see that bullet) does this lazily,
-  inside the function body, for the same reason.
+  input), `pdf.py` (`render_reconstructed_page`, `render_reconstructed_pdf`, `render_boxes_pdf`
+  — colored rectangle outlines, each entry `(bbox, rgb)` or `(bbox, rgb, dashes)` — plus
+  `render_text_pdf` / `render_vectors_pdf`, the two colour-callback stage-report primitives), `svg.py`
+  (`render_page_svg`, a thin `get_svg_image()` wrapper), and `_shapes.py` (shared). Import straight
+  from `rastervec.renderer` (`from rastervec.renderer import render_vector_cluster`, etc.).
+  `stages.py` holds one `render_<stage>(res) -> bytes` per pipeline stage, each returning a one-page
+  **stage PDF** built on those three primitives + a local `_compose` multi-layer helper — the data
+  source for `scripts/generate_pipeline_report.py`. It also owns `STAGE_COLOR_LEGEND` /
+  `STAGE_ARTIFACTS`, the colour-legend the viewer reads. Every stage module keeps its one-line
+  `from rastervec.renderer.stages import render_x` re-export. `notebook.py` is the leftover
+  matplotlib display plumbing (`RenderResult`, `visualize`, `show_row`, ...) kept only for
+  `golden_case_curation.ipynb`; deliberately **not** re-exported through `renderer/__init__.py`
+  (it imports matplotlib, and this package is imported by the real pipeline). `stages.py` stays
+  matplotlib-free and imports no `rastervec.pipelines` module at module level for the same reason.
   `_shapes.path_color_hex(path)` returns a path's real PDF stroke/fill color as hex (used by both the
   visualization notebook and OCR input rendering) — any B/W-style simplification stays purely
   internal to classification, never substituted into a rendered/displayed color.
@@ -744,27 +732,26 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `ocr_cluster(cluster, page, dpi=300)` = `render_cluster_for_ocr` → `segment_cluster` →
   `recognize_segmented` (kept for non-pipeline callers); `ocr(image)` is the raw-image convenience
   used by the inspector — both always use `backend.recognize_crops` directly, never `recognize_fn`.
-- **`notebooks/pipeline_stage_visualization.ipynb`** *(implemented, on the new `pipelines/` API)*:
-  one `res = run_pipeline(PDF_PATH, PAGE_INDEX, enable_fast=…, verbose=True)` run, then one
-  `visualize(stage_key, render_<stage_name>(res), step_outputs=…, original=…, matrix=…)` cell per
-  pipeline step — `visualize` and the generic pixel-drawing plumbing it shares across every stage
-  (`RenderResult`, `draw_paths`/`draw_polys`/`draw_bboxes`, `page_setup`, ...) live in
-  `renderer/notebook.py`; the stage-specific part (*what* to draw) is one `render_<stage_name>`
-  function, all twelve centralized in `renderer/stages.py` (`render_vectors`, `render_native`,
-  `render_layers` / `render_layer_color_buckets` / `render_clustering_steps` /
-  `render_text_candidates`, `render_radon`, `render_similarity`, `render_fast`, `render_drawing`,
-  `render_ocr_results`, `render_restore` — each still a thin lazy-`renderer.notebook`-import
-  function, and each original stage module keeps a one-line re-export of its own function for
-  backward compatibility). "Segment (Radon)" and
-  "PaddleOCR" are two separate sections/cells (`segment` and `ocr` are already two distinct
-  `STEP_NAMES`) rather than one combined cell, so the Radon step's own pass/fail/timing is now
-  visible too. `render_text_candidates` reports similarity grouping as a plain original-vs-unique
-  cluster count in its note, not a per-similarity-group image overlay (there can be dozens).
-  `VARIANT` picks a `current`-engine `variants.VARIANTS` entry (`current` / `current_nofast`) for
-  its `enable_fast`. The pipeline always runs all 9 steps (PaddleOCR included); writes no files.
-  A final "Timeline" cell renders `res.step_durations` as a waterfall/Gantt `matplotlib.barh`
-  (cumulative start offsets, since the 9 steps run strictly sequentially), colored by each step's
-  `res.step_outputs[name].status` (green ok / red error) when `verbose=True`.
+- **`scripts/generate_pipeline_report.py`** *(replaced `pipeline_stage_visualization.ipynb`)*:
+  reads a JSON `ReportConfig` (pydantic; `pipeline` variant, `final_stage` = a `STEP_NAMES` value,
+  `input_dir`/`input_files`, per-PDF `pages`, `vectorise` + `vectorise_mode` = an
+  `Evaluation/conversion.py` mode), runs `run_pipeline(..., verbose=True, stop_after=final_stage)`
+  once per (pdf, page), and writes `outputs/pipeline_report/<ts>__<config-stem>/<pdf-stem>/` with:
+  one multi-page PDF per stage (`native_text.pdf`, `vector_extraction.pdf`, `separation.pdf`,
+  `vector_classification.pdf`, `fast_heatmap.pdf`, `segmentation.pdf`, `similarity.pdf`,
+  `paddle_ocr.pdf`, `drawing_vectors.pdf`, `reconstructed.pdf` — via `renderer/stages.py`), one
+  `<stage>.txt` of numeric stats per stage (`Evaluation/Report/stage_stats.py`, reusing
+  `benchmark.distribution_stats`), `dump.json` (`Evaluation/dump_io.py` — every `Text` + `Vector`,
+  reloadable), `config_and_hyperparameters.txt` (config + every `rastervec.config` constant),
+  `manifest.json`, and `radon_images/` + `paddle_images/` (the Radon word crops and the elected
+  OCR crops). `stop_after` (new kwarg on `run_pipeline`/`run_current_pipeline`, also
+  `--stop-after` on the CLI) skips every step after the named one. Two verbose-only additions feed
+  the finer overlays: `FastPageResult.skipped_tiles`/`tile_count`/`tile_seconds` (from
+  `detect_tiled`'s new `tile_report` out-param) and `PipelineResult.segmentation_debug`
+  (line/word-gap cut lines, from `segment_clusters(debug_out=...)`).
+  `scripts/pipeline_report_viewer.py` is the Tkinter counterpart: a per-PDF folder → source page +
+  one checkbox per stage PDF, each toggled layer alpha-composited over the page (near-white made
+  transparent), zoom/pan/page-flip, colour legend from `manifest.json` (`stages.STAGE_COLOR_LEGEND`).
 
 `scripts/rasterize_pdf.py` (outside `rastervec/`, a one-off utility not a pipeline stage): flattens
 every page of a PDF to an image and rebuilds a pure-raster PDF from those images — not currently
@@ -791,13 +778,12 @@ Three things, all following the existing pattern:
    `STEP_NAMES`), or a step in a `sub_pipelines/*.py` block sequence — plus a thin adapter in
    `_steps.py` if it needs one. Add its output to the `PipelineResult` constructor (always-on
    or verbose-only). No registry, no `StageSpec`.
-3. Add a `render_<stage_name>(res: PipelineResult) -> RenderResult` function to
-   `rastervec/renderer/stages.py` (reading `res.<field>`, lazily importing `RenderResult`/
-   `renderer.notebook` inside the function body so matplotlib stays out of the pipeline's own
-   import graph -- every other function in that module follows this same pattern), plus a thin
-   cell in `notebooks/pipeline_stage_visualization.ipynb` calling
-   `visualize(stage_key, render_<stage_name>(res), step_outputs=outputs, original=ORIGINAL,
-   matrix=MATRIX)`.
+3. Add a `render_<stage_name>(res: PipelineResult, *, page_meta=None) -> bytes` function to
+   `rastervec/renderer/stages.py` returning a one-page stage PDF (build on `render_text_pdf` /
+   `render_vectors_pdf` / `render_boxes_pdf` / the local `_compose` helper; no matplotlib, no
+   `rastervec.pipelines` import at module level), add its filename to `STAGE_ARTIFACTS` +
+   `STAGE_COLOR_LEGEND` and a row to `_ARTIFACTS` in `scripts/generate_pipeline_report.py`, plus a
+   `stats_<stage>` in `rastervec/Evaluation/Report/stage_stats.py`.
 Also add tests under the matching `tests/rastervec/` subfolder using the synthetic PDF fixtures,
 and new third-party dependencies to `requirements.txt` only when the stage that needs them is
 actually implemented.

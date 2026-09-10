@@ -22,6 +22,7 @@ benchmark's pred-vs-GT box-overlay PDF.
 """
 from __future__ import annotations
 
+import dataclasses
 import io
 
 import pymupdf as fitz
@@ -30,8 +31,12 @@ from PIL import Image
 from rastervec.models import PageMeta, Text, Vector
 from rastervec.renderer._shapes import replay_drawing_paths
 
-# One reconstructed text box: (text, page-space bbox, rotation in degrees).
-TextBox = tuple[str, tuple[float, float, float, float], float]
+# One reconstructed text box: (text, page-space bbox, rotation in degrees),
+# optionally a fourth element, an (r, g, b) 0..1 fill color (default black).
+TextBox = (
+    tuple[str, tuple[float, float, float, float], float]
+    | tuple[str, tuple[float, float, float, float], float, tuple[float, float, float]]
+)
 
 
 def _text_color(color: int | None) -> tuple[float, float, float]:
@@ -217,8 +222,10 @@ def _build_reconstructed_doc(
             )
 
     if text_boxes:
-        for text, bbox, rotation in text_boxes:
-            _place_text(text, bbox, rotation)
+        for spec in text_boxes:
+            text, bbox, rotation = spec[0], spec[1], spec[2]
+            color = spec[3] if len(spec) > 3 else (0.0, 0.0, 0.0)
+            _place_text(text, bbox, rotation, color=color)
 
     return doc
 
@@ -309,6 +316,57 @@ def render_boxes_pdf(
             bbox, color = spec[0], spec[1]
             dashes = spec[2] if len(spec) > 2 else None
             page.draw_rect(fitz.Rect(*bbox), color=color, width=width, dashes=dashes)
+        return doc.tobytes()
+    finally:
+        doc.close()
+
+
+def render_text_pdf(
+    page_meta: PageMeta,
+    texts: "list[Text]",
+    *,
+    color_of=None,
+) -> bytes:
+    """A fresh page sized/rotated to `page_meta` with every `Text` placed at
+    its own bbox + rotation (via `_place_text`, box-height-derived font).
+    `color_of(text) -> (r, g, b)` 0..1 sets each word's colour; default
+    black. Used by the stage-report renderers for `native_text.pdf` /
+    `paddle_ocr.pdf`."""
+    boxes: list = []
+    for t in texts:
+        color = color_of(t) if color_of is not None else (0.0, 0.0, 0.0)
+        boxes.append((t.text, tuple(t.bbox), t.angle(), color))
+    return render_reconstructed_pdf(page_meta, text_boxes=boxes)
+
+
+def render_vectors_pdf(
+    page_meta: PageMeta,
+    vectors: "list[Vector]",
+    *,
+    color_of=None,
+    width: float = 1.0,
+) -> bytes:
+    """A fresh page sized/rotated to `page_meta` with every `Vector`'s items
+    replayed as **stroked** paths in `color_of(vector) -> (r, g, b)` 0..1
+    (default black), ignoring the vector's real paint/opacity/dashes -- so a
+    stage renderer can colour drawings by type / (layer, colour) bucket /
+    filter without the original colours drowning that out. Reuses
+    `replay_drawing_paths` on recoloured shallow copies so multi-contour
+    geometry still replays exactly."""
+    recoloured: list[Vector] = []
+    for v in vectors:
+        color = color_of(v) if color_of is not None else (0.0, 0.0, 0.0)
+        recoloured.append(dataclasses.replace(
+            v, type="s", color=tuple(color), fill=None, dashes=None,
+            width=max(v.width or 0.0, width), closePath=False,
+            blendmode="Normal", opacity=1.0, stroke_opacity=1.0, fill_opacity=None,
+        ))
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=page_meta.width, height=page_meta.height)
+        page.set_rotation(page_meta.rotation)
+        if recoloured:
+            replay_drawing_paths(page, recoloured)
         return doc.tobytes()
     finally:
         doc.close()
