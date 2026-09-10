@@ -1,0 +1,8 @@
+{
+  "pipeline": "current",
+  "final_stage": null,
+  "input_files": ["references/240118-Proposed OW Shopdrawings for Thomson Height CC.pdf"],
+  "pages": [0, 1, 2],
+  "vectorise": false,
+  "dpi": 300
+}

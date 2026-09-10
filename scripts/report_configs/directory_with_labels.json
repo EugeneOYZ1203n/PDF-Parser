@@ -1,0 +1,14 @@
+{
+  "pipeline": "current",
+  "final_stage": null,
+  "input_dir": "references",
+  "label_files": {
+    "240118-Proposed OW Shopdrawings for Thomson Height CC": "outputs/labels/240118-Proposed OW Shopdrawings for Thomson Height CC.json"
+  },
+  "pages": {
+    "240118-Proposed OW Shopdrawings for Thomson Height CC": [0, 3],
+    "*": [0]
+  },
+  "vectorise": false,
+  "output_root": "outputs/pipeline_report"
+}
