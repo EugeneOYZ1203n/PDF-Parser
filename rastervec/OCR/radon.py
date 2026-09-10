@@ -79,6 +79,7 @@ OCR'd.
 from __future__ import annotations
 
 import math
+from typing import Callable
 
 import numpy as np
 from scipy.ndimage import rotate as _nd_rotate
@@ -309,6 +310,15 @@ def _skew_objective(profile: np.ndarray) -> float:
     return float(np.mean(scores) * math.sqrt(len(scores)))
 
 
+# A projection function maps `(mask, angle_deg) -> 1-D row profile`. The
+# default `_project` sums ink per row; an alternative (e.g. counting ink
+# *runs* per row, which is stroke-weight-independent) can be threaded
+# through the whole sweep via the `project=` parameter on
+# `estimate_skew_from_mask` and friends -- see `notebooks/skew_method_
+# comparison.ipynb`.
+ProjectFn = Callable[[np.ndarray, float], np.ndarray]
+
+
 def _project(mask: np.ndarray, angle_deg: float) -> np.ndarray:
     """Row-projection profile of `mask` (a float ink mask) after rotating it
     `angle_deg` counter-clockwise -- `angle_deg = 0` is the raw
@@ -320,23 +330,25 @@ def _project(mask: np.ndarray, angle_deg: float) -> np.ndarray:
     return rot.sum(axis=1).astype(np.float64)
 
 
-def _objective_sweep(mask: np.ndarray, angles: np.ndarray) -> np.ndarray:
-    return np.array([_skew_objective(_project(mask, float(a))) for a in angles])
+def _objective_sweep(
+    mask: np.ndarray, angles: np.ndarray, *, project: ProjectFn = _project,
+) -> np.ndarray:
+    return np.array([_skew_objective(project(mask, float(a))) for a in angles])
 
 
-def _postl_deskew(mask: np.ndarray) -> float:
+def _postl_deskew(mask: np.ndarray, *, project: ProjectFn = _project) -> float:
     """Deskew angle (degrees) by the classic Postl criterion -- the
     `sum(profile**2)`-maximising rotation, i.e. the one whose profile is
     most concentrated (the across-lines direction). Robust when the gap
     objective degenerates (a single glyph, or a single line seen from
     almost every angle), so it's the fallback there."""
     coarse = np.arange(-90.0, 90.0, RADON_COARSE_STEP_DEG)
-    scores = np.array([float(np.sum(_project(mask, float(a)) ** 2)) for a in coarse])
+    scores = np.array([float(np.sum(project(mask, float(a)) ** 2)) for a in coarse])
     c_best = float(coarse[int(np.argmax(scores))])
     fine = c_best + np.arange(
         -RADON_COARSE_STEP_DEG, RADON_COARSE_STEP_DEG + RADON_ANGLE_STEP_DEG, RADON_ANGLE_STEP_DEG,
     )
-    scores = np.array([float(np.sum(_project(mask, float(a)) ** 2)) for a in fine])
+    scores = np.array([float(np.sum(project(mask, float(a)) ** 2)) for a in fine])
     return float(fine[int(np.argmax(scores))])
 
 
@@ -374,7 +386,7 @@ def _across_lines_angle(angles: np.ndarray, objs: np.ndarray) -> float | None:
     return None
 
 
-def _sweep_deskew(mask: np.ndarray) -> float:
+def _sweep_deskew(mask: np.ndarray, *, project: ProjectFn = _project) -> float:
     """Deskew angle (degrees, counter-clockwise positive) that makes the
     text baseline horizontal. A coarse full `[-90, 90)` sweep at
     `RADON_COARSE_STEP_DEG` locates the regime and a rough angle; a fine
@@ -382,25 +394,30 @@ def _sweep_deskew(mask: np.ndarray) -> float:
     it pins the edges. Falls back to the Postl criterion when the gap
     objective has no usable structure."""
     coarse = np.arange(-90.0, 90.0, RADON_COARSE_STEP_DEG)
-    rough = _across_lines_angle(coarse, _objective_sweep(mask, coarse))
+    rough = _across_lines_angle(coarse, _objective_sweep(mask, coarse, project=project))
     if rough is None:
-        return _postl_deskew(mask)
+        return _postl_deskew(mask, project=project)
 
     fine = rough + np.arange(
         -RADON_SKEW_LIMIT_DEG, RADON_SKEW_LIMIT_DEG + RADON_ANGLE_STEP_DEG, RADON_ANGLE_STEP_DEG,
     )
-    refined = _across_lines_angle(fine, _objective_sweep(mask, fine))
+    refined = _across_lines_angle(fine, _objective_sweep(mask, fine, project=project))
     return float(refined if refined is not None else rough)
 
 
-def estimate_skew_from_mask(ink: np.ndarray) -> float:
+def estimate_skew_from_mask(ink: np.ndarray, *, project: ProjectFn = _project) -> float:
     """`estimate_skew` for a pre-computed (possibly downscaled) ink mask.
     Full precision -- see this module's precision note. The 0-vs-180 flip is
-    *not* resolved here."""
+    *not* resolved here.
+
+    `project` swaps the row-projection function the whole sweep runs on
+    (default `_project`, ink sum per row). Not used by the pipeline; it's
+    the hook `notebooks/skew_method_comparison.ipynb` uses to try an
+    ink-*run*-count projection without patching the module."""
     if not ink.any():
         return 0.0
     mask = ink.astype(np.float64)
-    skew = _sweep_deskew(mask) % 180.0
+    skew = _sweep_deskew(mask, project=project) % 180.0
     if skew > 90.0:
         skew -= 180.0
     return float(skew)

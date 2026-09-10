@@ -258,6 +258,17 @@ def test_estimate_skew_blank_is_zero():
     assert radon.estimate_skew(np.full((30, 30), 255, np.uint8)) == 0.0
 
 
+def test_estimate_skew_project_hook_is_transparent():
+    """Passing the default `_project` explicitly must be identical to
+    omitting it -- the hook only exists so a notebook can swap the
+    projection."""
+    rotated = sk_rotate(_text_image(), -4.0, resize=True, cval=255, preserve_range=True)
+    ink = radon.to_ink(rotated.astype(np.uint8))
+    assert radon.estimate_skew_from_mask(ink) == radon.estimate_skew_from_mask(
+        ink, project=radon._project,
+    )
+
+
 # --------------------------------------------------------------------------
 # line bands / spacing
 # --------------------------------------------------------------------------
