@@ -17,10 +17,12 @@ from rastervec.config import (
     FAST_TILE_BLOCK_SIZE,
     FAST_TILE_CANDIDATE_MARGIN_FRAC,
     FAST_TILE_SCALE_FACTOR,
+    FAST_VECTOR_KEEP_THRESHOLD,
     UNIQUE_CLUSTER_TOLERANCE,
 )
 from rastervec.helpers.geometry import (
     PDF_POINTS_PER_INCH,
+    item_bbox,
     item_points,
     max_dimension,
     transform_point,
@@ -35,7 +37,11 @@ from rastervec.OCR.Paddle_OCR.ocr_backend import PaddleDetectBackend
 from rastervec.OCR.radon import segment_clusters  # noqa: F401 -- re-exported for callers
 from rastervec.pipelines.result import FastPageResult
 from rastervec.renderer import render_page_paths
-from rastervec.renderer.stages import render_drawing, render_similarity  # noqa: F401 -- re-exported for callers
+from rastervec.renderer.stages import (  # noqa: F401 -- re-exported for callers
+    render_drawing,
+    render_paddle_boxes,
+    render_similarity,
+)
 from rastervec.Vector.vector import extract_vectors as _extract_vectors
 
 log = get_logger("pipelines.steps")
@@ -187,6 +193,122 @@ def detect_text_fast(
         skipped_tiles=skipped_tiles, tile_count=tile_count, tile_seconds=tile_seconds,
     )
     return FastStepResult(passed, dropped_vectors, result)
+
+
+# --------------------------------------------------------------------------
+# `fast_first` pipeline: FAST detection directly on every extracted Vector,
+# independently, *before* any grouping/clustering exists at all (unlike
+# `detect_text_fast` above, which scores classification's already-built
+# clusters). A Vector is scored over its own items' bboxes
+# (`helpers.geometry.item_bbox` -- its actual line/fill geometry), not its
+# aggregate `.bbox`, so a large near-empty bounding rect doesn't dilute the
+# score with the heatmap value of its own empty interior.
+# --------------------------------------------------------------------------
+@dataclass
+class FastFilterResult:
+    passed: list[Vector]
+    dropped: list[Vector]
+    page_result: FastPageResult
+
+
+def _sample_mask_items(mask, items: list[tuple], zoom: float) -> float:
+    if mask is None:
+        return 0.0
+    mask_h, mask_w = mask.shape
+    total_pixels = 0
+    total_score = 0.0
+    for item in items:
+        x0, y0, x1, y1 = item_bbox(item)
+        px0 = max(0, min(mask_w, int(x0 * zoom)))
+        py0 = max(0, min(mask_h, int(y0 * zoom)))
+        px1 = max(px0, min(mask_w, int(np.ceil(x1 * zoom))))
+        py1 = max(py0, min(mask_h, int(np.ceil(y1 * zoom))))
+        region = mask[py0:py1, px0:px1]
+        if region.size:
+            total_pixels += region.size
+            total_score += float(region.sum())
+    return total_score / total_pixels if total_pixels else 0.0
+
+
+def filter_vectors_fast(
+    vectors: list[Vector],
+    page: Page,
+    *,
+    enable_fast: bool = True,
+    verbose: bool = False,
+    compute=None,
+    progress_counter=None,
+) -> FastFilterResult:
+    """Per-Vector counterpart of `detect_text_fast`, for the `fast_first`
+    pipeline: scores every extracted Vector, independently, against a
+    whole-page FAST mask, sampled over each of its own items' bboxes (its
+    real line/fill geometry) rather than its aggregate bbox, and keeps it
+    only if that per-item coverage exceeds `FAST_VECTOR_KEEP_THRESHOLD`.
+    `enable_fast=False` is a pass-through (every Vector passes). `compute`/
+    `progress_counter` are forwarded to `detect_tiled` exactly like
+    `detect_text_fast`."""
+    if not enable_fast:
+        result = FastPageResult(None, None, None, {})
+        return FastFilterResult(list(vectors), [], result)
+
+    page_image = page_mask = None
+    detect_seconds = None
+    zoom = FAST_PAGE_RENDER_DPI / PDF_POINTS_PER_INCH
+    if vectors:
+        detector = FastDetector()
+        page_image = render_page_paths(vectors, page.meta, FAST_PAGE_RENDER_DPI)
+        candidate_bboxes = _candidate_tile_bboxes(
+            [[v] for v in vectors], zoom=zoom, tile_scale=FAST_TILE_SCALE_FACTOR,
+            margin=FAST_TILE_BLOCK_SIZE * FAST_TILE_CANDIDATE_MARGIN_FRAC,
+        )
+        tile_report: list = [] if verbose else None
+        start = time.perf_counter()
+        try:
+            page_mask = detector.detect_tiled(
+                page_image, desc="FAST text detection (per-vector)", compute=compute,
+                candidate_bboxes=candidate_bboxes, progress_counter=progress_counter,
+                tile_report=tile_report,
+            )
+        except FileNotFoundError as exc:
+            log.warning("FAST detection skipped (keeping every vector): %s", exc)
+            return filter_vectors_fast(
+                vectors, page, enable_fast=False, verbose=verbose, compute=compute,
+                progress_counter=progress_counter,
+            )
+        detect_seconds = time.perf_counter() - start
+
+    vector_scores = [_sample_mask_items(page_mask, v.items, zoom) for v in vectors]
+
+    passed: list[Vector] = []
+    dropped: list[Vector] = []
+    scores_by_vector: dict[int, float] = {}
+    for i, v in enumerate(vectors):
+        score = vector_scores[i]
+        scores_by_vector[i] = score
+        if score > FAST_VECTOR_KEEP_THRESHOLD:
+            passed.append(v)
+        else:
+            dropped.append(v)
+
+    skipped_tiles = tile_count = tile_seconds = None
+    if verbose and vectors:
+        px_scale = zoom * FAST_TILE_SCALE_FACTOR
+
+        def _to_page(rect):
+            x0, y0, x1, y1 = rect
+            return (x0 / px_scale, y0 / px_scale, x1 / px_scale, y1 / px_scale)
+
+        tile_count = len(tile_report)
+        skipped_tiles = [_to_page(e["rect_scaled"]) for e in tile_report if not e["detected"]]
+        tile_seconds = [e["seconds"] for e in tile_report if e.get("seconds") is not None]
+
+    result = FastPageResult(
+        page_image if verbose else None,
+        page_mask if verbose else None,
+        detect_seconds, scores_by_vector,
+        skipped_tiles=skipped_tiles, tile_count=tile_count, tile_seconds=tile_seconds,
+    )
+    return FastFilterResult(passed, dropped, result)
 
 
 # --------------------------------------------------------------------------

@@ -64,7 +64,16 @@ from rastervec.Evaluation.Report import stage_stats
 from rastervec.logging_setup import configure_logging, get_logger
 from rastervec.paths import output_dir
 from rastervec.pipelines._common import STEP_NAMES
+from rastervec.pipelines._fast_first_common import STEP_NAMES as FAST_FIRST_STEP_NAMES
 from rastervec.renderer import render_boxes_pdf, render_reconstructed_pdf, stages
+
+# STEP_NAMES belonging to each engine, for `final_stage` validation and the
+# `_reached` gate check below -- `legacy` has no step concept of its own
+# (its `final_stage` must always be `None`).
+_STEP_NAMES_BY_ENGINE: dict[str, list[str]] = {
+    "current": STEP_NAMES,
+    "fast_first": FAST_FIRST_STEP_NAMES,
+}
 
 _LOG = get_logger("generate_pipeline_report")
 
@@ -76,19 +85,46 @@ _CONVERT = {
 
 # stage stem -> (stage_key for stages.render_stage_layers, stats-key or
 # None, gate STEP_NAME). Each stage emits one single-purpose PDF per visual
-# layer: `<stem>__<layer-slug>.pdf`.
-_ARTIFACTS: list[tuple[str, str, str | None, str]] = [
+# layer: `<stem>__<layer-slug>.pdf`. One table per engine, since each has
+# its own STEP_NAMES / stage set.
+#
+# `current`'s `segmentation`/`similarity`/old `paddle_ocr` rows (Radon +
+# OCR-recognition visuals) are dropped here: that path is dead code in
+# `run_current_pipeline` on this branch (`res.segmentation_debug`/
+# `res.word_segments`/`res.restored_texts` are never populated), so those
+# rows always rendered blank pages, and their gate names ("segment"/
+# "similarity"/"restore") don't exist in `STEP_NAMES` either -- setting
+# `final_stage` would have raised. `paddle_ocr` is retargeted at the real
+# `paddle_detect` stage/gate (`res.paddle_boxes`, this branch's actual
+# detection output). `render_ocr_results`/`render_radon`/`render_similarity`
+# themselves are untouched -- still exercised by their own direct unit
+# tests -- only their entries in this *active* table are gone.
+_CURRENT_ARTIFACTS: list[tuple[str, str, str | None, str]] = [
     ("native_text", "native", "native", "native"),
     ("vector_extraction", "vectors", "vectors", "vectors"),
     ("separation", "separation", "separation", "classify"),
     ("vector_classification", "classify", "classify", "classify"),
     ("fast_heatmap", "fast", "fast", "fast"),
-    ("segmentation", "segment", "segment", "segment"),
-    ("similarity", "similarity", "similarity", "similarity"),
-    ("paddle_ocr", "ocr", "ocr", "restore"),
+    ("paddle_detections", "paddle_detect", None, "paddle_detect"),
     ("drawing_vectors", "drawing", None, "drawing"),
     ("reconstructed", "reconstructed", None, "drawing"),
 ]
+
+_FAST_FIRST_ARTIFACTS: list[tuple[str, str, str | None, str]] = [
+    ("native_text", "native", "native", "native"),
+    ("vector_extraction", "vectors", "vectors", "vectors"),
+    ("fast_filter", "fast", "fast", "fast_filter"),
+    ("spatial_cluster", "spatial_cluster", None, "spatial_cluster"),
+    ("paddle_detections", "paddle_detect", None, "paddle_detect"),
+    ("drawing_vectors", "drawing", None, "drawing"),
+    ("reconstructed", "reconstructed", None, "drawing"),
+]
+
+_ARTIFACTS_BY_ENGINE: dict[str, list[tuple[str, str, str | None, str]]] = {
+    "current": _CURRENT_ARTIFACTS,
+    "fast_first": _FAST_FIRST_ARTIFACTS,
+    "legacy": [row for row in _CURRENT_ARTIFACTS if row[0] == "reconstructed"],
+}
 
 
 def _layer_slug(label: str) -> str:

@@ -9,10 +9,12 @@ from rastervec.pipelines._steps import (
     _candidate_tile_bboxes,
     _normalize_segment,
     _sample_mask,
+    _sample_mask_items,
     build_drawing_output,
     detect_text_fast,
     detect_text_paddle,
     elect_unique_segments,
+    filter_vectors_fast,
     group_similar_segments,
 )
 
@@ -197,6 +199,102 @@ def test_detect_text_fast_filters_each_cluster_independently(monkeypatch, vector
 
     assert res.passed == [[strong]]
     assert res.dropped_vectors == [weak]
+
+
+# --------------------------------------------------------------------------
+# _sample_mask_items / filter_vectors_fast (`fast_first` pipeline) -- scores
+# and drops/keeps individual Vectors, sampled over their own items' bboxes
+# rather than their aggregate bbox.
+# --------------------------------------------------------------------------
+def test_sample_mask_items_weights_by_item_footprint(vector):
+    mask = np.zeros((100, 100), dtype=np.float32)
+    mask[0:10, 0:10] = 1.0
+    v = vector(bbox=(0, 0, 100, 100), items=[("l", (0.0, 0.0), (10.0, 10.0))])
+    score = _sample_mask_items(mask, v.items, zoom=1.0)
+    assert score == pytest.approx(1.0)
+
+
+def test_sample_mask_items_none_is_zero(vector):
+    v = vector(bbox=(0, 0, 10, 10))
+    assert _sample_mask_items(None, v.items, zoom=1.0) == 0.0
+
+
+def test_sample_mask_items_differs_from_whole_bbox_sampling(vector):
+    """A large bbox with a tiny item inside it: per-item sampling reads the
+    item's own coverage, while whole-bbox sampling (`_sample_mask`) is
+    diluted by the empty interior of the aggregate rect."""
+    mask = np.zeros((100, 100), dtype=np.float32)
+    mask[0:10, 0:10] = 1.0
+    v = vector(bbox=(0, 0, 100, 100), items=[("l", (0.0, 0.0), (10.0, 10.0))])
+
+    item_score = _sample_mask_items(mask, v.items, zoom=1.0)
+    bbox_score = _sample_mask(mask, [v], zoom=1.0)
+
+    assert item_score == pytest.approx(1.0)
+    assert bbox_score < item_score
+
+
+def test_filter_vectors_fast_passthrough_when_disabled(vector):
+    v = vector(bbox=(0, 0, 10, 10))
+
+    res = filter_vectors_fast([v], page=None, enable_fast=False)
+
+    assert res.passed == [v]
+    assert res.dropped == []
+    assert res.page_result.page_image is None
+    assert res.page_result.detect_seconds is None
+
+
+def test_filter_vectors_fast_keeps_vector_that_passes(monkeypatch, vector, page_meta):
+    monkeypatch.setattr(_steps, "FastDetector", lambda: _FakeDetector(1.0))
+
+    class _FakePage:
+        meta = page_meta(width=200, height=200)
+
+    v = vector(bbox=(10, 10, 20, 20))
+
+    res = filter_vectors_fast([v], _FakePage(), enable_fast=True)
+
+    assert res.passed == [v]
+    assert res.dropped == []
+
+
+def test_filter_vectors_fast_drops_vector_that_fails(monkeypatch, vector, page_meta):
+    monkeypatch.setattr(_steps, "FastDetector", lambda: _FakeDetector(0.0))
+
+    class _FakePage:
+        meta = page_meta(width=200, height=200)
+
+    v = vector(bbox=(10, 10, 20, 20))
+
+    res = filter_vectors_fast([v], _FakePage(), enable_fast=True)
+
+    assert res.passed == []
+    assert res.dropped == [v]
+
+
+def test_filter_vectors_fast_filters_each_vector_independently(monkeypatch, vector, page_meta):
+    """A weak vector is dropped on its own, without dragging down (or being
+    saved by) an unrelated strong vector -- FAST runs per-Vector here,
+    before any clustering exists."""
+    class _SplitScoreDetector:
+        def detect_tiled(self, image, **kwargs):
+            mask = np.zeros((image.height, image.width), dtype=np.float32)
+            mask[:, : image.width // 2] = 1.0  # left half strong, right half zero
+            return mask
+
+    monkeypatch.setattr(_steps, "FastDetector", lambda: _SplitScoreDetector())
+
+    class _FakePage:
+        meta = page_meta(width=200, height=200)
+
+    strong = vector(bbox=(0, 0, 10, 10))      # left half -> high score
+    weak = vector(bbox=(150, 150, 160, 160))  # right half -> zero score
+
+    res = filter_vectors_fast([strong, weak], _FakePage(), enable_fast=True)
+
+    assert res.passed == [strong]
+    assert res.dropped == [weak]
 
 
 # --------------------------------------------------------------------------

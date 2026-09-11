@@ -78,7 +78,7 @@ class PipelineResult:
     texts: "list[Text]"  # native + restored OCR text, flat
     vectors: "list[Vector]"  # drawing content: classification + FAST drops, flat
     step_durations: dict
-    engine: str  # "current" | "legacy"
+    engine: str  # "current" | "legacy" | "fast_first"
 
     # ---- test-branch addition (`test/paddle-detect-post-fast`): populated
     # by the `paddle_detect` step whenever it runs, independent of
@@ -97,9 +97,17 @@ class PipelineResult:
     clustering: dict | None = None
     classification_dropped: "list[Vector] | None" = None
     fast_result: FastPageResult | None = None
-    fast_passed: "list[list[Vector]] | None" = None  # clusters that cleared
-    # FAST, pre-Radon -- Radon's own input
+    fast_passed: "list[list[Vector]] | None" = None  # `current` engine: clusters
+    # that cleared FAST, pre-Radon -- Radon's own input. `fast_first` engine:
+    # `[[v] for v in ...]`, one singleton per surviving Vector (FAST runs
+    # per-Vector there, before any clustering) -- `spatial_clusters` below is
+    # that engine's real post-clustering candidate set.
     fast_dropped_vectors: "list[Vector] | None" = None
+    spatial_clusters: "list[list[Vector]] | None" = None  # `fast_first` engine
+    # only: clusters formed by Vector_Classification.group_filters.
+    # combine_overlapping_seq over FAST-surviving Vectors (seqno order,
+    # chain-merged by spatial bbox-gap tolerance) -- this pipeline's
+    # paddle_detect input.
     word_segments: "list[Segment] | None" = None  # Radon's output: every
     # FAST-surviving cluster's own word-level Segments (with `.image`),
     # flat, combined across every cluster -- similarity's input

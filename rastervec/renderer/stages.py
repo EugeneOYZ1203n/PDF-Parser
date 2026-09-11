@@ -78,10 +78,14 @@ STAGE_COLOR_LEGEND: dict[str, list[tuple[str, str]]] = {
         ("vectors dropped", C_VEC_DROPPED), ("segments dropped", C_SEG_DROPPED),
     ],
     "similarity.pdf": [("(one colour per similarity group)", "#888888")],
+    "spatial_cluster.pdf": [
+        ("cluster vectors", C_TEXT_CANDIDATE), ("cluster bbox", C_CLUSTER_BBOX),
+    ],
     "paddle_ocr.pdf": [
         ("predicted text (ok)", C_OCR_PASS), ("predicted text (blank)", C_OCR_FAIL),
         ("OCR-detected box", C_OCR_BOX),
     ],
+    "paddle_detections.pdf": [("detected text box", C_OCR_BOX)],
     "drawing_vectors.pdf": [("drawing vector", C_DRAWING)],
     "reconstructed.pdf": [("reconstructed page", "#111827")],
 }
@@ -94,7 +98,9 @@ STAGE_ARTIFACTS = {
     "fast": "fast_heatmap.pdf",
     "segment": "segmentation.pdf",
     "similarity": "similarity.pdf",
+    "spatial_cluster": "spatial_cluster.pdf",
     "ocr": "paddle_ocr.pdf",
+    "paddle_detect": "paddle_detections.pdf",
     "drawing": "drawing_vectors.pdf",
     "reconstructed": "reconstructed.pdf",
 }
@@ -342,6 +348,23 @@ def render_text_candidates(
 
 
 # ---------------------------------------------------------------------------
+# fast_first pipeline: spatial_cluster stage -- Vector_Classification.
+# group_filters.combine_overlapping_seq's seqno-consecutive, bbox-gap merge
+# of FAST-surviving Vectors, `current`'s classification-chain replacement.
+# ---------------------------------------------------------------------------
+def render_spatial_clusters(
+    res: "PipelineResult", *, page_meta: "PageMeta | None" = None
+) -> bytes:
+    clusters = res.spatial_clusters or []
+    bboxes = [union_bbox([v.bbox for v in c]) for c in clusters if c]
+    return _compose(
+        _meta(res, page_meta),
+        vector_layers=[([v for c in clusters for v in c], C_TEXT_CANDIDATE)],
+        rect_layers=[(bboxes, C_CLUSTER_BBOX, False)],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Segment (Radon)
 # ---------------------------------------------------------------------------
 def render_radon(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
@@ -431,6 +454,18 @@ def render_drawing(res: "PipelineResult", *, page_meta: "PageMeta | None" = None
     return render_vectors_pdf(
         _meta(res, page_meta), res.vectors or [],
         color_of=lambda _v: _hex_to_rgb01(C_DRAWING),
+    )
+
+
+# ---------------------------------------------------------------------------
+# PaddleOCR text detection (test branch `test/paddle-detect-post-fast`) --
+# this branch's actual OCR-stage output on both `current` and `fast_first`:
+# detection only, no recognized text (`res.paddle_boxes`).
+# ---------------------------------------------------------------------------
+def render_paddle_boxes(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
+    return _compose(
+        _meta(res, page_meta),
+        rect_layers=[(list(res.paddle_boxes or []), C_OCR_BOX, False)],
     )
 
 
@@ -564,6 +599,18 @@ def render_stage_layers(
     if stage_key == "similarity":
         return [("similarity group (colour per group)", "#888888",
                  render_similarity(res, page_meta=pm))]
+
+    if stage_key == "spatial_cluster":
+        clusters = res.spatial_clusters or []
+        cand = [v for c in clusters for v in c]
+        boxes = [union_bbox([v.bbox for v in c]) for c in clusters if c]
+        return [
+            ("cluster vectors", C_TEXT_CANDIDATE, V(cand, C_TEXT_CANDIDATE)),
+            ("cluster bbox", C_CLUSTER_BBOX, R(boxes, C_CLUSTER_BBOX)),
+        ]
+
+    if stage_key == "paddle_detect":
+        return [("detected text box", C_OCR_BOX, R(list(res.paddle_boxes or []), C_OCR_BOX))]
 
     if stage_key == "ocr":
         restored = res.restored_texts or []

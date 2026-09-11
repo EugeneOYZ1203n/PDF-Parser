@@ -17,7 +17,7 @@ def build_arg_parser(pipeline_name: str) -> argparse.ArgumentParser:
     )
     parser.add_argument("--pdf", required=True, help="Path to the input PDF.")
     parser.add_argument("--page", type=int, default=0, help="0-based page index (default: 0).")
-    if pipeline_name == "current":
+    if pipeline_name in ("current", "fast_first"):
         parser.add_argument(
             "--no-fast", action="store_true",
             help="Turn FAST text detection into a pass-through (speed-testing).",
@@ -42,6 +42,13 @@ def main(pipeline_name: str, argv: list[str] | None = None) -> int:
         from rastervec.pipelines.legacy import run_pipeline
 
         result = run_pipeline(args.pdf, args.page, verbose=args.verbose)
+    elif pipeline_name == "fast_first":
+        from rastervec.pipelines.fast_first import run_pipeline
+
+        result = run_pipeline(
+            args.pdf, args.page, enable_fast=not getattr(args, "no_fast", False),
+            verbose=args.verbose, stop_after=getattr(args, "stop_after", None),
+        )
     else:
         from rastervec.pipelines.current import run_pipeline
 

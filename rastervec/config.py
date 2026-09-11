@@ -115,11 +115,37 @@ FAST_COMBINED_KEEP_THRESHOLD = 0.5
 FAST_TILE_BLOCK_SIZE = 2048
 FAST_TILE_SCALE_FACTOR = 5
 
+# FastDetector.detect_tiled: adjacent tiles overlap by this fraction of
+# FAST_TILE_BLOCK_SIZE (stride = block_size * (1 - overlap)); overlapping
+# regions are resolved by taking the max score, so a text line that would
+# otherwise be split across a tile boundary is fully covered by at least
+# one tile.
+FAST_TILE_OVERLAP_FRAC = 0.15
+
 # FastDetector.detect_tiled: a text-candidate segment's bbox is padded by
 # this fraction of FAST_TILE_BLOCK_SIZE (in the same scaled-tile pixel
 # space) before testing which tiles it overlaps, so a segment sitting
 # right at a tile boundary isn't dropped by an off-by-one intersection.
 FAST_TILE_CANDIDATE_MARGIN_FRAC = 0.05
+
+# ======================================================================
+# fast_first pipeline (pipelines/_fast_first_common.py) -- extract_vectors
+# -> per-Vector FAST filter -> seqno-consecutive spatial cluster, skipping
+# Vector_Classification entirely.
+# ======================================================================
+
+# filter_vectors_fast (pipelines/_steps.py): a Vector passes if its own
+# per-item heatmap coverage (helpers.geometry.item_bbox per item, not the
+# Vector's aggregate bbox) exceeds this.
+FAST_VECTOR_KEEP_THRESHOLD = 0.5
+
+# fast_first's spatial_cluster step: bbox-gap tolerance (PDF points) for
+# Vector_Classification.group_filters.combine_overlapping_seq's
+# seqno-consecutive chain-merge of FAST-surviving Vectors into
+# text-candidate clusters. Kept independent of SEQ_OVERLAP_TOLERANCE_PX,
+# which is tuned for the classification chain's very different
+# post-item-filter merge.
+FAST_FIRST_SEQ_MERGE_TOLERANCE = 10.0
 
 # ======================================================================
 # OCR (OCR/Paddle_OCR/ocr_backend.py)

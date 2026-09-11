@@ -40,7 +40,6 @@ torch at all.
 """
 from __future__ import annotations
 
-import math
 import os
 import time
 
@@ -50,6 +49,7 @@ from tqdm import tqdm
 
 from rastervec.config import (
     FAST_TILE_BLOCK_SIZE as TILED_BLOCK_SIZE,
+    FAST_TILE_OVERLAP_FRAC as TILED_OVERLAP_FRAC,
     FAST_TILE_SCALE_FACTOR as TILED_SCALE_FACTOR,
 )
 from rastervec.helpers.geometry import bbox_intersection_area
@@ -442,6 +442,7 @@ class FastDetector:
         image: "Image.Image",
         block_size: int = TILED_BLOCK_SIZE,
         scale: float = TILED_SCALE_FACTOR,
+        overlap: float = TILED_OVERLAP_FRAC,
         desc: str = "FAST text detection",
         show_progress: bool = True,
         compute=None,
@@ -450,16 +451,20 @@ class FastDetector:
         tile_report: "list | None" = None,
     ) -> "np.ndarray":
         """Runs FAST over `image` upscaled by `scale` and split into
-        non-overlapping `block_size`-square tiles (the last row/column of
-        tiles is right-padded with white up to `block_size` before
-        detection, so an edge tile isn't massively upscaled internally by
-        `detect()`'s own `_scale_aligned_short` preprocessing -- the padded
-        region is simply never copied back out). Each tile is detected once
-        (no rotation sweep). Every tile's mask is stitched back into one
-        full mask at the *scaled* resolution, then resized back down to
-        `image`'s own original size before returning -- callers sample it
-        exactly like `detect()`'s own return value, at `image`'s own pixel
-        coordinates. `show_progress` wraps the local (`compute is None`,
+        `block_size`-square tiles spaced `stride = block_size * (1 -
+        overlap)` apart -- adjacent tiles overlap by `overlap` of their own
+        size, and the last tile in each row/column is shifted to align
+        exactly with the far edge instead of being padded (padding is only
+        ever needed when `image` itself is smaller than one `block_size`
+        tile). Each tile is detected once (no rotation sweep). Every tile's
+        mask is stitched back into one full mask at the *scaled* resolution
+        by taking the **max** score wherever tiles overlap (so a line of
+        text that would otherwise straddle a tile boundary is fully covered
+        by at least one tile, instead of being split between two
+        independent detections), then resized back down to `image`'s own
+        original size before returning -- callers sample it exactly like
+        `detect()`'s own return value, at `image`'s own pixel coordinates.
+        `show_progress` wraps the local (`compute is None`,
         `progress_counter is None`) block loop in a `tqdm` bar (`desc`),
         since a large page at a real `scale` can mean hundreds of tiles --
         this is the fallback for a bare call with no outer progress bar to
@@ -498,11 +503,11 @@ class FastDetector:
             (max(1, round(orig_w * scale)), max(1, round(orig_h * scale))), Image.BICUBIC,
         )
         sw, sh = scaled.size
-        n_cols = max(1, math.ceil(sw / block_size))
-        n_rows = max(1, math.ceil(sh / block_size))
+        stride = max(1, round(block_size * (1 - overlap)))
+        col_starts = _tile_starts(sw, block_size, stride)
+        row_starts = _tile_starts(sh, block_size, stride)
 
-        def _block(r: int, c: int) -> tuple["Image.Image", tuple[int, int, int, int]]:
-            x0, y0 = c * block_size, r * block_size
+        def _block(x0: int, y0: int) -> tuple["Image.Image", tuple[int, int, int, int]]:
             x1, y1 = min(x0 + block_size, sw), min(y0 + block_size, sh)
             block = scaled.crop((x0, y0, x1, y1))
             if block.size != (block_size, block_size):
@@ -511,26 +516,25 @@ class FastDetector:
                 block = padded
             return block, (x0, y0, x1, y1)
 
-        all_positions = [(r, c) for r in range(n_rows) for c in range(n_cols)]
+        all_positions = [(x0, y0) for y0 in row_starts for x0 in col_starts]
 
-        def _tile_rect(r: int, c: int) -> tuple[int, int, int, int]:
-            return (c * block_size, r * block_size,
-                    min(c * block_size + block_size, sw), min(r * block_size + block_size, sh))
+        def _tile_rect(x0: int, y0: int) -> tuple[int, int, int, int]:
+            return (x0, y0, min(x0 + block_size, sw), min(y0 + block_size, sh))
 
         if candidate_bboxes is not None:
             tile_positions = [
-                (r, c) for r, c in all_positions
-                if _tile_has_candidate(_tile_rect(r, c), candidate_bboxes)
+                (x0, y0) for x0, y0 in all_positions
+                if _tile_has_candidate(_tile_rect(x0, y0), candidate_bboxes)
             ]
         else:
             tile_positions = list(all_positions)
 
         if tile_report is not None:
             detected = set(tile_positions)
-            for r, c in all_positions:
-                tile_report.append({"rect_scaled": _tile_rect(r, c), "detected": (r, c) in detected})
+            for x0, y0 in all_positions:
+                tile_report.append({"rect_scaled": _tile_rect(x0, y0), "detected": (x0, y0) in detected})
 
-        blocks = [_block(r, c) for r, c in tile_positions]
+        blocks = [_block(x0, y0) for x0, y0 in tile_positions]
 
         args_list = [(self.weights_path, np.asarray(block)) for block, _ in blocks]
         if compute is not None:
@@ -564,12 +568,29 @@ class FastDetector:
 
         full_mask = np.zeros((sh, sw), dtype=np.float32)
         for (_, (x0, y0, x1, y1)), mask in zip(blocks, masks):
-            full_mask[y0:y1, x0:x1] = mask[: y1 - y0, : x1 - x0]
+            region = mask[: y1 - y0, : x1 - x0]
+            np.maximum(full_mask[y0:y1, x0:x1], region, out=full_mask[y0:y1, x0:x1])
 
         mask_img = Image.fromarray((np.clip(full_mask, 0.0, 1.0) * 255).astype(np.uint8)).resize(
             (orig_w, orig_h), Image.BILINEAR,
         )
         return np.asarray(mask_img, dtype=np.float32) / 255.0
+
+
+def _tile_starts(total: int, block_size: int, stride: int) -> list[int]:
+    """Pixel start offsets along one axis covering `[0, total)` with
+    `block_size`-wide tiles spaced `stride` apart, guaranteeing full
+    coverage with no gap: an extra start is appended at `total -
+    block_size` whenever the regular stride grid doesn't already reach the
+    far edge, so the last tile aligns exactly with the edge instead of
+    needing white padding. `total <= block_size` is a single tile at 0
+    (still white-padded up to `block_size` by `_block`)."""
+    if total <= block_size:
+        return [0]
+    starts = list(range(0, total - block_size + 1, stride))
+    if starts[-1] + block_size < total:
+        starts.append(total - block_size)
+    return starts
 
 
 def _tile_has_candidate(
