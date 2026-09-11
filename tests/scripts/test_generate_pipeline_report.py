@@ -39,3 +39,29 @@ def test_rejects_unknown_final_stage():
 def test_rejects_unknown_vectorise_mode():
     with pytest.raises(ValueError):
         gpr.ReportConfig(vectorise_mode="nope")
+
+
+def test_benchmark_flag_and_vectorise_conflict():
+    cfg = gpr.ReportConfig(benchmark=True, input_files=["a.pdf"])
+    assert cfg.benchmark is True
+    with pytest.raises(ValueError):
+        gpr.ReportConfig(benchmark=True, vectorise=True, input_files=["a.pdf"])
+
+
+def test_benchmark_inputs_keys(tmp_path):
+    (tmp_path / "A.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    (tmp_path / "C.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    labels = tmp_path / "C.json"
+    labels.write_text(
+        f'{{"pdf_path": "{(tmp_path / "C.pdf").as_posix()}", "entries": []}}',
+        encoding="utf-8",
+    )
+    cfg = gpr.ReportConfig(
+        benchmark=True,
+        input_files=[str(tmp_path / "A.pdf"), str(labels)],
+    )
+    inputs = {b.key: b for b in cfg.benchmark_inputs()}
+    assert set(inputs) == {"pdf:A", "labels:C"}
+    assert inputs["pdf:A"].labels_path is None
+    assert inputs["labels:C"].labels_path == labels.resolve()
+    assert inputs["labels:C"].pdf_path == (tmp_path / "C.pdf").resolve()

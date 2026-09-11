@@ -284,16 +284,26 @@ def f1_from(recall: Ratio, precision: Ratio) -> float:
     return 2 * r * p / (r + p)
 
 
-def pred_text_fully_contained_in_overlapping_gt_rate(graph: OverlapGraph) -> Ratio:
+def pred_text_fully_contained_in_overlapping_gt_rate(
+    graph: OverlapGraph, allowed_pred_idxs: "set[int] | None" = None
+) -> Ratio:
     """For each non-blank prediction: is there an overlapping gt whose token
     multiset contains every token of the prediction? Catches hallucinated /
-    bled-in predicted text the bbox overlap alone would pass."""
-    if not graph.preds:
+    bled-in predicted text the bbox overlap alone would pass.
+
+    `allowed_pred_idxs` (multiclass path) restricts both the numerator and
+    the denominator to that subset of `graph.preds` -- a prediction the
+    other label class already claimed is neither a hit nor a miss here."""
+    idxs = (
+        list(range(len(graph.preds))) if allowed_pred_idxs is None
+        else sorted(allowed_pred_idxs)
+    )
+    if not idxs:
         return _NA
     gt_tokens = [Counter(word_tokens(g.text)) for g in graph.gt]
     contained = 0
-    for pj, p in enumerate(graph.preds):
-        p_tokens = Counter(word_tokens(p.text))
+    for pj in idxs:
+        p_tokens = Counter(word_tokens(graph.preds[pj].text))
         if not p_tokens:
             continue
         for e in graph.edges_by_pred[pj]:
@@ -301,7 +311,7 @@ def pred_text_fully_contained_in_overlapping_gt_rate(graph: OverlapGraph) -> Rat
             if all(gc[tok] >= cnt for tok, cnt in p_tokens.items()):
                 contained += 1
                 break
-    return Ratio(float(contained), float(len(graph.preds)))
+    return Ratio(float(contained), float(len(idxs)))
 
 
 def gt_text_word_coverage_by_overlapping_preds(graph: OverlapGraph) -> Ratio:
@@ -707,21 +717,59 @@ def evaluate_metrics(
     ocr_failed: list[list] | None = None,
     cfg: MetricConfig = MetricConfig(),
 ) -> MetricSuiteResult:
+    """Single-source suite -- one GT set, every non-blank prediction is a
+    candidate false-positive. Unchanged contract for
+    `Evaluation.Evaluate.benchmark` / `benchmark_jobs`. The multiclass path
+    (`evaluate_multiclass`) reuses `_suite_for_source` with an exclusion
+    set."""
     graph = build_overlap_graph(gt_regions, predictions, cfg)
+    return _suite_for_source(
+        graph, text_candidate_boxes, cfg,
+        exclude_pred_idxs=frozenset(),
+        candidate_precision=True,
+        clustering=clustering, fast_dropped=fast_dropped, ocr_failed=ocr_failed,
+    )
 
-    cg, cp = _page_char_counters(gt_regions, graph.preds)
-    wg, wp = _page_word_counters(gt_regions, graph.preds)
+
+def _suite_for_source(
+    graph: OverlapGraph,
+    text_candidate_boxes: list[Bbox],
+    cfg: MetricConfig,
+    *,
+    exclude_pred_idxs: "frozenset[int] | set[int]" = frozenset(),
+    candidate_precision: bool = True,
+    clustering: "dict[GroupKey, ClusteringStageResult] | None" = None,
+    fast_dropped: list[list] | None = None,
+    ocr_failed: list[list] | None = None,
+) -> MetricSuiteResult:
+    """The 20-metric suite for one GT set. `exclude_pred_idxs` (indices into
+    `graph.preds`, the non-blank predictions) are dropped from the
+    precision-family metrics only -- their numerator AND denominator -- so a
+    prediction the *other* label class matched is neither a false positive
+    nor a true positive here. `candidate_precision=False` sets
+    `classification_precision_candidate_is_text` to `_NA` (the multiclass
+    path scores it once, combined, instead)."""
+    gt_regions = graph.gt
+    allowed = {j for j in range(len(graph.preds)) if j not in exclude_pred_idxs}
+    incl_preds = [graph.preds[j] for j in sorted(allowed)]
+
+    cg, cp_all = _page_char_counters(gt_regions, graph.preds)
+    _, cp_incl = _page_char_counters(gt_regions, incl_preds)
+    wg, wp_all = _page_word_counters(gt_regions, graph.preds)
+    _, wp_incl = _page_word_counters(gt_regions, incl_preds)
 
     ratios: dict[str, Ratio] = {
-        "page_char_multiset_recall": page_char_multiset_recall(cg, cp),
-        "page_char_multiset_precision": page_char_multiset_precision(cg, cp),
+        "page_char_multiset_recall": page_char_multiset_recall(cg, cp_all),
+        "page_char_multiset_precision": page_char_multiset_precision(cg, cp_incl),
         "region_concat_char_accuracy_all_gt": region_concat_char_accuracy_all_gt(graph),
         "region_concat_char_accuracy_overlapping":
             region_concat_char_accuracy_overlapping(graph),
-        "page_word_multiset_recall": page_word_multiset_recall(wg, wp),
-        "page_word_multiset_precision": page_word_multiset_precision(wg, wp),
+        "page_word_multiset_recall": page_word_multiset_recall(wg, wp_all),
+        "page_word_multiset_precision": page_word_multiset_precision(wg, wp_incl),
         "pred_text_fully_contained_in_overlapping_gt_rate":
-            pred_text_fully_contained_in_overlapping_gt_rate(graph),
+            pred_text_fully_contained_in_overlapping_gt_rate(
+                graph, None if not exclude_pred_idxs else allowed
+            ),
         "gt_text_word_coverage_by_overlapping_preds":
             gt_text_word_coverage_by_overlapping_preds(graph),
         "per_gt_best_single_pred_iou_mean": per_gt_best_single_pred_iou_mean(graph),
@@ -730,8 +778,10 @@ def evaluate_metrics(
         "rotation_accuracy_localized_gt": rotation_accuracy_localized_gt(graph),
         "classification_recall_gt_reached_ocr":
             classification_recall_gt_reached_ocr(graph, text_candidate_boxes, cfg),
-        "classification_precision_candidate_is_text":
-            classification_precision_candidate_is_text(graph, text_candidate_boxes, cfg),
+        "classification_precision_candidate_is_text": (
+            classification_precision_candidate_is_text(graph, text_candidate_boxes, cfg)
+            if candidate_precision else _NA
+        ),
     }
 
     # Miss attribution over the missed gt regions.
@@ -754,7 +804,7 @@ def evaluate_metrics(
 
     counts = MetricCounts(
         n_gt=len(gt_regions),
-        n_pred=len(predictions),
+        n_pred=graph.n_pred_total,
         n_pred_nonblank=len(graph.preds),
         n_text_candidates=len(text_candidate_boxes),
         n_gt_localized=len(graph.localized_gt_idxs),
@@ -799,5 +849,175 @@ def aggregate_suite(results: list[MetricSuiteResult]) -> MetricSuiteResult:
     return MetricSuiteResult(
         ratios=agg_ratios,
         per_stage_miss_counts=dict(merged_miss),
+        counts=total_counts,
+    )
+
+
+# --------------------------------------------------------------------------
+# Multiclass benchmark -- one combined pipeline run scored against auto GT
+# AND manual GT at once (see docs/EVAL_METRICS.md). A prediction the other
+# class matched is not a false positive for this class.
+# --------------------------------------------------------------------------
+_CLASSES = ("auto", "manual", "none")
+
+
+def _covers(edges_by_pred: list[list[OverlapEdge]], pj: int, cfg: MetricConfig) -> bool:
+    return any(
+        e.pred_coverage >= cfg.coverage_tau or e.iou >= cfg.iou_edge_min
+        for e in edges_by_pred[pj]
+    )
+
+
+def pred_class(
+    pj: int, g_auto: OverlapGraph, g_manual: OverlapGraph, cfg: MetricConfig
+) -> str:
+    """`"auto"` / `"manual"` / `"both"` / `"none"` for non-blank prediction
+    `pj` -- which GT label class(es) it covers (`pred_coverage >=
+    coverage_tau` or `bbox_iou >= iou_edge_min`). `g_auto.preds` and
+    `g_manual.preds` are the same list in the same order."""
+    a = _covers(g_auto.edges_by_pred, pj, cfg)
+    m = _covers(g_manual.edges_by_pred, pj, cfg)
+    if a and m:
+        return "both"
+    if a:
+        return "auto"
+    if m:
+        return "manual"
+    return "none"
+
+
+def _best_pred_source(
+    pj: int, g_auto: OverlapGraph, g_manual: OverlapGraph
+) -> str:
+    a = max((e.pred_coverage for e in g_auto.edges_by_pred[pj]), default=0.0)
+    m = max((e.pred_coverage for e in g_manual.edges_by_pred[pj]), default=0.0)
+    return "manual" if m > a else "auto"
+
+
+def detected_class(
+    gi: int, graph: OverlapGraph, g_auto: OverlapGraph, g_manual: OverlapGraph
+) -> str:
+    """For GT region `gi` of `graph` (one source): `"none"` if no prediction
+    is assigned to it, else the source whose GT its best-covering assigned
+    prediction covers most -- usually this region's own source; off-diagonal
+    is genuine class confusion."""
+    assigned = graph.assigned_preds_by_gt[gi]
+    if not assigned:
+        return "none"
+    best = max(assigned, key=lambda pj: graph.iou(gi, pj))
+    return _best_pred_source(best, g_auto, g_manual)
+
+
+def candidate_is_text_combined(
+    auto_gt: list[GtRegion], manual_gt: list[GtRegion],
+    text_candidate_boxes: list[Bbox], cfg: MetricConfig,
+) -> Ratio:
+    """`classification_precision_candidate_is_text` against the union of both
+    label classes -- a candidate counts as text if it matches auto OR manual
+    GT."""
+    if not text_candidate_boxes:
+        return _NA
+    all_gt = list(auto_gt) + list(manual_gt)
+    is_text = 0
+    for c in text_candidate_boxes:
+        if any(
+            bbox_coverage(c, g.bbox) >= cfg.coverage_tau
+            or bbox_coverage(g.bbox, c) >= cfg.coverage_tau
+            or bbox_iou(c, g.bbox) >= cfg.iou_edge_min
+            for g in all_gt
+        ):
+            is_text += 1
+    return Ratio(float(is_text), float(len(text_candidate_boxes)))
+
+
+@dataclass
+class MulticlassResult:
+    auto: MetricSuiteResult
+    manual: MetricSuiteResult
+    confusion: dict[str, dict[str, int]]  # {auto,manual} -> {auto,manual,none} -> count
+    combined_candidate_precision: Ratio
+    counts: MetricCounts
+
+    def detection_recall(self, source: str) -> Ratio:
+        row = self.confusion.get(source, {})
+        total = sum(row.values())
+        return Ratio(float(row.get(source, 0)), float(total)) if total else _NA
+
+    def cross_class_rate(self) -> Ratio:
+        num = den = 0
+        for src, row in self.confusion.items():
+            for col, n in row.items():
+                den += n
+                if col not in (src, "none"):
+                    num += n
+        return Ratio(float(num), float(den)) if den else _NA
+
+
+def evaluate_multiclass(
+    auto_gt: list[GtRegion],
+    manual_gt: list[GtRegion],
+    predictions: list[Prediction],
+    text_candidate_boxes: list[Bbox],
+    *,
+    cfg: MetricConfig = MetricConfig(),
+) -> MulticlassResult:
+    g_auto = build_overlap_graph(auto_gt, predictions, cfg)
+    g_manual = build_overlap_graph(manual_gt, predictions, cfg)
+
+    classes = [pred_class(pj, g_auto, g_manual, cfg) for pj in range(len(g_auto.preds))]
+    excl_auto = frozenset(j for j, c in enumerate(classes) if c == "manual")
+    excl_manual = frozenset(j for j, c in enumerate(classes) if c == "auto")
+
+    auto_suite = _suite_for_source(
+        g_auto, text_candidate_boxes, cfg,
+        exclude_pred_idxs=excl_auto, candidate_precision=False,
+    )
+    manual_suite = _suite_for_source(
+        g_manual, text_candidate_boxes, cfg,
+        exclude_pred_idxs=excl_manual, candidate_precision=False,
+    )
+
+    confusion = {src: {c: 0 for c in _CLASSES} for src in ("auto", "manual")}
+    for src, graph in (("auto", g_auto), ("manual", g_manual)):
+        for gi in range(len(graph.gt)):
+            confusion[src][detected_class(gi, graph, g_auto, g_manual)] += 1
+
+    return MulticlassResult(
+        auto=auto_suite,
+        manual=manual_suite,
+        confusion=confusion,
+        combined_candidate_precision=candidate_is_text_combined(
+            auto_gt, manual_gt, text_candidate_boxes, cfg
+        ),
+        counts=auto_suite.counts + manual_suite.counts,
+    )
+
+
+def aggregate_multiclass(results: list[MulticlassResult]) -> MulticlassResult | None:
+    if not results:
+        return None
+    confusion = {src: {c: 0 for c in _CLASSES} for src in ("auto", "manual")}
+    for r in results:
+        for src in ("auto", "manual"):
+            for c in _CLASSES:
+                confusion[src][c] += r.confusion[src][c]
+
+    num = den = 0.0
+    any_applicable = False
+    for r in results:
+        if r.combined_candidate_precision.applicable:
+            any_applicable = True
+            num += r.combined_candidate_precision.numerator
+            den += r.combined_candidate_precision.denominator
+
+    total_counts = MetricCounts()
+    for r in results:
+        total_counts = total_counts + r.counts
+
+    return MulticlassResult(
+        auto=aggregate_suite([r.auto for r in results]),
+        manual=aggregate_suite([r.manual for r in results]),
+        confusion=confusion,
+        combined_candidate_precision=Ratio(num, den) if any_applicable else _NA,
         counts=total_counts,
     )

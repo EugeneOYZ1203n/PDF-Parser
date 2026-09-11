@@ -329,7 +329,136 @@ not); box = that occurrence's restored `Text.bbox`
 
 ---
 
-## 5. Not yet implemented (the rest of the catalogue)
+## 5. Multiclass benchmark (`evaluate_multiclass`)
+
+### Why this exists
+
+`evaluate_metrics` (sections 1–4) is **single-source**: one GT set, and *every*
+non-blank prediction that doesn't match it is a false positive. That is correct
+for `Evaluation.Evaluate.benchmark`, which runs the pipeline **twice per page** on
+physically disjoint inputs (`convert_page_text_only` vs `convert_page_drawings_only`)
+and scores each run against only its own label source.
+
+`scripts/generate_pipeline_report.py` in `benchmark: true` mode does something
+different on purpose: it runs the pipeline **once** on `convert_page_to_vector_text`
+output (native text as vectors *on top of* the untouched drawings) and scores that
+**single** prediction set against **both** the `source="auto"` and the
+`source="manual"` labels — one inspectable run instead of two. `scripts/
+pipeline_report_benchmark.py` scores it with `evaluate_multiclass`.
+
+The catch: a prediction that correctly read a native-text line (auto) must not be
+counted as a manual false positive just because it doesn't sit on a manual CAD-text
+region — and vice versa. So precision-family denominators become **class-aware**,
+and a `{auto, manual, none}` **confusion matrix** replaces a single recall number.
+
+### `pred_class(p)` — what a prediction covers
+
+Built once from two `OverlapGraph`s (`build_overlap_graph(auto_gt, preds, cfg)` and
+`build_overlap_graph(manual_gt, preds, cfg)` — the non-blank prediction list is
+identical and identically ordered in both). For non-blank prediction `p`:
+
+- `covers_auto` iff **∃** auto GT region `g` with `pred_coverage(p, g) ≥ coverage_tau`
+  **or** `bbox_iou(p, g) ≥ iou_edge_min` (the same predicate the N:1 assignment and
+  `classification_*` metrics use).
+- `covers_manual` iff the same holds against a manual GT region.
+- `pred_class(p)` = `"both"` if both, else `"auto"` / `"manual"` for exactly one, else
+  `"none"`.
+
+### `detected_class(g)` — how a GT region was detected
+
+For GT region `g` (one source `S`), from that source's graph:
+
+- `"none"` if `assigned_preds_by_gt[g]` is empty (a miss — same definition as
+  section 1).
+- otherwise: take the assigned prediction with the highest IoU to `g`, and return
+  whichever label class (`auto`/`manual`) **its** best `pred_coverage` edge points at
+  (`_best_pred_source` — ties → `"auto"`). Usually `S`; a different value means the
+  prediction that "found" `g` actually sits more on the *other* class's region — real
+  cross-class confusion.
+
+### The confusion matrix
+
+`confusion[actual][detected]`, `actual ∈ {auto, manual}`, `detected ∈ {auto, manual,
+none}`, one increment per GT region:
+
+| cell | meaning |
+|---|---|
+| `confusion["auto"]["auto"]` | auto GT regions found, by a prediction that is dominantly auto — correct detections |
+| `confusion["auto"]["manual"]` | auto GT region found, but the covering prediction belongs more to a manual region — class confusion |
+| `confusion["auto"]["none"]` | auto GT regions no prediction reached — misses |
+| `confusion["manual"][*]` | the same three, for manual GT |
+
+**Worked example** — page has 3 auto lines + 2 manual CAD-text regions. Predictions
+cover auto lines 1 & 2 cleanly, miss auto line 3, cover manual region 1 with a box
+that also spans auto line 2, miss manual region 2:
+```
+confusion = {"auto":   {"auto": 2, "manual": 0, "none": 1},
+             "manual": {"auto": 1, "manual": 0, "none": 1}}
+```
+(manual region 1's covering prediction leans auto ⇒ counted `manual→auto`.)
+
+Derived (methods on `MulticlassResult`):
+- `detection_recall(source)` = `confusion[source][source] / Σ confusion[source]`
+  (`n/a` when that source has no GT). Example: auto `2/3`, manual `0/2`.
+- `cross_class_rate()` = `Σ off-diagonal (excl. "none") / Σ all cells`. Example `1/5`.
+
+### Per-metric behaviour in the multiclass path
+
+For source `S` (`other` = the opposite), `evaluate_multiclass` calls the shared
+`_suite_for_source(graph_S, candidates, cfg, exclude_pred_idxs=E_S,
+candidate_precision=False)` where **`E_S` = every non-blank prediction with
+`pred_class == other`** (a `"both"` or `"none"` prediction is *not* excluded — it
+counts for `S`).
+
+| metric | multiclass change |
+|---|---|
+| `page_char_multiset_recall` | **unchanged** — recall's `Cp` is the *full* non-blank prediction set (a correctly-read word helps recall no matter which class claimed it) |
+| `page_char_multiset_precision` | `Cp` (numerator **and** denominator) is built from predictions **not in `E_S`** — an `other`-class prediction's characters are neither correct nor spurious here |
+| `page_char_multiset_f1` | derived from the two above |
+| `region_concat_char_accuracy_all_gt` / `_overlapping` | **unchanged** — already position-aware over `overlapping_preds_by_gt[g]` for `S`'s own GT; "only preds touching the GT" is already the definition |
+| `page_word_multiset_recall` | **unchanged** (as char recall) |
+| `page_word_multiset_precision` | `Wp` excludes `E_S` (as char precision) |
+| `page_word_multiset_f1` | derived |
+| `pred_text_fully_contained_in_overlapping_gt_rate` | iterates **only** the non-`E_S` predictions; denominator is that count — an `other`-class prediction is not a containment failure for `S` |
+| `gt_text_word_coverage_by_overlapping_preds` | **unchanged** — per-GT recall over `S`'s regions |
+| `per_gt_best_single_pred_iou_mean` / `per_gt_union_pred_iou_mean` / `undetected_gt_area_ratio` | **unchanged** — reductions over `S`'s GT regions only; predictions are never the denominator |
+| `rotation_accuracy_localized_gt` | **unchanged** — over `S`'s localized GT |
+| `classification_recall_gt_reached_ocr` | **unchanged** — over `S`'s GT |
+| `classification_precision_candidate_is_text` | **removed from the per-source suites** (set `n/a`); replaced by `MulticlassResult.combined_candidate_precision` — a candidate counts as text iff it matches an auto **or** a manual GT region (`candidate_is_text_combined`) |
+| `gt_miss_attributed_to_*` | **unchanged** (and always `n/a` here — the report path passes `clustering=None`) |
+
+**Worked example** — manual precision. Page: auto GT `"HELLO WORLD"` at one box,
+manual GT `"FOO BAR"` at another. Predictions: `p1="HELLO WORLD"` over the auto box,
+`p2="ZZZ"` over empty space. `pred_class(p1) = "auto"` ⇒ `p1 ∈ E_manual`.
+Manual `page_char_multiset_precision`: `Cp_incl` = chars of `p2` only = `{Z:3}`,
+`Cg` (manual) = `{F,O,O,B,A,R}` → numerator `0`, denominator `3` → `Ratio(0, 3)`.
+Without the exclusion it would have been `Ratio(0, 13)` — `p1` wrongly dragging
+manual precision down.
+
+### Result & aggregation shapes
+
+```python
+@dataclass
+class MulticlassResult:
+    auto:   MetricSuiteResult   # sections 1-4, precision-family class-adjusted
+    manual: MetricSuiteResult
+    confusion: dict[str, dict[str, int]]        # {auto,manual} -> {auto,manual,none}
+    combined_candidate_precision: Ratio
+    counts: MetricCounts                        # auto.counts + manual.counts
+```
+
+`aggregate_multiclass(results)` — `aggregate_suite` on the `.auto` suites and on the
+`.manual` suites separately (micro-average, section 2c), element-wise-sum the
+`confusion` dicts, micro-average `combined_candidate_precision`, sum `counts`.
+`None` for an empty input.
+
+`_suite_for_source` is also what single-source `evaluate_metrics` calls now
+(`exclude_pred_idxs=frozenset()`, `candidate_precision=True`) — sections 1–4 are
+byte-for-byte unchanged for every existing caller.
+
+---
+
+## 6. Not yet implemented (the rest of the catalogue)
 
 Structured the same way — each a pure reduction over `OverlapGraph`. Add on
 demand.

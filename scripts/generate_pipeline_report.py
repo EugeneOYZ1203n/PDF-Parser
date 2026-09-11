@@ -23,6 +23,13 @@ timestamped run folder:
 
 Replaces `rastervec/notebooks/pipeline_stage_visualization.ipynb`.
 
+With `benchmark: true` the same `<pdf-stem>/` folder is also a scoring
+artifact for `pipeline_report_benchmark.py`: one `convert_page_to_vector_text`
+run per page, plus `ground_truth_{auto,manual}.json` and the split
+`{auto,manual}_{bbox,text}.pdf` overlays (registered in the manifest under
+stage `benchmark`), and a run-root `benchmark.json` marker. See
+`docs/SCRIPTS.md`.
+
     .venv/Scripts/python.exe scripts/generate_pipeline_report.py --config run.json
 """
 from __future__ import annotations
@@ -32,23 +39,32 @@ import datetime as _dt
 import json
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import pymupdf as fitz
 from PIL import Image, ImageDraw
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import rastervec.config as rvconfig
 from rastervec.Evaluation import conversion, dump_io
+from rastervec.Evaluation.Evaluate import adapters, label_overlays, metrics
 from rastervec.Evaluation.Evaluate.variants import resolve_variant
+from rastervec.Evaluation.Labelling import auto_label
+from rastervec.Evaluation.Labelling.label_schema import (
+    LabelSet,
+    load_labels,
+    save_labels,
+    split_labelset_by_source,
+)
 from rastervec.helpers.geometry import union_bbox
 from rastervec.Evaluation.Report import stage_stats
 from rastervec.logging_setup import configure_logging, get_logger
 from rastervec.paths import output_dir
 from rastervec.pipelines._common import STEP_NAMES
-from rastervec.renderer import stages
+from rastervec.renderer import render_boxes_pdf, render_reconstructed_pdf, stages
 
 _LOG = get_logger("generate_pipeline_report")
 
@@ -91,6 +107,8 @@ class ReportConfig(BaseModel):
     pages: list[int] | dict[str, list[int]] | None = None
     vectorise: bool = False
     vectorise_mode: str = "to_vector_text"
+    benchmark: bool = False
+    iou_edge_min: float = metrics.MetricConfig().iou_edge_min
     dpi: int = 300
     output_root: Path | None = None
 
@@ -114,6 +132,15 @@ class ReportConfig(BaseModel):
             raise ValueError(f"vectorise_mode must be one of {list(_CONVERT)}")
         return v
 
+    @model_validator(mode="after")
+    def _benchmark_excludes_vectorise(self) -> "ReportConfig":
+        if self.benchmark and self.vectorise:
+            raise ValueError(
+                "benchmark mode runs its own text-only / drawings-only conversions; "
+                "set vectorise=false"
+            )
+        return self
+
     def resolved_pdfs(self) -> list[Path]:
         pdfs: list[Path] = list(self.input_files)
         if self.input_dir is not None:
@@ -132,6 +159,44 @@ class ReportConfig(BaseModel):
         if isinstance(self.pages, dict):
             return list(self.pages.get(stem, self.pages.get("*", [0])))
         return list(self.pages)
+
+    def benchmark_inputs(self) -> list["BenchInput"]:
+        """One `BenchInput` per config input, benchmark mode only. A `.json`
+        input (or a pdf with a `label_files` entry) carries manual ground
+        truth and is keyed `labels:<json-stem>`; a bare `.pdf` is auto-only
+        and keyed `pdf:<pdf-stem>`. The key is what the benchmark script
+        matches shared inputs on."""
+        out: list[BenchInput] = []
+        seen: set[str] = set()
+
+        def _add(key: str, pdf: Path, labels: Path | None) -> None:
+            if key not in seen:
+                seen.add(key)
+                out.append(BenchInput(key=key, pdf_path=pdf.resolve(), labels_path=labels))
+
+        raw: list[Path] = list(self.input_files)
+        if self.input_dir is not None:
+            raw += sorted(Path(self.input_dir).glob("*.pdf"))
+        for item in raw:
+            item = Path(item)
+            if item.suffix.lower() == ".json":
+                labels = item.resolve()
+                pdf = Path(load_labels(str(labels)).pdf_path)
+                _add(f"labels:{labels.stem}", pdf, labels)
+                continue
+            paired = self.label_files.get(item.stem)
+            if paired is not None:
+                paired = Path(paired).resolve()
+                _add(f"labels:{paired.stem}", item, paired)
+            else:
+                _add(f"pdf:{item.stem}", item, None)
+        return out
+
+
+class BenchInput(NamedTuple):
+    key: str
+    pdf_path: Path
+    labels_path: Path | None
 
 
 ReportConfig.model_rebuild()
@@ -170,8 +235,9 @@ _RADON_DPI = 300
 
 def _save_radon_inputs(res, folder: Path, page_index: int) -> int:
     """One PNG per FAST-surviving cluster: the rendered cluster image exactly
-    as Radon sees it (pre-deskew, pre-split), with every detected
-    word/segment box drawn on top (`res.segmentation_debug`)."""
+    as Radon sees it (pre-deskew, pre-split), with the original cluster bbox
+    (green) and the final grown crop box sent to PaddleOCR (blue) drawn on
+    top (`res.segmentation_debug`)."""
     clusters = getattr(res, "fast_passed", None) or []
     if not clusters:
         return 0
@@ -190,43 +256,44 @@ def _save_radon_inputs(res, folder: Path, page_index: int) -> int:
         gray, dpi_used = render_cluster_for_radon(cluster, _RADON_DPI)
         img = Image.fromarray(gray)
         key = tuple(round(c, 2) for c in union_bbox([v.bbox for v in cluster]))
-        boxes_px = []
         dbg = dbg_by_bbox.get(key)
-        if dbg is not None:
-            for x0, y0, x1, y1 in dbg["segment_bboxes"]:
+
+        def _to_px(page_bboxes):
+            out = []
+            for x0, y0, x1, y1 in page_bboxes:
                 (px0, py0), (px1, py1) = page_points_to_pixel(
                     cluster, dpi_used, [(x0, y0), (x1, y1)]
                 )
-                boxes_px.append((px0, py0, px1, py1))
-        _draw_boxes(img, boxes_px).save(folder / f"p{page_index}_cluster_{i:03d}.png")
+                out.append((px0, py0, px1, py1))
+            return out
+
+        if dbg is not None:
+            img = _draw_boxes(img, _to_px([dbg["cluster_bbox"]]), outline=(22, 163, 74))
+            img = _draw_boxes(
+                img, _to_px(dbg.get("grown_segment_bboxes", [])), outline=(37, 99, 235)
+            )
+        img.save(folder / f"p{page_index}_cluster_{i:03d}.png")
         n += 1
     return n
 
 
 def _save_paddle_inputs(res, folder: Path, page_index: int) -> int:
     """One PNG per elected unique segment -- the exact deskewed, white-padded
-    crop handed to PaddleOCR -- with the unpadded word region boxed and the
-    recognised text in the filename."""
+    crop handed to PaddleOCR verbatim, with the recognised text in the
+    filename. No overlay: PaddleOCR here is recognition-only and returns no
+    box."""
     segs = getattr(res, "unique_segments", None) or []
     if not segs:
         return 0
-    from rastervec.config import RADON_PAD_FRACTION
-
     texts = getattr(res, "unique_texts", None) or []
     folder.mkdir(parents=True, exist_ok=True)
     n = 0
     for i, seg in enumerate(segs):
         if seg.image is None:
             continue
-        arr = np.asarray(seg.image)
-        img = Image.fromarray(arr)
-        h, w = arr.shape[:2]
-        px = (w - w / (1 + 2 * RADON_PAD_FRACTION)) / 2
-        py = (h - h / (1 + 2 * RADON_PAD_FRACTION)) / 2
+        img = Image.fromarray(np.asarray(seg.image))
         rec = texts[i].text if i < len(texts) else ""
-        _draw_boxes(
-            img, [(px, py, w - px, h - py)], outline=(30, 90, 220)
-        ).save(folder / f"p{page_index}_uniq_{i:03d}__{_safe_slug(rec)}.png")
+        img.save(folder / f"p{page_index}_uniq_{i:03d}__{_safe_slug(rec)}.png")
         n += 1
     return n
 
@@ -258,6 +325,83 @@ def _write_hyperparams(path: Path, config: ReportConfig, variant) -> None:
     path.write_text("".join(lines), encoding="utf-8")
 
 
+def _restamp_page(res, page_index: int) -> None:
+    """A run on a per-page *converted* PDF reports `page_meta.index == 0`.
+    Stamp the real source page index back on so every `dump.json` PageDump /
+    label overlay / benchmark score keys off the right page."""
+    if res.page is not None and res.page.meta is not None:
+        res.page.meta.index = page_index
+        res.page.meta.number = page_index + 1
+
+
+def _active_artifacts(config: ReportConfig, variant) -> list[tuple]:
+    if variant.engine == "legacy":
+        return [row for row in _ARTIFACTS if row[0] == "reconstructed"]
+    return [row for row in _ARTIFACTS if _reached(row[3], config.final_stage)]
+
+
+def _accumulate_page(
+    res, page_index: int, active: list[tuple],
+    layer_pages: dict[str, list[bytes]], layer_meta: dict[str, dict],
+    stats_pages: dict[str, list[tuple[int, dict]]],
+    radon_dir: Path, paddle_dir: Path,
+) -> None:
+    """Render every active stage's layer PDFs + numeric stats for one page,
+    accumulating into the caller's dicts; also dump the radon / paddle
+    input PNGs."""
+    for stem, stage_key, stats_key, _gate in active:
+        try:
+            layers = stages.render_stage_layers(res, stage_key)
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning("%s render failed for page %d: %s", stem, page_index, exc)
+            layers = []
+        for label, hexc, pdf_bytes in layers:
+            fname = f"{stem}__{_layer_slug(label)}.pdf"
+            layer_pages.setdefault(fname, []).append(pdf_bytes)
+            layer_meta.setdefault(
+                fname, {"stage": stem, "layer": label, "file": fname, "color": hexc}
+            )
+        if stats_key is not None:
+            stats_pages[stem].append(
+                (page_index, stage_stats.stats_for_stage(res, stats_key))
+            )
+    _save_radon_inputs(res, radon_dir, page_index)
+    _save_paddle_inputs(res, paddle_dir, page_index)
+
+
+def _finalize_doc_dir(
+    doc_dir: Path, source_pdf: Path, pages: list[int], config: ReportConfig, variant,
+    active: list[tuple], layer_pages: dict[str, list[bytes]], layer_meta: dict[str, dict],
+    stats_pages: dict[str, list[tuple[int, dict]]], dumps: list[dump_io.PageDump],
+    *, extra_layers: tuple[dict, ...] = (),
+) -> None:
+    for fname, page_bytes in layer_pages.items():
+        _merge_pdfs(page_bytes, doc_dir / fname)
+
+    for stem, _sk, stats_key, _gate in active:
+        if stats_key is None:
+            continue
+        body = "".join(
+            f"\n## page {pi}\n{stage_stats.format_stats(stats_key, data)}"
+            for pi, data in stats_pages[stem]
+        )
+        (doc_dir / f"{stem}.txt").write_text(
+            f"# {stats_key} stats for {Path(source_pdf).name}\n{body}", encoding="utf-8"
+        )
+
+    dump_io.write_dump(doc_dir / "dump.json", str(source_pdf), dumps)
+    (doc_dir / "manifest.json").write_text(json.dumps({
+        "source_pdf": str(source_pdf),
+        "pages": pages,
+        "engine": variant.engine,
+        "variant": variant.name,
+        "final_stage": config.final_stage,
+        "vectorised": config.vectorise or config.benchmark,
+        "layers": [layer_meta[f] for f in layer_pages] + list(extra_layers),
+    }, indent=2), encoding="utf-8")
+    _LOG.info("wrote %s", doc_dir)
+
+
 def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -> None:
     from rastervec.pipelines.current import run_pipeline as run_current
     from rastervec.pipelines.legacy import run_pipeline as run_legacy
@@ -268,19 +412,15 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
     paddle_dir = doc_dir / "paddle_images"
 
     pages = config.pages_for(pdf_path.stem)
-    if variant.engine == "legacy":
-        active = [row for row in _ARTIFACTS if row[0] == "reconstructed"]
-    else:
-        active = [row for row in _ARTIFACTS if _reached(row[3], config.final_stage)]
+    active = _active_artifacts(config, variant)
 
     layer_pages: dict[str, list[bytes]] = {}
-    layer_meta: dict[str, dict] = {}  # file -> {stage, layer, color}
+    layer_meta: dict[str, dict] = {}
     stats_pages: dict[str, list[tuple[int, dict]]] = {row[0]: [] for row in active}
     dumps: list[dump_io.PageDump] = []
 
     for page_index in pages:
-        run_input = str(pdf_path)
-        run_page = page_index
+        run_input, run_page = str(pdf_path), page_index
         if config.vectorise:
             conv_path = doc_dir / f"converted_p{page_index}.pdf"
             _CONVERT[config.vectorise_mode](str(pdf_path), page_index, str(conv_path))
@@ -294,60 +434,158 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
                 run_input, run_page, enable_fast=variant.enable_fast, verbose=True,
                 stop_after=config.final_stage,
             )
+        if run_page != page_index:
+            _restamp_page(res, page_index)
 
-        for stem, stage_key, stats_key, _gate in active:
-            try:
-                layers = stages.render_stage_layers(res, stage_key)
-            except Exception as exc:  # noqa: BLE001
-                _LOG.warning("%s render failed for page %d: %s", stem, page_index, exc)
-                layers = []
-            for label, hexc, pdf_bytes in layers:
-                fname = f"{stem}__{_layer_slug(label)}.pdf"
-                layer_pages.setdefault(fname, []).append(pdf_bytes)
-                layer_meta.setdefault(
-                    fname, {"stage": stem, "layer": label, "file": fname, "color": hexc}
-                )
-            if stats_key is not None:
-                stats_pages[stem].append(
-                    (page_index, stage_stats.stats_for_stage(res, stats_key))
-                )
-
-        _save_radon_inputs(res, radon_dir, page_index)
-        _save_paddle_inputs(res, paddle_dir, page_index)
-
+        _accumulate_page(res, page_index, active, layer_pages, layer_meta, stats_pages,
+                         radon_dir, paddle_dir)
         dumps.append(dump_io.PageDump(
-            page_meta=res.page.meta,
-            texts=list(res.texts or []),
-            vectors=list(res.vectors or []),
-            engine=res.engine,
+            page_meta=res.page.meta, texts=list(res.texts or []),
+            vectors=list(res.vectors or []), engine=res.engine,
             step_durations=dict(res.step_durations or {}),
         ))
 
-    for fname, page_bytes in layer_pages.items():
-        _merge_pdfs(page_bytes, doc_dir / fname)
+    _finalize_doc_dir(doc_dir, pdf_path, pages, config, variant, active,
+                      layer_pages, layer_meta, stats_pages, dumps)
 
-    for stem, _sk, stats_key, _gate in active:
-        if stats_key is None:
-            continue
-        body = "".join(
-            f"\n## page {pi}\n{stage_stats.format_stats(stats_key, data)}"
-            for pi, data in stats_pages[stem]
-        )
-        (doc_dir / f"{stem}.txt").write_text(
-            f"# {stats_key} stats for {pdf_path.name}\n{body}", encoding="utf-8"
-        )
 
-    dump_io.write_dump(doc_dir / "dump.json", str(pdf_path), dumps)
-    (doc_dir / "manifest.json").write_text(json.dumps({
-        "source_pdf": str(pdf_path),
+_OVERLAY_COLORS = {"auto": "#22c55e", "manual": "#2563eb"}
+
+
+def _bench_ground_truth(source: str, bench: BenchInput, pages: list[int]) -> LabelSet:
+    """The combined `LabelSet` (all `pages`) for one label source. `auto`
+    merges `auto_label_pdf` per page; `manual` reads the paired label JSON's
+    `source="manual"` entries filtered to `pages`."""
+    if source == "auto":
+        entries = []
+        for p in pages:
+            entries += auto_label.auto_label_pdf(str(bench.pdf_path), p).entries
+        return LabelSet(pdf_path=str(bench.pdf_path), entries=entries)
+    if bench.labels_path is None:
+        return LabelSet(pdf_path=str(bench.pdf_path), entries=[])
+    manual = split_labelset_by_source(load_labels(str(bench.labels_path)))["manual"]
+    return LabelSet(
+        pdf_path=str(bench.pdf_path),
+        entries=[e for e in manual.entries if e.page_index in pages],
+    )
+
+
+def _write_label_overlays(
+    doc_dir: Path, source: str, gt: LabelSet, dumps: list[dump_io.PageDump],
+    cfg: metrics.MetricConfig,
+) -> None:
+    """`<source>_bbox.pdf` (GT boxes green=covered by a prediction / red=missed)
+    and `<source>_text.pdf` (GT text, per word green/yellow/red by read
+    accuracy) -- one page per report page, scored against the single shared
+    run's OCR predictions."""
+    gt_regions = adapters.gt_regions_from_labelset(gt)
+    bbox_pages: list[bytes] = []
+    text_pages: list[bytes] = []
+    for pd in dumps:
+        pi = pd.page_meta.index
+        regions = [g for g in gt_regions if g.page_index == pi]
+        preds = adapters.predictions_from_texts(
+            [t for t in pd.texts if t.source == "ocr"]
+        )
+        graph = metrics.build_overlap_graph(regions, preds, cfg)
+        bbox_pages.append(
+            render_boxes_pdf(pd.page_meta, label_overlays.gt_bbox_overlay(graph))
+        )
+        text_pages.append(
+            render_reconstructed_pdf(
+                pd.page_meta, text_boxes=label_overlays.gt_word_overlay(graph)
+            )
+        )
+    _merge_pdfs(bbox_pages, doc_dir / f"{source}_bbox.pdf")
+    _merge_pdfs(text_pages, doc_dir / f"{source}_text.pdf")
+
+
+def _process_pdf_benchmark(
+    bench: BenchInput, config: ReportConfig, variant, run_dir: Path,
+) -> dict:
+    """One benchmark input -> `run_dir/<pdf-stem>/`: the full per-stage
+    report for a **single** `convert_page_to_vector_text` run per page, plus
+    `ground_truth_auto.json` (+ `ground_truth_manual.json`) and the split
+    `{auto,manual}_{bbox,text}.pdf` overlays (all scored against that one
+    run). Returns the `benchmark.json` entry."""
+    from rastervec.pipelines.current import run_pipeline as run_current
+    from rastervec.pipelines.legacy import run_pipeline as run_legacy
+
+    is_legacy = variant.engine == "legacy"
+    doc_dir = run_dir / bench.pdf_path.stem
+    doc_dir.mkdir(parents=True, exist_ok=True)
+    radon_dir = doc_dir / "radon_images"
+    paddle_dir = doc_dir / "paddle_images"
+    pages = config.pages_for(bench.pdf_path.stem)
+    cfg = metrics.MetricConfig(iou_edge_min=config.iou_edge_min)
+    active = _active_artifacts(config, variant)
+
+    layer_pages: dict[str, list[bytes]] = {}
+    layer_meta: dict[str, dict] = {}
+    stats_pages: dict[str, list[tuple[int, dict]]] = {row[0]: [] for row in active}
+    dumps: list[dump_io.PageDump] = []
+
+    for p in pages:
+        conv_path = doc_dir / f"converted_p{p}.pdf"
+        conversion.convert_page_to_vector_text(str(bench.pdf_path), p, str(conv_path))
+        _LOG.info("benchmark %s page %d (%s)", bench.key, p, variant.name)
+        if is_legacy:
+            res = run_legacy(str(conv_path), 0, verbose=True)
+        else:
+            res = run_current(
+                str(conv_path), 0, enable_fast=variant.enable_fast, verbose=True,
+                stop_after=config.final_stage,
+            )
+        _restamp_page(res, p)
+        _accumulate_page(res, p, active, layer_pages, layer_meta, stats_pages,
+                         radon_dir, paddle_dir)
+        dumps.append(dump_io.PageDump(
+            page_meta=res.page.meta, texts=list(res.texts or []),
+            vectors=list(res.vectors or []), engine=res.engine,
+            step_durations=dict(res.step_durations or {}),
+        ))
+
+    sources: list[str] = []
+    extra_layers: list[dict] = []
+    gt_auto = _bench_ground_truth("auto", bench, pages)
+    save_labels(gt_auto, str(doc_dir / "ground_truth_auto.json"))
+    _write_label_overlays(doc_dir, "auto", gt_auto, dumps, cfg)
+    sources.append("auto")
+
+    gt_manual = _bench_ground_truth("manual", bench, pages)
+    if gt_manual.entries:
+        save_labels(gt_manual, str(doc_dir / "ground_truth_manual.json"))
+        _write_label_overlays(doc_dir, "manual", gt_manual, dumps, cfg)
+        sources.append("manual")
+    elif bench.labels_path is not None:
+        _LOG.info("%s: no manual labels for pages %s", bench.key, pages)
+
+    for s in sources:
+        for kind in ("bbox", "text"):
+            extra_layers.append({
+                "stage": "benchmark", "layer": f"{s} label {kind}",
+                "file": f"{s}_{kind}.pdf", "color": _OVERLAY_COLORS[s],
+            })
+
+    _finalize_doc_dir(doc_dir, bench.pdf_path, pages, config, variant, active,
+                      layer_pages, layer_meta, stats_pages, dumps,
+                      extra_layers=tuple(extra_layers))
+
+    (doc_dir / "benchmark_meta.json").write_text(json.dumps({
+        "key": bench.key,
+        "source_pdf": str(bench.pdf_path),
+        "labels": str(bench.labels_path) if bench.labels_path else None,
         "pages": pages,
-        "engine": variant.engine,
-        "variant": variant.name,
+        "sources": sources,
         "final_stage": config.final_stage,
-        "vectorised": config.vectorise,
-        "layers": [layer_meta[f] for f in layer_pages],
+        "variant": variant.name,
     }, indent=2), encoding="utf-8")
-    _LOG.info("wrote %s", doc_dir)
+    return {
+        "key": bench.key,
+        "pdf_stem": bench.pdf_path.stem,
+        "dir": bench.pdf_path.stem,
+        "sources": sources,
+    }
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -367,6 +605,25 @@ def main(argv: list[str] | None = None) -> int:
     run_dir = Path(root) / f"{ts}__{Path(args.config).stem}"
     run_dir.mkdir(parents=True, exist_ok=True)
     _write_hyperparams(run_dir / "config_and_hyperparameters.txt", config, variant)
+
+    if config.benchmark:
+        inputs = config.benchmark_inputs()
+        if not inputs:
+            _LOG.error("no benchmark inputs (set input_dir and/or input_files)")
+            return 1
+        entries = [
+            _process_pdf_benchmark(bench, config, variant, run_dir) for bench in inputs
+        ]
+        (run_dir / "benchmark.json").write_text(json.dumps({
+            "benchmark": True,
+            "config_stem": Path(args.config).stem,
+            "variant": variant.name,
+            "final_stage": config.final_stage,
+            "iou_edge_min": config.iou_edge_min,
+            "entries": entries,
+        }, indent=2), encoding="utf-8")
+        print(f"wrote {run_dir}")
+        return 0
 
     pdfs = config.resolved_pdfs()
     if not pdfs:

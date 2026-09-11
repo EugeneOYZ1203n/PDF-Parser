@@ -90,6 +90,15 @@ def run_archive_pipeline(
     Any failure (archive import, LibreOffice, PaddleOCR) is logged and
     re-raised -- never swallowed into an empty result."""
     _ensure_archive_importable()
+    # Windows DLL-load gotcha (see CLAUDE.md): `torch` must be imported before
+    # `paddle`/`paddleocr` in a process or torch's `shm.dll` load fails with
+    # WinError 127. Archive's `import raster_parser` pulls in paddleocr (via
+    # albumentations) paddle-first, so force torch in first here -- the current
+    # pipeline does the same right before its own paddle import.
+    try:
+        import torch  # noqa: F401
+    except Exception:  # noqa: BLE001 -- non-Windows / torch-less env: harmless
+        pass
     try:
         from raster_parser.main_pipeline_extract import extract
 

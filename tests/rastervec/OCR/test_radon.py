@@ -400,6 +400,39 @@ def test_segment_clusters_pools_gaps_across_lines():
     assert {v.seqno for v in line_b_segments[0].vectors} == line_b_seqnos
 
 
+def test_segment_clusters_debug_records_growth_and_drops():
+    cluster = _two_word_cluster()
+    dbg: list = []
+
+    segments = radon.segment_clusters([cluster], debug_out=dbg)
+
+    assert len(dbg) == 1
+    d = dbg[0]
+    for key in ("grown_segment_bboxes", "dropped_segment_bboxes",
+                "assigned_vector_bboxes", "dropped_vector_bboxes"):
+        assert key in d
+    # one grown box per kept tight box
+    assert len(d["grown_segment_bboxes"]) == len(d["segment_bboxes"]) == len(segments)
+    # every cluster vector was assigned, none dropped
+    assert len(d["assigned_vector_bboxes"]) == len(cluster)
+    assert d["dropped_vector_bboxes"] == []
+    # each grown box encloses (is no smaller than) its tight box
+    for (tx0, ty0, tx1, ty1), (gx0, gy0, gx1, gy1) in zip(
+        d["segment_bboxes"], d["grown_segment_bboxes"]
+    ):
+        assert gx0 <= tx0 + 1e-6 and gy0 <= ty0 + 1e-6
+        assert gx1 >= tx1 - 1e-6 and gy1 >= ty1 - 1e-6
+
+
+def test_segment_clusters_debug_records_dropped_vectors_on_blank_cluster():
+    v = _word_vector((0.0, 0.0, 0.001, 0.001), 0)
+    dbg: list = []
+    assert radon.segment_clusters([[v]], debug_out=dbg) == []
+    assert len(dbg) == 1
+    assert dbg[0]["dropped_vector_bboxes"] == [v.bbox]
+    assert dbg[0]["segment_bboxes"] == []
+
+
 def test_rotation_inverse_round_trips():
     out_shape, forward, inverse = radon._rotation((50, 80), 12.0)
     pts = np.array([(0.0, 0.0), (79.0, 0.0), (40.0, 25.0)])

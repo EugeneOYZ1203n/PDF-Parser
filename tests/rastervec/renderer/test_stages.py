@@ -66,3 +66,19 @@ def test_render_stage_layers(result, stage_key):
         doc = fitz.open("pdf", data)
         assert doc.page_count == 1
         doc.close()
+
+
+def test_segment_layers_include_growth_and_drops(result):
+    result.segmentation_debug = [{
+        "cluster_bbox": (10.0, 10.0, 60.0, 30.0),
+        "line_gap_lines": [], "word_gap_lines": [],
+        "segment_bboxes": [(10.0, 10.0, 30.0, 20.0)],
+        "grown_segment_bboxes": [(9.0, 9.0, 31.0, 21.0)],
+        "dropped_segment_bboxes": [(40.0, 10.0, 50.0, 20.0)],
+        "assigned_vector_bboxes": [(11.0, 11.0, 20.0, 19.0)],
+        "dropped_vector_bboxes": [(41.0, 11.0, 49.0, 19.0)],
+    }]
+    labels = [lbl for lbl, _, _ in stages.render_stage_layers(result, "segment")]
+    assert {"post-growth segment bbox", "vectors assigned",
+            "vectors dropped", "segments dropped"} <= set(labels)
+    assert len(labels) == len(stages.STAGE_COLOR_LEGEND["segmentation.pdf"])

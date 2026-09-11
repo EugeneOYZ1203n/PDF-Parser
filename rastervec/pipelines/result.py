@@ -105,8 +105,11 @@ class PipelineResult:
     # `unique_segments` entry, in canonical frame
     restored_texts: "list[Text] | None" = None
     step_outputs: dict | None = None
-    segmentation_debug: list | None = None  # one dict per segmented cluster:
-    # cluster_bbox, line_gap_lines, word_gap_lines, segment_bboxes (page space)
+    segmentation_debug: list | None = None  # one dict per cluster, page space:
+    # cluster_bbox, line_gap_lines, word_gap_lines, segment_bboxes (kept, tight),
+    # grown_segment_bboxes (kept, post-growth crop box), dropped_segment_bboxes
+    # (zero-vector segments), assigned_vector_bboxes, dropped_vector_bboxes
+    # (member vectors of a wholly-skipped cluster)
 
     @contextmanager
     def open_page(self) -> "Iterator[Page]":

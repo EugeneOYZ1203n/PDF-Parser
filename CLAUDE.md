@@ -31,8 +31,8 @@ those labels; all three implemented) plus the inspector tool — see "rastervec 
 .venv/Scripts/python.exe -m rastervec.Evaluation.inspector.inspector [path/to.pdf]  # run the PDF layer inspector
 .venv/Scripts/python.exe -m rastervec.pipelines.current --pdf PATH --page N        # run the current extraction pipeline (CLI; also .pipelines.legacy)
 .venv/Scripts/python.exe scripts/generate_pipeline_report.py --config run.json      # config-driven per-stage report (PDFs + stats + dump.json per source PDF)
-.venv/Scripts/python.exe scripts/pipeline_report_viewer.py <run>/<pdf-stem>         # Tkinter viewer: source page + toggleable stage-PDF overlays
-.venv/Scripts/python.exe scripts/pipeline_report_benchmark.py --dump dump.json --pdf PATH  # score a dump's OCR text vs auto/manual ground truth
+.venv/Scripts/python.exe scripts/pipeline_report_viewer.py <run>/<stem> [<run2>/<stem>]  # Tkinter viewer: source page + toggleable stage-PDF overlays (1-2 folders side by side)
+.venv/Scripts/python.exe scripts/pipeline_report_benchmark.py --run DIR1 [--run DIR2]  # multiclass-score + chart benchmark report folders (1 or 2) on shared inputs
 .venv/Scripts/python.exe -m pytest tests/ -v                                        # run rastervec's test suite
 .venv/Scripts/python.exe scripts/rasterize_pdf.py SRC [DST] --dpi 300               # flatten a PDF to pure raster (DST defaults to outputs/rasterize/)
 .venv/Scripts/python.exe -m rastervec.Evaluation.Labelling.manual_label PDF --page N [--out labels.json]  # manual cluster-label editor (GUI; --out defaults to outputs/labels/)
@@ -516,12 +516,35 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `format_variant_timing_comparison` / `summarize_stage_timings` are pure and unit-tested; `main()`'s
   actual OCR-backed path is a manual smoke test only (real PaddleOCR, first run downloads models —
   matches the existing `RASTERVEC_RUN_OCR_TESTS`-gated convention for OCR-dependent tests).
-  `scripts/pipeline_report_benchmark.py` is the standalone dump-based counterpart (replaced the old
-  `benchmark_vector_classification.ipynb`): it reloads one or more `dump.json` files
-  (`Evaluation/dump_io.py`), rebuilds `Text`/`Vector`, and scores each dump's OCR text against auto
-  (`--pdf`) or auto+manual (`--labels`) ground truth via `evaluate_metrics(clustering=None)` +
-  `format_aggregate_comparison`. Miss-attribution metrics are absent (a dump has no classification
-  state) — an accepted scope limit until benchmarking reads more than the dump.
+  `scripts/pipeline_report_benchmark.py` is the standalone folder-diff counterpart (replaced the old
+  `benchmark_vector_classification.ipynb`): it takes **1 or 2** benchmark report folders (`--run`,
+  `generate_pipeline_report.py` runs with `benchmark: true`), each embedding its single
+  `<stem>/dump.json` + `ground_truth_auto.json` (+ `ground_truth_manual.json`), matches the folders
+  on the inputs they **share by identity** (`pdf:<stem>` auto-only vs `labels:<stem>` auto+manual — a
+  `B.pdf` run and a `B.json` run don't match on B), and per shared input scores every run with
+  `metrics.evaluate_multiclass` → an `AUTO` table, a `MANUAL` table, the
+  `{auto,manual}×{auto,manual,none}` GT-recall confusion matrix (`benchmark.format_confusion`), and
+  `combined_candidate_precision`, one column per folder. Writes a timestamped
+  `outputs/pipeline_report_benchmark/<ts>/` with `benchmark.txt`, `runs.json`, `viewer_commands.txt`
+  (a `pipeline_report_viewer.py` line per shared input), and `charts/` (`Evaluation/Evaluate/
+  charts.py` — matplotlib Agg; `metric_comparison_chart` grouped bars + `confusion_heatmap`, per
+  page + per-key-aggregate + grand-aggregate, split per source). Miss-attribution metrics are absent
+  (a dump has no classification state).
+- **`Evaluation/Evaluate/label_overlays.py`** *(implemented, pure)*: `gt_bbox_overlay(graph)` and
+  `gt_word_overlay(graph)` — GT-only visual-diff data (no rendering / pipeline import) reduced off a
+  `metrics.OverlapGraph`, used by `generate_pipeline_report.py`'s benchmark mode for the
+  `{auto,manual}_bbox.pdf` (green covered / red missed GT box) and `{auto,manual}_text.pdf` (GT text,
+  per word green exact / yellow char edit distance 1-2 / red worse-or-unread — region bbox split into
+  per-word slices along the `expected_rotation` reading axis).
+- **`Evaluation/Evaluate/metrics.py::evaluate_multiclass`** *(implemented — see `docs/EVAL_METRICS.md`
+  §5)*: for the report benchmark's **one combined `convert_page_to_vector_text` run** scored against
+  auto GT + manual GT at once. Shares `_suite_for_source` with `evaluate_metrics` (which is now a thin
+  `exclude_pred_idxs=frozenset()` wrapper, contract unchanged). For source S, predictions whose
+  `pred_class` is the *other* source are dropped from the precision-family denominators only
+  (`page_{char,word}_multiset_precision`, `pred_text_fully_contained_in_overlapping_gt_rate`).
+  `classification_precision_candidate_is_text` becomes the combined
+  `MulticlassResult.combined_candidate_precision`. Adds a `{auto,manual}×{auto,manual,none}` GT-recall
+  confusion matrix (`detected_class`) + `aggregate_multiclass`.
 - **`renderer/` — module-level functions, no `Renderer` class** *(rendering helpers, not a pipeline
   stage)*: a package split by output concern — `png.py` (rasterize vector paths for OCR / FAST
   input), `pdf.py` (`render_reconstructed_page`, `render_reconstructed_pdf`, `render_boxes_pdf`
@@ -748,6 +771,17 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `input_dir`/`input_files`, per-PDF `pages`, `vectorise` + `vectorise_mode` = an
   `Evaluation/conversion.py` mode), runs `run_pipeline(..., verbose=True, stop_after=final_stage)`
   once per (pdf, page), and writes `outputs/pipeline_report/<ts>__<config-stem>/<pdf-stem>/` with:
+  **`benchmark: true`** (mutually exclusive with `vectorise`) additionally makes each `<pdf-stem>/` a
+  scoring artifact for `pipeline_report_benchmark.py` — `input_files` may be `.pdf` or `.json` label
+  sidecars; per page the pipeline runs **once** on `convert_page_to_vector_text` output (text-as-
+  vectors over the untouched drawings) and that one run's OCR is scored against both label classes.
+  Alongside the normal report artifacts (below) it writes `ground_truth_auto.json` (+
+  `ground_truth_manual.json`), the split `{auto,manual}_{bbox,text}.pdf` overlays (`label_overlays.py`,
+  registered in the manifest under stage `benchmark`), and a run-root `benchmark.json` marker
+  (`entries[].key` = `pdf:<stem>` / `labels:<json-stem>`). Runs under `pipeline: legacy` too (archive's
+  pipeline per converted page — `legacy_adapter.run_archive_pipeline` imports `torch` before the
+  paddle-first archive import for the Windows `shm.dll` gotcha; legacy emits only `reconstructed`).
+  Every mode writes:
   one multi-page PDF **per visual layer** (`<stage>__<layer>.pdf` — e.g.
   `vector_classification__group_bbox.pdf`, `fast_heatmap__text_heatmap.pdf` — via
   `renderer/stages.py::render_stage_layers`; the layer set per stage is fixed so every layer PDF
@@ -764,11 +798,13 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   the finer overlays: `FastPageResult.skipped_tiles`/`tile_count`/`tile_seconds` (from
   `detect_tiled`'s new `tile_report` out-param) and `PipelineResult.segmentation_debug`
   (line/word-gap cut lines, from `segment_clusters(debug_out=...)`).
-  `scripts/pipeline_report_viewer.py` is the Tkinter counterpart: a per-PDF folder → toggleable
-  source page + one checkbox per layer PDF (grouped by stage, `all`/`none` per group), each checked
-  layer rasterized with a real alpha channel (`get_pixmap(alpha=True)` — a layer PDF page has no
-  background, so it composites with no white-key halo) and alpha-composited over the base;
-  zoom/pan/page-flip.
+  `scripts/pipeline_report_viewer.py` is the Tkinter counterpart: **1 or 2** per-PDF folders →
+  toggleable source page + one side-by-side panel per folder, each a checkbox per layer PDF (grouped
+  by stage, `all`/`none` per group, incl. the `benchmark` overlay group), each checked layer
+  rasterized with a real alpha channel (`get_pixmap(alpha=True)`) and alpha-composited over the base
+  in panel order — so a layer from folder A and a layer from folder B show together;
+  zoom/pan/page-flip. `pipeline_report_benchmark.py` emits ready-to-paste invocations in
+  `viewer_commands.txt`.
 
 `scripts/rasterize_pdf.py` (outside `rastervec/`, a one-off utility not a pipeline stage): flattens
 every page of a PDF to an image and rebuilds a pure-raster PDF from those images — not currently

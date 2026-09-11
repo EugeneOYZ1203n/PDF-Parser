@@ -252,6 +252,28 @@ def format_aggregate_comparison(
     return "\n".join(lines)
 
 
+_CONF_ROWS = ("auto", "manual")
+_CONF_COLS = ("auto", "manual", "none")
+
+
+def format_confusion(
+    confusion_by_run: dict[str, dict], *, title: str = "GT-recall confusion {auto,manual}x{auto,manual,none}",
+) -> str:
+    """Fixed-width `actual -> detected` count table, one block per run."""
+    lines = [title]
+    for run, conf in confusion_by_run.items():
+        lines.append(f"  [{run}]")
+        lines.append("    actual\\detected  " + "".join(f"{c:>8}" for c in _CONF_COLS))
+        for r in _CONF_ROWS:
+            row = conf.get(r, {})
+            total = sum(row.values())
+            recall = row.get(r, 0) / total if total else float("nan")
+            cells = "".join(f"{row.get(c, 0):>8}" for c in _CONF_COLS)
+            rec = "n/a" if recall != recall else f"{recall:.3f}"
+            lines.append(f"    {r:<15}{cells}   recall {rec}")
+    return "\n".join(lines)
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Benchmark the Vector Classification + OCR pipeline against auto-labelled ground truth."

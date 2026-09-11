@@ -62,61 +62,105 @@ one of `input_dir` / `input_files`):
 | `pages` | `[0, 2]`, or `{ "<pdf-stem>": [0,1], "*": [0] }`, or `null` = page 0 |
 | `vectorise` | run an `Evaluation/conversion.py` pre-step so the pipeline sees text-as-vector-paths |
 | `vectorise_mode` | `to_vector_text` (default) / `text_only` / `drawings_only` |
+| `benchmark` | benchmark mode (see below) - mutually exclusive with `vectorise` |
+| `iou_edge_min` | `MetricConfig.iou_edge_min` for the benchmark overlays (default 0.1) |
 | `dpi` | render dpi (default 300) |
 | `output_root` | default `outputs/pipeline_report/` |
 
 Output: `outputs/pipeline_report/<ts>__<config-stem>/<pdf-stem>/`.
 Sample configs live in `scripts/report_configs/` (`full_current`,
-`quick_classify`, `nofast_vectorised`, `directory_with_labels`).
+`quick_classify`, `nofast_vectorised`, `directory_with_labels`, `benchmark`).
+
+### Benchmark mode (`benchmark: true`)
+
+A self-contained scoring artifact for `pipeline_report_benchmark.py`.
+`input_files` entries may be `.pdf` **or** `.json` (a `LabelSet` sidecar - its
+`pdf_path` names the source PDF, the file is the manual-label source); a bare
+`.pdf` (or `input_dir` scan) gets auto ground truth only.
+
+Per input, per page: the page is converted **once** with
+`convert_page_to_vector_text` (native text as vectors on top of the untouched
+drawings) and the pipeline runs **once**. `<pdf-stem>/` then gets the **full**
+per-stage report (`manifest.json`, every `<stage>__<layer>.pdf`, `<stage>.txt`,
+`radon_images/`, `paddle_images/`, `dump.json`, `converted_p*.pdf`) - legacy
+engine only emits `reconstructed` - **plus**:
+
+- `ground_truth_auto.json` (from `auto_label_pdf`), `ground_truth_manual.json`
+  (the JSON's `source="manual"` entries; absent when there are none)
+- `auto_bbox.pdf` / `manual_bbox.pdf` - GT boxes, green = covered by a
+  prediction, red = missed
+- `auto_text.pdf` / `manual_text.pdf` - GT text, per word green = exact /
+  yellow = char edit distance 1-2 / red = worse or unread
+
+The overlays are added to `manifest.json`'s `layers` under stage `benchmark`,
+so the viewer toggles them like any other layer. The run root gets a
+`benchmark.json` marker listing every input's key (`pdf:<stem>` /
+`labels:<json-stem>`) and sources.
+
+Works with `pipeline: legacy` too (runs `archive/`'s pipeline on each converted
+page - needs LibreOffice on PATH). Run one `benchmark` config with
+`pipeline: current` and one with `pipeline: legacy` (samples:
+`report_configs/benchmark.json` / `benchmark_legacy.json`), then diff the two
+folders with `pipeline_report_benchmark.py --run ... --run ...`.
 
 `quick_classify.json` (`final_stage: "classify"`) is the fast smoke test - it
 never touches OCR.
 
 ## `scripts/pipeline_report_viewer.py`
 
-Tkinter viewer for one per-PDF report folder. Left pane = source page; right
-sidebar = one checkbox per **layer PDF**, grouped by stage. A checked layer
-is rasterized with a real alpha channel (`get_pixmap(alpha=True)` -- a stage
-PDF page has no background, so it composites cleanly with no white-key halo
-and no anti-alias fringe) and alpha-composited over the base.
+Tkinter viewer for **1 or 2** per-PDF report folders. Left pane = source page;
+right side = one **panel per folder**, side by side. Each panel is one checkbox
+per layer PDF, grouped by stage (including the `benchmark` group). A checked
+layer is rasterized with a real alpha channel (`get_pixmap(alpha=True)`) and
+alpha-composited over the base, in panel order - so you can show e.g. the OCR
+output of pipeline A together with the clusters of pipeline B.
 
-- **source page** checkbox: toggle the underlying page on/off (off = layers
-  composite over white).
-- each stage header has `all` / `none` buttons to toggle its whole group.
+- **source page** checkbox: toggle the underlying page (off = layers composite
+  over white).
+- each stage header has `all` / `none` buttons.
 
 ```
 .venv/Scripts/python.exe scripts/pipeline_report_viewer.py \
-    "outputs/pipeline_report/20260910_232639__full_current/240118-Proposed OW Shopdrawings for Thomson Height CC"
+    "outputs/pipeline_report/<ts1>__benchmark/240118-..." \
+    "outputs/pipeline_report/<ts2>__benchmark_legacy/240118-..."
 ```
 
-One positional arg: a `<pdf-stem>` folder produced by
-`generate_pipeline_report.py` (must contain `manifest.json`).
+Positional: 1 or 2 `<pdf-stem>` folders (each must contain `manifest.json`).
+`pipeline_report_benchmark.py` writes ready-to-paste lines to
+`viewer_commands.txt`.
 
 ## `scripts/pipeline_report_benchmark.py`
 
-Scores the OCR text inside one or more `dump.json` files against ground
-truth. No pipeline run - reads the dumps only. Miss-attribution metrics are
-absent (a dump has no classification state).
+Compares **1 or 2 benchmark report folders** (`generate_pipeline_report.py`
+runs with `benchmark: true`). No pipeline run - each folder embeds its single
+`<pdf-stem>/dump.json` + `ground_truth_auto.json` (+ `ground_truth_manual.json`).
+Scored with **`metrics.evaluate_multiclass`** (see `docs/EVAL_METRICS.md` §5):
+one prediction set vs both label classes, so a prediction the *other* class
+matched is not a false positive here. Folders are matched on the inputs they
+**share, by input identity**: `pdf:<stem>` (auto only) vs `labels:<stem>`
+(auto + manual) - a `B.pdf` run and a `B.json` run do not match on B.
 
 ```
-# auto ground truth from the source PDF's native text
 .venv/Scripts/python.exe scripts/pipeline_report_benchmark.py \
-    --dump outputs/pipeline_report/<ts>__full_current/<stem>/dump.json \
-    --pdf "references/<stem>.pdf"
-
-# ground truth from a label JSON (auto + manual scored separately)
-.venv/Scripts/python.exe scripts/pipeline_report_benchmark.py \
-    --dump run_a/<stem>/dump.json --dump run_b/<stem>/dump.json \
-    --labels outputs/labels/<stem>.json
+    --run outputs/pipeline_report/<ts1>__benchmark \
+    --run outputs/pipeline_report/<ts2>__benchmark_legacy
 ```
 
 | arg | meaning |
 |---|---|
-| `--dump PATH` | a `dump.json` (repeatable) |
-| `--pdf PATH` | target PDF for auto ground truth (mutually exclusive with `--labels`) |
-| `--labels PATH` | label JSON, auto + manual scored separately |
+| `--run DIR` | a benchmark run folder (repeatable; **1 or 2**) |
 | `--iou-threshold F` | `MetricConfig.iou_edge_min` (default 0.1) |
-| `--out PATH` | default `outputs/pipeline_report/benchmark.txt` |
+| `--out-root DIR` | parent of the timestamped output folder (default `outputs/pipeline_report_benchmark/`) |
+
+Writes `outputs/pipeline_report_benchmark/<ts>/`:
+
+- `benchmark.txt` - per shared key: AUTO + MANUAL metric tables (one column per
+  run), the `{auto,manual}x{auto,manual,none}` GT-recall confusion matrix, and
+  combined candidate precision.
+- `runs.json` - compared folders + threshold + shared keys.
+- `viewer_commands.txt` - a `pipeline_report_viewer.py` line per shared input.
+- `charts/` - `<key>__p<N>__{auto,manual,confusion}.png` per page,
+  `<key>__aggregate__*.png`, and grand `aggregate__*.png`.
 
 ## `scripts/rasterize_pdf.py`
 

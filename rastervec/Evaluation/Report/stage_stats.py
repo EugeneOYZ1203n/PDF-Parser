@@ -128,6 +128,8 @@ def stats_segment(res) -> dict:
         "segment_count": len(segs),
         "cluster_count": len(dbg),
         "segments_per_cluster": _dist(len(d["segment_bboxes"]) for d in dbg),
+        "dropped_segments": sum(len(d.get("dropped_segment_bboxes", [])) for d in dbg),
+        "dropped_vectors": sum(len(d.get("dropped_vector_bboxes", [])) for d in dbg),
         "skew_angle": _dist(s.angle for s in segs),
     }
 

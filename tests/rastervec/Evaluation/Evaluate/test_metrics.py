@@ -330,3 +330,57 @@ def test_aggregate_f1_from_aggregated_pr():
     rec = agg.ratios["page_char_multiset_recall"].value
     prec = agg.ratios["page_char_multiset_precision"].value
     assert agg.get("page_char_multiset_f1") == pytest.approx(2 * rec * prec / (rec + prec))
+
+
+# ---------------------------------------------------------------------------
+# Multiclass (evaluate_multiclass)
+# ---------------------------------------------------------------------------
+from rastervec.Evaluation.Evaluate.metrics import (  # noqa: E402
+    aggregate_multiclass,
+    evaluate_multiclass,
+)
+
+
+def test_multiclass_other_class_pred_excluded_from_precision():
+    auto = [_gt("hello world", (0, 0, 50, 10))]
+    manual = [_gt("foo bar", (0, 100, 50, 110))]
+    # one pred lands cleanly on the auto line, one is pure spurious
+    preds = [_pred("HELLO WORLD", (0, 0, 50, 10)), _pred("ZZZ", (300, 300, 320, 310))]
+    r = evaluate_multiclass(auto, manual, preds, [p.bbox for p in preds])
+
+    # manual precision denominator excludes the auto-matched pred -> only "ZZZ" chars
+    mp = r.manual.ratios["page_char_multiset_precision"]
+    assert mp.denominator == 3.0  # len("ZZZ")
+    # auto precision still sees its own pred + the spurious one (non-space chars)
+    assert r.auto.ratios["page_char_multiset_precision"].denominator == 10.0 + 3.0
+
+
+def test_multiclass_confusion_diagonal_and_recall():
+    auto = [_gt("aa", (0, 0, 20, 10)), _gt("bb", (0, 40, 20, 50))]
+    manual = [_gt("cc", (0, 100, 20, 110))]
+    preds = [_pred("AA", (0, 0, 20, 10))]  # only the first auto region detected
+    r = evaluate_multiclass(auto, manual, preds, [p.bbox for p in preds])
+    assert r.confusion["auto"] == {"auto": 1, "manual": 0, "none": 1}
+    assert r.confusion["manual"] == {"auto": 0, "manual": 0, "none": 1}
+    assert r.detection_recall("auto") == Ratio(1.0, 2.0)
+    assert math.isnan(r.detection_recall("manual").value) is False
+
+
+def test_multiclass_cross_class_when_pred_spans_both():
+    auto = [_gt("aa", (0, 0, 20, 100))]
+    manual = [_gt("cc", (0, 0, 100, 20))]
+    preds = [_pred("X", (0, 0, 100, 30))]  # covers manual (2000) more than auto (600)
+    r = evaluate_multiclass(auto, manual, preds, [p.bbox for p in preds])
+    # auto region detected, but by a pred that leans manual
+    assert r.confusion["auto"]["manual"] == 1
+
+
+def test_multiclass_aggregate_sums_confusion():
+    auto = [_gt("aa", (0, 0, 20, 10))]
+    manual = [_gt("cc", (0, 100, 20, 110))]
+    preds = [_pred("AA", (0, 0, 20, 10))]
+    r = evaluate_multiclass(auto, manual, preds, [p.bbox for p in preds])
+    agg = aggregate_multiclass([r, r])
+    assert agg.confusion["auto"]["auto"] == 2
+    assert agg.confusion["manual"]["none"] == 2
+    assert aggregate_multiclass([]) is None

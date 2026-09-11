@@ -718,6 +718,19 @@ def _assign_vectors_to_segments(
     return assignment
 
 
+def _blank_segmentation_dbg(cluster: list[Vector]) -> dict:
+    return {
+        "cluster_bbox": union_bbox([v.bbox for v in cluster]),
+        "line_gap_lines": [],
+        "word_gap_lines": [],
+        "segment_bboxes": [],
+        "grown_segment_bboxes": [],
+        "dropped_segment_bboxes": [],
+        "assigned_vector_bboxes": [],
+        "dropped_vector_bboxes": [],
+    }
+
+
 def segment_clusters(
     clusters: list[list[Vector]], *, dpi: int = 300, debug_out: "list | None" = None,
 ) -> list[Segment]:
@@ -751,6 +764,10 @@ def segment_clusters(
             continue
         gray, dpi_used = render_cluster_for_radon(cluster, dpi)
         if gray.size == 0 or not to_ink(gray).any():
+            if debug_out is not None:
+                d = _blank_segmentation_dbg(cluster)
+                d["dropped_vector_bboxes"] = [v.bbox for v in cluster]
+                debug_out.append(d)
             continue
         # Pad 1 of 2: the whole cluster render, so deskew's warp and
         # `line_bands`' band padding have room at the frame edge. Every
@@ -770,6 +787,10 @@ def segment_clusters(
         prof = row_profile(deskew_ink)
         bands = line_bands(prof)
         if not bands:
+            if debug_out is not None:
+                d = _blank_segmentation_dbg(cluster)
+                d["dropped_vector_bboxes"] = [v.bbox for v in cluster]
+                debug_out.append(d)
             continue
 
         line_cols = [deskew_ink[by0:by1 + 1, :].any(axis=0) for by0, by1 in bands]
@@ -793,15 +814,12 @@ def segment_clusters(
                 line_gap_lines.append(
                     _px_to_page_bbox([(0, by0), (width, by0), (width, by1), (0, by1)])
                 )
-            dbg = {
-                "cluster_bbox": union_bbox([v.bbox for v in cluster]),
-                "line_gap_lines": line_gap_lines,
-                "word_gap_lines": [],
-                "segment_bboxes": [],
-            }
+            dbg = _blank_segmentation_dbg(cluster)
+            dbg["line_gap_lines"] = line_gap_lines
             debug_out.append(dbg)
 
         seg_bboxes: list[tuple[float, float, float, float]] = []
+        grown_page_bboxes: list[tuple[float, float, float, float]] = []
         seg_images: list[np.ndarray] = []
         for bi, (by0, by1) in enumerate(bands):
             line = deskewed[by0:by1 + 1, :]
@@ -833,8 +851,6 @@ def segment_clusters(
                     [(float(x) - pad_x_px, float(y) - pad_y_px) for x, y in mapped],
                 )
                 seg_bboxes.append(page_bbox)
-                if dbg is not None:
-                    dbg["segment_bboxes"].append(page_bbox)
 
                 # OCR crop from the GROWN box (ascenders/descenders the line
                 # band clipped), capped at +100 % per axis and clamped to
@@ -850,17 +866,30 @@ def segment_clusters(
                     ),
                 )
                 gx0, ggy0, gx1, ggy1 = grown
+                grown_page_bboxes.append(_px_to_page_bbox(
+                    [(gx0, ggy0), (gx1, ggy0), (gx1, ggy1), (gx0, ggy1)]
+                ))
                 # Pad 2 of 2: this segment's own crop, handed to PaddleOCR
                 # verbatim as `Segment.image`.
                 crop, _offset = pad_image(deskewed[ggy0:ggy1, gx0:gx1])
                 seg_images.append(crop)
 
         if not seg_bboxes:
+            if dbg is not None:
+                dbg["dropped_vector_bboxes"] = [v.bbox for v in cluster]
             continue
 
         assignments = _assign_vectors_to_segments(cluster, seg_bboxes)
-        for seg_vectors, image in zip(assignments, seg_images):
+        for seg_vectors, tight_bbox, grown_bbox, image in zip(
+            assignments, seg_bboxes, grown_page_bboxes, seg_images
+        ):
             if seg_vectors:
                 segments.append(Segment(vectors=seg_vectors, angle=float(skew), image=image))
+                if dbg is not None:
+                    dbg["segment_bboxes"].append(tight_bbox)
+                    dbg["grown_segment_bboxes"].append(grown_bbox)
+                    dbg["assigned_vector_bboxes"].extend(v.bbox for v in seg_vectors)
+            elif dbg is not None:
+                dbg["dropped_segment_bboxes"].append(tight_bbox)
 
     return segments

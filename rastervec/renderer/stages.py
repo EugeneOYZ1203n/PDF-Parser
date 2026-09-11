@@ -44,6 +44,10 @@ C_ORIG_BBOX = "#2563eb"
 C_SEGMENT_BBOX = "#059669"
 C_LINE_GAP = "#dc2626"
 C_WORD_GAP = "#f59e0b"
+C_GROWN_BBOX = "#0d9488"
+C_VEC_ASSIGNED = "#16a34a"
+C_VEC_DROPPED = "#dc2626"
+C_SEG_DROPPED = "#b91c1c"
 C_FAST_PASS = "#059669"
 C_FAST_DROP = "#dc2626"
 C_TILE_SKIP = "#9ca3af"
@@ -69,7 +73,9 @@ STAGE_COLOR_LEGEND: dict[str, list[tuple[str, str]]] = {
     ],
     "segmentation.pdf": [
         ("original cluster bbox", C_ORIG_BBOX), ("segment bbox", C_SEGMENT_BBOX),
-        ("line gap", C_LINE_GAP), ("word gap", C_WORD_GAP),
+        ("post-growth segment bbox", C_GROWN_BBOX), ("line gap", C_LINE_GAP),
+        ("word gap", C_WORD_GAP), ("vectors assigned", C_VEC_ASSIGNED),
+        ("vectors dropped", C_VEC_DROPPED), ("segments dropped", C_SEG_DROPPED),
     ],
     "similarity.pdf": [("(one colour per similarity group)", "#888888")],
     "paddle_ocr.pdf": [
@@ -344,15 +350,23 @@ def render_radon(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) 
     dbg = res.segmentation_debug or []
     cluster_b = [d["cluster_bbox"] for d in dbg]
     seg_b = [b for d in dbg for b in d["segment_bboxes"]]
+    grown_b = [b for d in dbg for b in d.get("grown_segment_bboxes", [])]
     line_g = [b for d in dbg for b in d["line_gap_lines"]]
     word_g = [b for d in dbg for b in d["word_gap_lines"]]
+    vec_ok = [b for d in dbg for b in d.get("assigned_vector_bboxes", [])]
+    vec_drop = [b for d in dbg for b in d.get("dropped_vector_bboxes", [])]
+    seg_drop = [b for d in dbg for b in d.get("dropped_segment_bboxes", [])]
     return _compose(
         _meta(res, page_meta),
         rect_layers=[
             (cluster_b, C_ORIG_BBOX, False),
             (seg_b, C_SEGMENT_BBOX, False),
+            (grown_b, C_GROWN_BBOX, False),
             (line_g, C_LINE_GAP, True),
             (word_g, C_WORD_GAP, True),
+            (vec_ok, C_VEC_ASSIGNED, False),
+            (vec_drop, C_VEC_DROPPED, False),
+            (seg_drop, C_SEG_DROPPED, True),
         ],
     )
 
@@ -533,10 +547,18 @@ def render_stage_layers(
              R([d["cluster_bbox"] for d in dbg], C_ORIG_BBOX)),
             ("segment bbox", C_SEGMENT_BBOX,
              R([b for d in dbg for b in d["segment_bboxes"]], C_SEGMENT_BBOX)),
+            ("post-growth segment bbox", C_GROWN_BBOX,
+             R([b for d in dbg for b in d.get("grown_segment_bboxes", [])], C_GROWN_BBOX)),
             ("line gap", C_LINE_GAP,
              R([b for d in dbg for b in d["line_gap_lines"]], C_LINE_GAP, True)),
             ("word gap", C_WORD_GAP,
              R([b for d in dbg for b in d["word_gap_lines"]], C_WORD_GAP, True)),
+            ("vectors assigned", C_VEC_ASSIGNED,
+             R([b for d in dbg for b in d.get("assigned_vector_bboxes", [])], C_VEC_ASSIGNED)),
+            ("vectors dropped", C_VEC_DROPPED,
+             R([b for d in dbg for b in d.get("dropped_vector_bboxes", [])], C_VEC_DROPPED)),
+            ("segments dropped", C_SEG_DROPPED,
+             R([b for d in dbg for b in d.get("dropped_segment_bboxes", [])], C_SEG_DROPPED, True)),
         ]
 
     if stage_key == "similarity":
