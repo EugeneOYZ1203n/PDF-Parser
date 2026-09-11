@@ -48,6 +48,36 @@ def test_benchmark_flag_and_vectorise_conflict():
         gpr.ReportConfig(benchmark=True, vectorise=True, input_files=["a.pdf"])
 
 
+class _Variant:
+    def __init__(self, engine: str) -> None:
+        self.engine = engine
+
+
+def test_active_artifacts_includes_paddle_detect_for_current_engine():
+    """Test branch (`test/paddle-detect-post-fast`): the old segment/
+    similarity/restore-gated rows are gone from `_ARTIFACTS`; one
+    `paddle_detect` row replaces them."""
+    active = gpr._active_artifacts(gpr.ReportConfig(input_files=["a.pdf"]), _Variant("current"))
+    stems = [row[0] for row in active]
+    assert "paddle_detect" in stems
+    assert "segmentation" not in stems
+    assert "similarity" not in stems
+    assert "paddle_ocr" not in stems
+
+
+def test_active_artifacts_respects_final_stage_gate():
+    cfg = gpr.ReportConfig(input_files=["a.pdf"], final_stage="fast")
+    stems = [row[0] for row in gpr._active_artifacts(cfg, _Variant("current"))]
+    assert "fast_heatmap" in stems
+    assert "paddle_detect" not in stems
+    assert "drawing_vectors" not in stems
+
+
+def test_active_artifacts_legacy_only_reconstructed():
+    active = gpr._active_artifacts(gpr.ReportConfig(input_files=["a.pdf"]), _Variant("legacy"))
+    assert [row[0] for row in active] == ["reconstructed"]
+
+
 def test_benchmark_inputs_keys(tmp_path):
     (tmp_path / "A.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
     (tmp_path / "C.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")

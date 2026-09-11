@@ -54,6 +54,7 @@ C_TILE_SKIP = "#9ca3af"
 C_OCR_PASS = "#059669"
 C_OCR_FAIL = "#dc2626"
 C_OCR_BOX = "#2563eb"
+C_PADDLE_DETECT_BOX = "#db2777"
 
 _DROP_CATEGORIES = [
     "dropped_oversized", "duplicate_runs", "dropped_tiny", "dropped_mixed_fill_rule",
@@ -82,6 +83,7 @@ STAGE_COLOR_LEGEND: dict[str, list[tuple[str, str]]] = {
         ("predicted text (ok)", C_OCR_PASS), ("predicted text (blank)", C_OCR_FAIL),
         ("OCR-detected box", C_OCR_BOX),
     ],
+    "paddle_detect.pdf": [("PaddleOCR detected box", C_PADDLE_DETECT_BOX)],
     "drawing_vectors.pdf": [("drawing vector", C_DRAWING)],
     "reconstructed.pdf": [("reconstructed page", "#111827")],
 }
@@ -95,6 +97,7 @@ STAGE_ARTIFACTS = {
     "segment": "segmentation.pdf",
     "similarity": "similarity.pdf",
     "ocr": "paddle_ocr.pdf",
+    "paddle_detect": "paddle_detect.pdf",
     "drawing": "drawing_vectors.pdf",
     "reconstructed": "reconstructed.pdf",
 }
@@ -458,6 +461,18 @@ def render_restore(res: "PipelineResult", *, page_meta: "PageMeta | None" = None
 
 
 # ---------------------------------------------------------------------------
+# PaddleOCR text detection (test branch `test/paddle-detect-post-fast`) --
+# replaces Radon segmentation + similarity dedup + recognition entirely.
+# `res.paddle_boxes` is page-space bboxes only, no text.
+# ---------------------------------------------------------------------------
+def render_paddle_detect(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
+    return _compose(
+        _meta(res, page_meta),
+        rect_layers=[(list(res.paddle_boxes or []), C_PADDLE_DETECT_BOX, False)],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Final reconstruction
 # ---------------------------------------------------------------------------
 def render_reconstructed(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
@@ -578,6 +593,10 @@ def render_stage_layers(
             ("blank-read box", C_OCR_FAIL, R([tuple(t.bbox) for t in blank], C_OCR_FAIL)),
             ("OCR box", C_OCR_BOX, R([tuple(t.bbox) for t in restored], C_OCR_BOX)),
         ]
+
+    if stage_key == "paddle_detect":
+        return [("PaddleOCR detected box", C_PADDLE_DETECT_BOX,
+                 R(list(res.paddle_boxes or []), C_PADDLE_DETECT_BOX))]
 
     if stage_key == "drawing":
         return [("drawing vector", C_DRAWING, render_drawing(res, page_meta=pm))]

@@ -13,15 +13,14 @@ timestamped run folder:
                                                        the viewer toggles each)
             native_text.txt ...                       (one stats file per stage)
             dump.json                                 (every Text + Vector, reloadable)
-            radon_images/    (one PNG per FAST-surviving cluster: the rendered
-                             cluster image Radon sees *before* segmentation,
-                             with the detected word/segment boxes drawn on it)
-            paddle_images/   (one PNG per elected unique segment: the exact
-                             deskewed, white-padded crop handed to PaddleOCR
-                             *before* recognition, unpadded word region boxed,
-                             recognised text in the filename)
 
 Replaces `rastervec/notebooks/pipeline_stage_visualization.ipynb`.
+
+Test branch (`test/paddle-detect-post-fast`): the `radon_images/`/
+`paddle_images/` per-word debug PNGs are gone -- Radon segmentation and
+PaddleOCR recognition don't run on this branch, so there's nothing to dump
+crops of. The `paddle_detect` stage's own layer PDF (drawn straight from
+`PipelineResult.paddle_boxes`) is this branch's replacement visual.
 
 With `benchmark: true` the same `<pdf-stem>/` folder is also a scoring
 artifact for `pipeline_report_benchmark.py`: one `convert_page_to_vector_text`
@@ -41,9 +40,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-import numpy as np
 import pymupdf as fitz
-from PIL import Image, ImageDraw
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -59,7 +56,6 @@ from rastervec.Evaluation.Labelling.label_schema import (
     save_labels,
     split_labelset_by_source,
 )
-from rastervec.helpers.geometry import union_bbox
 from rastervec.Evaluation.Report import stage_stats
 from rastervec.logging_setup import configure_logging, get_logger
 from rastervec.paths import output_dir
@@ -77,15 +73,18 @@ _CONVERT = {
 # stage stem -> (stage_key for stages.render_stage_layers, stats-key or
 # None, gate STEP_NAME). Each stage emits one single-purpose PDF per visual
 # layer: `<stem>__<layer-slug>.pdf`.
+#
+# Test branch (`test/paddle-detect-post-fast`): `_common.STEP_NAMES` no
+# longer has `segment`/`similarity`/`restore` (Radon segmentation, similarity
+# dedup, and recognition are gone from this branch's wiring) -- one
+# `paddle_detect` row replaces all three.
 _ARTIFACTS: list[tuple[str, str, str | None, str]] = [
     ("native_text", "native", "native", "native"),
     ("vector_extraction", "vectors", "vectors", "vectors"),
     ("separation", "separation", "separation", "classify"),
     ("vector_classification", "classify", "classify", "classify"),
     ("fast_heatmap", "fast", "fast", "fast"),
-    ("segmentation", "segment", "segment", "segment"),
-    ("similarity", "similarity", "similarity", "similarity"),
-    ("paddle_ocr", "ocr", "ocr", "restore"),
+    ("paddle_detect", "paddle_detect", "paddle_detect", "paddle_detect"),
     ("drawing_vectors", "drawing", None, "drawing"),
     ("reconstructed", "reconstructed", None, "drawing"),
 ]
@@ -208,102 +207,6 @@ def _reached(step: str, final_stage: str | None) -> bool:
     return STEP_NAMES.index(step) <= STEP_NAMES.index(final_stage)
 
 
-def _safe_slug(text: str, limit: int = 40) -> str:
-    keep = "".join(c if c.isalnum() else "_" for c in (text or "")).strip("_")
-    return keep[:limit] or "blank"
-
-
-def _draw_boxes(img: Image.Image, boxes, outline=(220, 30, 30), width=2) -> Image.Image:
-    out = img.convert("RGB")
-    d = ImageDraw.Draw(out)
-    for b in boxes:
-        if b is None:
-            continue
-        x0, y0, x1, y1 = b
-        d.rectangle(
-            [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)],
-            outline=outline, width=width,
-        )
-    return out
-
-
-# `_common.run_current_pipeline` calls `segment_clusters` with the default
-# dpi, so the report must render Radon's input at the same dpi to line the
-# detected boxes up.
-_RADON_DPI = 300
-
-
-def _save_radon_inputs(res, folder: Path, page_index: int) -> int:
-    """One PNG per FAST-surviving cluster: the rendered cluster image exactly
-    as Radon sees it (pre-deskew, pre-split), with the original cluster bbox
-    (green) and the final grown crop box sent to PaddleOCR (blue) drawn on
-    top (`res.segmentation_debug`)."""
-    clusters = getattr(res, "fast_passed", None) or []
-    if not clusters:
-        return 0
-    from rastervec.config import RADON_RENDER_PADDING_EXTRA_PT
-    from rastervec.OCR.radon import render_cluster_for_radon
-    from rastervec.renderer import page_points_to_pixel
-
-    dbg_by_bbox = {
-        tuple(round(c, 2) for c in d["cluster_bbox"]): d
-        for d in (res.segmentation_debug or [])
-    }
-    folder.mkdir(parents=True, exist_ok=True)
-    n = 0
-    for i, cluster in enumerate(clusters):
-        if not cluster:
-            continue
-        # Must match segment_clusters' own per-cluster padding exactly, or
-        # this debug render and its overlay boxes will be misaligned.
-        stroke_padding = (
-            max((v.width or 0.0) for v in cluster) / 2.0 + RADON_RENDER_PADDING_EXTRA_PT
-        )
-        gray, dpi_used = render_cluster_for_radon(cluster, _RADON_DPI, padding=stroke_padding)
-        img = Image.fromarray(gray)
-        key = tuple(round(c, 2) for c in union_bbox([v.bbox for v in cluster]))
-        dbg = dbg_by_bbox.get(key)
-
-        def _to_px(page_bboxes):
-            out = []
-            for x0, y0, x1, y1 in page_bboxes:
-                (px0, py0), (px1, py1) = page_points_to_pixel(
-                    cluster, dpi_used, [(x0, y0), (x1, y1)], padding=stroke_padding,
-                )
-                out.append((px0, py0, px1, py1))
-            return out
-
-        if dbg is not None:
-            img = _draw_boxes(img, _to_px([dbg["cluster_bbox"]]), outline=(22, 163, 74))
-            img = _draw_boxes(
-                img, _to_px(dbg.get("grown_segment_bboxes", [])), outline=(37, 99, 235)
-            )
-        img.save(folder / f"p{page_index}_cluster_{i:03d}.png")
-        n += 1
-    return n
-
-
-def _save_paddle_inputs(res, folder: Path, page_index: int) -> int:
-    """One PNG per elected unique segment -- the exact deskewed, white-padded
-    crop handed to PaddleOCR verbatim, with the recognised text in the
-    filename. No overlay: PaddleOCR here is recognition-only and returns no
-    box."""
-    segs = getattr(res, "unique_segments", None) or []
-    if not segs:
-        return 0
-    texts = getattr(res, "unique_texts", None) or []
-    folder.mkdir(parents=True, exist_ok=True)
-    n = 0
-    for i, seg in enumerate(segs):
-        if seg.image is None:
-            continue
-        img = Image.fromarray(np.asarray(seg.image))
-        rec = texts[i].text if i < len(texts) else ""
-        img.save(folder / f"p{page_index}_uniq_{i:03d}__{_safe_slug(rec)}.png")
-        n += 1
-    return n
-
-
 def _merge_pdfs(page_bytes: list[bytes], out_path: Path) -> None:
     out = fitz.open()
     try:
@@ -350,11 +253,9 @@ def _accumulate_page(
     res, page_index: int, active: list[tuple],
     layer_pages: dict[str, list[bytes]], layer_meta: dict[str, dict],
     stats_pages: dict[str, list[tuple[int, dict]]],
-    radon_dir: Path, paddle_dir: Path,
 ) -> None:
     """Render every active stage's layer PDFs + numeric stats for one page,
-    accumulating into the caller's dicts; also dump the radon / paddle
-    input PNGs."""
+    accumulating into the caller's dicts."""
     for stem, stage_key, stats_key, _gate in active:
         try:
             layers = stages.render_stage_layers(res, stage_key)
@@ -371,8 +272,6 @@ def _accumulate_page(
             stats_pages[stem].append(
                 (page_index, stage_stats.stats_for_stage(res, stats_key))
             )
-    _save_radon_inputs(res, radon_dir, page_index)
-    _save_paddle_inputs(res, paddle_dir, page_index)
 
 
 def _finalize_doc_dir(
@@ -414,8 +313,6 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
 
     doc_dir = run_dir / pdf_path.stem
     doc_dir.mkdir(parents=True, exist_ok=True)
-    radon_dir = doc_dir / "radon_images"
-    paddle_dir = doc_dir / "paddle_images"
 
     pages = config.pages_for(pdf_path.stem)
     active = _active_artifacts(config, variant)
@@ -443,8 +340,7 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
         if run_page != page_index:
             _restamp_page(res, page_index)
 
-        _accumulate_page(res, page_index, active, layer_pages, layer_meta, stats_pages,
-                         radon_dir, paddle_dir)
+        _accumulate_page(res, page_index, active, layer_pages, layer_meta, stats_pages)
         dumps.append(dump_io.PageDump(
             page_meta=res.page.meta, texts=list(res.texts or []),
             vectors=list(res.vectors or []), engine=res.engine,
@@ -520,8 +416,6 @@ def _process_pdf_benchmark(
     is_legacy = variant.engine == "legacy"
     doc_dir = run_dir / bench.pdf_path.stem
     doc_dir.mkdir(parents=True, exist_ok=True)
-    radon_dir = doc_dir / "radon_images"
-    paddle_dir = doc_dir / "paddle_images"
     pages = config.pages_for(bench.pdf_path.stem)
     cfg = metrics.MetricConfig(iou_edge_min=config.iou_edge_min)
     active = _active_artifacts(config, variant)
@@ -543,8 +437,7 @@ def _process_pdf_benchmark(
                 stop_after=config.final_stage,
             )
         _restamp_page(res, p)
-        _accumulate_page(res, p, active, layer_pages, layer_meta, stats_pages,
-                         radon_dir, paddle_dir)
+        _accumulate_page(res, p, active, layer_pages, layer_meta, stats_pages)
         dumps.append(dump_io.PageDump(
             page_meta=res.page.meta, texts=list(res.texts or []),
             vectors=list(res.vectors or []), engine=res.engine,

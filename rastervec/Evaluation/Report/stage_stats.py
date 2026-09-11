@@ -159,6 +159,14 @@ def stats_ocr(res) -> dict:
     }
 
 
+def stats_paddle_detect(res) -> dict:
+    boxes = res.paddle_boxes or []
+    return {
+        "box_count": len(boxes),
+        "box_size": _dist(max_dimension(b) for b in boxes),
+    }
+
+
 _STATS = {
     "native": stats_native,
     "vectors": stats_vectors,
@@ -168,6 +176,7 @@ _STATS = {
     "segment": stats_segment,
     "similarity": stats_similarity,
     "ocr": stats_ocr,
+    "paddle_detect": stats_paddle_detect,
 }
 
 

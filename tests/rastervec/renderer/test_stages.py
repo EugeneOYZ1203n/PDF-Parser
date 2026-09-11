@@ -36,6 +36,7 @@ def result(page_meta, text, vector):
         unique_texts=[],
         restored_texts=[text(text="ocr", source="ocr")],
         segmentation_debug=[],
+        paddle_boxes=[(10.0, 10.0, 40.0, 20.0)],
     )
 
 
@@ -43,7 +44,7 @@ def result(page_meta, text, vector):
     "render_native", "render_vectors", "render_layers", "render_layer_color_buckets",
     "render_clustering_steps", "render_text_candidates", "render_radon", "render_similarity",
     "render_fast", "render_drawing", "render_ocr_results", "render_restore",
-    "render_reconstructed",
+    "render_paddle_detect", "render_reconstructed",
 ])
 def test_render_returns_valid_pdf(result, fn):
     data = getattr(stages, fn)(result)
@@ -55,7 +56,7 @@ def test_render_returns_valid_pdf(result, fn):
 
 @pytest.mark.parametrize("stage_key", [
     "native", "vectors", "separation", "classify", "fast", "segment",
-    "similarity", "ocr", "drawing", "reconstructed",
+    "similarity", "ocr", "paddle_detect", "drawing", "reconstructed",
 ])
 def test_render_stage_layers(result, stage_key):
     layers = stages.render_stage_layers(result, stage_key)
