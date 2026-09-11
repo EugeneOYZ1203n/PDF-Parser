@@ -6,29 +6,19 @@ import pytest
 from rastervec.models import Page
 from rastervec.pipelines import _common
 from rastervec.pipelines.current import STEP_NAMES, run_pipeline
-from rastervec.pipelines.sub_pipelines import ocr as ocr_mod
 
 
 @pytest.fixture(autouse=True)
-def _stub_ocr(monkeypatch):
-    def fake_recognize_segments(segments, *, recognize_fn=None):
-        from rastervec.helpers.geometry import compute_origin, union_bbox
-        from rastervec.models import Text
+def _stub_paddle_detect(monkeypatch):
+    """Unit tests don't need the real PaddleOCR detection model -- return a
+    fixed box per call so `paddle_detect` exercises the pipeline wiring
+    without a network/model dependency."""
 
-        texts = []
-        for seg in segments:
-            bbox = union_bbox([v.bbox for v in seg.vectors]) if seg.vectors else (0.0, 0.0, 1.0, 1.0)
-            direction = (1.0, 0.0)
-            texts.append(Text(
-                text="TXT", bbox=bbox, direction=direction, origin=compute_origin(bbox, direction),
-                font="", font_size=0.0, color=None, flags=0,
-                ascender=None, descender=None, wmode=0,
-                block_no=0, line_no=0, word_no=0, page_index=0, seqno=0,
-                confidence=0.9, source="ocr",
-            ))
-        return texts
+    def fake_detect_text_paddle(clusters, page, **kwargs):
+        all_vectors = [v for cluster in clusters for v in cluster]
+        return [(0.0, 0.0, 1.0, 1.0)] if all_vectors else []
 
-    monkeypatch.setattr(ocr_mod, "_recognize_segments", fake_recognize_segments)
+    monkeypatch.setattr(_common, "detect_text_paddle", fake_detect_text_paddle)
 
 
 def _text_pdf(tmp_pdf_path):
@@ -71,28 +61,21 @@ def test_run_pipeline_verbose_toggles_intermediates(tmp_pdf_path):
 
     lean = run_pipeline(path, 0, enable_fast=False, verbose=False)
     assert lean.vectors_raw is None
-    assert lean.similarity_groups is None
     assert lean.step_outputs is None
     assert lean.fast_passed is None
-    assert lean.word_segments is None
-    assert lean.unique_texts is None
 
     full = run_pipeline(path, 0, enable_fast=False, verbose=True)
     assert full.vectors_raw is not None
     assert full.vectors_by_layer is not None
-    assert full.similarity_groups is not None
     assert full.step_outputs is not None and set(full.step_outputs) == set(STEP_NAMES)
     assert full.fast_passed is not None
-    assert full.word_segments is not None
-    assert full.unique_segments is not None
-    assert full.unique_texts is not None
+    assert full.paddle_boxes is not None
 
 
-def test_run_pipeline_drawing_pdf_ocrs_candidate(tmp_pdf_path):
+def test_run_pipeline_drawing_pdf_detects_candidate(tmp_pdf_path):
     res = run_pipeline(_drawing_pdf(tmp_pdf_path), 0, enable_fast=False)
-    ocr_texts = _ocr_texts(res)
-    assert ocr_texts  # the small line survives classification and gets OCR'd
-    assert all(t.text == "TXT" for t in ocr_texts)
+    # the small line survives classification and reaches the paddle_detect step
+    assert res.paddle_boxes  # populated by the _stub_paddle_detect fixture
 
 
 def test_verbose_text_clusters_are_tiered(tmp_pdf_path):
@@ -114,7 +97,7 @@ def test_result_page_is_detached_and_open_page_reopens(tmp_pdf_path):
     assert res.page.fitz_page is None
 
 
-def test_run_current_pipeline_threads_compute_to_fast_and_ocr(tmp_pdf_path, monkeypatch):
+def test_run_current_pipeline_threads_compute_to_fast(tmp_pdf_path, monkeypatch):
     sentinel = object()
     captured: dict = {}
 
@@ -124,18 +107,10 @@ def test_run_current_pipeline_threads_compute_to_fast_and_ocr(tmp_pdf_path, monk
         captured["fast"] = kwargs.get("compute")
         return real_detect_text_fast(*args, **kwargs)
 
-    real_recognize = _common.recognize_unique_words
-
-    def spy_recognize(*args, **kwargs):
-        captured["ocr"] = kwargs.get("compute")
-        return real_recognize(*args, **kwargs)
-
     monkeypatch.setattr(_common, "detect_text_fast", spy_detect_text_fast)
-    monkeypatch.setattr(_common, "recognize_unique_words", spy_recognize)
 
     run_pipeline(_text_pdf(tmp_pdf_path), 0, enable_fast=False, compute=sentinel)
     assert captured["fast"] is sentinel
-    assert captured["ocr"] is sentinel
 
 
 def test_step_timer_propagates_when_not_verbose():

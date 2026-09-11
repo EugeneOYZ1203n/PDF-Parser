@@ -80,6 +80,14 @@ class PipelineResult:
     step_durations: dict
     engine: str  # "current" | "legacy"
 
+    # ---- test-branch addition (`test/paddle-detect-post-fast`): populated
+    # by the `paddle_detect` step whenever it runs, independent of
+    # `verbose` -- it's this branch's actual replacement for OCR/restore
+    # output, not a diagnostic extra. `None` if the step wasn't reached
+    # (see `stop_after`). No text, just PaddleOCR's own detected page-space
+    # bboxes.
+    paddle_boxes: "list[tuple[float, float, float, float]] | None" = None
+
     # ---- verbose only (None unless verbose=True) -------------------------
     native_words: "list[Text] | None" = None
     vectors_raw: "list[Vector] | None" = None

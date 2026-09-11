@@ -11,6 +11,7 @@ from rastervec.pipelines._steps import (
     _sample_mask,
     build_drawing_output,
     detect_text_fast,
+    detect_text_paddle,
     elect_unique_segments,
     group_similar_segments,
 )
@@ -231,6 +232,56 @@ def test_elect_unique_segments_multi_member_group_shares_one_representative(vect
 
 def test_elect_unique_segments_empty_input():
     assert elect_unique_segments([], []) == ([], [])
+
+
+# --------------------------------------------------------------------------
+# detect_text_paddle (test branch `test/paddle-detect-post-fast`) -- renders
+# every FAST-surviving cluster's vectors onto one page-sized image, then maps
+# `PaddleDetectBackend.detect`'s pixel-space boxes back to page space.
+# --------------------------------------------------------------------------
+def test_detect_text_paddle_empty_clusters_skips_render(monkeypatch, page_meta):
+    called = []
+    monkeypatch.setattr(_steps, "render_page_paths", lambda *a, **k: called.append(1))
+
+    class _FakePage:
+        meta = page_meta(width=200, height=200)
+
+    assert detect_text_paddle([], _FakePage()) == []
+    assert called == []
+
+
+def test_detect_text_paddle_maps_pixel_boxes_to_page_space(monkeypatch, vector, page_meta):
+    class _FakeDetectBackend:
+        def detect(self, image):
+            return [(0.0, 0.0, 10.0, 20.0)]
+
+    monkeypatch.setattr(_steps, "PaddleDetectBackend", lambda: _FakeDetectBackend())
+    monkeypatch.setattr(_steps, "render_page_paths", lambda vectors, meta, dpi: object())
+
+    class _FakePage:
+        meta = page_meta(width=200, height=200)
+
+    v = vector(bbox=(10, 10, 20, 20))
+    boxes = detect_text_paddle([[v]], _FakePage(), dpi=72)
+
+    assert boxes == [(0.0, 0.0, 10.0, 20.0)]  # dpi=72 -> zoom=1.0, pixel space == page space
+
+
+def test_detect_text_paddle_applies_dpi_zoom(monkeypatch, vector, page_meta):
+    class _FakeDetectBackend:
+        def detect(self, image):
+            return [(0.0, 0.0, 150.0, 150.0)]
+
+    monkeypatch.setattr(_steps, "PaddleDetectBackend", lambda: _FakeDetectBackend())
+    monkeypatch.setattr(_steps, "render_page_paths", lambda vectors, meta, dpi: object())
+
+    class _FakePage:
+        meta = page_meta(width=200, height=200)
+
+    v = vector(bbox=(10, 10, 20, 20))
+    boxes = detect_text_paddle([[v]], _FakePage(), dpi=150)  # zoom = 150/72
+
+    assert boxes == [pytest.approx((0.0, 0.0, 72.0, 72.0))]
 
 
 def test_normalize_segment_undoes_known_rotation(vector):

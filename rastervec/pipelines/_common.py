@@ -9,23 +9,22 @@ from rastervec.logging_setup import get_logger
 from rastervec.pipelines._steps import (
     build_drawing_output,
     detect_text_fast,
-    elect_unique_segments,
+    detect_text_paddle,
     extract_native_text,
     extract_vectors,
-    group_similar_segments,
     read_page,
-    segment_clusters,
 )
 from rastervec.pipelines.result import PipelineResult, StepOutcome
-from rastervec.pipelines.sub_pipelines.ocr import recognize_unique_words, restore_word_texts
 from rastervec.pipelines.sub_pipelines.vector_classification import classify_vectors
 from rastervec.Reader.reader import Reader
 
 _LOG = get_logger("pipelines.current")
 
+# Test branch (`test/paddle-detect-post-fast`): everything after `fast` is
+# replaced by one `paddle_detect` step -- see `_steps.py::detect_text_paddle`.
 STEP_NAMES = [
     "read", "native", "vectors", "classify",
-    "fast", "segment", "similarity", "ocr", "restore", "drawing",
+    "fast", "paddle_detect", "drawing",
 ]
 
 
@@ -67,9 +66,7 @@ def run_current_pipeline(
     compute=None, progress_counter=None, stop_after: str | None = None,
 ) -> PipelineResult:
     timer = StepTimer(verbose=verbose)
-    page = native = vectors = cls = fast = word_segments = groups = None
-    uniques = metas = unique_texts = restored = drawing = None
-    segmentation_debug: list | None = [] if verbose else None
+    page = native = vectors = cls = fast = paddle_boxes = drawing = None
 
     if stop_after is not None and stop_after not in STEP_NAMES:
         raise ValueError(f"stop_after must be one of {STEP_NAMES}, got {stop_after!r}")
@@ -100,23 +97,9 @@ def run_current_pipeline(
                     enable_fast=enable_fast, verbose=verbose, compute=compute,
                     progress_counter=progress_counter,
                 )
-        if _reached("segment"):
-            with timer("segment"):
-                word_segments = segment_clusters(
-                    fast.passed if fast else [], debug_out=segmentation_debug,
-                )
-        if _reached("similarity"):
-            with timer("similarity"):
-                groups = group_similar_segments(word_segments or [])
-                uniques, metas = elect_unique_segments(word_segments or [], groups)
-        if _reached("ocr"):
-            with timer("ocr"):
-                unique_texts = recognize_unique_words(
-                    uniques or [], compute=compute, progress_counter=progress_counter,
-                )
-        if _reached("restore"):
-            with timer("restore"):
-                restored = restore_word_texts(unique_texts or [], metas or [])
+        if _reached("paddle_detect"):
+            with timer("paddle_detect"):
+                paddle_boxes = detect_text_paddle(fast.passed if fast else [], page)
         if _reached("drawing"):
             with timer("drawing"):
                 drawing = build_drawing_output(
@@ -129,7 +112,7 @@ def run_current_pipeline(
     if page is not None:
         page.fitz_page = None
 
-    all_texts = list(native or []) + list(restored or [])
+    all_texts = list(native or [])
 
     return PipelineResult(
         page=page,
@@ -137,6 +120,7 @@ def run_current_pipeline(
         vectors=drawing or [],
         step_durations=timer.durations,
         engine="current",
+        paddle_boxes=paddle_boxes,
         # verbose extras
         native_words=(native if verbose else None),
         vectors_raw=(vectors if verbose else None),
@@ -148,12 +132,5 @@ def run_current_pipeline(
         fast_result=(fast.page_result if verbose and fast else None),
         fast_passed=(fast.passed if verbose and fast else None),
         fast_dropped_vectors=(fast.dropped_vectors if verbose and fast else None),
-        word_segments=(word_segments if verbose else None),
-        similarity_groups=(groups if verbose else None),
-        unique_segments=(uniques if verbose else None),
-        segment_metas=(metas if verbose else None),
-        unique_texts=(unique_texts if verbose else None),
-        restored_texts=(restored if verbose else None),
         step_outputs=(timer.outcomes if verbose else None),
-        segmentation_debug=(segmentation_debug if verbose else None),
     )

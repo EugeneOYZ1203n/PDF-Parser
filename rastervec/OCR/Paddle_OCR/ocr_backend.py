@@ -120,6 +120,54 @@ class PaddleRecBackend:
         return out
 
 
+class PaddleDetectBackend:
+    """Test-branch backend (see `pipelines/_steps.py::detect_text_paddle`):
+    PaddleOCR's own text-DETECTION model (`engine.text_detector`, PP-OCR's
+    DB detector) run directly on a whole-page render, replacing Radon
+    segmentation + similarity dedup + recognition entirely. No text is ever
+    recognized on this path -- callers get page-space bboxes only.
+
+    Cached separately from `PaddleRecBackend` (its own `_ENGINE_CACHE`)
+    because it's built with a much larger `det_limit_side_len`: a whole-page
+    render at `config.FAST_PAGE_RENDER_DPI` is easily 1500-5000px on a side,
+    and DB's 960px default would downsize away most small text before
+    detection even runs."""
+
+    _ENGINE_CACHE: dict[tuple[str, str], object] = {}
+    _DET_LIMIT_SIDE_LEN = 4000
+
+    def __init__(self, ocr_version: str = OCR_VERSION, lang: str = OCR_LANG) -> None:
+        self.key = (ocr_version, lang)
+
+    def _engine(self):
+        if self.key not in PaddleDetectBackend._ENGINE_CACHE:
+            # torch must load before paddle on Windows -- see PaddleRecBackend._engine.
+            import torch  # noqa: F401
+            from paddleocr import PaddleOCR
+
+            ocr_version, lang = self.key
+            PaddleDetectBackend._ENGINE_CACHE[self.key] = PaddleOCR(
+                ocr_version=ocr_version,
+                lang=lang,
+                show_log=False,
+                det_limit_side_len=self._DET_LIMIT_SIDE_LEN,
+            )
+        return PaddleDetectBackend._ENGINE_CACHE[self.key]
+
+    def detect(self, image: np.ndarray) -> list[tuple[float, float, float, float]]:
+        """One axis-aligned pixel-space bbox per detected text region, no
+        confidence score (paddleocr 2.x's public detector API never returns
+        the one `DBPostProcess` computes internally -- it's only used for
+        its own `det_db_box_thresh` filtering)."""
+        engine = self._engine()
+        bgr = _normalize_bgr(image)
+        dt_boxes, _elapse = engine.text_detector(bgr)
+        return [
+            (float(q[:, 0].min()), float(q[:, 1].min()), float(q[:, 0].max()), float(q[:, 1].max()))
+            for q in dt_boxes
+        ]
+
+
 def _normalize_bgr(crop: np.ndarray) -> np.ndarray:
     """A `Segment.image` -> a 3-channel BGR array (paddleocr 2.x's
     TextClassifier/TextRecognizer are cv2/BGR). Nothing else happens here:

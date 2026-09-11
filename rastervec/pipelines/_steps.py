@@ -31,6 +31,7 @@ from rastervec.logging_setup import get_logger
 from rastervec.models import Page, Segment, SegmentMeta, Vector
 from rastervec.native_text import extract_native_text as _extract_native_text
 from rastervec.OCR.fast_detect import FastDetector
+from rastervec.OCR.Paddle_OCR.ocr_backend import PaddleDetectBackend
 from rastervec.OCR.radon import segment_clusters  # noqa: F401 -- re-exported for callers
 from rastervec.pipelines.result import FastPageResult
 from rastervec.renderer import render_page_paths
@@ -186,6 +187,30 @@ def detect_text_fast(
         skipped_tiles=skipped_tiles, tile_count=tile_count, tile_seconds=tile_seconds,
     )
     return FastStepResult(passed, dropped_vectors, result)
+
+
+# --------------------------------------------------------------------------
+# Test-branch step (`test/paddle-detect-post-fast`): replaces Radon
+# segmentation + similarity dedup + recognition entirely -- one call to
+# PaddleOCR's own text-DETECTION model on a whole-page render of every
+# FAST-surviving cluster's vectors. No text is ever recognized here; only
+# page-space bboxes come out.
+# --------------------------------------------------------------------------
+def detect_text_paddle(
+    clusters: list[list[Vector]], page: Page, *, dpi: int = FAST_PAGE_RENDER_DPI,
+) -> list[tuple[float, float, float, float]]:
+    """Renders every FAST-surviving cluster's vectors onto one shared
+    page-sized canvas (the same `render_page_paths` FAST itself uses, same
+    unrotated-MediaBox-space / scale-only pixel<->page transform), runs
+    `PaddleDetectBackend.detect` on it, and maps the returned pixel-space
+    bboxes back to page space."""
+    all_vectors = [v for cluster in clusters for v in cluster]
+    if not all_vectors:
+        return []
+    page_image = render_page_paths(all_vectors, page.meta, dpi)
+    pixel_boxes = PaddleDetectBackend().detect(np.array(page_image))
+    zoom = dpi / PDF_POINTS_PER_INCH
+    return [(x0 / zoom, y0 / zoom, x1 / zoom, y1 / zoom) for x0, y0, x1, y1 in pixel_boxes]
 
 
 # --------------------------------------------------------------------------

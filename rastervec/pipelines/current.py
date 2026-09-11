@@ -1,17 +1,15 @@
-"""The current extraction pipeline.
+"""**Test branch (`test/paddle-detect-post-fast`)**: everything after FAST
+is replaced by a single PaddleOCR text-DETECTION call -- no Radon
+segmentation, no similarity dedup, no recognition. See `_steps.py::
+detect_text_paddle` and `OCR/Paddle_OCR/ocr_backend.py::PaddleDetectBackend`.
 
     native           = extract_native_text(page)                      # list[Text]
     vectors          = extract_vectors(page)                          # list[Vector]
     classification   = classify_vectors(vectors, page)                # tiered text clusters + drawing drops
     fast             = detect_text_fast(flat_clusters, page)          # per-cluster, independent -> passed clusters
                                                                        # + dropped_vectors
-    word_segments    = segment_clusters(fast.passed)                  # Radon, every surviving cluster -> flat
-                                                                       # list[Segment] (word-level, w/ .image)
-    groups           = group_similar_segments(word_segments)          # shape dedup, Radon angle -> list[list[int]]
-    uniques, metas   = elect_unique_segments(word_segments, groups)   # one canonical Segment/group + SegmentMetas
-                                                                       # (real word occurrences)
-    unique_texts     = recognize_unique_words(uniques)                # one Text per unique
-    restored         = restore_word_texts(unique_texts, metas)        # each unique's Text, onto every occurrence
+    paddle_boxes     = detect_text_paddle(fast.passed, page)          # whole-page render -> PaddleOCR's own
+                                                                       # detector -> page-space bboxes, no text
     drawing_vectors  = build_drawing_output(...)
 
 See `_common.run_current_pipeline` for the real block sequence and
