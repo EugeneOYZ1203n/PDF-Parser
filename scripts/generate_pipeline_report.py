@@ -241,6 +241,7 @@ def _save_radon_inputs(res, folder: Path, page_index: int) -> int:
     clusters = getattr(res, "fast_passed", None) or []
     if not clusters:
         return 0
+    from rastervec.config import RADON_RENDER_PADDING_EXTRA_PT
     from rastervec.OCR.radon import render_cluster_for_radon
     from rastervec.renderer import page_points_to_pixel
 
@@ -253,7 +254,12 @@ def _save_radon_inputs(res, folder: Path, page_index: int) -> int:
     for i, cluster in enumerate(clusters):
         if not cluster:
             continue
-        gray, dpi_used = render_cluster_for_radon(cluster, _RADON_DPI)
+        # Must match segment_clusters' own per-cluster padding exactly, or
+        # this debug render and its overlay boxes will be misaligned.
+        stroke_padding = (
+            max((v.width or 0.0) for v in cluster) / 2.0 + RADON_RENDER_PADDING_EXTRA_PT
+        )
+        gray, dpi_used = render_cluster_for_radon(cluster, _RADON_DPI, padding=stroke_padding)
         img = Image.fromarray(gray)
         key = tuple(round(c, 2) for c in union_bbox([v.bbox for v in cluster]))
         dbg = dbg_by_bbox.get(key)
@@ -262,7 +268,7 @@ def _save_radon_inputs(res, folder: Path, page_index: int) -> int:
             out = []
             for x0, y0, x1, y1 in page_bboxes:
                 (px0, py0), (px1, py1) = page_points_to_pixel(
-                    cluster, dpi_used, [(x0, y0), (x1, y1)]
+                    cluster, dpi_used, [(x0, y0), (x1, y1)], padding=stroke_padding,
                 )
                 out.append((px0, py0, px1, py1))
             return out

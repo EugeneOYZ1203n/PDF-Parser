@@ -48,14 +48,18 @@ combines this angle with PaddleOCR's cls-detected 180-degree flip) depend
 on the full-precision value; rounding it here would silently degrade every
 downstream angle to blocky 90-degree steps.
 
-**Padding lives here, and only here.** `pad_image` is the pipeline's single
-padding step: `renderer.render_vector_cluster` renders a cluster's bare
-`union_bbox` with no border, and the OCR backend hands `Segment.image` to
-PaddleOCR verbatim (there is no crop-normalization pass anymore), so both
-margins the OCR path needs come from `segment_clusters`' two explicit
-`pad_image` calls -- one around the whole cluster render, one around each
-word crop. Don't push either back into the renderer or the backend; the
-point of the current shape is that the padding is readable at the call site.
+**Two padding mechanisms, both decided here.** `pad_image` is the pipeline's
+pixel-space padding step: the OCR backend hands `Segment.image` to
+PaddleOCR verbatim (there is no crop-normalization pass anymore), so the
+breathing-room margin the OCR path needs comes from `segment_clusters`' two
+explicit `pad_image` calls -- one around the whole cluster render, one
+around each word crop. Separately, `render_cluster_for_radon` passes a
+small page-space `padding` into `renderer.render_vector_cluster` itself
+(sized from the cluster's own max stroke width, see
+`RADON_RENDER_PADDING_EXTRA_PT`), so a stroke sitting at the exact edge of
+the cluster's bbox isn't clipped by the render frame. Don't push either back
+into the renderer or the backend; the point of the current shape is that
+both paddings are readable at the call site.
 
 Pipeline use: this runs directly after FAST detection (`pipelines/
 _steps.py::detect_text_fast`) and before similarity grouping -- every
@@ -69,8 +73,10 @@ splits it into line bands (on the *good* gaps) and then into
 aspect-ratio-bounded word segments, then maps each segment's crop region
 back onto the cluster's own `Vector`s (by bbox overlap) to build a flat
 `list[Segment]`, one per segment. It also captures each segment's own
-deskewed pixel crop -- grown outward to a fully ink-free border so clipped
-ascenders/descenders are recovered -- directly into `Segment.image`, so OCR
+deskewed pixel crop -- grown to the union of its tight box and its assigned
+`Vector`s' own bboxes, so clipped ascenders/descenders are recovered from
+real geometry rather than an ink-pixel scan -- directly into
+`Segment.image`, so OCR
 (`OCR/Paddle_OCR/ocr_backend.py::recognize_segments`) never has to
 re-render from vectors. The 0-vs-180 (and 90-vs-270) ambiguity Radon cannot
 resolve is left to PaddleOCR's `cls` pass once a word is actually being
@@ -101,8 +107,8 @@ from rastervec.config import (
     RADON_PAD_FRACTION,
     RADON_PEAK_MIN_FRAC,
     RADON_PROFILE_SMOOTH_PX,
+    RADON_RENDER_PADDING_EXTRA_PT,
     RADON_SKEW_LIMIT_DEG,
-    RADON_WORD_GROW_MAX_FRAC,
 )
 from rastervec.helpers.geometry import (
     PDF_POINTS_PER_INCH,
@@ -110,7 +116,11 @@ from rastervec.helpers.geometry import (
     union_bbox,
 )
 from rastervec.models import Segment, Vector
-from rastervec.renderer import pixel_to_page_bbox, render_vector_cluster
+from rastervec.renderer import (
+    page_points_to_pixel,
+    pixel_to_page_bbox,
+    render_vector_cluster,
+)
 from rastervec.renderer.stages import render_radon  # noqa: F401 -- re-exported for callers
 
 # A pixel darker than this counts as glyph ink (0 = black, 255 = white).
@@ -595,22 +605,26 @@ def _downscale_ink_for_radon(gray: np.ndarray) -> np.ndarray:
     return resize(ink.astype(np.float64), new_hw, order=1) > 0.5
 
 
-def render_cluster_for_radon(vectors: list[Vector], dpi: int = 300) -> tuple["np.ndarray", int]:
+def render_cluster_for_radon(
+    vectors: list[Vector], dpi: int = 300, padding: float = 0.0,
+) -> tuple["np.ndarray", int]:
     """Render `vectors` as Radon/OCR sees it: `dpi` bumped upward (never
     down) so the rendered image's shorter side is at least
     `MIN_RENDER_SIDE_PX` -- "don't hand PaddleOCR a tiny crop" -- and
     capped at `MAX_RENDER_DPI`, since the render frame is the bare bbox
     and a degenerate sub-point cluster would otherwise demand an unbounded
-    dpi to reach that minimum. Returns `(gray, dpi_used)`, the cluster's
-    bare `union_bbox` with no border (`renderer/png.py` pads nothing);
-    `segment_clusters` adds the margin itself, in pixel space, via
-    `pad_image`."""
+    dpi to reach that minimum. Returns `(gray, dpi_used)`. `padding` (PDF
+    points, 0 by default) is forwarded to `renderer.render_vector_cluster`,
+    expanding the render frame on every side -- `segment_clusters` sizes it
+    from the cluster's own max stroke width so a thick stroke at the bbox
+    edge isn't clipped; `segment_clusters` separately adds its own margin
+    in pixel space afterward, via `pad_image`."""
     x0, y0, x1, y1 = union_bbox([v.bbox for v in vectors])
-    min_side_pt = min(x1 - x0, y1 - y0)
+    min_side_pt = min(x1 - x0, y1 - y0) + 2 * padding
     if min_side_pt > 0:
         needed_dpi = math.ceil(MIN_RENDER_SIDE_PX * PDF_POINTS_PER_INCH / min_side_pt)
         dpi = min(max(dpi, needed_dpi), MAX_RENDER_DPI)
-    image = render_vector_cluster(vectors, dpi)
+    image = render_vector_cluster(vectors, dpi, padding)
     return to_gray(image), dpi
 
 
@@ -646,47 +660,6 @@ def pad_image(
 # --------------------------------------------------------------------------
 # crop growth + vector assignment
 # --------------------------------------------------------------------------
-def _grow_box_to_ink_free_border(
-    ink: np.ndarray, box: tuple[int, int, int, int],
-    *, bounds: tuple[float, float, float, float],
-) -> tuple[int, int, int, int]:
-    """Expand `box` (x0, y0, x1, y1; x1/y1 exclusive) outward one pixel per
-    side while the row/column just outside that side still touches ink in
-    `ink` (the FULL deskewed cluster mask, so an ascender/descender the
-    line band clipped is recovered). Stops when all four just-outside
-    borders are ink-free, or a side hits `bounds` (x0, y0, x1, y1;
-    typically the neighbour-band midpoints and the +100 % growth cap) or
-    the image edge."""
-    height, width = ink.shape
-    bx0 = max(0, int(round(bounds[0])))
-    by0 = max(0, int(round(bounds[1])))
-    bx1 = min(width, int(round(bounds[2])))
-    by1 = min(height, int(round(bounds[3])))
-
-    x0, y0, x1, y1 = box
-    x0 = max(0, min(int(x0), width))
-    x1 = max(x0, min(int(x1), width))
-    y0 = max(0, min(int(y0), height))
-    y1 = max(y0, min(int(y1), height))
-
-    changed = True
-    while changed:
-        changed = False
-        if y0 > by0 and ink[y0 - 1, x0:x1].any():
-            y0 -= 1
-            changed = True
-        if y1 < by1 and ink[y1, x0:x1].any():
-            y1 += 1
-            changed = True
-        if x0 > bx0 and ink[y0:y1, x0 - 1].any():
-            x0 -= 1
-            changed = True
-        if x1 < bx1 and ink[y0:y1, x1].any():
-            x1 += 1
-            changed = True
-    return (x0, y0, x1, y1)
-
-
 def _bbox_center(bbox: tuple[float, float, float, float]) -> tuple[float, float]:
     x0, y0, x1, y1 = bbox
     return ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
@@ -735,25 +708,29 @@ def segment_clusters(
     clusters: list[list[Vector]], *, dpi: int = 300, debug_out: "list | None" = None,
 ) -> list[Segment]:
     """Radon-segments every cluster into aspect-bounded word `Segment`s at
-    real page position. For each cluster: render (transient) -> **pad** ->
-    estimate skew (full precision) -> deskew -> split into line bands on the
-    good gaps -> split each band into aspect-ratio-bounded word segments
-    (`group_by_aspect`) -> grow each segment's crop outward to an ink-free
-    border (capped at +100 %, clamped to the neighbouring bands) -> map each
+    real page position. For each cluster: render (transient, padded by half
+    the cluster's own max stroke width so thick strokes at the bbox edge
+    aren't clipped) -> **pad** -> estimate skew (full precision) -> deskew
+    -> split into line bands on the good gaps -> split each band into
+    aspect-ratio-bounded word segments (`group_by_aspect`) -> map each
     segment's *tight* crop region back onto the cluster's own `Vector`s (by
-    bbox overlap, see `_assign_vectors_to_segments`) -> one `Segment` per
-    non-empty segment, its `image` that segment's own **padded** grown
-    deskewed pixel crop (so OCR never has to re-render from vectors, and
-    needs no normalization pass of its own).
+    bbox overlap, see `_assign_vectors_to_segments`) -> grow each kept
+    segment's page-space bbox to the union of its tight box and its
+    assigned `Vector`s' own bboxes (recovering ascenders/descenders the
+    line band clipped, from real geometry rather than an ink-pixel scan) ->
+    one `Segment` per non-empty segment, its `image` that grown region's
+    own **padded** deskewed pixel crop (so OCR never has to re-render from
+    vectors, and needs no normalization pass of its own).
 
-    The two `pad_image` calls are the only padding in the pipeline -- see
+    The two `pad_image` calls are the pipeline's pixel-space padding -- see
     that function's docstring. Both are inline here rather than hidden in
     the renderer or the OCR backend so the margins are visible where they
     happen; the price is the `- pad_x_px / - pad_y_px` correction on the
-    way back out to page space. The crop is grown from the tight box but
-    the page bbox / vector assignment stays on the tight box, so growth can
-    never enlarge a segment's page footprint or steal a neighbour's
-    vectors.
+    way back out to page space (and its `+ pad_x_px / + pad_y_px` inverse
+    on the way back in for the grown-box crop). Vector assignment
+    (`_assign_vectors_to_segments`) always runs on the *tight* boxes, so
+    growth can never steal a neighbour's vectors -- it can only enlarge a
+    segment's own page footprint afterward.
 
     A cluster with no ink, or whose deskewed profile yields no line bands,
     is skipped (its Vectors are lost from this step's output -- callers
@@ -762,7 +739,10 @@ def segment_clusters(
     for cluster in clusters:
         if not cluster:
             continue
-        gray, dpi_used = render_cluster_for_radon(cluster, dpi)
+        stroke_padding = (
+            max((v.width or 0.0) for v in cluster) / 2.0 + RADON_RENDER_PADDING_EXTRA_PT
+        )
+        gray, dpi_used = render_cluster_for_radon(cluster, dpi, padding=stroke_padding)
         if gray.size == 0 or not to_ink(gray).any():
             if debug_out is not None:
                 d = _blank_segmentation_dbg(cluster)
@@ -803,6 +783,7 @@ def segment_clusters(
             return pixel_to_page_bbox(
                 cluster, dpi_used,
                 [(float(x) - pad_x_px, float(y) - pad_y_px) for x, y in mapped],
+                padding=stroke_padding,
             )
 
         dbg = None
@@ -819,15 +800,8 @@ def segment_clusters(
             debug_out.append(dbg)
 
         seg_bboxes: list[tuple[float, float, float, float]] = []
-        grown_page_bboxes: list[tuple[float, float, float, float]] = []
-        seg_images: list[np.ndarray] = []
-        for bi, (by0, by1) in enumerate(bands):
+        for by0, by1 in bands:
             line = deskewed[by0:by1 + 1, :]
-            prev_mid = 0 if bi == 0 else (bands[bi - 1][1] + bands[bi][0]) // 2
-            next_mid = (
-                height if bi == len(bands) - 1
-                else (bands[bi][1] + bands[bi + 1][0]) // 2 + 1
-            )
             _prev_wx1 = None
             for wx0, wy0, wx1, wy1 in group_by_aspect(
                 line, gap_threshold=gap_threshold, pad=0,
@@ -849,30 +823,9 @@ def segment_clusters(
                 page_bbox = pixel_to_page_bbox(
                     cluster, dpi_used,
                     [(float(x) - pad_x_px, float(y) - pad_y_px) for x, y in mapped],
+                    padding=stroke_padding,
                 )
                 seg_bboxes.append(page_bbox)
-
-                # OCR crop from the GROWN box (ascenders/descenders the line
-                # band clipped), capped at +100 % per axis and clamped to
-                # the neighbouring bands.
-                tw = max(1, wx1 - wx0)
-                th = max(1, gy1 - gy0)
-                margin = RADON_WORD_GROW_MAX_FRAC / 2.0
-                grown = _grow_box_to_ink_free_border(
-                    deskew_ink, (wx0, gy0, wx1, gy1),
-                    bounds=(
-                        wx0 - margin * tw, max(prev_mid, gy0 - margin * th),
-                        wx1 + margin * tw, min(next_mid, gy1 + margin * th),
-                    ),
-                )
-                gx0, ggy0, gx1, ggy1 = grown
-                grown_page_bboxes.append(_px_to_page_bbox(
-                    [(gx0, ggy0), (gx1, ggy0), (gx1, ggy1), (gx0, ggy1)]
-                ))
-                # Pad 2 of 2: this segment's own crop, handed to PaddleOCR
-                # verbatim as `Segment.image`.
-                crop, _offset = pad_image(deskewed[ggy0:ggy1, gx0:gx1])
-                seg_images.append(crop)
 
         if not seg_bboxes:
             if dbg is not None:
@@ -880,16 +833,39 @@ def segment_clusters(
             continue
 
         assignments = _assign_vectors_to_segments(cluster, seg_bboxes)
-        for seg_vectors, tight_bbox, grown_bbox, image in zip(
-            assignments, seg_bboxes, grown_page_bboxes, seg_images
-        ):
-            if seg_vectors:
-                segments.append(Segment(vectors=seg_vectors, angle=float(skew), image=image))
+        for seg_vectors, tight_bbox in zip(assignments, seg_bboxes):
+            if not seg_vectors:
                 if dbg is not None:
-                    dbg["segment_bboxes"].append(tight_bbox)
-                    dbg["grown_segment_bboxes"].append(grown_bbox)
-                    dbg["assigned_vector_bboxes"].extend(v.bbox for v in seg_vectors)
-            elif dbg is not None:
-                dbg["dropped_segment_bboxes"].append(tight_bbox)
+                    dbg["dropped_segment_bboxes"].append(tight_bbox)
+                continue
+
+            # Grow to the union of the tight box and its assigned Vectors'
+            # own bboxes -- real geometry, not an ink-pixel scan -- then map
+            # that page-space region back into this cluster's deskewed/
+            # padded pixel space (the exact reverse of `_px_to_page_bbox`)
+            # to build the OCR crop.
+            grown_bbox = union_bbox([tight_bbox] + [v.bbox for v in seg_vectors])
+            gpx0, gpy0, gpx1, gpy1 = grown_bbox
+            corners_page = [(gpx0, gpy0), (gpx1, gpy0), (gpx1, gpy1), (gpx0, gpy1)]
+            unpadded_px = page_points_to_pixel(
+                cluster, dpi_used, corners_page, padding=stroke_padding,
+            )
+            padded_px = np.array(
+                [(x + pad_x_px, y + pad_y_px) for x, y in unpadded_px], dtype=np.float64,
+            )
+            deskewed_px = forward(padded_px)
+            gx0 = max(0, int(math.floor(float(deskewed_px[:, 0].min()))))
+            gx1 = min(width, int(math.ceil(float(deskewed_px[:, 0].max()))))
+            ggy0 = max(0, int(math.floor(float(deskewed_px[:, 1].min()))))
+            ggy1 = min(height, int(math.ceil(float(deskewed_px[:, 1].max()))))
+            # Pad 2 of 2: this segment's own crop, handed to PaddleOCR
+            # verbatim as `Segment.image`.
+            crop, _offset = pad_image(deskewed[ggy0:ggy1, gx0:gx1])
+
+            segments.append(Segment(vectors=seg_vectors, angle=float(skew), image=crop))
+            if dbg is not None:
+                dbg["segment_bboxes"].append(tight_bbox)
+                dbg["grown_segment_bboxes"].append(grown_bbox)
+                dbg["assigned_vector_bboxes"].extend(v.bbox for v in seg_vectors)
 
     return segments

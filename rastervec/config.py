@@ -179,10 +179,6 @@ RADON_GOOD_GAP_MAX = 0.5
 # "I love pineapples very much" becomes a few OCR-friendly chunks rather
 # than one absurdly wide crop. A single word wider than this is never split.
 RADON_MAX_SEGMENT_ASPECT = 10.0
-# Max fractional growth of a segment's OCR crop per axis when it is grown
-# outward to a fully ink-free border (recovering clipped ascenders /
-# descenders). 1.0 -> at most +100% width and +100% height.
-RADON_WORD_GROW_MAX_FRAC = 1.0
 # Cap (px) on a cluster render's long side before the Radon sweep -- angle
 # estimation is scale-invariant, so a big merged bbox is downscaled to
 # this first to keep the O(pixels * angles) transform fast.
@@ -197,11 +193,16 @@ RADON_MIN_GAP_PX = 2.0
 # word gaps), so a threshold just above it separates words from letters.
 RADON_GAP_MEDIAN_MULTIPLIER = 1.3
 # White border `OCR/radon.py::pad_image` adds, as a fraction of the image's
-# own width (left/right) and height (top/bottom). The pipeline's *only*
-# padding: applied once to a whole cluster render before deskew/word-split,
-# and once to each word crop before it becomes `Segment.image` -- the crop
-# PaddleOCR recognizes. `renderer/png.py` adds no border of its own.
+# own width (left/right) and height (top/bottom). Applied once to a whole
+# cluster render before deskew/word-split, and once to each word crop before
+# it becomes `Segment.image` -- the crop PaddleOCR recognizes.
 RADON_PAD_FRACTION = 0.1
+# Fixed extra margin (PDF points) added on top of half the cluster's own max
+# stroke width when `segment_clusters` renders a cluster for Radon
+# (`render_cluster_for_radon(..., padding=...)`) -- so a stroke's
+# anti-aliased edge is never clipped exactly at the render frame. Distinct
+# from `RADON_PAD_FRACTION`'s pixel-space post-render border.
+RADON_RENDER_PADDING_EXTRA_PT = 0.5
 # Minimum ink-run count (the pre-OCR proxy for character count) a split
 # word must have -- a shorter word merges into a neighbor regardless of
 # the gap between them, since PaddleOCR reads a too-short word's
