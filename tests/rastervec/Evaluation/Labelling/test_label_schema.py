@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from rastervec.Evaluation.Labelling.label_schema import (
+    GeometryAnnotation,
     LabelEntry,
     LabelSet,
     cluster_signature,
@@ -38,9 +39,16 @@ def test_save_and_load_labels_round_trip(tmp_path):
         entries=[
             LabelEntry(
                 page_index=0, cluster_bbox=(0, 0, 10, 10),
-                cluster_signature="1:0.0:0.0:10.0:10.0", text="Hello",
-                source="manual", vector_signatures=["abc123", "def456"],
+                cluster_signature="1:0.0:0.0:10.0:10.0", label_id="abc-123", text="Hello",
+                source="vector", vector_signatures=["abc123", "def456"],
             )
+        ],
+        geometry_entries=[
+            GeometryAnnotation(page_index=0, kind="l", points=[(0.0, 0.0), (1.0, 1.0)]),
+            GeometryAnnotation(
+                page_index=0, kind="c",
+                points=[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
+            ),
         ],
     )
     out_path = str(tmp_path / "labels.json")
@@ -49,3 +57,12 @@ def test_save_and_load_labels_round_trip(tmp_path):
     restored = load_labels(out_path)
 
     assert restored == labels
+
+
+def test_label_source_accepts_native_vector_raster(tmp_path):
+    for i, source in enumerate(("native", "vector", "raster")):
+        entry = LabelEntry(
+            page_index=0, cluster_bbox=(0, 0, 1, 1),
+            cluster_signature=f"sig{i}", label_id=f"id{i}", text="x", source=source,
+        )
+        assert entry.source == source

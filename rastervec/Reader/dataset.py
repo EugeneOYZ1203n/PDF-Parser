@@ -1,8 +1,9 @@
 """Dataset collection for the benchmarking suite: recursively walk a
-directory tree for PDFs and sidecar label JSONs (the `manual_label.py` /
-`auto_label.py` `LabelSet` format, see `Evaluation/Labelling/
-label_schema.py`) and pair them into one flat list of `(pdf, page)` work
-items, each carrying any human-entered `LabelEntry`s for that page.
+directory tree for PDFs and sidecar label JSONs (the `scripts/label/
+vector_label.py` / `native_label.py` / `raster_label.py` `LabelSet` format,
+see `Evaluation/Labelling/label_schema.py`) and pair them into one flat
+list of `(pdf, page)` work items, each carrying any human-entered
+`LabelEntry`s for that page.
 
 Imported by `notebooks/benchmark_vector_classification.ipynb` -- it
 replaces that notebook's old two-mode (`PDF_FOLDER` xor `LABELS_JSON`)
@@ -49,11 +50,12 @@ def _canon(p: Path | str) -> str:
 @dataclass(frozen=True)
 class DatasetPage:
     """One `(pdf, page)` benchmark work item. `manual_entries` is the
-    `source="manual"` `LabelEntry`s a sidecar label file supplied for this
-    exact page (empty when the PDF had no sidecar, or the sidecar had no
-    manual entries for this page). Auto labels are NOT included here -- the
-    benchmark derives those itself per page via `auto_label_pdf`, so ground
-    truth stays independent of any pipeline run."""
+    human-entered (`source in ("vector", "raster")`) `LabelEntry`s a sidecar
+    label file supplied for this exact page (empty when the PDF had no
+    sidecar, or the sidecar had no such entries for this page). Native
+    labels are NOT included here -- the benchmark derives those itself per
+    page via `native_label_pdf`, so ground truth stays independent of any
+    pipeline run."""
 
     pdf_path: str
     page_index: int
@@ -131,8 +133,8 @@ def collect_dataset(
     one flat, sorted, de-duplicated list of `DatasetPage`s.
 
     - A PDF that a label file names: one `DatasetPage` per page that file
-      references (any source), carrying that page's `source="manual"`
-      entries.
+      references (any source), carrying that page's human-entered
+      (`source in ("vector", "raster")`) entries.
     - A PDF with no label file (and `include_unlabelled`): one
       `DatasetPage` per page in `range(min(pages_per_pdf or n, n))` with no
       manual entries -- the benchmark auto-labels these.
@@ -166,7 +168,7 @@ def collect_dataset(
 
         for entry in label_set.entries:
             labelled_pages.setdefault(canon, set()).add(entry.page_index)
-            if entry.source != "manual":
+            if entry.source not in ("vector", "raster"):
                 continue
             key = (canon, entry.page_index)
             sig = (tuple(entry.cluster_bbox), entry.text, entry.expected_rotation)

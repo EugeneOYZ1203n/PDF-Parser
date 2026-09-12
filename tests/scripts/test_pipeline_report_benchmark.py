@@ -32,7 +32,7 @@ def _meta() -> PageMeta:
 
 def _label(text, bbox, source):
     return LabelEntry(page_index=0, cluster_bbox=bbox, cluster_signature="s",
-                      text=text, source=source)
+                      label_id=f"{source}:{text}", text=text, source=source)
 
 
 def _write_doc(doc: Path, *, ocr_text: str, manual: bool) -> None:
@@ -41,10 +41,10 @@ def _write_doc(doc: Path, *, ocr_text: str, manual: bool) -> None:
         doc / "dump.json", "x.pdf",
         [dump_io.PageDump(_meta(), [_text(ocr_text, (0, 0, 50, 12))], [], "current", {})],
     )
-    save_labels(LabelSet(pdf_path="x.pdf", entries=[_label("HELLO WORLD", (0, 0, 50, 12), "auto")]),
+    save_labels(LabelSet(pdf_path="x.pdf", entries=[_label("HELLO WORLD", (0, 0, 50, 12), "native")]),
                 str(doc / "ground_truth_auto.json"))
     if manual:
-        save_labels(LabelSet(pdf_path="x.pdf", entries=[_label("FOO BAR", (0, 100, 50, 112), "manual")]),
+        save_labels(LabelSet(pdf_path="x.pdf", entries=[_label("FOO BAR", (0, 100, 50, 112), "vector")]),
                     str(doc / "ground_truth_manual.json"))
 
 

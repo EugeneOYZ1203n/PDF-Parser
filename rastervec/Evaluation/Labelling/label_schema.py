@@ -1,19 +1,25 @@
 """Sidecar JSON label format for ground-truth vector-cluster text, used by
-both `manual_label.py` (human-entered) and `auto_label.py` (derived from
-native text, independent of any pipeline run) -- and consumed by
-`Evaluation/Evaluate/evaluate.py` to score a pipeline run against these
-labels.
+`scripts/label/vector_label.py` (human-entered), `scripts/label/
+native_label.py` (derived from native text, independent of any pipeline
+run), and `scripts/label/raster_label.py` (human-entered over a rasterized
+page, no backing vectors) -- and consumed by `Evaluation/Evaluate/
+evaluate.py` to score a pipeline run against these labels.
 
-One `LabelEntry` per labelled region. `cluster_signature`'s meaning
-differs by `source`: for `source="manual"`, it's `cluster_signature()`
-below -- a deterministic string built from a real clustered-run's own
-member count and rounded bbox, stable across repeated runs of the *same*
-pipeline over the *same* PDF (VectorPath instances have no identity across
-runs, so this lets a label re-match a freshly re-clustered run's clusters).
-For `source="auto"`, there is no clustered run backing the label at all
-(see auto_label.py's own docstring) -- `cluster_signature` there is a
+One `LabelEntry` per labelled region, identified by its stable `label_id`
+(not `cluster_signature`, which can go stale the moment a `vector_label`
+edit changes the entry's own bbox/vector set). `cluster_signature` is
+informational/debug-only now: for `source="vector"`/`source="raster"`, it's
+`cluster_signature()` below -- a deterministic string built from a real
+clustered-run's own member count and rounded bbox (`"raster:..."` for a
+raster entry, which has no backing vectors at all). For `source="native"`,
+there is no clustered run backing the label at all (see native_label.py's
+own docstring) -- `cluster_signature` there is a
 `f"line:{page_index}:{block_no}:{line_no}"` native-text line-region id
 instead, not a VectorPath-cluster signature.
+
+`GeometryAnnotation` is a separate, non-text kind of ground truth --
+hand-drawn lines/curves for a future raster-image line-tracing pipeline
+stage, produced only by `raster_label.py`.
 """
 from __future__ import annotations
 
@@ -28,32 +34,51 @@ from rastervec.helpers.geometry import item_points, union_bbox
 if TYPE_CHECKING:
     from rastervec.models import Vector
 
-LabelSource = Literal["manual", "auto"]
+LabelSource = Literal["native", "vector", "raster"]
 
 
 class LabelEntry(BaseModel):
     page_index: int
     cluster_bbox: tuple[float, float, float, float]
     cluster_signature: str
+    # Stable identity, independent of the entry's current vector set/bbox/
+    # text -- lookup key for "edit this label in place". `vector_label`/
+    # `raster_label`: uuid4().hex at creation. `native_label`: reuses its
+    # existing deterministic `f"line:{page_index}:{block_no}:{line_no}"`
+    # (already stable/meaningful, no random id needed there).
+    label_id: str
     text: str
     source: LabelSource
     # Ground-truth rotation (degrees) this cluster's text should read at --
-    # 0 for every auto-labelled entry (Conversion never rotates text), a
-    # manual labeller can set this explicitly for a rotated cluster. Used
+    # 0 for every native-labelled entry (Conversion never rotates text), a
+    # human labeller can set this explicitly for a rotated cluster. Used
     # by Evaluation/Evaluate/evaluate.py's rotation-accuracy metric.
     expected_rotation: int = 0
     # `path_signature()` of every `Vector` that composed this cluster, sorted,
     # deduped. Lets an external script re-run `extract_vectors` on the same
     # PDF and match each label back to its exact drawing paths. Empty for
-    # `source="auto"` (native-text based, no vectors).
+    # `source="raster"` (no backing vectors).
     vector_signatures: list[str] = Field(default_factory=list)
 
 
+class GeometryAnnotation(BaseModel):
+    """A hand-drawn non-text ground-truth shape (`raster_label.py`'s line/
+    curve tools), for a future raster-image line-tracing pipeline stage.
+    Same convention as `Vector.items` entries (`helpers/geometry.py::
+    item_points`): `"l"` is a straight line (2 points), `"c"` is a cubic
+    bezier (4 points: start, 2 control points, end). Page space."""
+
+    page_index: int
+    kind: Literal["l", "c"]
+    points: list[tuple[float, float]]
+
+
 class LabelSet(BaseModel):
-    """Every labelled cluster for one PDF."""
+    """Every labelled cluster (+ non-text geometry annotation) for one PDF."""
 
     pdf_path: str
     entries: list[LabelEntry] = Field(default_factory=list)
+    geometry_entries: list[GeometryAnnotation] = Field(default_factory=list)
 
 
 def cluster_signature(cluster: "list[VectorPath]") -> str:
@@ -84,18 +109,32 @@ def path_signature(v: "Vector") -> str:
     return hashlib.sha1(payload.encode()).hexdigest()[:16]
 
 
-def split_labelset_by_source(labels: LabelSet) -> dict[LabelSource, LabelSet]:
-    """Split a mixed-source `LabelSet` into one `LabelSet` per `source`
-    ("auto"/"manual"), each key always present (entries may be empty),
-    `pdf_path` preserved -- so a caller can score auto-derived and
-    human-entered ground truth as separate benchmark runs with separate
-    accuracy statistics."""
+def vector_signatures_for(vectors: "list[Vector]") -> list[str]:
+    """Sorted, deduped `path_signature()` of every given `Vector` -- shared
+    by `native_label.py` (vectors assigned to a native-text line) and
+    `vector_label.py` (vectors composing a human-labelled entry)."""
+    return sorted({path_signature(v) for v in vectors})
+
+
+def split_labelset_by_source(labels: LabelSet) -> dict[str, LabelSet]:
+    """Split a mixed-source `LabelSet` into `{"auto": ..., "manual": ...}`,
+    each key always present (entries may be empty), `pdf_path` preserved --
+    so a caller can score auto-derived and human-entered ground truth as
+    separate benchmark runs with separate accuracy statistics. Keeps the
+    benchmark's own long-standing "auto"/"manual" GT-class vocabulary
+    (`Evaluation/Evaluate/metrics.py` etc.) rather than the finer three-way
+    `LabelSource` used at labelling time: `source="native"` -> "auto"
+    (native-text-derived, no human involved); `source in ("vector",
+    "raster")` -> "manual" (human-entered, vector-backed or not)."""
     return {
-        source: LabelSet(
+        "auto": LabelSet(
             pdf_path=labels.pdf_path,
-            entries=[e for e in labels.entries if e.source == source],
-        )
-        for source in ("auto", "manual")
+            entries=[e for e in labels.entries if e.source == "native"],
+        ),
+        "manual": LabelSet(
+            pdf_path=labels.pdf_path,
+            entries=[e for e in labels.entries if e.source in ("vector", "raster")],
+        ),
     }
 
 

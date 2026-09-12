@@ -18,14 +18,16 @@ def _label_set(pdf_path: str, entries: list[LabelEntry]) -> LabelSet:
 def _manual(page_index: int, text: str) -> LabelEntry:
     return LabelEntry(
         page_index=page_index, cluster_bbox=(0, 0, 10, 5),
-        cluster_signature="1:0.0:0.0:10.0:5.0", text=text, source="manual",
+        cluster_signature="1:0.0:0.0:10.0:5.0", label_id=f"vec:{page_index}:{text}",
+        text=text, source="vector",
     )
 
 
 def _auto(page_index: int, text: str) -> LabelEntry:
     return LabelEntry(
         page_index=page_index, cluster_bbox=(0, 0, 10, 5),
-        cluster_signature=f"line:{page_index}:0:0", text=text, source="auto",
+        cluster_signature=f"line:{page_index}:0:0", label_id=f"line:{page_index}:0:0",
+        text=text, source="native",
     )
 
 
