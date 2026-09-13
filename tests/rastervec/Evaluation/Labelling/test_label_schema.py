@@ -5,6 +5,7 @@ from rastervec.Evaluation.Labelling.label_schema import (
     LabelEntry,
     LabelSet,
     cluster_signature,
+    geometry_annotations_for_vector,
     load_labels,
     path_signature,
     save_labels,
@@ -66,3 +67,44 @@ def test_label_source_accepts_native_vector_raster(tmp_path):
             cluster_signature=f"sig{i}", label_id=f"id{i}", text="x", source=source,
         )
         assert entry.source == source
+
+
+def test_geometry_annotations_for_vector_line(vector):
+    v = vector(kind="l", bbox=(1, 2, 3, 4), color=(0.1, 0.2, 0.3), width=2.0, stroke_opacity=0.5)
+    out = geometry_annotations_for_vector(v)
+    assert len(out) == 1
+    ann = out[0]
+    assert ann.kind == "l"
+    assert ann.points == [(1.0, 2.0), (3.0, 4.0)]
+    assert ann.color == (0.1, 0.2, 0.3)
+    assert ann.width == 2.0
+    assert ann.opacity == 0.5
+    assert ann.source == "auto"
+
+
+def test_geometry_annotations_for_vector_curve(vector):
+    pts = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    v = vector(items=[("c", *pts)])
+    out = geometry_annotations_for_vector(v)
+    assert len(out) == 1
+    assert out[0].kind == "c"
+    assert out[0].points == pts
+
+
+def test_geometry_annotations_for_vector_rect_becomes_4_lines(vector):
+    v = vector(kind="re", bbox=(0, 0, 4, 2))
+    out = geometry_annotations_for_vector(v)
+    assert len(out) == 4
+    assert all(a.kind == "l" for a in out)
+    corners = {p for a in out for p in a.points}
+    assert corners == {(0.0, 0.0), (4.0, 0.0), (4.0, 2.0), (0.0, 2.0)}
+    # forms a closed loop
+    assert out[0].points[1] == out[1].points[0]
+    assert out[-1].points[1] == out[0].points[0]
+
+
+def test_geometry_annotations_for_vector_quad_becomes_4_lines(vector):
+    v = vector(kind="qu", bbox=(0, 0, 4, 2))
+    out = geometry_annotations_for_vector(v)
+    assert len(out) == 4
+    assert all(a.kind == "l" for a in out)

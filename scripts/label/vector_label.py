@@ -27,7 +27,7 @@ continuous `ttk.Scale` (2.5 degree snap) with a live direction-arrow overlay,
 replacing the old 4-value dropdown. The text entry auto-focuses after *any*
 selection (click or drag), not just right-click.
 
-`_get_display_matrix` (page-space -> canvas-space) and `Tooltip` are
+`get_display_matrix` (page-space -> canvas-space) and `Tooltip` are
 unchanged from `manual_label.py`, ported originally from the former
 `debug_app.py`.
 
@@ -67,6 +67,21 @@ import tkinter as tk
 
 import pymupdf as fitz
 
+from _common import (
+    DRAG_THRESHOLD_PX,
+    ENTRY_COLOR,
+    LABELLED_COLOR,
+    MAX_ZOOM,
+    MIN_ZOOM,
+    ROTATION_SNAP_DEG,
+    SELECTED_COLOR,
+    Tooltip,
+    UNLABELLED_COLOR,
+    ZOOM_DEFAULT,
+    ZOOM_STEP,
+    draw_vector,
+    get_display_matrix,
+)
 from rastervec.Evaluation.Labelling.label_schema import (
     LabelEntry,
     LabelSet,
@@ -80,7 +95,6 @@ from rastervec.helpers.geometry import (
     bbox_area,
     bbox_contains,
     bboxes_intersect,
-    item_points,
     union_bbox,
 )
 from rastervec.logging_setup import configure_logging, get_logger
@@ -92,78 +106,6 @@ from rastervec.Reader.reader import Reader
 from rastervec.renderer._shapes import path_color_hex
 
 _LOG = get_logger("vector_label")
-
-# Ported from the former debug_app.py when it was removed.
-MIN_ZOOM = 0.25
-MAX_ZOOM = 6.0
-ZOOM_STEP = 1.25
-
-ROTATION_SNAP_DEG = 2.5
-
-
-def _get_display_matrix(fitz_page: "fitz.Page", zoom: float) -> "fitz.Matrix":
-    """page-space (unrotated MediaBox) -> canvas-space, page rotation baked
-    in. OVERLAY-ONLY: the page pixmap must be rendered zoom-only, since
-    get_pixmap() bakes /Rotate itself (double-rotates otherwise)."""
-    return fitz_page.rotation_matrix * fitz.Matrix(zoom, zoom)
-
-
-class Tooltip:
-    """Mouse-following tooltip, ported from the former debug_app.py
-    (originally inspector/overlay_canvas.py)."""
-
-    def __init__(self, parent: "tk.Widget"):
-        self.parent = parent
-        self.window: "tk.Toplevel | None" = None
-        self.label: "tk.Label | None" = None
-
-    def show(self, x: int, y: int, text: str) -> None:
-        if self.window is None:
-            self.window = tk.Toplevel(self.parent)
-            self.window.overrideredirect(True)
-            self.window.attributes("-topmost", True)
-            self.label = tk.Label(
-                self.window, text=text, justify="left", anchor="w", padx=8, pady=6,
-                bg="#ffffe0", fg="#111111", relief="solid", borderwidth=1,
-                font=("TkDefaultFont", 9),
-            )
-            self.label.pack()
-        else:
-            self.label.config(text=text)
-        self.window.geometry(f"+{x + 15}+{y + 15}")
-        self.window.deiconify()
-
-    def hide(self) -> None:
-        if self.window is not None:
-            self.window.withdraw()
-
-
-_ZOOM = 1.5
-_UNLABELLED_COLOR = "#3366ff"
-_LABELLED_COLOR = "#33aa33"
-_SELECTED_COLOR = "#ff8800"
-_ENTRY_COLOR = "#999999"
-
-
-def _draw_vector(canvas: tk.Canvas, matrix: "fitz.Matrix", vector: Vector, color: str, width: int):
-    """Polyline of every item's own points through the display matrix
-    (polygon outline for re/qu, line otherwise) -- one `Vector` can carry
-    several items, all drawn."""
-    for item in vector.items:
-        coords: list[float] = []
-        for x, y in item_points(item):
-            p = fitz.Point(x, y) * matrix
-            coords.extend([p.x, p.y])
-        if len(coords) < 4:
-            continue
-        if item[0] in ("re", "qu"):
-            canvas.create_polygon(*coords, outline=color, fill="", width=width, tags=("overlay",))
-        else:
-            canvas.create_line(*coords, fill=color, width=width, tags=("overlay",))
-
-
-# Canvas-pixel movement below which a press/release is treated as a plain click.
-_DRAG_THRESHOLD_PX = 4
 
 
 class VectorLabelApp:
@@ -185,7 +127,7 @@ class VectorLabelApp:
         self._drag_start: tuple[float, float] | None = None
         self._drag_moved = False
         self._drag_rect_id: int | None = None
-        self.zoom = _ZOOM
+        self.zoom = ZOOM_DEFAULT
 
         self.root = tk.Tk()
         self.tooltip = Tooltip(self.root)
@@ -208,7 +150,7 @@ class VectorLabelApp:
 
         self.selected.clear()
         self._active_label_id = None
-        self.matrix = _get_display_matrix(self.page.fitz_page, self.zoom)
+        self.matrix = get_display_matrix(self.page.fitz_page, self.zoom)
 
         self._build_bucket_panel()
 
@@ -382,12 +324,12 @@ class VectorLabelApp:
             shown += 1
             vid = id(v)
             if vid in self.selected:
-                color, width = _SELECTED_COLOR, 3
+                color, width = SELECTED_COLOR, 3
             elif path_signature(v) in labelled:
-                color, width = _LABELLED_COLOR, 2
+                color, width = LABELLED_COLOR, 2
             else:
-                color, width = _UNLABELLED_COLOR, 1
-            _draw_vector(self.canvas, self.matrix, v, color, width)
+                color, width = UNLABELLED_COLOR, 1
+            draw_vector(self.canvas, self.matrix, v, color, width)
 
         # Entries with no live vector representation here at all (every
         # source="native" entry, plus a source="vector" entry left stale by
@@ -399,7 +341,7 @@ class VectorLabelApp:
                 continue
             rect = fitz.Rect(entry.cluster_bbox) * self.matrix
             self.canvas.create_rectangle(
-                rect.x0, rect.y0, rect.x1, rect.y1, outline=_ENTRY_COLOR, width=1, dash=(4, 3),
+                rect.x0, rect.y0, rect.x1, rect.y1, outline=ENTRY_COLOR, width=1, dash=(4, 3),
                 tags=("entry", entry.label_id),
             )
 
@@ -419,7 +361,7 @@ class VectorLabelApp:
             self.zoom = min(MAX_ZOOM, self.zoom * ZOOM_STEP)
         else:
             self.zoom = max(MIN_ZOOM, self.zoom / ZOOM_STEP)
-        self.matrix = _get_display_matrix(self.page.fitz_page, self.zoom)
+        self.matrix = get_display_matrix(self.page.fitz_page, self.zoom)
         self._render()
 
     def _on_wheel(self, event: "tk.Event") -> None:
@@ -473,14 +415,14 @@ class VectorLabelApp:
         x0, y0 = self._drag_start
         x1, y1 = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
         if not self._drag_moved and (
-            abs(x1 - x0) < _DRAG_THRESHOLD_PX and abs(y1 - y0) < _DRAG_THRESHOLD_PX
+            abs(x1 - x0) < DRAG_THRESHOLD_PX and abs(y1 - y0) < DRAG_THRESHOLD_PX
         ):
             return
         self._drag_moved = True
         if self._drag_rect_id is not None:
             self.canvas.delete(self._drag_rect_id)
         self._drag_rect_id = self.canvas.create_rectangle(
-            x0, y0, x1, y1, outline=_SELECTED_COLOR, width=1, dash=(3, 2),
+            x0, y0, x1, y1, outline=SELECTED_COLOR, width=1, dash=(3, 2),
             tags=("selrect",),
         )
 
@@ -609,7 +551,7 @@ class VectorLabelApp:
         c1 = fitz.Point(cx, cy) * self.matrix
         c2 = fitz.Point(tip_x, tip_y) * self.matrix
         self.canvas.create_line(
-            c1.x, c1.y, c2.x, c2.y, fill=_SELECTED_COLOR, width=2,
+            c1.x, c1.y, c2.x, c2.y, fill=SELECTED_COLOR, width=2,
             arrow=tk.LAST, tags=("overlay", "rotation_arrow"),
         )
 

@@ -17,9 +17,13 @@ own docstring) -- `cluster_signature` there is a
 `f"line:{page_index}:{block_no}:{line_no}"` native-text line-region id
 instead, not a VectorPath-cluster signature.
 
-`GeometryAnnotation` is a separate, non-text kind of ground truth --
-hand-drawn lines/curves for a future raster-image line-tracing pipeline
-stage, produced only by `raster_label.py`.
+`GeometryAnnotation` is a separate, non-text kind of ground truth -- line/
+curve geometry for a future raster-image line-tracing pipeline stage.
+`source="auto"` entries are machine-derived (`raster_label.py`'s
+`geometry_annotations_for_vector`, decomposing the original PDF's real
+`Vector`s -- carries their real paint attrs); `source="manual"` (the
+default) is a human hand-drawn line/curve over an embedded raster image
+with no vector backing at all, via the interactive `raster_label` tool.
 """
 from __future__ import annotations
 
@@ -62,15 +66,24 @@ class LabelEntry(BaseModel):
 
 
 class GeometryAnnotation(BaseModel):
-    """A hand-drawn non-text ground-truth shape (`raster_label.py`'s line/
-    curve tools), for a future raster-image line-tracing pipeline stage.
-    Same convention as `Vector.items` entries (`helpers/geometry.py::
-    item_points`): `"l"` is a straight line (2 points), `"c"` is a cubic
-    bezier (4 points: start, 2 control points, end). Page space."""
+    """A non-text ground-truth line/curve shape, for a future raster-image
+    line-tracing pipeline stage. Same convention as `Vector.items` entries
+    (`helpers/geometry.py::item_points`): `"l"` is a straight line (2
+    points), `"c"` is a cubic bezier (4 points: start, 2 control points,
+    end). Page space. `color`/`fill`/`width`/`dashes`/`opacity` mirror the
+    matching `Vector` fields of the same name -- populated for
+    `source="auto"` entries (`geometry_annotations_for_vector`), left `None`
+    for a hand-drawn `source="manual"` one unless the labeller sets them."""
 
     page_index: int
     kind: Literal["l", "c"]
     points: list[tuple[float, float]]
+    color: tuple[float, ...] | None = None
+    fill: tuple[float, ...] | None = None
+    width: float | None = None
+    dashes: str | None = None
+    opacity: float | None = None
+    source: Literal["auto", "manual"] = "manual"
 
 
 class LabelSet(BaseModel):
@@ -107,6 +120,41 @@ def path_signature(v: "Vector") -> str:
         bool(v.closePath), bool(v.even_odd), v.layer,
     ))
     return hashlib.sha1(payload.encode()).hexdigest()[:16]
+
+
+def geometry_annotations_for_vector(v: "Vector") -> list[GeometryAnnotation]:
+    """Decomposes one `Vector`'s raw `items` into `GeometryAnnotation`
+    line/curve entries, `source="auto"`, carrying the `Vector`'s own real
+    paint attrs: `"l"` -> one line as-is; `"c"` -> one curve as-is; `"re"`/
+    `"qu"` -> their 4 edges as 4 separate lines (a rect/quad has no
+    dedicated GeometryAnnotation kind of its own). Used by
+    `raster_label.raster_geometry_for_page` -- every `Vector` on the
+    original, unconverted page becomes ground truth for a future
+    raster-image line-tracing stage, CAD-vector text glyphs included."""
+    out: list[GeometryAnnotation] = []
+    common = dict(
+        page_index=v.page_index, color=v.color, fill=v.fill, width=v.width,
+        dashes=v.dashes, opacity=v.stroke_opacity, source="auto",
+    )
+    for item in v.items:
+        kind = item[0]
+        pts = item_points(item)
+        if kind == "l":
+            out.append(GeometryAnnotation(kind="l", points=pts, **common))
+        elif kind == "c":
+            out.append(GeometryAnnotation(kind="c", points=pts, **common))
+        elif kind in ("re", "qu"):
+            # "re" gives 2 diagonal corners; expand to all 4. "qu" already
+            # gives all 4, in polygon order (ul, ur, lr, ll) per
+            # helpers.fitz_geometry.plain_item.
+            if kind == "re":
+                (x0, y0), (x1, y1) = pts
+                corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+            else:
+                corners = pts
+            for p1, p2 in zip(corners, corners[1:] + corners[:1]):
+                out.append(GeometryAnnotation(kind="l", points=[p1, p2], **common))
+    return out
 
 
 def vector_signatures_for(vectors: "list[Vector]") -> list[str]:

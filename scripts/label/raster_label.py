@@ -1,25 +1,31 @@
-"""Raster labelling: a Tk UI for drawing ground-truth text bounding boxes
-plus straight-line/bezier-curve annotations directly over a rasterized page
--- no live `Vector` extraction/clustering at all (a raster tool has no
-vectors to select). Same skeleton as `vector_label.py` (Reader-backed page
-render, zoom/pan, save on close/page-change, inline label bar), simpler.
+"""Raster labelling: a Tk UI for hand-labelling ground-truth text boxes plus
+straight-line/bezier-curve annotations over **embedded raster images** of
+the original PDF -- not the whole page. `raster_label.embedded_images_for_page`
+(`rastervec.Evaluation.Labelling.raster_label`) lists every real embedded
+image placement (`page.get_image_info(xrefs=True)`) across the whole
+document; this tool lets you step through them one at a time and crop into
+each (`page.get_pixmap(clip=bbox, ...)`) to label it. This is deliberately
+scoped to content with **no vector backing at all** (a scanned inset,
+stamp, photo -- the actual CLAUDE.md-scoped-out "Raster" pipeline concern);
+everything else on the page already has real vector ground truth via
+`native_label`/`vector_label`, and machine-derived line/curve geometry via
+`raster_label.raster_geometry_for_page` (see the master script). A PDF/page
+with no embedded images simply has nothing to show here.
 
-Works on any PDF page the same way every other tool does
-(`page.get_pixmap()`), including a pre-rasterized PDF from
-`scripts/rasterize_pdf.py` (which itself just emits a normal
-one-image-per-page PDF, so it opens identically to any other source PDF).
+Every saved `LabelEntry`/`GeometryAnnotation` still stores **absolute
+page-space** coordinates (same convention as every other tool) even though
+the canvas only ever shows one cropped region at a time -- labels compose
+directly with the rest of the label set.
 
-Three tools (toolbar radio buttons):
+Three tools (toolbar radio buttons), mechanics unchanged from the
+whole-page version this replaces:
 
-- **Text**: click-drag-release a bbox (same rubber-band mechanics as
-  `vector_label.py`'s selection drag); the inline label bar (text +
-  rotation slider + direction arrow, ported verbatim) then creates a
-  `LabelEntry(source="raster", vector_signatures=[])` on Apply.
+- **Text**: click-drag-release a bbox; the inline label bar (text +
+  rotation slider + direction arrow) creates a `LabelEntry(source="raster",
+  vector_signatures=[])` on Apply.
 - **Line**: click, drag (live preview), release -- two points ->
   `GeometryAnnotation(kind="l", points=[p1, p2])`.
-- **Curve**: click four times in sequence (start, 2 control points, end) --
-  live straight-guide preview, then a sampled cubic-bezier preview once all
-  4 points exist. The 4th click finalizes ->
+- **Curve**: click four times in sequence (start, 2 control points, end) ->
   `GeometryAnnotation(kind="c", points=[p1, p2, p3, p4])`. `Escape` cancels
   an in-progress line/curve.
 
@@ -28,14 +34,17 @@ per-page list of placed annotations, right-click to remove a mis-click.
 
 Not unit-testable (a real Tk event loop). Smoke-test manually:
 
-    .venv/Scripts/python.exe scripts/label/raster_label.py path/to.pdf --page 0
+    .venv/Scripts/python.exe scripts/label/raster_label.py path/to.pdf
 
-1. Text tool: drag a box over some text, type + rotate + Apply -- a solid
-   box with text appears; hovering shows it.
-2. Line tool: click-drag-release along a line -- a solid segment appears.
-3. Curve tool: click 4 points -- a bezier curve appears; Escape mid-way
+1. If the PDF has embedded images, the first one loads cropped; "Image i/N"
+   nav steps through the rest (`<`/`>` or PageUp/PageDown). If it has none,
+   the status bar says so and the canvas stays blank.
+2. Text tool: drag a box over something in the crop, type + rotate + Apply
+   -- a solid box with text appears; hovering shows it.
+3. Line tool: click-drag-release along a line -- a solid segment appears.
+4. Curve tool: click 4 points -- a bezier curve appears; Escape mid-way
    cancels the in-progress curve.
-4. Right-click an annotation to delete it. Save (or close) writes the
+5. Right-click an annotation to delete it. Save (or close) writes the
    label JSON (`entries` + `geometry_entries`).
 """
 from __future__ import annotations
@@ -54,6 +63,8 @@ import tkinter as tk
 
 import pymupdf as fitz
 
+from _common import DRAG_THRESHOLD_PX, ROTATION_SNAP_DEG, SELECTED_COLOR, Tooltip, bezier_points
+
 from rastervec.Evaluation.Labelling.label_schema import (
     GeometryAnnotation,
     LabelEntry,
@@ -61,6 +72,7 @@ from rastervec.Evaluation.Labelling.label_schema import (
     load_labels,
     save_labels,
 )
+from rastervec.Evaluation.Labelling.raster_label import ImageRegion, embedded_images_for_page
 from rastervec.helpers.geometry import bbox_contains
 from rastervec.logging_setup import configure_logging, get_logger
 from rastervec.paths import output_dir
@@ -68,64 +80,37 @@ from rastervec.Reader.reader import Reader
 
 _LOG = get_logger("raster_label")
 
-MIN_ZOOM = 0.25
-MAX_ZOOM = 6.0
-ZOOM_STEP = 1.25
-ROTATION_SNAP_DEG = 2.5
-_DRAG_THRESHOLD_PX = 4
-
-_ZOOM = 1.5
+CROP_ZOOM = 3.0  # embedded images are usually small in page space; zoom in by default
 _ENTRY_COLOR = "#33aa33"
-_STALE_COLOR = "#999999"
-_SELECTED_COLOR = "#ff8800"
 _LINE_COLOR = "#3366ff"
 _CURVE_COLOR = "#cc33cc"
+_MIN_IMAGE_SIDE = 1.0  # degenerate/zero-size get_image_info entries are skipped
 
 
-def _get_display_matrix(fitz_page: "fitz.Page", zoom: float) -> "fitz.Matrix":
-    return fitz_page.rotation_matrix * fitz.Matrix(zoom, zoom)
+def _point_segment_distance(px, py, x0, y0, x1, y1) -> float:
+    dx, dy = x1 - x0, y1 - y0
+    if dx == 0 and dy == 0:
+        return math.hypot(px - x0, py - y0)
+    t = max(0.0, min(1.0, ((px - x0) * dx + (py - y0) * dy) / (dx * dx + dy * dy)))
+    return math.hypot(px - (x0 + t * dx), py - (y0 + t * dy))
 
 
-class Tooltip:
-    def __init__(self, parent: "tk.Widget"):
-        self.parent = parent
-        self.window: "tk.Toplevel | None" = None
-        self.label: "tk.Label | None" = None
-
-    def show(self, x: int, y: int, text: str) -> None:
-        if self.window is None:
-            self.window = tk.Toplevel(self.parent)
-            self.window.overrideredirect(True)
-            self.window.attributes("-topmost", True)
-            self.label = tk.Label(
-                self.window, text=text, justify="left", anchor="w", padx=8, pady=6,
-                bg="#ffffe0", fg="#111111", relief="solid", borderwidth=1,
-                font=("TkDefaultFont", 9),
-            )
-            self.label.pack()
-        else:
-            self.label.config(text=text)
-        self.window.geometry(f"+{x + 15}+{y + 15}")
-        self.window.deiconify()
-
-    def hide(self) -> None:
-        if self.window is not None:
-            self.window.withdraw()
-
-
-def _bezier_points(p0, p1, p2, p3, n: int = 24) -> list[tuple[float, float]]:
-    pts = []
-    for i in range(n + 1):
-        t = i / n
-        mt = 1 - t
-        x = (mt**3) * p0[0] + 3 * (mt**2) * t * p1[0] + 3 * mt * (t**2) * p2[0] + (t**3) * p3[0]
-        y = (mt**3) * p0[1] + 3 * (mt**2) * t * p1[1] + 3 * mt * (t**2) * p2[1] + (t**3) * p3[1]
-        pts.append((x, y))
-    return pts
+def all_embedded_images(pdf_path: str) -> list[ImageRegion]:
+    """Every embedded image across every page of `pdf_path`, skipping
+    degenerate (zero/near-zero area) placements."""
+    with Reader(pdf_path) as reader:
+        count = reader.page_count()
+    regions: list[ImageRegion] = []
+    for p in range(count):
+        for region in embedded_images_for_page(pdf_path, p):
+            x0, y0, x1, y1 = region.bbox
+            if (x1 - x0) >= _MIN_IMAGE_SIDE and (y1 - y0) >= _MIN_IMAGE_SIDE:
+                regions.append(region)
+    return regions
 
 
 class RasterLabelApp:
-    def __init__(self, pdf_path: str, page_index: int, out_path: str) -> None:
+    def __init__(self, pdf_path: str, out_path: str) -> None:
         self.pdf_path = pdf_path
         self.out_path = out_path
         self.reader = Reader(pdf_path)
@@ -133,6 +118,7 @@ class RasterLabelApp:
             load_labels(out_path) if Path(out_path).exists()
             else LabelSet(pdf_path=pdf_path)
         )
+        self.images = all_embedded_images(pdf_path)
 
         self._tool: Literal["text", "line", "curve"] = "text"
         self._active_label_id: str | None = None
@@ -141,27 +127,48 @@ class RasterLabelApp:
         self._drag_rect_id: int | None = None
         self._curve_points: list[tuple[float, float]] = []
         self._curve_preview_ids: list[int] = []
-        self.zoom = _ZOOM
+        self.zoom = CROP_ZOOM
+        self._image_idx = 0
+        self.page_index = 0
+        self.page = None
+        self.matrix = fitz.Matrix(1, 1)
 
         self.root = tk.Tk()
         self.tooltip = Tooltip(self.root)
         self._build_layout()
         self._bind_events()
-        self._load_page(page_index)
+        if self.images:
+            self._load_image(0)
+        else:
+            self._status.config(text="No embedded images found in this PDF -- nothing to label here.")
 
-    # ---- per-page state -------------------------------------------------
+    # ---- per-image state -------------------------------------------------
 
-    def _load_page(self, page_index: int) -> None:
-        self.page_index = max(0, min(self.reader.page_count() - 1, page_index))
+    def _current_region(self) -> "ImageRegion | None":
+        if not self.images:
+            return None
+        return self.images[self._image_idx]
+
+    def _load_image(self, index: int) -> None:
+        index = max(0, min(len(self.images) - 1, index))
+        self._image_idx = index
+        region = self.images[index]
+        self.page_index = region.page_index
         self.page = self.reader.get_page(self.page_index)
-        self.matrix = _get_display_matrix(self.page.fitz_page, self.zoom)
+        x0, y0, x1, y1 = region.bbox
+        # Page-space (cropped to this image's own bbox) -> canvas-space:
+        # plain scale + translate so the crop's own top-left lands at (0, 0)
+        # -- no page-rotation term here, unlike the whole-page tools
+        # (get_pixmap's `clip` operates in pre-rotation page space, and
+        # embedded raster insets on these drawings are not independently
+        # rotated from their page).
+        self.matrix = fitz.Matrix(self.zoom, 0, 0, self.zoom, -x0 * self.zoom, -y0 * self.zoom)
         self._curve_points.clear()
         self._active_label_id = None
         self.root.title(
             f"Raster Label -- {Path(self.pdf_path).name} "
-            f"page {self.page_index + 1}/{self.reader.page_count()}"
+            f"image {index + 1}/{len(self.images)} (page {self.page_index + 1})"
         )
-        self._sync_page_entry()
         self._clear_label_panel()
         self._render()
 
@@ -177,10 +184,10 @@ class RasterLabelApp:
         bar = ttk.Frame(self.root)
         bar.pack(side=tk.TOP, fill=tk.X)
 
-        ttk.Button(bar, text="Zoom -", command=lambda: self._change_zoom(-1)).pack(side=tk.LEFT, padx=2)
-        self.zoom_label = ttk.Label(bar, text="100%")
-        self.zoom_label.pack(side=tk.LEFT, padx=4)
-        ttk.Button(bar, text="Zoom +", command=lambda: self._change_zoom(1)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(bar, text="<", width=3, command=lambda: self._change_image(-1)).pack(side=tk.LEFT, padx=1)
+        self._image_label = ttk.Label(bar, text="0 / 0")
+        self._image_label.pack(side=tk.LEFT, padx=4)
+        ttk.Button(bar, text=">", width=3, command=lambda: self._change_image(1)).pack(side=tk.LEFT, padx=1)
 
         ttk.Separator(bar, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
@@ -190,17 +197,6 @@ class RasterLabelApp:
                 bar, text=label, value=value, variable=self._tool_var,
                 command=self._on_tool_change,
             ).pack(side=tk.LEFT)
-
-        ttk.Separator(bar, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=8)
-
-        ttk.Button(bar, text="<", width=3, command=lambda: self._change_page(-1)).pack(side=tk.LEFT, padx=1)
-        self._page_var = tk.StringVar(value="1")
-        page_entry = ttk.Entry(bar, textvariable=self._page_var, width=4, justify="center")
-        page_entry.pack(side=tk.LEFT)
-        page_entry.bind("<Return>", self._on_page_entry_return)
-        self._page_count_label = ttk.Label(bar, text="/ 1")
-        self._page_count_label.pack(side=tk.LEFT, padx=(1, 1))
-        ttk.Button(bar, text=">", width=3, command=lambda: self._change_page(1)).pack(side=tk.LEFT, padx=1)
 
         self._status = ttk.Label(bar, text="")
         self._status.pack(side=tk.RIGHT, padx=8)
@@ -250,10 +246,9 @@ class RasterLabelApp:
         self.canvas.bind("<Leave>", lambda _e: self.tooltip.hide())
         self.canvas.bind("<MouseWheel>", self._on_wheel)
         self.canvas.bind("<Shift-MouseWheel>", self._on_shift_wheel)
-        self.canvas.bind("<Control-MouseWheel>", self._on_ctrl_wheel)
         self.root.bind("<Escape>", lambda _e: self._cancel_in_progress())
-        self.root.bind("<Next>", lambda _e: self._change_page(1))
-        self.root.bind("<Prior>", lambda _e: self._change_page(-1))
+        self.root.bind("<Next>", lambda _e: self._change_image(1))
+        self.root.bind("<Prior>", lambda _e: self._change_image(-1))
 
     # ---- coordinate helpers -------------------------------------------
 
@@ -265,7 +260,12 @@ class RasterLabelApp:
 
     def _render(self) -> None:
         self.canvas.delete("all")
-        pix = self.page.fitz_page.get_pixmap(matrix=fitz.Matrix(self.zoom, self.zoom))
+        region = self._current_region()
+        if region is None or self.page is None:
+            return
+        pix = self.page.fitz_page.get_pixmap(
+            matrix=fitz.Matrix(self.zoom, self.zoom), clip=fitz.Rect(region.bbox),
+        )
         self._photo = tk.PhotoImage(data=pix.tobytes("ppm"))
         self.canvas.create_image(0, 0, anchor="nw", image=self._photo)
         self.canvas.config(scrollregion=(0, 0, pix.width, pix.height))
@@ -273,7 +273,7 @@ class RasterLabelApp:
         for entry in self._page_entries():
             rect = fitz.Rect(entry.cluster_bbox) * self.matrix
             selected = entry.label_id == self._active_label_id
-            color = _SELECTED_COLOR if selected else _ENTRY_COLOR
+            color = SELECTED_COLOR if selected else _ENTRY_COLOR
             width = 3 if selected else 2
             self.canvas.create_rectangle(
                 rect.x0, rect.y0, rect.x1, rect.y1, outline=color, width=width,
@@ -283,20 +283,23 @@ class RasterLabelApp:
         for geo in self._page_geometry():
             self._draw_geometry(geo, tag=f"geo:{id(geo)}")
 
-        self.zoom_label.config(text=f"{round(self.zoom * 100)}%")
+        self._image_label.config(text=f"{self._image_idx + 1} / {len(self.images)}")
         self._status.config(
-            text=f"{self._tool} tool  |  {len(self._page_entries())} text label(s)  "
-                 f"|  {len(self._page_geometry())} line/curve annotation(s)"
+            text=f"{self._tool} tool  |  page {self.page_index + 1}  |  "
+                 f"{len(self._page_entries())} text label(s)  |  "
+                 f"{len(self._page_geometry())} line/curve annotation(s)"
         )
         self._refresh_label_hint()
         self._draw_rotation_arrow()
 
     def _draw_geometry(self, geo: GeometryAnnotation, *, tag: str, preview: bool = False) -> None:
-        color = _LINE_COLOR if geo.kind == "l" else _CURVE_COLOR
+        color = geo.color if geo.color is not None else (_LINE_COLOR if geo.kind == "l" else _CURVE_COLOR)
+        if isinstance(color, (tuple, list)):
+            color = "#%02x%02x%02x" % tuple(min(255, max(0, round(c * 255))) for c in color)
         if geo.kind == "l" and len(geo.points) == 2:
             pts = geo.points
         elif geo.kind == "c" and len(geo.points) == 4:
-            pts = _bezier_points(*geo.points)
+            pts = bezier_points(*geo.points)
         else:
             pts = geo.points
         coords: list[float] = []
@@ -305,20 +308,12 @@ class RasterLabelApp:
             coords.extend([p.x, p.y])
         if len(coords) < 4:
             return
-        dash = (3, 2) if preview else None
+        dash = (3, 2) if (preview or geo.source == "auto") else None
         self.canvas.create_line(
             *coords, fill=color, width=2, dash=dash, tags=("overlay", "geometry", tag),
         )
 
-    # ---- zoom / nav (unchanged pattern) --------------------------------
-
-    def _change_zoom(self, direction: int) -> None:
-        if direction > 0:
-            self.zoom = min(MAX_ZOOM, self.zoom * ZOOM_STEP)
-        else:
-            self.zoom = max(MIN_ZOOM, self.zoom / ZOOM_STEP)
-        self.matrix = _get_display_matrix(self.page.fitz_page, self.zoom)
-        self._render()
+    # ---- nav --------------------------------------------------
 
     def _on_wheel(self, event: "tk.Event") -> None:
         self.canvas.yview_scroll(int(-event.delta / 120), "units")
@@ -326,30 +321,15 @@ class RasterLabelApp:
     def _on_shift_wheel(self, event: "tk.Event") -> None:
         self.canvas.xview_scroll(int(-event.delta / 120), "units")
 
-    def _on_ctrl_wheel(self, event: "tk.Event") -> None:
-        self._change_zoom(1 if event.delta > 0 else -1)
-
-    def _sync_page_entry(self) -> None:
-        self._page_var.set(str(self.page_index + 1))
-        self._page_count_label.config(text=f"/ {self.reader.page_count()}")
-
-    def _change_page(self, delta: int) -> None:
-        self._goto_page(self.page_index + delta)
-
-    def _on_page_entry_return(self, _event: "tk.Event") -> None:
-        try:
-            self._goto_page(int(self._page_var.get()) - 1)
-        except ValueError:
-            self._sync_page_entry()
-
-    def _goto_page(self, new_index: int) -> None:
-        new_index = max(0, min(self.reader.page_count() - 1, new_index))
-        if new_index == self.page_index:
-            self._sync_page_entry()
+    def _change_image(self, delta: int) -> None:
+        if not self.images:
+            return
+        new_index = self._image_idx + delta
+        if new_index == self._image_idx or not (0 <= new_index < len(self.images)):
             return
         self.save()
         self.tooltip.hide()
-        self._load_page(new_index)
+        self._load_image(new_index)
 
     # ---- tool switching -------------------------------------------------
 
@@ -384,7 +364,7 @@ class RasterLabelApp:
         x0, y0 = self._drag_start
         x1, y1 = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
         if not self._drag_moved and (
-            abs(x1 - x0) < _DRAG_THRESHOLD_PX and abs(y1 - y0) < _DRAG_THRESHOLD_PX
+            abs(x1 - x0) < DRAG_THRESHOLD_PX and abs(y1 - y0) < DRAG_THRESHOLD_PX
         ):
             return
         self._drag_moved = True
@@ -392,7 +372,7 @@ class RasterLabelApp:
             self.canvas.delete(self._drag_rect_id)
         if self._tool == "text":
             self._drag_rect_id = self.canvas.create_rectangle(
-                x0, y0, x1, y1, outline=_SELECTED_COLOR, width=1, dash=(3, 2), tags=("selrect",),
+                x0, y0, x1, y1, outline=SELECTED_COLOR, width=1, dash=(3, 2), tags=("selrect",),
             )
         else:
             self._drag_rect_id = self.canvas.create_line(
@@ -476,7 +456,7 @@ class RasterLabelApp:
     def _draw_pending_rect(self, rect: tuple[float, float, float, float]) -> None:
         r = fitz.Rect(rect) * self.matrix
         self.canvas.create_rectangle(
-            r.x0, r.y0, r.x1, r.y1, outline=_SELECTED_COLOR, width=2, tags=("overlay", "pending"),
+            r.x0, r.y0, r.x1, r.y1, outline=SELECTED_COLOR, width=2, tags=("overlay", "pending"),
         )
 
     def _clear_label_panel(self) -> None:
@@ -516,7 +496,7 @@ class RasterLabelApp:
         c1 = fitz.Point(cx, cy) * self.matrix
         c2 = fitz.Point(tip_x, tip_y) * self.matrix
         self.canvas.create_line(
-            c1.x, c1.y, c2.x, c2.y, fill=_SELECTED_COLOR, width=2,
+            c1.x, c1.y, c2.x, c2.y, fill=SELECTED_COLOR, width=2,
             arrow=tk.LAST, tags=("overlay", "rotation_arrow"),
         )
 
@@ -566,7 +546,7 @@ class RasterLabelApp:
 
     def _on_right_click(self, event: "tk.Event") -> None:
         pt = self._page_point(event)
-        for i, entry in enumerate(self._page_entries()):
+        for entry in self._page_entries():
             if bbox_contains(entry.cluster_bbox, pt.x, pt.y):
                 real_idx = self.labels.entries.index(entry)
                 del self.labels.entries[real_idx]
@@ -581,7 +561,7 @@ class RasterLabelApp:
                 return
 
     def _point_near_geometry(self, pt: "fitz.Point", geo: GeometryAnnotation, tol: float = 6.0) -> bool:
-        pts = geo.points if geo.kind == "l" else _bezier_points(*geo.points)
+        pts = geo.points if geo.kind == "l" else bezier_points(*geo.points)
         for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
             if _point_segment_distance(pt.x, pt.y, x0, y0, x1, y1) <= tol:
                 return True
@@ -617,18 +597,11 @@ class RasterLabelApp:
         self.reader.close()
 
 
-def _point_segment_distance(px, py, x0, y0, x1, y1) -> float:
-    dx, dy = x1 - x0, y1 - y0
-    if dx == 0 and dy == 0:
-        return math.hypot(px - x0, py - y0)
-    t = max(0.0, min(1.0, ((px - x0) * dx + (py - y0) * dy) / (dx * dx + dy * dy)))
-    return math.hypot(px - (x0 + t * dx), py - (y0 + t * dy))
-
-
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Draw ground-truth text boxes + line/curve annotations over a rasterized page.")
+    parser = argparse.ArgumentParser(
+        description="Hand-label text boxes + line/curve annotations over embedded raster images.",
+    )
     parser.add_argument("pdf", help="Path to the input PDF.")
-    parser.add_argument("--page", type=int, default=0, help="0-based page index.")
     parser.add_argument(
         "--out", default=None,
         help="Path to save/load the label JSON file "
@@ -641,7 +614,7 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging()
     args = build_arg_parser().parse_args(argv)
     out = args.out or str(output_dir("labels") / f"{Path(args.pdf).stem}.json")
-    app = RasterLabelApp(args.pdf, args.page, out)
+    app = RasterLabelApp(args.pdf, out)
     app.run()
     return 0
 
