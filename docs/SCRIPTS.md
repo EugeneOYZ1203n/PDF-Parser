@@ -85,8 +85,8 @@ per-stage report (`manifest.json`, every `<stage>__<layer>.pdf`, `<stage>.txt`,
 `radon_images/`, `paddle_images/`, `dump.json`, `converted_p*.pdf`) - legacy
 engine only emits `reconstructed` - **plus**:
 
-- `ground_truth_auto.json` (from `auto_label_pdf`), `ground_truth_manual.json`
-  (the JSON's `source="manual"` entries; absent when there are none)
+- `ground_truth_auto.json` (from `native_label_pdf`), `ground_truth_manual.json`
+  (the JSON's `source in ("vector", "raster")` entries; absent when there are none)
 - `auto_bbox.pdf` / `manual_bbox.pdf` - GT boxes, green = covered by a
   prediction, red = missed
 - `auto_text.pdf` / `manual_text.pdf` - GT text, per word green = exact /
@@ -179,6 +179,113 @@ utility, not a pipeline stage.
 | `dst` | output path (positional, optional; default `outputs/rasterize/<src-stem>_raster.pdf`) |
 | `--dpi N` | render resolution (default 300) |
 
+## `scripts/label/*.py` -- labelling tools
+
+Ground-truth labelling, bundled per PDF into `outputs/labels/<stem>_label/`.
+Each tool moved out of the `rastervec` package into a plain script (run
+directly, not `python -m`); `label_schema.py` itself stayed in the package
+(imported broadly elsewhere) at `rastervec.Evaluation.Labelling.label_schema`.
+
+### `scripts/label/master_label.py`
+
+Runs the whole workflow over one PDF: native step (auto text labels +
+`vectorised.pdf`) -> raster geometry step (auto line/curve labels from the
+original vectors + `rasterised.pdf`) -> text re-sync (pulls `vector_label`'s
+human text labels into `raster_labels.json`) -> opens `vector_label` -> re-sync
+-> opens `raster_label` -> prints a summary. Re-running skips already-done
+pages for the native/raster-geometry steps (tracked in `manifest.json`); the
+interactive steps always reopen.
+
+```
+.venv/Scripts/python.exe scripts/label/master_label.py "references/<stem>.pdf" --dpi 300
+```
+
+| arg | meaning |
+|---|---|
+| `pdf` | source PDF (positional, required) |
+| `--dpi N` | raster step render resolution (default 300) |
+
+Produces `outputs/labels/<stem>_label/`: `original.pdf`, `vectorised.pdf`,
+`rasterised.pdf`, `native_labels.json`, `vector_labels.json`,
+`raster_labels.json`, `manifest.json`.
+
+### `scripts/label/native_label.py`
+
+Auto-derives text ground truth from a page's own native text (no human, no
+pipeline run) - `native_label_pdf` + a `convert_page_text_only` sidecar +
+`attach_vector_signatures`.
+
+```
+.venv/Scripts/python.exe scripts/label/native_label.py "references/<stem>.pdf" --page 0
+```
+
+| arg | meaning |
+|---|---|
+| `pdf` | input PDF (positional, required) |
+| `--page N` | 0-based page index |
+| `--out PATH` | label JSON to load/save (default `outputs/labels/<stem>.json`) |
+
+### `scripts/label/vector_label.py`
+
+GUI: flat pool of raw `Vector`s (no clustering) - click/drag-select
+unlabelled vectors + Apply to label; click an already-labelled vector to
+re-select its set and edit in place. Bucket checkboxes
+(`layer`/`color`/`width`) filter visibility; "Hide labelled" hides labelled
+vectors. Continuous rotation slider (2.5 degree snap) with a direction-arrow
+overlay. One `LabelSet` spans every page; saved on page change and on close.
+
+```
+.venv/Scripts/python.exe scripts/label/vector_label.py "references/<stem>.pdf" --page 0
+```
+
+| arg | meaning |
+|---|---|
+| `pdf` | input PDF (positional, required) |
+| `--page N` | 0-based page index |
+| `--out PATH` | label JSON to load/save (default `outputs/labels/<stem>.json`) |
+
+### `scripts/label/raster_label.py`
+
+GUI, scoped to content with **no vector backing** (scanned insets, stamps,
+photos): lists every embedded raster image in the PDF
+(`page.get_image_info`) and steps through them one at a time, cropped, for
+hand-drawn text bbox / line / curve annotation. A PDF with no embedded
+images has nothing to show.
+
+```
+.venv/Scripts/python.exe scripts/label/raster_label.py "references/<stem>.pdf"
+```
+
+| arg | meaning |
+|---|---|
+| `pdf` | input PDF (positional, required) |
+| `--out PATH` | label JSON to load/save (default `outputs/labels/<stem>.json`) |
+
+### `scripts/label/view_native_labels.py`
+
+Runs `native_label_pdf`, merges onto any existing `--out` file (by
+`label_id`), then opens `vector_label`'s window on it so you can view/adjust
+the native labels alongside the real vector pool.
+
+```
+.venv/Scripts/python.exe scripts/label/view_native_labels.py "references/<stem>.pdf" --page 0
+```
+
+Same args as `native_label.py`; `--out` default is
+`outputs/labels/<stem>_p<N>_native_labels.json`.
+
+### `scripts/label/label_viewer.py`
+
+Read-only: overlays a `master_label.py` folder's `native_labels.json` /
+`vector_labels.json` / `raster_labels.json` on one page view, one checkbox per
+label set (plus the vector set's own backing `Vector`s). No editing, no save.
+
+```
+.venv/Scripts/python.exe scripts/label/label_viewer.py "references/<stem>.pdf"
+```
+
+Accepts either the source PDF path or the `<stem>_label` folder itself.
+
 ## `scripts/generate_test_pdfs.py`
 
 One-off generator for the `tests/references/test_pdfs_*.pdf` fixtures. Run
@@ -224,7 +331,7 @@ OCR-scored fields of the result are meaningful.
 
 ### `rastervec.Evaluation.Evaluate.benchmark`
 
-Full Conversion -> auto_label -> real pipeline run -> `evaluate_metrics`,
+Full Conversion -> native_label -> real pipeline run -> `evaluate_metrics`,
 per variant, with an aggregate + timing comparison.
 
 ```
@@ -260,36 +367,8 @@ shares no imports with it.
 Optional positional `pdf`; with none it opens against the repo-root
 `references/` folder.
 
-### `rastervec.Evaluation.Labelling.manual_label`
-
-GUI cluster-label editor - runs the real pipeline per page, lets a human
-click clusters / paths, group / ungroup, and enter text + rotation. One
-`LabelSet` spans every page; labels are saved on every page change and on
-close.
-
-```
-.venv/Scripts/python.exe -m rastervec.Evaluation.Labelling.manual_label \
-    "references/<stem>.pdf" --page 0 --out outputs/labels/<stem>.json
-```
-
-| arg | meaning |
-|---|---|
-| `pdf` | input PDF (positional, required) |
-| `--page N` | 0-based page index |
-| `--out PATH` | label JSON to load/save (default `outputs/labels/<stem>.json`) |
-
-### `rastervec.Evaluation.Labelling.view_auto_labels`
-
-Runs `auto_label_pdf`, merges onto any existing `--out` file, opens the same
-editor window so you can view/adjust the auto labels.
-
-```
-.venv/Scripts/python.exe -m rastervec.Evaluation.Labelling.view_auto_labels \
-    "references/<stem>.pdf" --page 0
-```
-
-Same args as `manual_label`; `--out` default is
-`outputs/labels/<stem>_p<N>_auto_labels.json`.
+See `scripts/label/*.py` above for the labelling tools - they moved out of
+`rastervec` into plain scripts, so they're no longer `python -m` module CLIs.
 
 ---
 
