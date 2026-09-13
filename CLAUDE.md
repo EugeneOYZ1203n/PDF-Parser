@@ -35,8 +35,12 @@ those labels; all three implemented) plus the inspector tool — see "rastervec 
 .venv/Scripts/python.exe scripts/pipeline_report_benchmark.py --run DIR1 [--run DIR2]  # multiclass-score + chart benchmark report folders (1 or 2) on shared inputs
 .venv/Scripts/python.exe -m pytest tests/ -v                                        # run rastervec's test suite
 .venv/Scripts/python.exe scripts/rasterize_pdf.py SRC [DST] --dpi 300               # flatten a PDF to pure raster (DST defaults to outputs/rasterize/)
-.venv/Scripts/python.exe -m rastervec.Evaluation.Labelling.manual_label PDF --page N [--out labels.json]  # manual cluster-label editor (GUI; --out defaults to outputs/labels/)
-.venv/Scripts/python.exe -m rastervec.Evaluation.Labelling.view_auto_labels PDF --page N               # view auto_label output in that editor
+.venv/Scripts/python.exe scripts/label/master_label.py PDF [--dpi 300]              # full native+vector+raster label workflow, one outputs/labels/<stem>_label/ folder per PDF
+.venv/Scripts/python.exe scripts/label/native_label.py PDF --page N [--out ...]     # auto-derive native-text ground truth (GUI-free)
+.venv/Scripts/python.exe scripts/label/vector_label.py PDF --page N [--out ...]     # manual vector-text labelling (GUI)
+.venv/Scripts/python.exe scripts/label/raster_label.py PDF [--out ...]              # manual embedded-image line/curve/text labelling (GUI)
+.venv/Scripts/python.exe scripts/label/view_native_labels.py PDF --page N [--out ...]  # view native_label output in the vector_label editor
+.venv/Scripts/python.exe scripts/label/label_viewer.py PDF_OR_LABEL_FOLDER          # read-only viewer over a master_label.py folder's three label sets
 ```
 
 venv is **Python 3.10** (`.venv/pyvenv.cfg` → 3.10.11):
@@ -162,8 +166,8 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `output_dir(name, *subparts)` (mkdir-p `outputs/<name>/…`). Every script/notebook that writes
   files sends them under one `outputs/<source>/` subfolder by default: `benchmark_notebook/`
   (benchmark notebook), `benchmark_cli/` (`benchmark.py --reconstruct-dir` default), `labels/`
-  (`manual_label.py` / `view_auto_labels.py --out` default), `rasterize/` (`rasterize_pdf.py` dst
-  default).
+  (`scripts/label/*.py --out` default, and `master_label.py`'s `<stem>_label/` folders),
+  `rasterize/` (`rasterize_pdf.py` dst default).
 - **`helpers/geometry.py`** — pure-math helpers, originally ported from the inspector tool's
   `pdf_model.py` (`point_angle`, `line_length`, `quad_angle`, `matrix_rotation`, `matrix_scale`,
   `make_oriented_quad`, `rect_gap`, `union_bbox`, etc.), shared by `native_text.py` and `Vector/` (and
@@ -307,66 +311,110 @@ independently of the others (every stage's *output* is a plain dataclass from `m
     drawing kept byte-for-byte** (images removed). The benchmark's **manual**-ground-truth input.
   - `convert_page_to_vector_text` — both overlaid (text-as-vectors on the untouched drawings). No
     longer used by the benchmark; kept as a general utility + for its tests.
-- **`Evaluation/Labelling/`** *(implemented)*: ground-truth labelling for vector-text regions.
-  `label_schema.py`'s `LabelEntry` (`page_index`, `cluster_bbox`, `cluster_signature`, `text`,
-  `source: "manual"|"auto"`, `expected_rotation`, `vector_signatures`) + `LabelSet` are the
-  sidecar JSON format (`save_labels`/`load_labels`). `vector_signatures` is the sorted list of
-  `path_signature(v)` (SHA1 of absolute page-space geometry + `seqno` + paint attrs — run-stable,
-  collision-resistant, **not** translation-invariant unlike `item_filters.vector_signature`) for
-  every `Vector` in a `source="manual"` cluster, so an external script re-running `extract_vectors`
-  on the same PDF can match a label to its exact paths; empty for `source="auto"`.
-  `cluster_signature`'s meaning depends on `source` —
-  `"manual"` entries use `cluster_signature(cluster)`, a deterministic member-count + rounded-bbox
-  string identifying a real clustered-run's cluster across repeated pipeline runs (VectorPath
-  objects have no identity across runs); `"auto"` entries use a
-  `f"line:{page_index}:{block_no}:{line_no}"` native-text line-region id instead, since there's no
-  clustered run backing them (see below). `auto_label.py`'s `auto_label_pdf` is deliberately
-  independent of the pipeline being evaluated — it reads *only* the original PDF's own
-  `native.extract` (never runs Conversion or any classification/clustering), groups words
-  by `(block_no, line_no)` into line-level ground-truth regions (bbox via `helpers.geometry.
-  union_bbox`, text joined in reading-direction order — x for horizontal lines, y for vertical),
-  and sets `expected_rotation` to the most common quarter-turn among the line's words. This
-  independence matters: an earlier
-  version derived labels from the *converted* page's own surviving classification clusters, which
-  meant a native word the classification chain's own filter steps wrongly dropped never became a
-  label at all — silently excluded from ground truth rather than scored as a miss. Ground truth
-  must not depend on what the system under test decided. `manual_label.py`'s `ManualLabelApp`
-  (`python -m rastervec.Evaluation.Labelling.manual_label PDF --page N [--out labels.json]`;
-  `--out` defaults to `outputs/labels/<stem>.json`) *does*
-  need real clusters (a human has to click something), so it's the one place that still runs the
-  real pipeline — via `classify_vectors(vectors.paths, page, verbose=True)` (sub_pipelines)
-  — with a `_get_display_matrix` / `Tooltip` for the page-space → canvas-space transform and hover
-  tooltip, both ported from the former `debug_app.py` when it was removed. `_get_display_matrix`
-  (`rotation_matrix * zoom`) is **overlay-only**; `_render` rasterizes the page pixmap zoom-only
-  because `get_pixmap()` bakes `/Rotate` itself (passing the full matrix double-rotates the bitmap
-  vs. the overlays on rotated pages — same split as `inspector/pdf_model.py`). It's also a light cluster
-  *editor* (the pipeline's clustering isn't always right): scroll + `Zoom -`/`Zoom +` + Ctrl-wheel
-  zoom, and two edit modes — **cluster mode** (left-click toggles a whole cluster; `Group` merges
-  the selected clusters, `Ungroup` splits one back into its pre-spatial `ctx.cluster_groups`
-  "groups", or one-path-per-cluster if it was already edited) and **path mode** (left-click toggles
-  an individual `VectorPath`; `Group` builds a new cluster from exactly the selected paths). In either
-  mode a left-click-drag draws a rubber-band box that adds every intersecting cluster/path to the
-  selection, or removes them all if they were already selected (one drag both selects and deselects
-  an area); a click that barely moves still does the single-item toggle. `Ctrl+Z`
-  undoes the last group/ungroup. The **inline label bar** below the toolbar — a persistent Text
-  entry + Rotation dropdown + `Apply`/`Delete` (an earlier version used chained `simpledialog`
-  popups that could vanish behind the topmost hover tooltip) — writes to `_label_targets()`:
-  **every selected cluster** (one `Apply` labels them all with the same text+rotation) or, if
-  nothing is selected, the **single** cluster right-clicked (which drops any selection and
-  pre-fills the fields from its existing label). `Apply` (or Enter) upserts the manual
-  `LabelEntry`(s), then clears the selection, empties Text and resets Rotation to 0; `Delete`
-  removes the targeted label(s) the same way. The `<`/`>`
-  buttons (or `PageUp`/`PageDown`) move between pages of the same PDF without relaunching — one
-  `LabelSet` spans every page (`_load_page` reruns `classify_vectors` per page, `_page_entries()`
-  scopes overlays/hover/label-bar to the current `page_index`), and the labels are saved on every
-  page change. `LabelEntry`s loaded from `--out` that match no live cluster on the current page
-  (every `source="auto"` entry, plus manual entries left stale by an edit) draw as dashed grey
-  boxes, so the same window doubles as an auto-label viewer. Save/window-close writes the label
-  file — not unit-testable (a real Tk event loop), smoke-test steps are in its own module
-  docstring. `view_auto_labels.py`
-  (`python -m rastervec.Evaluation.Labelling.view_auto_labels PDF --page N [--out labels.json]`)
-  runs `auto_label_pdf`, merges its entries onto any existing `--out` file (default:
-  `outputs/labels/<stem>_p<N>_auto_labels.json`), and opens `ManualLabelApp` on it.
+- **`Evaluation/Labelling/`** *(implemented)*: ground-truth labelling, three kinds — native
+  (auto-derived from native text), vector (human-labelled real `Vector`s), raster (human-labelled
+  embedded-image content with no vector backing) — bundled per PDF by `scripts/label/
+  master_label.py` into one `outputs/labels/<stem>_label/` folder (see that bullet). `label_schema.py`
+  is the shared sidecar-JSON schema, kept in the package (not moved to `scripts/`) since it's
+  imported broadly outside the labelling tools themselves (`adapters.py`, `generate_pipeline_report.py`,
+  `Reader/dataset.py`, benchmark plumbing). `LabelEntry` (`page_index`, `cluster_bbox`,
+  `cluster_signature`, `label_id`, `text`, `source: "native"|"vector"|"raster"`,
+  `expected_rotation`, `vector_signatures`) + `GeometryAnnotation` (`page_index`, `kind: "l"|"c"`,
+  `points`, `color`/`fill`/`width`/`dashes`/`opacity` mirroring the matching `Vector` fields,
+  `source: "auto"|"manual"`) + `LabelSet` (`entries` + `geometry_entries`) are the format
+  (`save_labels`/`load_labels`). `label_id` is the stable identity a labelling tool edits in place
+  (`vector_label`/`raster_label`: `uuid4().hex`; `native_label`: the deterministic
+  `f"line:{page_index}:{block_no}:{line_no}"`); `cluster_signature` is informational/debug-only now.
+  `vector_signatures_for(vectors)` / `path_signature(v)` (SHA1 of absolute page-space geometry +
+  `seqno` + paint attrs — run-stable, collision-resistant, **not** translation-invariant unlike
+  `item_filters.vector_signature`) let a label re-match its exact paths across a fresh
+  `extract_vectors` run; empty for `source="raster"` (no backing vectors).
+  `geometry_annotations_for_vector(v)` decomposes one `Vector`'s raw `items` into `source="auto"`
+  `GeometryAnnotation`s carrying its real paint attrs (`"l"`/`"c"` as-is, `"re"`/`"qu"` → their 4
+  edges as 4 separate lines) — the raster-geometry auto-labelling step's building block.
+  `split_labelset_by_source` still buckets into the benchmark's long-standing `"auto"`/`"manual"`
+  GT-class vocabulary (`source="native"` → `"auto"`; `source in ("vector", "raster")` →
+  `"manual"`), distinct from the finer three-way `LabelSource` used at labelling time.
+  - **`native_label.py`** (library; the interactive-tool convention below still applies to its thin
+    CLI wrapper) — `native_label_pdf(pdf_path, page_index)` is deliberately independent of the
+    pipeline being evaluated: it reads *only* the original PDF's own `native.extract` (never runs
+    Conversion or any classification/clustering), groups words by `(block_no, line_no)` into
+    line-level ground-truth regions (bbox via `helpers.geometry.union_bbox`, text joined in
+    reading-direction order), and sets `expected_rotation` to the most common quarter-turn among
+    the line's words, `vector_signatures` left empty. This independence matters: an earlier version
+    derived labels from a converted page's own surviving classification clusters, which meant a
+    native word the classification chain's own filter steps wrongly dropped never became a label at
+    all — silently excluded from ground truth rather than scored as a miss. `attach_vector_signatures
+    (labels, page_index, vectors_pdf_path)` is the separate, heavier enrichment step (opt-in, not
+    run by the benchmark's hot per-page loop): extracts vectors from a persisted
+    `convert_page_text_only` render and assigns each to whichever line covers the most of its own
+    bbox area (mirrors `pipelines/_steps.py::reassign_by_overlap`'s coverage-ratio pattern),
+    populating `vector_signatures`.
+  - **`raster_label.py`** (library) — `raster_geometry_for_page(pdf_path, page_index)`:
+    `extract_vectors` on the *original, unconverted* page (CAD-vector text glyphs included — a
+    raster/scanned pipeline has to trace all of it), flat-mapped through
+    `geometry_annotations_for_vector`. `sync_text_from_vector_labels(raster_labels, vector_labels,
+    page_indices)`: mutates `raster_labels.entries` in place, dropping then re-adding every
+    `label_id=f"vecsync:{v.label_id}"` entry from the current `vector_labels` on those pages —
+    reuses `vector_label`'s human-vetted text as raster ground truth (raster and vector share page
+    coordinates) without ever touching a genuine hand-drawn raster entry. `ImageRegion` +
+    `embedded_images_for_page(pdf_path, page_index)`: thin wrapper over `page.get_image_info
+    (xrefs=True)` (same API `inspector/pdf_model.py::extract_image_items` uses), listing real
+    embedded raster images for the manual tool's picker.
+  - **`scripts/label/_common.py`** — shared Tk plumbing (`get_display_matrix`
+    — `rotation_matrix * zoom`, **overlay-only**, since `get_pixmap()` bakes `/Rotate` itself and
+    passing the full matrix would double-rotate the bitmap vs. the overlays on a rotated page, same
+    split as `inspector/pdf_model.py`; `Tooltip`, ported from the former `debug_app.py`;
+    `draw_vector`; `bezier_points`; zoom/color constants) imported by every tool below via the
+    sibling-import trick (running a script directly puts its own directory first on `sys.path`, so
+    `scripts/label/` needs no `__init__.py`).
+  - **`scripts/label/native_label.py`** (`python scripts/label/native_label.py PDF --page N
+    [--out]`) — thin CLI over the library: `native_label_pdf` + `convert_page_text_only` (writing a
+    `<stem>_p<N>_native_vectors.pdf` sidecar) + `attach_vector_signatures`, merged onto any existing
+    `--out` file by `label_id`.
+  - **`scripts/label/vector_label.py`** (`VectorLabelApp`) — there is only ever **one flat pool of
+    raw vectors** for the page (`extract_vectors(page)`); every vector is always individually
+    clickable, no clustering. `separate_by_layer_color_width` (`rastervec.pipelines.current`)
+    buckets them into one visibility checkbox per `(layer, color, width)` in a side panel — a
+    filter, not a selection unit. Selecting unlabelled vectors (click/ctrl-click/drag) + Apply
+    creates a new label; clicking a single **already-labelled** vector instead selects that whole
+    label's vector set, pre-fills the inline label bar (text + a continuous `ttk.Scale` rotation,
+    2.5° snap, with a live direction-arrow overlay), and enters "editing" it
+    (`self._active_label_id`) so a further Apply overwrites the same entry in place. A rubber-band
+    drag never enters edit mode by itself. Labelled vectors render green; "Hide labelled" hides them
+    entirely. The text entry auto-focuses after *any* selection. `<`/`>` (or `PageUp`/`PageDown`)
+    move between pages without relaunching — labels save on every page change and on close.
+  - **`scripts/label/raster_label.py`** (`RasterLabelApp`) — scoped to content with **no vector
+    backing at all** (a scanned inset, stamp, photo — the actual CLAUDE.md-scoped-out "Raster"
+    pipeline concern); everything else already has ground truth via `native_label`/`vector_label`/
+    the auto geometry step. On load it lists every embedded image across the whole document
+    (`raster_label.embedded_images_for_page`) and lets you step through them one at a time,
+    cropping into each via `page.get_pixmap(clip=bbox, ...)` — every saved
+    `LabelEntry`/`GeometryAnnotation` still stores absolute page-space coordinates regardless. Three
+    toolbar tools: **Text** (drag a bbox, same label bar as `vector_label`, `source="raster"`),
+    **Line** (click-drag-release two points), **Curve** (click 4 points in sequence — start, 2
+    controls, end; `Escape` cancels an in-progress one). Right-click deletes a text label or a
+    line/curve. A PDF/page with no embedded images simply has nothing to show.
+  - **`scripts/label/master_label.py`** — runs the whole workflow over one PDF into
+    `outputs/labels/<stem>_label/` (`original.pdf`, `vectorised.pdf`, `rasterised.pdf`,
+    `native_labels.json`, `vector_labels.json`, `raster_labels.json`, `manifest.json`): a **native**
+    step (skippable per page via the manifest's `native_done`) assembling `vectorised.pdf` and
+    `native_labels.json`; a **raster geometry** step (`rasterise_done`/`geometry_done`, independent
+    flags — rasterising is the expensive part) assembling `rasterised.pdf` and replacing that page's
+    `source="auto"` geometry entries; a **text re-sync** (`sync_text_from_vector_labels`, always
+    runs, no skip, so editing vector labels later keeps raster labels in sync) — then opens
+    `VectorLabelApp`, re-syncs again, then opens `RasterLabelApp`, then prints a summary. Re-running
+    on the same PDF skips already-done pages for steps 1-2; the interactive steps always reopen for
+    incremental labelling. Not unit-tested end to end (chains three real Tk event loops); its
+    per-step assembly functions are plain file orchestration, smoke-tested by hand.
+  - **`scripts/label/label_viewer.py`** (`LabelViewerApp`, read-only) — resolves a
+    `master_label.py` folder from either the source PDF path or the folder itself
+    (`resolve_label_folder`), and overlays all three label sets on one page view with four
+    independent toggles: Native (bbox), Vector (bbox + its actual backing `Vector`s, resolved by
+    `path_signature` against a fresh `extract_vectors(page)`), Raster geometry (lines/curves, dashed
+    for `source="auto"` vs solid for hand-traced), Raster text (bbox, dashed for a
+    `"vecsync:"`-prefixed `label_id` vs solid for genuine manual entries). No editing, no save —
+    page nav + zoom + hover tooltips only.
 - **`Evaluation/Evaluate/metrics.py` — `evaluate_metrics`** *(implemented, the current scorer)*: an
   **independent** metric suite — each metric is a separate reduction over one shared many-to-many
   `OverlapGraph` between ground-truth `GtRegion`s and `Prediction`s (per (gt, pred) edge: intersection
@@ -402,9 +450,6 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `levenshtein` / `char_error_rate` / `word_error_rate` (the standard text-diff — **not**
   `difflib.SequenceMatcher`). `levenshtein` is used by `metrics.py`'s two
   `region_concat_char_accuracy_*` metrics.
-- **`Evaluation/Labelling/label_schema.py::split_labelset_by_source`** splits a mixed-source
-  `LabelSet` into `{"auto": …, "manual": …}` so the benchmark can score auto-derived and
-  human-entered ground truth as separate runs.
 - **`Evaluation/Evaluate/golden_schema.py` + `golden_regression.py`** *(implemented)*: a
   hand-curated golden/regression test suite, separate from the `LabelSet`/benchmark machinery
   above — one `GoldenCase` (pydantic, `golden_schema.py`, pure) is a single curated snapshot of
@@ -498,7 +543,7 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   every page job via `functools.partial(run_page_task, compute=compute)`, shutting it down after;
   `compute_workers=0` (default) is fully local, today's behavior. Per-variant reconstruct output goes to
   `RECONSTRUCT_DIR/<stem>_p<N>_<variant>/`.
-- **`Evaluation/Evaluate/benchmark.py`** *(implemented)* — the CLI wiring Conversion → auto_label →
+- **`Evaluation/Evaluate/benchmark.py`** *(implemented)* — the CLI wiring Conversion → native_label →
   a real full pipeline run → `metrics.evaluate_metrics` together: `python -m
   rastervec.Evaluation.Evaluate.benchmark --pdf PATH [--pdf PATH2 ...] --pages 0,1,2
   [--iou-threshold 0.1] [--reconstruct-dir DIR] [--workers N] [--compute-workers N]
