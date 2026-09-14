@@ -29,7 +29,7 @@ those labels; all three implemented) plus the inspector tool — see "rastervec 
 ```
 .venv/Scripts/python.exe -m pip install -r requirements.txt                        # install deps
 .venv/Scripts/python.exe -m rastervec.Evaluation.inspector.inspector [path/to.pdf]  # run the PDF layer inspector
-.venv/Scripts/python.exe -m rastervec.pipelines.current --pdf PATH --page N        # run the current extraction pipeline (CLI; also .pipelines.legacy)
+.venv/Scripts/python.exe -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 FastIntoPaddle]  # run the pluggable pipeline (P1 -> P2_REGISTRY[p2] -> P3_REGISTRY[p3])
 .venv/Scripts/python.exe scripts/generate_pipeline_report.py --config run.json      # config-driven per-stage report (PDFs + stats + dump.json per source PDF)
 .venv/Scripts/python.exe scripts/pipeline_report_viewer.py <run>/<stem> [<run2>/<stem>]  # Tkinter viewer: source page + toggleable stage-PDF overlays (1-2 folders side by side)
 .venv/Scripts/python.exe scripts/pipeline_report_benchmark.py --run DIR1 [--run DIR2]  # multiclass-score + chart benchmark report folders (1 or 2) on shared inputs
@@ -49,8 +49,7 @@ venv is **Python 3.10** (`.venv/pyvenv.cfg` → 3.10.11):
 the **PP-OCRv4** model family — the last family 2.x ships, and the API surface `archive/`'s
 `raster_parser` OCR was written against, so the `legacy` benchmark variant needs no compatibility
 shim. paddleocr 2.x is not numpy-2 compatible (`numpy>=1.24,<2` → 1.26.4) and does not pull in
-`paddlex`. `rastervec/` never imports `cv2`. To move models: `config.OCR_VERSION` /
-`config.OCR_LANG`.
+`paddlex`. To move models: `config.OCR_VERSION` / `config.OCR_LANG`.
 
 Two Windows-specific gotchas, both handled in-code: (1) `torch` must be imported **before**
 `paddle`/`paddleocr` in a process — a paddle-first process fails torch's DLL load (`shm.dll`,
@@ -492,10 +491,15 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   the bank (from any prior session, not just the current one) — the same cell to re-run later as a
   regression check.
 - **`Evaluation/Evaluate/variants.py`** *(implemented)*: `PipelineVariant` (name, `engine`
-  current/legacy, `enable_fast`) + the `VARIANTS` registry (`current` [default],
-  `current_nofast`, `legacy`) + `DEFAULT_VARIANTS` + `resolve_variant`. Adding an ablation = one
-  `VARIANTS` entry; `benchmark_jobs.run_page_task` reads it and threads `enable_fast` into
-  `rastervec.pipelines.current.run_pipeline`.
+  current/legacy, `p2`, `p3`, `enable_fast`) + the `VARIANTS` registry (`current` [default p2/p3],
+  `legacy`, plus named presets for benchmark comparisons across P3 backends —
+  `current_vectorclassification`, `current_legacyrecreation`, `current_junction`) +
+  `DEFAULT_VARIANTS` + `resolve_variant`. `engine="current"` threads `p2`/`p3`/`enable_fast` into
+  `rastervec.core.pipeline.run_pipeline` (the pluggable P1→P2_REGISTRY[p2]→P3_REGISTRY[p3]
+  orchestrator, see the `core/` section below); `engine="legacy"` ignores `p2`/`p3` entirely.
+  `scripts/generate_pipeline_report.py`'s `ReportConfig` doesn't go through this registry for the
+  `current` engine — its own `p2`/`p3` fields build a `PipelineVariant` directly, so a report run
+  gets exactly the config's own combo rather than a fixed named preset.
 - **`Evaluation/Evaluate/legacy_adapter.py`** *(implemented)*: a thin `sys.path` + call-through
   that runs archive's `raster_parser.main_pipeline_extract.extract` unmodified and reshapes its
   output into `ClusterOcrResult`s for `metrics.evaluate_metrics` (the `legacy` variant).
@@ -812,10 +816,22 @@ independently of the others (every stage's *output* is a plain dataclass from `m
   `recognize_segmented` (kept for non-pipeline callers); `ocr(image)` is the raw-image convenience
   used by the inspector — both always use `backend.recognize_crops` directly, never `recognize_fn`.
 - **`scripts/generate_pipeline_report.py`** *(replaced `pipeline_stage_visualization.ipynb`)*:
-  reads a JSON `ReportConfig` (pydantic; `pipeline` variant, `final_stage` = a `STEP_NAMES` value,
-  `input_dir`/`input_files`, per-PDF `pages`, `vectorise` + `vectorise_mode` = an
-  `Evaluation/conversion.py` mode), runs `run_pipeline(..., verbose=True, stop_after=final_stage)`
-  once per (pdf, page), and writes `outputs/pipeline_report/<ts>__<config-stem>/<pdf-stem>/` with:
+  reads a JSON `ReportConfig` (pydantic; `pipeline: "current"|"legacy"` — the engine axis — plus
+  `p2`/`p3` [only meaningful when `pipeline == "current"`, validated against
+  `core.registry.P2_REGISTRY`/`P3_REGISTRY`], `enable_fast`, `final_stage` = one of `core.pipeline`'s
+  short `phase1`/`phase2`/`phase3` step names [`"legacy"` ignores it entirely], `input_dir`/
+  `input_files`, per-PDF `pages`, `vectorise` + `vectorise_mode` = an `Evaluation/conversion.py`
+  mode), runs `core.pipeline.run_pipeline(..., p2=, p3=, verbose=True)` once per (pdf, page) for the
+  `current` engine (`pipelines.legacy.run_pipeline` unchanged for `legacy` — always a full run;
+  the new orchestrator has no `stop_after`, so `final_stage` only trims which report *artifacts*
+  render, not how much of the pipeline executes), and writes
+  `outputs/pipeline_report/<ts>__<config-stem>/<pdf-stem>/` with: for `current`, a deliberately
+  small generic artifact set (`phase1__*.pdf`/`phase2__*.pdf`/`final__*.pdf`/
+  `reconstructed__*.pdf` — see `commons/renderer/stages.py`'s `"phase1"`/`"phase2"`/`"final"`
+  branches; no per-stage stats `.txt` files, since P3 backends share no code and populate verbose
+  intermediates differently); `legacy` still only ever emits the single `reconstructed` row, as
+  before (`_active_artifacts` hardcodes this, unrelated to the p2/p3 rewiring). Every run always
+  gets:
   **`benchmark: true`** (mutually exclusive with `vectorise`) additionally makes each `<pdf-stem>/` a
   scoring artifact for `pipeline_report_benchmark.py` — `input_files` may be `.pdf` or `.json` label
   sidecars; per page the pipeline runs **once** on `convert_page_to_vector_text` output (text-as-
