@@ -99,12 +99,19 @@ def test_two_runs_shared_key_report_html_and_viewer_cmds(tmp_path):
     assert "Char overlap" in html
     assert "Rotation accuracy" in html
     assert "Vector classification funnel" in html
+    assert "Font size distribution" in html
 
     charts = sorted(p.name for p in (run_out / "charts").glob("*.png"))
     assert "labels_C__aggregate__labels.png" in charts
     assert "aggregate__labels.png" in charts
     # per-page charts are no longer generated
     assert not any("__p0__" in c for c in charts)
+
+    font_size_charts = [c for c in charts if "font_size" in c]
+    assert font_size_charts
+    assert all(
+        f'src="charts/{c}"' in html for c in font_size_charts
+    ), "font-size charts must be generated AND linked into report.html"
 
     cmds = (run_out / "viewer_commands.txt").read_text(encoding="utf-8")
     assert "pipeline_report_viewer.py" in cmds

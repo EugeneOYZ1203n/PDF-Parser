@@ -632,15 +632,29 @@ def main(argv: list[str] | None = None) -> int:
                     ) + "</div>"
                 )
 
+        font_size_paths: "dict[str, list[Path]]" = {t: [] for t in TEXT_TYPES}
         for name, agg in text_by_run.items():
             nslug = _short_slug(name)
             for text_type in TEXT_TYPES:
+                path = charts_dir / f"{kslug}__{nslug}__{text_type}__font_size.png"
                 charts.font_size_histogram_chart(
-                    agg, text_type, title=f"{key} {name} {text_type} font size",
-                    path=charts_dir / f"{kslug}__{nslug}__{text_type}__font_size.png")
+                    agg, text_type, title=f"{key} {name} {text_type} font size", path=path)
+                font_size_paths[text_type].append(path)
             charts.extra_chars_table_image(
                 agg, title=f"{key} {name} extra predicted chars",
                 path=charts_dir / f"{kslug}__{nslug}__extra_chars.png")
+
+        font_size_html = ["<h4>Font size distribution</h4>"]
+        for text_type in TEXT_TYPES:
+            imgs = [p for p in font_size_paths[text_type] if p.is_file()]
+            if imgs:
+                font_size_html.append(f"<p>{text_type}</p>")
+                font_size_html.append(
+                    '<div class="charts">' + "".join(
+                        f'<img src="{p.relative_to(out_dir).as_posix()}">' for p in imgs
+                    ) + "</div>"
+                )
+        builder.add_raw_html("".join(font_size_html))
 
         if any(v is not None for v in vector_by_run.values()):
             charts.vector_count_chart(
@@ -718,6 +732,28 @@ def main(argv: list[str] | None = None) -> int:
                 if p.is_file()
             ) + "</div>"
         )
+
+        grand_font_size_html = ["<h4>Font size distribution</h4>"]
+        for name, agg in grand_text_agg.items():
+            nslug = _short_slug(name)
+            for text_type in TEXT_TYPES:
+                path = charts_dir / f"aggregate__{nslug}__{text_type}__font_size.png"
+                charts.font_size_histogram_chart(
+                    agg, text_type, title=f"(all inputs) {name} {text_type} font size", path=path)
+        for text_type in TEXT_TYPES:
+            imgs = [
+                charts_dir / f"aggregate__{_short_slug(name)}__{text_type}__font_size.png"
+                for name in grand_text_agg
+            ]
+            imgs = [p for p in imgs if p.is_file()]
+            if imgs:
+                grand_font_size_html.append(f"<p>{text_type}</p>")
+                grand_font_size_html.append(
+                    '<div class="charts">' + "".join(
+                        f'<img src="{p.relative_to(out_dir).as_posix()}">' for p in imgs
+                    ) + "</div>"
+                )
+        builder.add_raw_html("".join(grand_font_size_html))
 
     header = "compared runs:\n" + "\n".join(f"  {Path(d).name}" for d in args.run)
     (out_dir / "benchmark.txt").write_text(
