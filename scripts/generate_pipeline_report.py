@@ -174,10 +174,11 @@ class ReportConfig(BaseModel):
     @field_validator("final_stage")
     @classmethod
     def _known_stage(cls, v: str | None) -> str | None:
-        # Only the new engine's short step list is meaningful here now
-        # (legacy's `_active_artifacts` never consults `final_stage` at
-        # all). Left loose (not required to be in NEW_STEP_NAMES) so a
-        # `pipeline: "legacy"` config doesn't need to omit it.
+        # Validated against the new engine's short step list regardless of
+        # `pipeline` (legacy's `_active_artifacts` never consults
+        # `final_stage` at all, so it's a harmless no-op there too).
+        if v is not None and v not in NEW_STEP_NAMES:
+            raise ValueError(f"final_stage must be one of {NEW_STEP_NAMES}")
         return v
 
     @field_validator("vectorise_mode")
