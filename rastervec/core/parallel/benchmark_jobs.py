@@ -64,6 +64,7 @@ from rastervec.Evaluation.Evaluate.adapters import (
 )
 from rastervec.Evaluation.Evaluate.benchmark import format_report
 from rastervec.Evaluation.Evaluate.variants import PipelineVariant, resolve_variant
+from rastervec.core.registry import DEFAULT_P2, DEFAULT_P3
 from rastervec.Evaluation.Evaluate.metrics import (
     TEXT_TYPES,
     MetricConfig,
@@ -79,7 +80,7 @@ from rastervec.Evaluation.Labelling.label_schema import (
 )
 from rastervec.commons.logging_setup import get_logger
 from rastervec.commons.models import PageMeta, Segment, Text
-from rastervec.pipelines.current import run_pipeline
+from rastervec.core.pipeline import run_pipeline
 from rastervec.P1_Reading_Native.reader import Reader
 from rastervec.commons.renderer import render_boxes_pdf, render_reconstructed_pdf
 
@@ -130,18 +131,18 @@ def _ground_truth(task: PageTask) -> LabelSet:
 
 
 def _run_pipeline(
-    input_bytes: bytes, *, enable_fast: bool = True,
-    compute=None, progress_counter=None,
+    input_bytes: bytes, *, p2: str = DEFAULT_P2, p3: str = DEFAULT_P3,
+    enable_fast: bool = True, compute=None, progress_counter=None,
 ):
-    """Full `pipelines.current.run_pipeline` run on one input PDF -> its
+    """Full `core.pipeline.run_pipeline` run on one input PDF -> its
     PipelineResult ("legacy" is handled separately by `_run_legacy`, never
     reaches here). Always `verbose=True` -- see this module's docstring."""
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "in.pdf"
         path.write_bytes(input_bytes)
         return run_pipeline(
-            str(path), 0, enable_fast=enable_fast, verbose=True, compute=compute,
-            progress_counter=progress_counter,
+            str(path), 0, p2=p2, p3=p3, enable_fast=enable_fast, verbose=True,
+            compute=compute, progress_counter=progress_counter,
         )
 
 
@@ -249,7 +250,7 @@ def _run_current(
     native_ctx = vector_ctx = None
     total = 0.0
     run_kw = dict(
-        enable_fast=variant.enable_fast,
+        p2=variant.p2, p3=variant.p3, enable_fast=variant.enable_fast,
         compute=compute, progress_counter=progress_counter,
     )
     lbl = task.variant
@@ -314,7 +315,12 @@ def _run_current(
     unique_pairs: list[tuple] = []
     for ctx in (native_ctx, vector_ctx):
         if ctx is not None:
-            unique_pairs.extend(zip(ctx.rotated_segments or [], ctx.restored_texts or []))
+            # `rotated_segments`/`restored_texts` are old-engine-only verbose
+            # fields; a P2/P3 backend combination that doesn't populate them
+            # just yields no showcase samples (graceful degradation).
+            segs = getattr(ctx, "rotated_segments", None) or []
+            restored = getattr(ctx, "restored_texts", None) or []
+            unique_pairs.extend(zip(segs, restored))
     result.showcase = _showcase(unique_pairs, task.showcase_per_page, task.showcase_seed)
 
     ocr_texts_all = [

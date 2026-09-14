@@ -6,7 +6,7 @@ per-page report plus cross-variant accuracy + timing comparison tables.
     .venv/Scripts/python.exe -m rastervec.Evaluation.Evaluate.benchmark \
         --pdf path/to.pdf --pages 0,1,2 [--iou-threshold 0.3] \
         [--reconstruct-dir DIR] [--workers N] [--compute-workers N] \
-        [--variants current,current_nofast,legacy]
+        [--variants current,current_vectorclassification,legacy]
 
 `--variants` selects which `Evaluation/Evaluate/variants.VARIANTS` to run
 and compare (default `DEFAULT_VARIANTS`).
@@ -387,10 +387,13 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             parser.error(str(exc))
 
-    from rastervec.pipelines.current import STEP_NAMES
+    from rastervec.pipelines.current import STEP_NAMES as _OLD_STEP_NAMES
     from rastervec.core.parallel.benchmark_jobs import PageTask, run_benchmark
 
-    stage_order = [*STEP_NAMES]
+    # Old (legacy-engine-adjacent) step names + the new core.pipeline's
+    # phase1/phase2/phase3 -- whichever variant ran, its keys are a subset
+    # of this combined order.
+    stage_order = [*_OLD_STEP_NAMES, "phase1", "phase2", "phase3"]
     aggregates: "dict[str, TextMetricSuiteResult | None]" = {}
     vector_aggregates: "dict[str, VectorMetricSuiteResult | None]" = {}
     timings: dict[str, dict] = {}
