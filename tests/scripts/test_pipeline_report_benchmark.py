@@ -83,16 +83,15 @@ def test_two_runs_shared_key_charts_and_viewer_cmds(tmp_path):
 
     run_out = next(out_root.iterdir())
     text = (run_out / "benchmark.txt").read_text(encoding="utf-8")
-    assert "pdf:A  --  AUTO ground truth" in text
-    assert "labels:C  --  MANUAL ground truth" in text
-    assert "confusion matrix" in text
+    assert "pdf:A" in text
+    assert "labels:C" in text
+    assert "OCR confusion characters" in text
     assert "labels:B" not in text  # labels:B vs pdf:B not shared
 
     charts = sorted(p.name for p in (run_out / "charts").glob("*.png"))
-    assert any("labels_C__p0__auto.png" == c for c in charts)
-    assert any("labels_C__p0__confusion.png" == c for c in charts)
-    assert any("labels_C__p0__manual.png" == c for c in charts)
-    assert "aggregate__auto.png" in charts
+    assert any("labels_C__p0__labels.png" == c for c in charts)
+    assert any("labels_C__p0__bbox.png" == c for c in charts)
+    assert "aggregate__labels.png" in charts
 
     cmds = (run_out / "viewer_commands.txt").read_text(encoding="utf-8")
     assert "pipeline_report_viewer.py" in cmds
@@ -104,4 +103,4 @@ def test_single_run_allowed(tmp_path):
     out_root = tmp_path / "out"
     assert prb.main(["--run", str(r), "--out-root", str(out_root)]) == 0
     text = (next(out_root.iterdir()) / "benchmark.txt").read_text(encoding="utf-8")
-    assert "labels:C  --  AUTO ground truth" in text
+    assert "labels:C" in text

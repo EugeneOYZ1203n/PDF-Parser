@@ -1,386 +1,159 @@
+"""Tests for the reworked 4-text-type metrics suite."""
 from __future__ import annotations
 
-import math
-from types import SimpleNamespace
-
-import pytest
-
 from rastervec.Evaluation.Evaluate.metrics import (
+    TEXT_TYPES,
     GtRegion,
     MetricConfig,
     Prediction,
-    Ratio,
-    aggregate_suite,
+    bbox_accuracy_stats,
+    bbox_accuracy_unclassified,
     build_overlap_graph,
-    evaluate_metrics,
-)
-from rastervec.pipelines.result import ClusteringStageResult
-from rastervec.Vector_Classification.classification import CategoryResult, StepResult
-
-
-def _pred(text, bbox, rotation=0, blank=False):
-    return Prediction(
-        text=text, bbox=bbox, rotation=rotation, reached_ocr=True,
-        ocr_blank=blank, source_cluster_id=id(bbox),
-    )
-
-
-def _gt(text, bbox, rotation=0):
-    return GtRegion(page_index=0, bbox=bbox, text=text, expected_rotation=rotation)
-
-
-def _box_group(bbox):
-    return [SimpleNamespace(bbox=bbox)]
-
-
-# --------------------------------------------------------------------------
-# overlap graph
-# --------------------------------------------------------------------------
-def test_graph_disjoint_no_edges():
-    g = build_overlap_graph([_gt("a", (0, 0, 10, 10))], [_pred("A", (50, 50, 60, 60))])
-    assert g.edges == []
-    assert g.missed_gt_idxs == [0]
-    assert g.gt_has_overlap == [False]
-
-
-def test_graph_n_to_1_assignment():
-    gt = [_gt("foo bar baz", (0, 0, 30, 10))]
-    preds = [
-        _pred("FOO", (0, 0, 10, 10)),
-        _pred("BAR", (10, 0, 20, 10)),
-        _pred("BAZ", (20, 0, 30, 10)),
-    ]
-    g = build_overlap_graph(gt, preds)
-    assert sorted(g.assigned_preds_by_gt[0]) == [0, 1, 2]
-    assert g.localized_gt_idxs == [0]
-
-
-def test_graph_blank_predictions_excluded():
-    g = build_overlap_graph(
-        [_gt("a", (0, 0, 10, 10))],
-        [_pred("", (0, 0, 10, 10), blank=True)],
-    )
-    assert g.preds == []
-    assert g.missed_gt_idxs == [0]
-
-
-# --------------------------------------------------------------------------
-# N:1 scene -- the case the legacy 1:1 matcher corrupts
-# --------------------------------------------------------------------------
-def test_n_to_1_scene_metrics():
-    gt = [_gt("foo bar baz", (0, 0, 30, 10))]
-    preds = [
-        _pred("FOO", (0, 0, 10, 10)),
-        _pred("BAR", (10, 0, 20, 10)),
-        _pred("BAZ", (20, 0, 30, 10)),
-    ]
-    res = evaluate_metrics(gt, preds, text_candidate_boxes=[(0, 0, 30, 10)])
-
-    assert res.get("page_char_multiset_recall") == pytest.approx(1.0)
-    assert res.get("page_word_multiset_recall") == pytest.approx(1.0)
-    assert res.get("page_word_multiset_f1") == pytest.approx(1.0)
-    assert res.ratios["gt_text_word_coverage_by_overlapping_preds"] == Ratio(3.0, 3.0)
-    assert res.ratios["pred_text_fully_contained_in_overlapping_gt_rate"] == Ratio(3.0, 3.0)
-    assert res.get("per_gt_best_single_pred_iou_mean") == pytest.approx(1 / 3)
-    assert res.get("per_gt_union_pred_iou_mean") == pytest.approx(1.0)
-    assert res.ratios["undetected_gt_area_ratio"] == Ratio(0.0, 300.0)
-    assert res.ratios["rotation_accuracy_localized_gt"] == Ratio(1.0, 1.0)
-    assert res.ratios["classification_recall_gt_reached_ocr"] == Ratio(1.0, 1.0)
-    # no misses + clustering not supplied -> attribution n/a
-    assert math.isnan(res.get("gt_miss_attributed_to_classification_frac"))
-    assert res.per_stage_miss_counts == {}
-    assert res.counts.n_gt == 1
-    assert res.counts.n_pred_nonblank == 3
-    assert res.counts.n_gt_localized == 1
-
-
-def test_perfect_1_to_1():
-    gt = [_gt("Hello", (0, 0, 10, 5)), _gt("World", (20, 20, 30, 25), rotation=90)]
-    preds = [_pred("hello", (0, 0, 10, 5)), _pred("world", (20, 20, 30, 25), rotation=90)]
-    res = evaluate_metrics(gt, preds, text_candidate_boxes=[(0, 0, 10, 5), (20, 20, 30, 25)])
-    assert res.get("page_char_multiset_recall") == pytest.approx(1.0)
-    assert res.get("page_char_multiset_precision") == pytest.approx(1.0)
-    assert res.get("rotation_accuracy_localized_gt") == pytest.approx(1.0)
-    assert res.get("per_gt_union_pred_iou_mean") == pytest.approx(1.0)
-    assert res.get("undetected_gt_area_ratio") == pytest.approx(0.0)
-    assert res.get("classification_recall_gt_reached_ocr") == pytest.approx(1.0)
-    assert res.get("classification_precision_candidate_is_text") == pytest.approx(1.0)
-
-
-# --------------------------------------------------------------------------
-# text-precision cases
-# --------------------------------------------------------------------------
-def test_hallucinated_pred_not_contained():
-    gt = [_gt("foo", (0, 0, 10, 10))]
-    preds = [_pred("FOO ZZZ", (0, 0, 10, 10))]
-    res = evaluate_metrics(gt, preds, text_candidate_boxes=[(0, 0, 10, 10)])
-    assert res.ratios["pred_text_fully_contained_in_overlapping_gt_rate"] == Ratio(0.0, 1.0)
-    assert res.get("page_char_multiset_precision") < 1.0
-    # gt side: all of "foo" is present in the overlapping pred
-    assert res.ratios["gt_text_word_coverage_by_overlapping_preds"] == Ratio(1.0, 1.0)
-
-
-def test_case_and_whitespace_normalised():
-    gt = [_gt("Setback  Line", (0, 0, 20, 5))]
-    preds = [_pred("SETBACK LINE", (0, 0, 20, 5))]
-    res = evaluate_metrics(gt, preds, text_candidate_boxes=[(0, 0, 20, 5)])
-    assert res.get("page_char_multiset_recall") == pytest.approx(1.0)
-    assert res.get("page_word_multiset_recall") == pytest.approx(1.0)
-
-
-# --------------------------------------------------------------------------
-# char-level edit-distance metrics
-# --------------------------------------------------------------------------
-def test_region_concat_char_accuracy_exact_match():
-    # normalize_text folds case + spacing; the space is kept in the char count
-    gt = [_gt("Setback  Line", (0, 0, 20, 5))]
-    preds = [_pred("SETBACK LINE", (0, 0, 20, 5))]
-    res = evaluate_metrics(gt, preds, text_candidate_boxes=[(0, 0, 20, 5)])
-    n = float(len("SETBACK LINE"))
-    assert res.ratios["region_concat_char_accuracy_all_gt"] == Ratio(n, n)
-    assert res.ratios["region_concat_char_accuracy_overlapping"] == Ratio(n, n)
-
-
-def test_region_concat_char_accuracy_one_substitution():
-    gt = [_gt("HELLO", (0, 0, 10, 5))]
-    preds = [_pred("HELPO", (0, 0, 10, 5))]  # one substitution: L -> P
-    res = evaluate_metrics(gt, preds, text_candidate_boxes=[(0, 0, 10, 5)])
-    assert res.ratios["region_concat_char_accuracy_all_gt"] == Ratio(4.0, 5.0)
-
-
-def test_region_concat_char_accuracy_missed_gt_only_hits_global():
-    gt = [
-        _gt("READ", (0, 0, 10, 5)),
-        _gt("LOST", (100, 0, 110, 5)),
-    ]
-    preds = [_pred("READ", (0, 0, 10, 5))]  # nothing over the second gt
-    res = evaluate_metrics(gt, preds, text_candidate_boxes=[(0, 0, 10, 5)])
-    # global: 4 correct / 8 total
-    assert res.ratios["region_concat_char_accuracy_all_gt"] == Ratio(4.0, 8.0)
-    # overlapping: only the first gt counts -> 4/4
-    assert res.ratios["region_concat_char_accuracy_overlapping"] == Ratio(4.0, 4.0)
-
-
-def test_region_concat_char_accuracy_na_without_gt():
-    res = evaluate_metrics([], [], text_candidate_boxes=[])
-    assert math.isnan(res.get("region_concat_char_accuracy_all_gt"))
-    assert math.isnan(res.get("region_concat_char_accuracy_overlapping"))
-
-
-def test_region_concat_char_accuracy_micro_averaged():
-    r1 = evaluate_metrics([_gt("AB", (0, 0, 10, 5))], [_pred("AB", (0, 0, 10, 5))],
-                          text_candidate_boxes=[(0, 0, 10, 5)])
-    r2 = evaluate_metrics([_gt("CDEF", (0, 0, 10, 5))], [_pred("CDXF", (0, 0, 10, 5))],
-                          text_candidate_boxes=[(0, 0, 10, 5)])
-    agg = aggregate_suite([r1, r2])
-    # page 1: 2/2, page 2: 3/4 -> micro Ratio(5, 6)
-    assert agg.ratios["region_concat_char_accuracy_all_gt"] == Ratio(5.0, 6.0)
-
-
-# --------------------------------------------------------------------------
-# pred-vs-gt box overlay
-# --------------------------------------------------------------------------
-def test_overlay_boxes_colors():
-    from rastervec.Evaluation.Evaluate.metrics import (
-        MATCH_BOX_COLOR,
-        MISSED_GT_BOX_COLOR,
-        SPURIOUS_PRED_BOX_COLOR,
-        build_overlap_graph,
-        overlay_boxes,
-    )
-
-    gt = [_gt("hit", (0, 0, 10, 10)), _gt("miss", (200, 0, 210, 10))]
-    preds = [_pred("HIT", (0, 0, 10, 10)), _pred("SPUR", (500, 0, 510, 10))]
-    boxes = overlay_boxes(build_overlap_graph(gt, preds))
-    colors = {bbox: color for bbox, color in boxes}
-    assert colors[(0, 0, 10, 10)] == MATCH_BOX_COLOR
-    assert colors[(200, 0, 210, 10)] == MISSED_GT_BOX_COLOR
-    assert colors[(500, 0, 510, 10)] == SPURIOUS_PRED_BOX_COLOR
-
-
-def test_overlay_boxes_split_line_styles():
-    from rastervec.Evaluation.Evaluate.metrics import (
-        MATCH_BOX_COLOR,
-        MISSED_GT_BOX_COLOR,
-        SPURIOUS_PRED_BOX_COLOR,
-        overlay_boxes_split,
-    )
-
-    auto_gt = [_gt("A", (0, 0, 20, 10))]
-    auto_preds = [_pred("A", (1, 1, 19, 9)), _pred("SPUR", (500, 0, 510, 10))]
-    manual_gt = [_gt("M", (100, 0, 110, 10))]  # nothing over it in manual run
-    manual_preds: list = []
-
-    boxes = overlay_boxes_split(auto_gt, auto_preds, manual_gt, manual_preds)
-    by_bbox = {bbox: (color, dashes) for bbox, color, dashes in boxes}
-
-    assert by_bbox[(0, 0, 20, 10)] == (MATCH_BOX_COLOR, "[4 3] 0")            # auto GT: dashed, matched
-    assert by_bbox[(1, 1, 19, 9)] == (MATCH_BOX_COLOR, "[1 2] 0")            # auto pred: dotted, matched
-    assert by_bbox[(500, 0, 510, 10)] == (SPURIOUS_PRED_BOX_COLOR, "[1 2] 0")  # pred: dotted, extra
-    assert by_bbox[(100, 0, 110, 10)] == (MISSED_GT_BOX_COLOR, None)          # manual GT: solid, missed
-
-
-# --------------------------------------------------------------------------
-# misses
-# --------------------------------------------------------------------------
-def test_missed_gt_no_prediction():
-    gt = [_gt("gone", (0, 0, 10, 10))]
-    res = evaluate_metrics(gt, [], text_candidate_boxes=[])
-    assert res.ratios["undetected_gt_area_ratio"] == Ratio(100.0, 100.0)
-    assert res.ratios["classification_recall_gt_reached_ocr"] == Ratio(0.0, 1.0)
-    assert res.counts.n_gt_missed == 1
-
-
-def test_blank_ocr_reached_candidate_but_missed():
-    gt = [_gt("text", (0, 0, 10, 10))]
-    preds = [_pred("", (0, 0, 10, 10), blank=True)]
-    res = evaluate_metrics(gt, preds, text_candidate_boxes=[(0, 0, 10, 10)])
-    assert res.ratios["classification_recall_gt_reached_ocr"] == Ratio(1.0, 1.0)
-    assert res.counts.n_gt_missed == 1
-    assert res.get("page_char_multiset_recall") == pytest.approx(0.0)  # nothing recalled
-    assert math.isnan(res.get("page_char_multiset_precision"))  # no predicted chars at all
-
-
-def test_miss_attribution_to_classification():
-    gt = [_gt("dropped text", (0, 0, 10, 10))]
-    dropped = CategoryResult(groups=[_box_group((0, 0, 10, 10))], role="dropped")
-    kept = CategoryResult(groups=[], role="kept")
-    step = StepResult(label="Tiny groups", categories={"kept": kept, "dropped": dropped})
-    clustering = {("", ()): ClusteringStageResult(steps=[step])}
-
-    res = evaluate_metrics(
-        gt, [], text_candidate_boxes=[], clustering=clustering,
-    )
-    assert res.ratios["gt_miss_attributed_to_classification_frac"] == Ratio(1.0, 1.0)
-    assert res.ratios["gt_miss_attributed_to_not_found_frac"] == Ratio(0.0, 1.0)
-    assert res.per_stage_miss_counts == {"classification:Tiny groups": 1}
-
-
-def test_miss_attribution_fast_and_ocr_and_not_found():
-    gt = [
-        _gt("a", (0, 0, 10, 10)),
-        _gt("b", (100, 0, 110, 10)),
-        _gt("c", (200, 0, 210, 10)),
-    ]
-    fast_dropped = [_box_group((0, 0, 10, 10))]
-    ocr_failed = [_box_group((100, 0, 110, 10))]
-    clustering = {("", ()): ClusteringStageResult(steps=[])}
-
-    res = evaluate_metrics(
-        gt, [], text_candidate_boxes=[], clustering=clustering,
-        fast_dropped=fast_dropped, ocr_failed=ocr_failed,
-    )
-    assert res.ratios["gt_miss_attributed_to_fast_frac"] == Ratio(1.0, 3.0)
-    assert res.ratios["gt_miss_attributed_to_ocr_blank_frac"] == Ratio(1.0, 3.0)
-    assert res.ratios["gt_miss_attributed_to_not_found_frac"] == Ratio(1.0, 3.0)
-
-
-def test_miss_attribution_na_without_clustering():
-    gt = [_gt("x", (0, 0, 10, 10))]
-    res = evaluate_metrics(gt, [], text_candidate_boxes=[])
-    for name in (
-        "gt_miss_attributed_to_classification_frac",
-        "gt_miss_attributed_to_fast_frac",
-        "gt_miss_attributed_to_ocr_blank_frac",
-        "gt_miss_attributed_to_not_found_frac",
-    ):
-        assert math.isnan(res.get(name))
-
-
-# --------------------------------------------------------------------------
-# aggregation -- micro-average, not mean of ratios
-# --------------------------------------------------------------------------
-def test_aggregate_is_micro_averaged():
-    r1 = evaluate_metrics([_gt("abc", (0, 0, 30, 10))], [_pred("A", (0, 0, 10, 10))],
-                          text_candidate_boxes=[(0, 0, 10, 10)])
-    # page 1: char recall numerator 1 (just "A"), denominator 3
-    assert r1.ratios["page_char_multiset_recall"] == Ratio(1.0, 3.0)
-
-    r2 = evaluate_metrics(
-        [_gt("abcdefghij", (0, 0, 30, 10)), _gt("klmno", (0, 20, 30, 30))],
-        [_pred("ABCDEFGHIJKLMNO", (0, 0, 30, 30))],
-        text_candidate_boxes=[(0, 0, 30, 30)],
-    )
-    # page 2: all 15 gt chars present -> Ratio(15, 15); but wait pred covers
-    # both -> assigned to both. char recall numerator 15, denominator 15.
-    assert r2.ratios["page_char_multiset_recall"] == Ratio(15.0, 15.0)
-
-    agg = aggregate_suite([r1, r2])
-    assert agg.ratios["page_char_multiset_recall"] == Ratio(16.0, 18.0)
-    assert agg.get("page_char_multiset_recall") == pytest.approx(16 / 18)
-    # NOT the mean of per-page ratios:
-    assert agg.get("page_char_multiset_recall") != pytest.approx((1 / 3 + 1.0) / 2)
-
-
-def test_aggregate_skips_na_pages_and_sums_counts():
-    r_na = evaluate_metrics([], [], text_candidate_boxes=[])  # empty gt -> na everywhere
-    r_ok = evaluate_metrics([_gt("hi", (0, 0, 10, 10))], [_pred("HI", (0, 0, 10, 10))],
-                            text_candidate_boxes=[(0, 0, 10, 10)])
-    agg = aggregate_suite([r_na, r_ok])
-    assert agg.ratios["page_char_multiset_recall"] == Ratio(2.0, 2.0)
-    assert agg.counts.n_gt == 1
-
-
-def test_aggregate_f1_from_aggregated_pr():
-    r1 = evaluate_metrics([_gt("ab", (0, 0, 10, 10))], [_pred("A", (0, 0, 10, 10))],
-                          text_candidate_boxes=[(0, 0, 10, 10)])
-    r2 = evaluate_metrics([_gt("cd", (0, 0, 10, 10))], [_pred("CD", (0, 0, 10, 10))],
-                          text_candidate_boxes=[(0, 0, 10, 10)])
-    agg = aggregate_suite([r1, r2])
-    rec = agg.ratios["page_char_multiset_recall"].value
-    prec = agg.ratios["page_char_multiset_precision"].value
-    assert agg.get("page_char_multiset_f1") == pytest.approx(2 * rec * prec / (rec + prec))
-
-
-# ---------------------------------------------------------------------------
-# Multiclass (evaluate_multiclass)
-# ---------------------------------------------------------------------------
-from rastervec.Evaluation.Evaluate.metrics import (  # noqa: E402
-    aggregate_multiclass,
-    evaluate_multiclass,
+    build_overlap_graphs_by_type,
+    char_overlap_stats,
+    classification_funnel_stats,
+    evaluate_text_metrics,
+    aggregate_text_metrics,
+    overlay_boxes_by_type,
+    rotation_stats,
+    text_label_stats,
+    word_overlap_stats,
 )
 
 
-def test_multiclass_other_class_pred_excluded_from_precision():
-    auto = [_gt("hello world", (0, 0, 50, 10))]
-    manual = [_gt("foo bar", (0, 100, 50, 110))]
-    # one pred lands cleanly on the auto line, one is pure spurious
-    preds = [_pred("HELLO WORLD", (0, 0, 50, 10)), _pred("ZZZ", (300, 300, 320, 310))]
-    r = evaluate_multiclass(auto, manual, preds, [p.bbox for p in preds])
-
-    # manual precision denominator excludes the auto-matched pred -> only "ZZZ" chars
-    mp = r.manual.ratios["page_char_multiset_precision"]
-    assert mp.denominator == 3.0  # len("ZZZ")
-    # auto precision still sees its own pred + the spurious one (non-space chars)
-    assert r.auto.ratios["page_char_multiset_precision"].denominator == 10.0 + 3.0
+def _gt(text, bbox=(0, 0, 10, 10), rot=0, text_type="native_to_vector"):
+    return GtRegion(page_index=0, bbox=bbox, text=text, expected_rotation=rot, text_type=text_type)
 
 
-def test_multiclass_confusion_diagonal_and_recall():
-    auto = [_gt("aa", (0, 0, 20, 10)), _gt("bb", (0, 40, 20, 50))]
-    manual = [_gt("cc", (0, 100, 20, 110))]
-    preds = [_pred("AA", (0, 0, 20, 10))]  # only the first auto region detected
-    r = evaluate_multiclass(auto, manual, preds, [p.bbox for p in preds])
-    assert r.confusion["auto"] == {"auto": 1, "manual": 0, "none": 1}
-    assert r.confusion["manual"] == {"auto": 0, "manual": 0, "none": 1}
-    assert r.detection_recall("auto") == Ratio(1.0, 2.0)
-    assert math.isnan(r.detection_recall("manual").value) is False
+def _pred(text, bbox=(0, 0, 10, 10), rot=0):
+    return Prediction(text=text, bbox=bbox, rotation=rot)
 
 
-def test_multiclass_cross_class_when_pred_spans_both():
-    auto = [_gt("aa", (0, 0, 20, 100))]
-    manual = [_gt("cc", (0, 0, 100, 20))]
-    preds = [_pred("X", (0, 0, 100, 30))]  # covers manual (2000) more than auto (600)
-    r = evaluate_multiclass(auto, manual, preds, [p.bbox for p in preds])
-    # auto region detected, but by a pred that leans manual
-    assert r.confusion["auto"]["manual"] == 1
+def test_char_overlap_stats_exact_match():
+    g = _gt("HELLO")
+    graph = build_overlap_graph([g], [_pred("HELLO")])
+    stats = char_overlap_stats(graph, "native_to_vector")
+    assert stats.matched == 5
+    assert stats.total_gt == 5
+    assert stats.unclassified == 0
+    assert stats.missing == 0
+    assert stats.precision.value == 1.0
+    assert stats.recall.value == 1.0
 
 
-def test_multiclass_aggregate_sums_confusion():
-    auto = [_gt("aa", (0, 0, 20, 10))]
-    manual = [_gt("cc", (0, 100, 20, 110))]
-    preds = [_pred("AA", (0, 0, 20, 10))]
-    r = evaluate_multiclass(auto, manual, preds, [p.bbox for p in preds])
-    agg = aggregate_multiclass([r, r])
-    assert agg.confusion["auto"]["auto"] == 2
-    assert agg.confusion["manual"]["none"] == 2
-    assert aggregate_multiclass([]) is None
+def test_char_overlap_stats_unclassified_prediction():
+    g = _gt("HELLO")
+    spurious = _pred("WORLD", bbox=(100, 100, 110, 110))
+    graph = build_overlap_graph([g], [_pred("HELLO"), spurious])
+    stats = char_overlap_stats(graph, "native_to_vector")
+    assert stats.matched == 5
+    assert stats.unclassified == 5  # WORLD's 5 chars, zero overlap
+    assert stats.precision.value == 0.5
+
+
+def test_word_overlap_stats_partial_recall():
+    g = _gt("HELLO WORLD")
+    graph = build_overlap_graph([g], [_pred("HELLO")])
+    stats = word_overlap_stats(graph, "native_to_vector")
+    assert stats.matched == 1
+    assert stats.total_gt == 2
+    assert stats.missing == 1
+
+
+def test_bbox_accuracy_stats_perfect_iou():
+    g = _gt("X", bbox=(0, 0, 10, 10))
+    graph = build_overlap_graph([g], [_pred("X", bbox=(0, 0, 10, 10))])
+    stats = bbox_accuracy_stats(graph, "native_to_vector")
+    assert stats.mean_iou.value == 1.0
+    assert stats.n_gt == 1
+    assert stats.n_localized == 1
+
+
+def test_bbox_accuracy_unclassified_counts_spurious_across_all_types():
+    gt_by_type = {t: [] for t in TEXT_TYPES}
+    gt_by_type["native_to_vector"] = [_gt("A", bbox=(0, 0, 5, 5))]
+    preds = [_pred("A", bbox=(0, 0, 5, 5)), _pred("SPURIOUS", bbox=(50, 50, 60, 60))]
+    graphs = build_overlap_graphs_by_type(gt_by_type, preds)
+    stats = bbox_accuracy_unclassified(graphs)
+    assert stats.spurious_pred_count == 1
+
+
+def test_rotation_stats_buckets():
+    g0 = _gt("A", rot=0)
+    graph = build_overlap_graph([g0], [_pred("A", rot=90)])
+    stats = rotation_stats(graph, "native_to_vector")
+    assert stats.buckets.off_90 == 1
+    assert stats.buckets.correct == 0
+    assert stats.mean_error_deg == 90.0
+    assert stats.rmse_deg == 90.0
+
+
+def test_rotation_stats_circular_270_is_off_by_90():
+    g0 = _gt("A", rot=0)
+    graph = build_overlap_graph([g0], [_pred("A", rot=270)])
+    stats = rotation_stats(graph, "native_to_vector")
+    assert stats.buckets.off_90 == 1
+
+
+def test_classification_funnel_stats():
+    stats = classification_funnel_stats({"a", "b", "c"}, {"a", "b"}, "native_to_vector")
+    assert stats.n_gt_vectors == 3
+    assert stats.n_survived == 2
+    assert stats.survival_rate.value == 2 / 3
+
+
+def test_classification_funnel_stats_no_gt_vectors_is_na():
+    stats = classification_funnel_stats(set(), set(), "native_to_vector")
+    assert not stats.survival_rate.applicable
+
+
+def test_text_label_stats_counts():
+    class E:
+        def __init__(self, text, sigs=()):
+            self.text = text
+            self.vector_signatures = list(sigs)
+
+    entries_by_type = {t: [] for t in TEXT_TYPES}
+    entries_by_type["original_vector"] = [E("HELLO WORLD", sigs=["a", "b"])]
+    stats = {s.text_type: s for s in text_label_stats(entries_by_type)}
+    ov = stats["original_vector"]
+    assert ov.label_count == 1
+    assert ov.word_count == 2
+    assert ov.char_count == 10
+    assert ov.vector_count == 2
+    assert stats["native_to_vector"].label_count == 0
+
+
+def test_evaluate_text_metrics_builds_all_four_types():
+    gt_by_type = {t: [] for t in TEXT_TYPES}
+    gt_by_type["native_to_vector"] = [_gt("HELLO")]
+    entries_by_type = {t: [] for t in TEXT_TYPES}
+    result = evaluate_text_metrics(gt_by_type, entries_by_type, [_pred("HELLO")])
+    assert set(result.by_type) == set(TEXT_TYPES)
+    assert result.by_type["native_to_vector"].char_overlap.matched == 5
+    assert result.by_type["original_vector"].label_stats.label_count == 0
+    assert result.by_type["native_to_vector"].funnel is not None
+    assert result.by_type["vector_to_raster"].funnel is None
+
+
+def test_aggregate_text_metrics_micro_averages():
+    gt_by_type = {t: [] for t in TEXT_TYPES}
+    entries_by_type = {t: [] for t in TEXT_TYPES}
+    gt_by_type["native_to_vector"] = [_gt("HELLO")]
+    r1 = evaluate_text_metrics(gt_by_type, entries_by_type, [_pred("HELLO")])
+    gt_by_type2 = {t: [] for t in TEXT_TYPES}
+    gt_by_type2["native_to_vector"] = [_gt("WORLD")]
+    r2 = evaluate_text_metrics(gt_by_type2, entries_by_type, [_pred("WRLD")])
+    agg = aggregate_text_metrics([r1, r2])
+    co = agg.by_type["native_to_vector"].char_overlap
+    assert co.total_gt == 10
+    assert co.matched == 5 + 4
+
+
+def test_overlay_boxes_by_type_dashes_and_colors():
+    gt_by_type = {t: [] for t in TEXT_TYPES}
+    gt_by_type["native_to_vector"] = [_gt("A", bbox=(0, 0, 5, 5))]
+    graphs = build_overlap_graphs_by_type(gt_by_type, [_pred("A", bbox=(0, 0, 5, 5))])
+    boxes = overlay_boxes_by_type(graphs)
+    assert boxes  # at least the matched gt + pred box
+    assert any(dashes == "[4 3] 0" for _bbox, _rgb, dashes in boxes)

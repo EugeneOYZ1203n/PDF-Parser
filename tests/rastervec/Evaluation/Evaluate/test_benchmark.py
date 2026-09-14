@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from rastervec.Evaluation.Evaluate.benchmark import (
@@ -9,41 +7,32 @@ from rastervec.Evaluation.Evaluate.benchmark import (
     distribution_stats,
     format_aggregate,
     format_aggregate_comparison,
-    format_report,
+    format_text_report,
     format_timing_report,
     format_variant_timing_comparison,
     summarize_stage_timings,
 )
 from rastervec.Evaluation.Evaluate.metrics import (
-    _RATIO_FIELDS,
-    MetricCounts,
-    MetricSuiteResult,
-    Ratio,
+    TEXT_TYPES,
+    GtRegion,
+    Prediction,
+    evaluate_text_metrics,
 )
 
 
-def _suite(**ratios) -> MetricSuiteResult:
-    base = {name: Ratio(0.0, math.nan) for name in _RATIO_FIELDS}
-    base.update(ratios)
-    return MetricSuiteResult(ratios=base)
+def _result(recall_pair=("HELLO", "HELLO")):
+    gt_by_type = {t: [] for t in TEXT_TYPES}
+    gt_by_type["native_to_vector"] = [GtRegion(0, (0, 0, 50, 10), recall_pair[0], 0, "native_to_vector")]
+    entries_by_type = {t: [] for t in TEXT_TYPES}
+    preds = [Prediction(recall_pair[1], (0, 0, 50, 10), 0)]
+    return evaluate_text_metrics(gt_by_type, entries_by_type, preds)
 
 
-def test_format_report_groups_metrics_with_absolute_counts():
-    result = _suite(
-        page_char_multiset_recall=Ratio(9.0, 10.0),
-        page_char_multiset_precision=Ratio(9.0, 12.0),
-    )
-    result.per_stage_miss_counts = {"ocr_blank": 1}
-    result.counts = MetricCounts(n_gt=4, n_pred=3, n_pred_nonblank=3, n_text_candidates=3)
-
-    report = format_report("x.pdf", 0, result)
-
-    assert "x.pdf page 0:" in report
-    assert "[character]" in report
-    assert "page_char_multiset_recall: 9/10  (0.900)" in report
-    assert "page_char_multiset_f1: 0.818" in report  # 2*.9*.75/(.9+.75)
-    assert "rotation_accuracy_localized_gt: 0/nan  (n/a)" in report
-    assert "per_stage_miss_counts: {'ocr_blank': 1}" in report
+def test_format_text_report_has_type_blocks():
+    report = format_text_report("x.pdf", 0, _result())
+    assert "x.pdf page 0 [text]:" in report
+    assert "[native_to_vector]" in report
+    assert "char overlap:" in report
 
 
 def test_aggregate_results_empty_returns_none():
@@ -52,27 +41,14 @@ def test_aggregate_results_empty_returns_none():
 
 
 def test_aggregate_results_micro_averages():
-    a = _suite(page_char_multiset_recall=Ratio(1.0, 3.0))
-    b = _suite(page_char_multiset_recall=Ratio(10.0, 15.0))
+    a = _result(("HI", "HI"))  # 2/2 matched
+    b = _result(("HELLO", "HELLO"))  # 5/5 matched
 
     agg = aggregate_results([a, b])
 
-    assert agg.ratios["page_char_multiset_recall"] == Ratio(11.0, 18.0)
-    assert agg.get("page_char_multiset_recall") == pytest.approx(11 / 18)
-
-
-def test_aggregate_results_merges_miss_counts_and_sums_counts():
-    a = _suite()
-    a.per_stage_miss_counts = {"ocr_blank": 1, "fast_text_detect": 1}
-    a.counts = MetricCounts(n_gt=2)
-    b = _suite()
-    b.per_stage_miss_counts = {"ocr_blank": 1}
-    b.counts = MetricCounts(n_gt=3)
-
-    agg = aggregate_results([a, b])
-
-    assert agg.per_stage_miss_counts == {"ocr_blank": 2, "fast_text_detect": 1}
-    assert agg.counts.n_gt == 5
+    co = agg.by_type["native_to_vector"].char_overlap
+    assert co.matched == 7
+    assert co.total_gt == 7
 
 
 def test_distribution_stats_empty_returns_empty_dict():
@@ -131,7 +107,6 @@ def test_format_variant_timing_comparison_columns_and_delta():
     )
     assert "current_heavy" in out and "current_heavy_nofast" in out
     assert "d:current_heavy_nofast" in out
-    # ocr_compare goes up without FAST (+4.000), total goes down (-1.000)
     ocr_line = next(ln for ln in out.splitlines() if ln.strip().startswith("ocr_compare"))
     assert "+4.000" in ocr_line
     total_line = next(ln for ln in out.splitlines() if ln.strip().startswith("total"))
@@ -148,12 +123,8 @@ def test_format_variant_timing_comparison_tolerates_empty_variant_summary():
     assert "nan" in out  # legacy has no per-stage medians
 
 
-def test_format_aggregate_comparison_metric_rows():
-    a = _suite(page_char_multiset_recall=Ratio(9.0, 10.0))
-    b = _suite(page_char_multiset_recall=Ratio(5.0, 10.0))
-    out = format_aggregate_comparison({"current_heavy": a, "current_light": b, "legacy": None})
-    assert "current_heavy" in out and "legacy" in out
-    recall_line = next(
-        ln for ln in out.splitlines() if ln.strip().startswith("page_char_multiset_recall")
-    )
-    assert "0.900" in recall_line and "0.500" in recall_line and "n/a" in recall_line
+def test_format_aggregate_comparison_shows_all_variants():
+    a = _result(("HI", "HI"))
+    out = format_aggregate_comparison({"current": a, "legacy": None})
+    assert "current" in out and "legacy" in out
+    assert "(no results)" in out

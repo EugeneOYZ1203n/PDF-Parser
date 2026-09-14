@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pickle
 
-from rastervec.Evaluation.Evaluate.metrics import MetricSuiteResult, Ratio
 from rastervec.Reader.Parallel import benchmark_jobs as bj
 from rastervec.Reader.Parallel.benchmark_jobs import (
     PageResult,
@@ -21,20 +20,19 @@ def test_pagetask_pickle_round_trip():
 def test_pageresult_pickle_round_trip():
     r = PageResult(
         pdf_path="x.pdf", page_index=0, variant="current",
-        auto=MetricSuiteResult(ratios={"page_char_multiset_recall": Ratio(1.0, 2.0)}),
         showcase=[ShowcaseSample(png=b"\x89PNG", text="HI", passed=True)],
         stage_durations={"reader": 0.1},
     )
     back = pickle.loads(pickle.dumps(r))
     assert back.showcase[0].text == "HI"
-    assert back.auto.ratios["page_char_multiset_recall"] == Ratio(1.0, 2.0)
+    assert back.text_metrics is None
 
 
 def test_run_page_task_missing_pdf_captures_error():
     task = PageTask(pdf_path="does_not_exist.pdf", page_index=0, variant="current")
     result = run_page_task(task)
     assert result.error is not None
-    assert result.auto is None
+    assert result.text_metrics is None
     assert result.variant == "current"
 
 
