@@ -18,3 +18,8 @@ scikit-image>=0.22,<0.25
 # used directly by OCR/radon.py (scipy.ndimage.rotate for the skew sweep);
 # also a scikit-image dependency, pinned here since it's imported directly.
 scipy>=1.10
+# used directly by P2_Raster_To_Vec/Junction/junction_test/ (ported as-is from
+# branch junction-classification) -- a NEW exception to "rastervec/ never
+# imports cv2" (see CLAUDE.md), scoped to this one P2 backend; was already
+# present transitively (via paddleocr/albumentations) but not pinned.
+opencv-python-headless>=4.9
