@@ -356,7 +356,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--workers", type=int, default=1,
         help="Run pages across a spawn process pool of this size (>1). Default 1 "
-        "(serial). See rastervec.Reader.Parallel.",
+        "(serial). See rastervec.core.parallel.",
     )
     parser.add_argument(
         "--compute-workers", type=int, default=0,
@@ -388,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(str(exc))
 
     from rastervec.pipelines.current import STEP_NAMES
-    from rastervec.Reader.Parallel.benchmark_jobs import PageTask, run_benchmark
+    from rastervec.core.parallel.benchmark_jobs import PageTask, run_benchmark
 
     stage_order = [*STEP_NAMES]
     aggregates: "dict[str, TextMetricSuiteResult | None]" = {}

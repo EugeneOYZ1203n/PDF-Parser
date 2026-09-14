@@ -77,11 +77,11 @@ from rastervec.Evaluation.Labelling.label_schema import (
     LabelEntry,
     LabelSet,
 )
-from rastervec.logging_setup import get_logger
-from rastervec.models import PageMeta, Segment, Text
+from rastervec.commons.logging_setup import get_logger
+from rastervec.commons.models import PageMeta, Segment, Text
 from rastervec.pipelines.current import run_pipeline
-from rastervec.Reader.reader import Reader
-from rastervec.renderer import render_boxes_pdf, render_reconstructed_pdf
+from rastervec.P1_Reading_Native.reader import Reader
+from rastervec.commons.renderer import render_boxes_pdf, render_reconstructed_pdf
 
 _LOG = get_logger("reader.parallel.jobs")
 
@@ -491,7 +491,7 @@ def run_benchmark(
     import functools
     import multiprocessing
 
-    from rastervec.Reader.Parallel.pool import compute_pool, run_parallel
+    from rastervec.core.parallel.pool import compute_pool, run_parallel
 
     progress_manager = multiprocessing.Manager()
     try:

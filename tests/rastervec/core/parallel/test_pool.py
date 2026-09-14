@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 
-from rastervec.Reader.Parallel import pool as pool_mod
-from rastervec.Reader.Parallel.pool import (
+from rastervec.core.parallel import pool as pool_mod
+from rastervec.core.parallel.pool import (
     _WORKER_ENV,
     _progress_postfix,
     compute_pool,

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pickle
 
-from rastervec.Reader.Parallel import benchmark_jobs as bj
-from rastervec.Reader.Parallel.benchmark_jobs import (
+from rastervec.core.parallel import benchmark_jobs as bj
+from rastervec.core.parallel.benchmark_jobs import (
     PageResult,
     PageTask,
     ShowcaseSample,
@@ -49,7 +49,7 @@ def test_run_benchmark_compute_workers_wires_a_starmap_capable_proxy(monkeypatch
         captured["compute"] = compute
         return PageResult(pdf_path=task.pdf_path, page_index=task.page_index, variant=task.variant)
 
-    from rastervec.Reader.Parallel import pool as pool_mod
+    from rastervec.core.parallel import pool as pool_mod
 
     monkeypatch.setattr(bj, "run_page_task", fake_run_page_task)
     monkeypatch.setattr(pool_mod, "warmup", lambda: None)

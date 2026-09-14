@@ -19,7 +19,7 @@ from typing import Callable, Iterable, Iterator, TypeVar
 
 from tqdm import tqdm
 
-from rastervec.logging_setup import get_logger
+from rastervec.commons.logging_setup import get_logger
 
 _LOG = get_logger("reader.parallel")
 
