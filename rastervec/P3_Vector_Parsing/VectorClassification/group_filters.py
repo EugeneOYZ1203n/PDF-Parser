@@ -28,10 +28,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rastervec.helpers.geometry import max_dimension, rect_gap, union_bbox
-from rastervec.helpers.iterutils import partition
-from rastervec.models import Page, Vector
-from rastervec.Vector_Classification.item_filters import (
+from rastervec.commons.helpers.geometry import max_dimension, rect_gap, union_bbox
+from rastervec.commons.helpers.iterutils import partition
+from rastervec.commons.models import Page, Vector
+from rastervec.P3_Vector_Parsing.VectorClassification.item_filters import (
     bbox_of,
     vector_signature,
 )

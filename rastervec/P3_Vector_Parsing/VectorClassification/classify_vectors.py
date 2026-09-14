@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from rastervec.config import (
+from rastervec.P3_Vector_Parsing.VectorClassification.config import (
     DENSITY_DEFAULT_GRID_SIZE,
     DENSITY_MAX_CELL_PX,
     DENSITY_MAX_EMPTY_FRACTION,
@@ -35,13 +35,22 @@ from rastervec.config import (
     SPATIAL_CLUSTER_THRESHOLD,
     SPATIAL_SIZE_TOLERANCE,
 )
-from rastervec.models import Page, Vector
-from rastervec.pipelines.result import ClusteringStageResult
-from rastervec.Vector.vector import separate_by_color, separate_by_layer
-from rastervec.Vector_Classification import cluster_filters as clf
-from rastervec.Vector_Classification import group_filters as grf
-from rastervec.Vector_Classification import item_filters as itf
-from rastervec.Vector_Classification.classification import CategoryResult, StepResult
+from rastervec.commons.models import Page, Vector
+from rastervec.P3_Vector_Parsing.VectorClassification.layer_color_separation import separate_by_color, separate_by_layer
+from rastervec.P3_Vector_Parsing.VectorClassification import cluster_filters as clf
+from rastervec.P3_Vector_Parsing.VectorClassification import group_filters as grf
+from rastervec.P3_Vector_Parsing.VectorClassification import item_filters as itf
+from rastervec.P3_Vector_Parsing.VectorClassification.classification import CategoryResult, StepResult
+
+
+@dataclass
+class ClusteringStageResult:
+    """One (layer, color) bucket's Vector Classification result: `steps` is
+    exactly `_classify_bucket()`'s return value. `steps[-1].categories
+    ["kept"]` is the final surviving (tiered) clusters; every
+    `role="dropped"` category across every step is drawing content."""
+
+    steps: "list[StepResult]"
 
 
 @dataclass

@@ -13,11 +13,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from rastervec.helpers.geometry import transform_bbox, transform_direction, transform_point
-from rastervec.models import Segment, SegmentMeta, Text
-from rastervec.OCR.Paddle_OCR.ocr_backend import _recognize_crops_job
-from rastervec.OCR.Paddle_OCR.ocr_backend import recognize_segments as _recognize_segments
-from rastervec.renderer.stages import render_restore  # noqa: F401 -- re-exported for callers
+from rastervec.commons.helpers.geometry import transform_bbox, transform_direction, transform_point
+from rastervec.commons.models import Segment, SegmentMeta, Text
+from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import _recognize_crops_job
+from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import recognize_segments as _recognize_segments
 
 
 def recognize_unique_words(

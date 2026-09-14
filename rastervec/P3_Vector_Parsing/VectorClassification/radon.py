@@ -88,13 +88,13 @@ import math
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
-    from rastervec.OCR.Paddle_OCR.ocr_backend import PaddleDetection
+    from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import PaddleDetection
 
 import numpy as np
 from scipy.ndimage import rotate as _nd_rotate
 from skimage.transform import SimilarityTransform, resize, warp
 
-from rastervec.config import (
+from rastervec.P3_Vector_Parsing.VectorClassification.config import (
     MAX_RENDER_DPI,
     MIN_RENDER_SIDE_PX,
     RADON_ANGLE_STEP_DEG,
@@ -113,18 +113,17 @@ from rastervec.config import (
     RADON_RENDER_PADDING_EXTRA_PT,
     RADON_SKEW_LIMIT_DEG,
 )
-from rastervec.helpers.geometry import (
+from rastervec.commons.helpers.geometry import (
     PDF_POINTS_PER_INCH,
     bbox_intersection_area,
     union_bbox,
 )
-from rastervec.models import Segment, Vector
-from rastervec.renderer import (
+from rastervec.commons.models import Segment, Vector
+from rastervec.commons.renderer import (
     page_points_to_pixel,
     pixel_to_page_bbox,
     render_vector_cluster,
 )
-from rastervec.renderer.stages import render_radon  # noqa: F401 -- re-exported for callers
 
 # A pixel darker than this counts as glyph ink (0 = black, 255 = white).
 INK_LEVEL = 250

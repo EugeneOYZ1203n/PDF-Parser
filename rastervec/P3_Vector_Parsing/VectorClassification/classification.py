@@ -46,17 +46,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from rastervec.logging_setup import get_logger
-from rastervec.models import Page, Vector
-from rastervec.renderer.stages import (  # noqa: F401 -- re-exported for callers
-    render_clustering_steps,
-    render_layer_color_buckets,
-    render_layers,
-    render_text_candidates,
-)
-from rastervec.Vector_Classification import cluster_filters as clf  # noqa: F401 -- re-exported
-from rastervec.Vector_Classification import group_filters as grf  # noqa: F401 -- re-exported
-from rastervec.Vector_Classification import item_filters as itf  # noqa: F401 -- re-exported
+from rastervec.commons.logging_setup import get_logger
+from rastervec.commons.models import Page, Vector
+from rastervec.P3_Vector_Parsing.VectorClassification import cluster_filters as clf  # noqa: F401 -- re-exported
+from rastervec.P3_Vector_Parsing.VectorClassification import group_filters as grf  # noqa: F401 -- re-exported
+from rastervec.P3_Vector_Parsing.VectorClassification import item_filters as itf  # noqa: F401 -- re-exported
 
 _LOG = get_logger("classification")
 

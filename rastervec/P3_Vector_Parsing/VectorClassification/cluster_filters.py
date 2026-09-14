@@ -60,12 +60,12 @@ from __future__ import annotations
 from collections import defaultdict
 from math import ceil, hypot, log
 
-from rastervec.helpers.clustering import cluster_spatial
-from rastervec.helpers.geometry import bboxes_intersect, dims, item_bbox
-from rastervec.helpers.iterutils import partition
-from rastervec.models import Vector
-from rastervec.Vector_Classification.group_filters import GroupStats
-from rastervec.Vector_Classification.item_filters import (
+from rastervec.commons.helpers.clustering import cluster_spatial
+from rastervec.commons.helpers.geometry import bboxes_intersect, dims, item_bbox
+from rastervec.commons.helpers.iterutils import partition
+from rastervec.commons.models import Vector
+from rastervec.P3_Vector_Parsing.VectorClassification.group_filters import GroupStats
+from rastervec.P3_Vector_Parsing.VectorClassification.item_filters import (
     ItemSignature,
     bbox_of,
     item_signature,

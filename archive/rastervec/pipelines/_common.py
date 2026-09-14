@@ -6,20 +6,13 @@ from __future__ import annotations
 import time
 
 from rastervec.logging_setup import get_logger
-from rastervec.pipelines._steps import (
-    build_drawing_output,
-    detect_text_fast,
-    elect_unique_segments,
-    extract_native_text,
-    extract_vectors,
-    group_similar_segments,
-    read_page,
-    segment_clusters,
-)
+from rastervec.pipelines._steps import build_drawing_output, extract_native_text, extract_vectors, read_page
+from rastervec.pipelines._old_steps import detect_text_fast, elect_unique_segments, group_similar_segments
 from rastervec.pipelines.result import PipelineResult, StepOutcome
 from rastervec.pipelines.sub_pipelines.ocr import recognize_unique_words, restore_word_texts
 from rastervec.pipelines.sub_pipelines.vector_classification import classify_vectors
 from rastervec.Reader.reader import Reader
+from archive.rastervec.OCR.radon import segment_clusters  # frozen -- see archive/rastervec/OCR/radon.py
 
 _LOG = get_logger("pipelines.current")
 

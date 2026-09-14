@@ -22,8 +22,8 @@ from __future__ import annotations
 
 from collections import Counter
 
-from rastervec.helpers.geometry import BBox, item_bbox, item_points, max_dimension, union_bbox
-from rastervec.models import Page, Vector
+from rastervec.commons.helpers.geometry import BBox, item_bbox, item_points, max_dimension, union_bbox
+from rastervec.commons.models import Page, Vector
 
 # A whole-Vector signature: one per-item signature (kind + points, translated
 # so the *Vector's own bbox origin* sits at the origin) per item, in order --
