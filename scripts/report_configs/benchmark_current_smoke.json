@@ -1,0 +1,10 @@
+{
+  "pipeline": "current",
+  "benchmark": true,
+  "input_files": [
+    "references/P2118-Thomson-PRECOMP-24Oct2023.pdf"
+  ],
+  "pages": [0],
+  "iou_edge_min": 0.1,
+  "output_root": "outputs/pipeline_report"
+}
