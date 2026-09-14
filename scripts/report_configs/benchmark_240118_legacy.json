@@ -1,0 +1,10 @@
+{
+  "pipeline": "legacy",
+  "benchmark": true,
+  "input_files": [
+    "outputs/labels/240118-Proposed OW Shopdrawings for Thomson Height CC_label"
+  ],
+  "pages": [1],
+  "iou_edge_min": 0.1,
+  "output_root": "outputs/pipeline_report"
+}

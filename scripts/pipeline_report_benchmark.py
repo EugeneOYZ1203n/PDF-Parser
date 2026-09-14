@@ -204,6 +204,19 @@ def _slug(text: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in text).strip("_") or "key"
 
 
+def _short_slug(text: str, max_len: int = 16) -> str:
+    """A filename-safe slug capped to `max_len` chars (+ a short hash
+    suffix for uniqueness) -- unlike `_slug`, safe to compose several of
+    into one path component without hitting Windows' ~260-char MAX_PATH."""
+    import hashlib
+
+    full = _slug(text)
+    if len(full) <= max_len:
+        return full
+    h = hashlib.sha1(text.encode()).hexdigest()[:8]
+    return f"{full[:max_len]}_{h}"
+
+
 def _crop_to_png(pdf_path: Path, bbox, out_path: Path, *, dpi: float = 150.0) -> bool:
     """Crops `bbox` (page-space, unrotated MediaBox) out of `pdf_path`'s
     page 0 -- every `converted_p<N>.pdf` this benchmark scores against is a
@@ -238,7 +251,7 @@ def _collect_examples(
     GT (no prediction reached it), confusion misreads (GT word vs. its
     closest overlapping predicted word)."""
     out: "dict[tuple[str, str], list[ExampleCard]]" = {}
-    rslug = _slug(entry.run_name)
+    rslug = _short_slug(entry.run_name)
     for text_type in TEXT_TYPES:
         extra: "list[ExampleCard]" = []
         missed: "list[ExampleCard]" = []
@@ -552,7 +565,7 @@ def main(argv: list[str] | None = None) -> int:
     grand_vector: "dict[str, list[VectorMetricSuiteResult]]" = {}
 
     for key in sorted(shared_keys):
-        kslug = _slug(key)
+        kslug = _short_slug(key)
         text_scored = {r[key].run_name: _score_text(r[key], cfg) for r in runs}
         vector_scored = {r[key].run_name: _score_vectors(r[key], vcfg) for r in runs}
 
@@ -605,7 +618,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
         for name, agg in text_by_run.items():
-            nslug = _slug(name)
+            nslug = _short_slug(name)
             for text_type in TEXT_TYPES:
                 charts.font_size_histogram_chart(
                     agg, text_type, title=f"{key} {name} {text_type} font size",
@@ -651,7 +664,7 @@ def main(argv: list[str] | None = None) -> int:
                 files = sorted(folder.iterdir())[:5]
                 if not files:
                     continue
-                rslug = _slug(entry.run_name)
+                rslug = _short_slug(entry.run_name)
                 gallery_dir.mkdir(parents=True, exist_ok=True)
                 copied: "list[Path]" = []
                 for f in files:
