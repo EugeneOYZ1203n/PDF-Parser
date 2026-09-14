@@ -1,4 +1,4 @@
-"""pipeline_report_benchmark: folder matching, multiclass scoring, charts."""
+"""pipeline_report_benchmark: folder matching, text/vector scoring, report.html."""
 from __future__ import annotations
 
 import importlib.util
@@ -41,24 +41,28 @@ def _write_doc(doc: Path, *, ocr_text: str, manual: bool) -> None:
         doc / "dump.json", "x.pdf",
         [dump_io.PageDump(_meta(), [_text(ocr_text, (0, 0, 50, 12))], [], "current", {})],
     )
-    save_labels(LabelSet(pdf_path="x.pdf", entries=[_label("HELLO WORLD", (0, 0, 50, 12), "native")]),
-                str(doc / "ground_truth_auto.json"))
+    save_labels(
+        LabelSet(pdf_path="x.pdf", entries=[_label("HELLO WORLD", (0, 0, 50, 12), "native")]),
+        str(doc / "ground_truth_native_to_vector.json"),
+    )
     if manual:
-        save_labels(LabelSet(pdf_path="x.pdf", entries=[_label("FOO BAR", (0, 100, 50, 112), "vector")]),
-                    str(doc / "ground_truth_manual.json"))
+        save_labels(
+            LabelSet(pdf_path="x.pdf", entries=[_label("FOO BAR", (0, 100, 50, 112), "vector")]),
+            str(doc / "ground_truth_original_vector.json"),
+        )
 
 
 def _make_run(root: Path, name: str, entries: list[dict], ocr_text: str) -> Path:
     run = root / name
     for e in entries:
-        _write_doc(run / e["dir"], ocr_text=ocr_text, manual="manual" in e["sources"])
+        _write_doc(run / e["dir"], ocr_text=ocr_text, manual="original_vector" in e["sources"])
     (run / "benchmark.json").write_text(
         json.dumps({"benchmark": True, "entries": entries}), encoding="utf-8")
     return run
 
 
-_A = {"key": "pdf:A", "pdf_stem": "A", "dir": "A", "sources": ["auto"]}
-_C = {"key": "labels:C", "pdf_stem": "C", "dir": "C", "sources": ["auto", "manual"]}
+_A = {"key": "pdf:A", "pdf_stem": "A", "dir": "A", "sources": ["native_to_vector"]}
+_C = {"key": "labels:C", "pdf_stem": "C", "dir": "C", "sources": ["native_to_vector", "original_vector"]}
 
 
 def test_rejects_non_benchmark_folder(tmp_path):
@@ -75,9 +79,9 @@ def test_rejects_three_runs(tmp_path):
         prb.main(["--run", str(r), "--run", str(r), "--run", str(r)])
 
 
-def test_two_runs_shared_key_charts_and_viewer_cmds(tmp_path):
-    r1 = _make_run(tmp_path, "run1", [_A, _C, {"key": "labels:B", "pdf_stem": "B", "dir": "B", "sources": ["auto", "manual"]}], "HELLO WORLD")
-    r2 = _make_run(tmp_path, "run2", [_A, _C, {"key": "pdf:B", "pdf_stem": "B", "dir": "B", "sources": ["auto"]}], "HELLO")
+def test_two_runs_shared_key_report_html_and_viewer_cmds(tmp_path):
+    r1 = _make_run(tmp_path, "run1", [_A, _C, {"key": "labels:B", "pdf_stem": "B", "dir": "B", "sources": ["native_to_vector", "original_vector"]}], "HELLO WORLD")
+    r2 = _make_run(tmp_path, "run2", [_A, _C, {"key": "pdf:B", "pdf_stem": "B", "dir": "B", "sources": ["native_to_vector"]}], "HELLO")
     out_root = tmp_path / "out"
     assert prb.main(["--run", str(r1), "--run", str(r2), "--out-root", str(out_root)]) == 0
 
@@ -88,10 +92,19 @@ def test_two_runs_shared_key_charts_and_viewer_cmds(tmp_path):
     assert "OCR confusion characters" in text
     assert "labels:B" not in text  # labels:B vs pdf:B not shared
 
+    html = (run_out / "report.html").read_text(encoding="utf-8")
+    assert "pdf:A" in html
+    assert "labels:C" in html
+    assert "Label description" in html
+    assert "Char overlap" in html
+    assert "Rotation accuracy" in html
+    assert "Vector classification funnel" in html
+
     charts = sorted(p.name for p in (run_out / "charts").glob("*.png"))
-    assert any("labels_C__p0__labels.png" == c for c in charts)
-    assert any("labels_C__p0__bbox.png" == c for c in charts)
+    assert "labels_C__aggregate__labels.png" in charts
     assert "aggregate__labels.png" in charts
+    # per-page charts are no longer generated
+    assert not any("__p0__" in c for c in charts)
 
     cmds = (run_out / "viewer_commands.txt").read_text(encoding="utf-8")
     assert "pipeline_report_viewer.py" in cmds
@@ -102,5 +115,22 @@ def test_single_run_allowed(tmp_path):
     r = _make_run(tmp_path, "solo", [_C], "HELLO WORLD")
     out_root = tmp_path / "out"
     assert prb.main(["--run", str(r), "--out-root", str(out_root)]) == 0
-    text = (next(out_root.iterdir()) / "benchmark.txt").read_text(encoding="utf-8")
+    out = next(out_root.iterdir())
+    text = (out / "benchmark.txt").read_text(encoding="utf-8")
     assert "labels:C" in text
+    assert (out / "report.html").is_file()
+
+
+def test_merge_gt_supports_legacy_auto_manual_filenames(tmp_path):
+    doc = tmp_path / "doc"
+    doc.mkdir()
+    save_labels(
+        LabelSet(pdf_path="x.pdf", entries=[_label("HELLO", (0, 0, 10, 10), "native")]),
+        str(doc / "ground_truth_auto.json"),
+    )
+    save_labels(
+        LabelSet(pdf_path="x.pdf", entries=[_label("WORLD", (0, 20, 10, 30), "vector")]),
+        str(doc / "ground_truth_manual.json"),
+    )
+    merged = prb._merge_gt(doc)
+    assert {e.text for e in merged.entries} == {"HELLO", "WORLD"}
