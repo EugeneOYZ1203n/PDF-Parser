@@ -41,11 +41,15 @@ from pathlib import Path
 import numpy as np
 
 from rastervec.Evaluation.Evaluate.metrics import (
-    DERIVED_F1_FIELDS,
-    METRIC_GROUPS,
+    TEXT_TYPES,
     MetricConfig,
-    MetricSuiteResult,
-    aggregate_suite,
+    TextMetricSuiteResult,
+    aggregate_text_metrics,
+)
+from rastervec.Evaluation.Evaluate.vector_metrics import (
+    VECTOR_TYPES,
+    VectorMetricSuiteResult,
+    aggregate_vector_metrics,
 )
 from rastervec.Evaluation.Evaluate.variants import DEFAULT_VARIANTS, resolve_variant
 from rastervec.logging_setup import configure_logging, get_logger
@@ -54,56 +58,127 @@ from rastervec.paths import output_dir
 _LOG = get_logger("benchmark")
 
 
-def _fmt_metric_line(name: str, result: MetricSuiteResult) -> str:
-    if name in DERIVED_F1_FIELDS:
-        v = result.get(name)
-        return f"  {name}: {'n/a' if math.isnan(v) else f'{v:.3f}'}"
-    ratio = result.ratios[name]
+def _fmt_ratio(ratio) -> str:
     v = ratio.value
     val = "n/a" if math.isnan(v) else f"{v:.3f}"
-    return f"  {name}: {ratio.numerator:.4g}/{ratio.denominator:.4g}  ({val})"
+    return f"{ratio.numerator:.4g}/{ratio.denominator:.4g} ({val})"
 
 
-def format_report(pdf_path: str, page_index: int, result: MetricSuiteResult) -> str:
-    """Per-page report -- absolute `numerator/denominator (value)` per metric,
-    grouped by dimension, then a diagnostics block."""
-    lines = [f"{pdf_path} page {page_index}:"]
-    for dimension, names in METRIC_GROUPS:
-        lines.append(f"  [{dimension}]")
-        for name in names:
-            lines.append(_fmt_metric_line(name, result))
-    lines.append("  [diagnostics]")
-    if result.per_stage_miss_counts:
-        lines.append(f"    per_stage_miss_counts: {result.per_stage_miss_counts}")
-    c = result.counts
+def format_text_report(pdf_path: str, page_index: int, result: TextMetricSuiteResult) -> str:
+    """Per-page text-metric report: one block per text type, categories 1-8."""
+    lines = [f"{pdf_path} page {page_index} [text]:"]
+    for text_type in TEXT_TYPES:
+        r = result.by_type[text_type]
+        lines.append(f"  [{text_type}]")
+        ls = r.label_stats
+        lines.append(
+            f"    labels: {ls.label_count} | chars: {ls.char_count} | "
+            f"words: {ls.word_count} | vectors: {ls.vector_count}"
+        )
+        co = r.char_overlap
+        lines.append(
+            f"    char overlap: {co.matched}/{co.total_gt} matched | "
+            f"{co.unclassified} extra unmatched (FP) | {co.missing} missing (FN) | "
+            f"precision {_fmt_ratio(co.precision)} | recall {_fmt_ratio(co.recall)}"
+        )
+        wo = r.word_overlap
+        lines.append(
+            f"    word overlap: {wo.matched}/{wo.total_gt} matched | "
+            f"{wo.unclassified} extra unmatched (FP) | {wo.missing} missing (FN) | "
+            f"precision {_fmt_ratio(wo.precision)} | recall {_fmt_ratio(wo.recall)}"
+        )
+        ba = r.bbox_accuracy
+        lines.append(
+            f"    bbox mean IoU: {_fmt_ratio(ba.mean_iou)} "
+            f"(n_gt={ba.n_gt}, n_localized={ba.n_localized})"
+        )
+        rot = r.rotation
+        lines.append(
+            f"    rotation: correct={rot.buckets.correct} off_90={rot.buckets.off_90} "
+            f"off_180={rot.buckets.off_180} (n={rot.n_localized}) | "
+            f"mean_err={rot.mean_error_deg:.1f}deg | rmse={rot.rmse_deg:.1f}deg"
+        )
+        if r.funnel is not None:
+            f_ = r.funnel
+            lines.append(
+                f"    classification funnel: {f_.n_survived}/{f_.n_gt_vectors} survived "
+                f"({_fmt_ratio(f_.survival_rate)})"
+            )
+        ro = r.reading_order
+        lines.append(
+            f"    reading order: in_order={ro.n_in_order}/{ro.n_with_overlap} "
+            f"({_fmt_ratio(ro.in_order_rate)}) | edit dist min/max/mean/median = "
+            f"{ro.edit_distance_min}/{ro.edit_distance_max}/{ro.edit_distance_mean}/{ro.edit_distance_median}"
+        )
+    bu = result.bbox_unclassified
     lines.append(
-        f"    counts: gt={c.n_gt} pred={c.n_pred}(nonblank {c.n_pred_nonblank}) "
-        f"candidates={c.n_text_candidates} localized={c.n_gt_localized} missed={c.n_gt_missed}"
+        f"  [unclassified] spurious preds: {bu.spurious_pred_count} "
+        f"(area frac {bu.spurious_pred_area_frac})"
     )
     return "\n".join(lines)
 
 
-def aggregate_results(results: list[MetricSuiteResult]) -> MetricSuiteResult | None:
-    """Micro-averaged aggregate (`Ratio(sum num, sum den)` per metric) over
-    every page's `MetricSuiteResult`. `None` for an empty input."""
+def format_confusion_table(result: TextMetricSuiteResult, *, top_n: int = 5) -> str:
+    lines = ["OCR confusion characters (top {} replacements per gt char):".format(top_n)]
+    for text_type in TEXT_TYPES:
+        confusion = result.by_type[text_type].confusion
+        if not confusion:
+            continue
+        lines.append(f"  [{text_type}]")
+        for ch, counter in sorted(confusion.items(), key=lambda kv: -sum(kv[1].values())):
+            total = sum(counter.values())
+            top = counter.most_common(top_n)
+            cells = ", ".join(
+                f"{repr(r) if r else '(none)'}: {c} ({100 * c / total:.0f}%)" for r, c in top
+            )
+            lines.append(f"    {ch!r}: {cells}")
+    return "\n".join(lines)
+
+
+def format_vector_report(pdf_path: str, page_index: int, result: VectorMetricSuiteResult) -> str:
+    lines = [f"{pdf_path} page {page_index} [vectors]:"]
+    for vector_type in VECTOR_TYPES:
+        r = result.by_type[vector_type]
+        lines.append(f"  [{vector_type}]")
+        lines.append(f"    labels: {r.label_stats.count}")
+        cs = r.count_stats
+        lines.append(
+            f"    count: paired={cs.n_paired} missed={cs.n_missed} spurious={cs.n_spurious} | "
+            f"precision {_fmt_ratio(cs.precision)} | recall {_fmt_ratio(cs.recall)}"
+        )
+        es = r.endpoint_stats
+        lines.append(f"    endpoint RMSE: {es.rmse} (n_paired={es.n_paired})")
+        for row in r.property_rows:
+            if not row.applicable:
+                lines.append(f"    property {row.property_name}: n/a")
+                continue
+            lines.append(
+                f"    property {row.property_name} ({row.kind}): {row.metric_value} "
+                f"(n={row.n_applicable}, none_vs_none={row.none_vs_none_count})"
+            )
+    return "\n".join(lines)
+
+
+def format_report(pdf_path: str, page_index: int, result: TextMetricSuiteResult) -> str:
+    """Back-compat name -- text-only report."""
+    return format_text_report(pdf_path, page_index, result)
+
+
+def aggregate_results(results: list[TextMetricSuiteResult]) -> TextMetricSuiteResult | None:
+    """Micro-averaged aggregate over every page's `TextMetricSuiteResult`.
+    `None` for an empty input."""
     if not results:
         return None
-    return aggregate_suite(results)
+    return aggregate_text_metrics(results)
 
 
 def format_aggregate(
-    result: MetricSuiteResult | None, n_pages: int, *, label: str = "Aggregate",
+    result: TextMetricSuiteResult | None, n_pages: int, *, label: str = "Aggregate",
 ) -> str:
     if result is None:
         return f"{label}: (no results)"
-    lines = [f"{label} (micro-averaged over {n_pages} page-score(s)):"]
-    for dimension, names in METRIC_GROUPS:
-        lines.append(f"  [{dimension}]")
-        for name in names:
-            lines.append(_fmt_metric_line(name, result))
-    if result.per_stage_miss_counts:
-        lines.append(f"  per_stage_miss_counts: {result.per_stage_miss_counts}")
-    return "\n".join(lines)
+    header = f"{label} (micro-averaged over {n_pages} page-score(s)):"
+    return header + "\n" + format_text_report("", 0, result).split(":", 1)[1].lstrip("\n")
 
 
 # ---------------------------------------------------------------------------
@@ -210,67 +285,37 @@ def format_variant_timing_comparison(
     return "\n".join(lines)
 
 
-def _metric_value(result: MetricSuiteResult, name: str) -> float:
-    if name in DERIVED_F1_FIELDS:
-        return result.get(name)
-    return result.ratios[name].value
-
-
 def format_aggregate_comparison(
-    aggregates_by_variant: dict[str, MetricSuiteResult | None], *,
-    title: str = "Aggregate metrics by variant (micro-averaged)",
+    aggregates_by_variant: dict[str, TextMetricSuiteResult | None], *,
+    title: str = "Aggregate text metrics by variant (micro-averaged)",
 ) -> str:
-    """Metric rows (grouped by `METRIC_GROUPS`) x variant columns. A `None`
-    aggregate (a variant that produced no scored page) shows `n/a`."""
+    """One `format_text_report`-style block per variant. A `None` aggregate
+    (a variant that produced no scored page) shows `(no results)`."""
     if not aggregates_by_variant:
         return f"{title}\n  (no results)"
-
-    variants = list(aggregates_by_variant)
-    col_w = max(9, max(len(v) for v in variants) + 2)
-    name_w = max(
-        (len(n) for _dim, names in METRIC_GROUPS for n in names), default=len("metric"),
-    )
-    lines = [
-        title,
-        f"  {'metric':<{name_w}}  " + "  ".join(f"{v:>{col_w}}" for v in variants),
-        "  " + "-" * (name_w + 2 + len(variants) * (col_w + 2)),
-    ]
-    for dimension, names in METRIC_GROUPS:
-        lines.append(f"  [{dimension}]")
-        for name in names:
-            cells = []
-            for variant in variants:
-                result = aggregates_by_variant[variant]
-                if result is None:
-                    cells.append(f"{'n/a':>{col_w}}")
-                    continue
-                value = _metric_value(result, name)
-                cells.append(
-                    f"{'n/a':>{col_w}}" if math.isnan(value) else f"{value:>{col_w}.3f}"
-                )
-            lines.append(f"  {name:<{name_w}}  " + "  ".join(cells))
+    lines = [title]
+    for variant, result in aggregates_by_variant.items():
+        lines.append(f"[{variant}]")
+        if result is None:
+            lines.append("  (no results)")
+            continue
+        lines.append(format_text_report("", 0, result))
     return "\n".join(lines)
 
 
-_CONF_ROWS = ("auto", "manual")
-_CONF_COLS = ("auto", "manual", "none")
-
-
-def format_confusion(
-    confusion_by_run: dict[str, dict], *, title: str = "GT-recall confusion {auto,manual}x{auto,manual,none}",
+def format_vector_aggregate_comparison(
+    aggregates_by_variant: "dict[str, VectorMetricSuiteResult | None]", *,
+    title: str = "Aggregate vector metrics by variant (micro-averaged)",
 ) -> str:
-    """Fixed-width `actual -> detected` count table, one block per run."""
+    if not aggregates_by_variant:
+        return f"{title}\n  (no results)"
     lines = [title]
-    for run, conf in confusion_by_run.items():
-        lines.append(f"  [{run}]")
-        lines.append("    actual\\detected  " + "".join(f"{c:>8}" for c in _CONF_COLS))
-        for r in _CONF_ROWS:
-            row = conf.get(r, {})
-            total = sum(row.values())
-            recall = row.get(r, 0) / total if total else float("nan")
-            cells = "".join(f"{row.get(c, 0):>8}" for c in _CONF_COLS)
-            rec = "n/a" if recall != recall else f"{recall:.3f}"
-            lines.append(f"    {r:<15}{cells}   recall {rec}")
+    for variant, result in aggregates_by_variant.items():
+        lines.append(f"[{variant}]")
+        if result is None:
+            lines.append("  (no results)")
+            continue
+        lines.append(format_vector_report("", 0, result))
     return "\n".join(lines)
 
 
@@ -333,7 +378,8 @@ def main(argv: list[str] | None = None) -> int:
     from rastervec.Reader.Parallel.benchmark_jobs import PageTask, run_benchmark
 
     stage_order = [*STEP_NAMES]
-    aggregates: dict[str, MetricSuiteResult | None] = {}
+    aggregates: "dict[str, TextMetricSuiteResult | None]" = {}
+    vector_aggregates: "dict[str, VectorMetricSuiteResult | None]" = {}
     timings: dict[str, dict] = {}
 
     for name in variant_names:
@@ -351,24 +397,34 @@ def main(argv: list[str] | None = None) -> int:
             tasks, workers=args.workers, compute_workers=args.compute_workers, desc=name,
         )
 
-        results: list[MetricSuiteResult] = []
+        results: "list[TextMetricSuiteResult]" = []
+        vector_results: "list[VectorMetricSuiteResult]" = []
         per_page_timings: list[dict[str, float]] = []
         for pr in page_results:
             if pr.error is not None:
                 _LOG.warning("[%s] %s page %d failed: %s", name, pr.pdf_path, pr.page_index, pr.error)
                 continue
-            if pr.auto is not None:
-                results.append(pr.auto)
-                print(format_report(f"[{name}] {pr.pdf_path}", pr.page_index, pr.auto))
+            for block in pr.report_blocks:
+                print(f"[{name}] {block}")
+            if pr.text_metrics is not None:
+                results.append(pr.text_metrics)
+                print(format_text_report(f"[{name}] {pr.pdf_path}", pr.page_index, pr.text_metrics))
+                print()
+            if pr.vector_metrics is not None:
+                vector_results.append(pr.vector_metrics)
+                print(format_vector_report(f"[{name}] {pr.pdf_path}", pr.page_index, pr.vector_metrics))
                 print()
             per_page_timings.append(
                 pr.stage_durations or {"pipeline_total": pr.total_seconds}
             )
 
         aggregates[name] = aggregate_results(results)
+        vector_aggregates[name] = aggregate_vector_metrics(vector_results) if vector_results else None
         timings[name] = summarize_stage_timings(per_page_timings, stage_order)
 
     print(format_aggregate_comparison(aggregates))
+    print()
+    print(format_vector_aggregate_comparison(vector_aggregates))
     print()
     print(format_variant_timing_comparison(timings))
     return 0

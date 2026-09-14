@@ -2,12 +2,9 @@
 (`scripts/pipeline_report_benchmark.py`).
 
 Headless (`Agg` backend). Not imported by the pipeline -- only the benchmark
-script and its tests. Two chart kinds:
-
-- `metric_comparison_chart` -- horizontal grouped bars, every metric in
-  `METRIC_GROUPS` order (dimension labels between groups), one bar per run.
-- `confusion_heatmap` -- the `{auto,manual} x {auto,manual,none}` GT-recall
-  confusion matrix, one small heatmap per run.
+scripts and their tests. One chart function per metrics table (see
+`Evaluation.Evaluate.metrics`/`vector_metrics`), each taking
+`results_by_run: dict[str, <SuiteResult> | None]` -- one bar-group per run.
 """
 from __future__ import annotations
 
@@ -20,105 +17,202 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from rastervec.Evaluation.Evaluate.metrics import (  # noqa: E402
-    DERIVED_F1_FIELDS,
-    LOWER_IS_BETTER,
-    METRIC_GROUPS,
-    MetricSuiteResult,
+    TEXT_TYPES,
+    TextMetricSuiteResult,
+)
+from rastervec.Evaluation.Evaluate.vector_metrics import (  # noqa: E402
+    VECTOR_TYPES,
+    VectorMetricSuiteResult,
 )
 
 _BAR_COLORS = ("#2563eb", "#dc2626", "#16a34a", "#d97706")
 
 
-def _metric_value(result: MetricSuiteResult, name: str) -> float:
-    if name in DERIVED_F1_FIELDS:
-        return result.get(name)
-    return result.ratios[name].value
-
-
-def _rows() -> list[tuple[str, str]]:
-    """`(dimension, metric_name)` for every metric, in display order."""
-    return [(dim, name) for dim, names in METRIC_GROUPS for name in names]
-
-
-def metric_comparison_chart(
-    results_by_run: dict[str, "MetricSuiteResult | None"],
-    *,
-    title: str,
-    path: Path,
+def _grouped_bar(
+    categories: list[str], series: dict[str, list[float]], *,
+    title: str, ylabel: str, path: Path, ylim: "tuple[float, float] | None" = None,
 ) -> None:
-    """One horizontal bar per run per metric. `None` result / `nan` value =>
-    no bar (gap left in place). `↓` prefix marks `LOWER_IS_BETTER` metrics."""
-    rows = _rows()
-    labels = [
-        ("↓ " if name in LOWER_IS_BETTER else "") + name for _dim, name in rows
-    ]
-    runs = list(results_by_run)
+    """`series`: `{run_name: [value_per_category]}`, `nan` -> gap."""
+    runs = list(series)
     n = len(runs)
-    y = list(range(len(rows)))
-    height = 0.8 / max(n, 1)
+    x = list(range(len(categories)))
+    width = 0.8 / max(n, 1)
 
-    fig, ax = plt.subplots(figsize=(9, 0.34 * len(rows) + 1.4))
+    fig, ax = plt.subplots(figsize=(max(6, 1.4 * len(categories)), 4))
     for ri, run in enumerate(runs):
-        result = results_by_run[run]
-        offset = (ri - (n - 1) / 2) * height
+        offset = (ri - (n - 1) / 2) * width
+        values = series[run]
         xs, ys = [], []
-        for i, (_dim, name) in enumerate(rows):
-            v = _metric_value(result, name) if result is not None else float("nan")
+        for i, v in enumerate(values):
             if v == v:  # not nan
-                xs.append(v)
-                ys.append(i + offset)
-        ax.barh(ys, xs, height=height, label=run, color=_BAR_COLORS[ri % len(_BAR_COLORS)])
-
-    ax.set_yticks(y)
-    ax.set_yticklabels(labels, fontsize=7)
-    ax.invert_yaxis()
-    ax.set_xlim(0, 1)
-    ax.axvline(0, color="#999", lw=0.5)
-    # dimension separators
-    seen = set()
-    for i, (dim, _name) in enumerate(rows):
-        if dim not in seen:
-            seen.add(dim)
-            ax.axhline(i - 0.5, color="#ccc", lw=0.6)
-            ax.text(1.01, i, dim, fontsize=6, color="#666", va="center", rotation=90)
+                xs.append(i + offset)
+                ys.append(v)
+        ax.bar(xs, ys, width=width, label=run, color=_BAR_COLORS[ri % len(_BAR_COLORS)])
+    ax.set_xticks(x)
+    ax.set_xticklabels(categories, rotation=20, ha="right", fontsize=8)
+    ax.set_ylabel(ylabel, fontsize=8)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
     ax.set_title(title, fontsize=9)
-    ax.legend(fontsize=7, loc="lower right")
+    ax.legend(fontsize=7)
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=120, bbox_inches="tight")
     plt.close(fig)
 
 
-_CONF_ROWS = ("auto", "manual")
-_CONF_COLS = ("auto", "manual", "none")
-
-
-def confusion_heatmap(
-    confusion_by_run: dict[str, dict[str, dict[str, int]]],
-    *,
-    title: str,
-    path: Path,
+def label_description_chart(
+    results_by_run: "dict[str, TextMetricSuiteResult | None]", *, title: str, path: Path,
 ) -> None:
-    """One `{auto,manual} x {auto,manual,none}` heatmap per run, side by
-    side, cell counts annotated."""
-    runs = list(confusion_by_run)
-    fig, axes = plt.subplots(1, max(len(runs), 1), figsize=(3.2 * max(len(runs), 1), 3))
-    if len(runs) == 1:
-        axes = [axes]
-    for ax, run in zip(axes, runs):
-        conf = confusion_by_run[run]
-        grid = [[conf.get(r, {}).get(c, 0) for c in _CONF_COLS] for r in _CONF_ROWS]
-        ax.imshow(grid, cmap="Blues", vmin=0)
-        ax.set_xticks(range(len(_CONF_COLS)), _CONF_COLS, fontsize=8)
-        ax.set_yticks(range(len(_CONF_ROWS)), _CONF_ROWS, fontsize=8)
-        ax.set_xlabel("detected as", fontsize=8)
-        ax.set_ylabel("actual", fontsize=8)
-        ax.set_title(run, fontsize=8)
-        for ri in range(len(_CONF_ROWS)):
-            for ci in range(len(_CONF_COLS)):
-                ax.text(ci, ri, str(grid[ri][ci]), ha="center", va="center", fontsize=9)
-    fig.suptitle(title, fontsize=9)
+    series = {}
+    for run, result in results_by_run.items():
+        if result is None:
+            series[run] = [float("nan")] * len(TEXT_TYPES)
+            continue
+        series[run] = [float(result.by_type[t].label_stats.label_count) for t in TEXT_TYPES]
+    _grouped_bar(list(TEXT_TYPES), series, title=title, ylabel="label count", path=path)
+
+
+def char_word_overlap_chart(
+    results_by_run: "dict[str, TextMetricSuiteResult | None]", *, field: str,
+    title: str, path: Path,
+) -> None:
+    """`field`: `"char_overlap"` or `"word_overlap"`; plots recall per text type."""
+    series = {}
+    for run, result in results_by_run.items():
+        if result is None:
+            series[run] = [float("nan")] * len(TEXT_TYPES)
+            continue
+        series[run] = [
+            getattr(result.by_type[t], field).recall.value for t in TEXT_TYPES
+        ]
+    _grouped_bar(list(TEXT_TYPES), series, title=title, ylabel="recall", path=path, ylim=(0, 1))
+
+
+def bbox_accuracy_chart(
+    results_by_run: "dict[str, TextMetricSuiteResult | None]", *, title: str, path: Path,
+) -> None:
+    series = {}
+    for run, result in results_by_run.items():
+        if result is None:
+            series[run] = [float("nan")] * len(TEXT_TYPES)
+            continue
+        series[run] = [result.by_type[t].bbox_accuracy.mean_iou.value for t in TEXT_TYPES]
+    _grouped_bar(list(TEXT_TYPES), series, title=title, ylabel="mean IoU", path=path, ylim=(0, 1))
+
+
+def rotation_chart(
+    results_by_run: "dict[str, TextMetricSuiteResult | None]", *, title: str, path: Path,
+) -> None:
+    series = {}
+    for run, result in results_by_run.items():
+        if result is None:
+            series[run] = [float("nan")] * len(TEXT_TYPES)
+            continue
+        rows = []
+        for t in TEXT_TYPES:
+            rot = result.by_type[t].rotation
+            n = rot.n_localized
+            rows.append((rot.buckets.correct / n) if n else float("nan"))
+        series[run] = rows
+    _grouped_bar(list(TEXT_TYPES), series, title=title, ylabel="rotation-correct rate", path=path, ylim=(0, 1))
+
+
+def funnel_chart(
+    results_by_run: "dict[str, TextMetricSuiteResult | None]", *, title: str, path: Path,
+) -> None:
+    funnel_types = ("native_to_vector", "original_vector")
+    series = {}
+    for run, result in results_by_run.items():
+        if result is None:
+            series[run] = [float("nan")] * len(funnel_types)
+            continue
+        rows = []
+        for t in funnel_types:
+            f_ = result.by_type[t].funnel
+            rows.append(f_.survival_rate.value if f_ is not None else float("nan"))
+        series[run] = rows
+    _grouped_bar(list(funnel_types), series, title=title, ylabel="survival rate", path=path, ylim=(0, 1))
+
+
+def reading_order_chart(
+    results_by_run: "dict[str, TextMetricSuiteResult | None]", *, title: str, path: Path,
+) -> None:
+    series = {}
+    for run, result in results_by_run.items():
+        if result is None:
+            series[run] = [float("nan")] * len(TEXT_TYPES)
+            continue
+        series[run] = [result.by_type[t].reading_order.in_order_rate.value for t in TEXT_TYPES]
+    _grouped_bar(list(TEXT_TYPES), series, title=title, ylabel="in-order rate", path=path, ylim=(0, 1))
+
+
+def confusion_char_table_image(
+    result: "TextMetricSuiteResult | None", text_type: str, *, title: str, path: Path, top_n: int = 5,
+) -> None:
+    """One table image (not a bar chart) of the top-`top_n` OCR
+    replacements per ground-truth character, for one text type."""
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.axis("off")
+    if result is None or not result.by_type[text_type].confusion:
+        ax.text(0.5, 0.5, "(no confusion data)", ha="center", va="center")
+    else:
+        confusion = result.by_type[text_type].confusion
+        rows = sorted(confusion.items(), key=lambda kv: -sum(kv[1].values()))[:30]
+        cell_text = []
+        for ch, counter in rows:
+            total = sum(counter.values())
+            top = counter.most_common(top_n)
+            cells = [ch] + [
+                f"{r or '(none)'}: {c} ({100 * c / total:.0f}%)" for r, c in top
+            ]
+            cells += [""] * (1 + top_n - len(cells))
+            cell_text.append(cells)
+        columns = ["char"] + [f"#{i+1}" for i in range(top_n)]
+        ax.table(cellText=cell_text, colLabels=columns, loc="center", cellLoc="left")
+    ax.set_title(title, fontsize=9)
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=120, bbox_inches="tight")
     plt.close(fig)
+
+
+def vector_count_chart(
+    results_by_run: "dict[str, VectorMetricSuiteResult | None]", *, title: str, path: Path,
+) -> None:
+    series = {}
+    for run, result in results_by_run.items():
+        if result is None:
+            series[run] = [float("nan")] * len(VECTOR_TYPES)
+            continue
+        series[run] = [result.by_type[t].count_stats.recall.value for t in VECTOR_TYPES]
+    _grouped_bar(list(VECTOR_TYPES), series, title=title, ylabel="recall", path=path, ylim=(0, 1))
+
+
+def endpoint_accuracy_chart(
+    results_by_run: "dict[str, VectorMetricSuiteResult | None]", *, title: str, path: Path,
+) -> None:
+    series = {}
+    for run, result in results_by_run.items():
+        if result is None:
+            series[run] = [float("nan")] * len(VECTOR_TYPES)
+            continue
+        series[run] = [result.by_type[t].endpoint_stats.rmse for t in VECTOR_TYPES]
+    _grouped_bar(list(VECTOR_TYPES), series, title=title, ylabel="endpoint RMSE (pt)", path=path)
+
+
+def property_accuracy_chart(
+    results_by_run: "dict[str, VectorMetricSuiteResult | None]", *, property_name: str,
+    title: str, path: Path,
+) -> None:
+    series = {}
+    for run, result in results_by_run.items():
+        if result is None:
+            series[run] = [float("nan")] * len(VECTOR_TYPES)
+            continue
+        rows = []
+        for t in VECTOR_TYPES:
+            row = next((r for r in result.by_type[t].property_rows if r.property_name == property_name), None)
+            rows.append(row.metric_value if row and row.applicable else float("nan"))
+        series[run] = rows
+    _grouped_bar(list(VECTOR_TYPES), series, title=title, ylabel=property_name, path=path)

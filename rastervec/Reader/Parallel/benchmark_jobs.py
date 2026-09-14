@@ -3,28 +3,37 @@
 `run_parallel` can fan it across a process pool.
 
 `PageTask.variant` names a `rastervec.Evaluation.Evaluate.variants.VARIANTS`
-entry (engine current/legacy, `enable_fast`, light/heavy OCR backend).
-Each variant is run **twice** per page on disjoint inputs, so auto and
-manual ground truth are scored against physically separate runs that
-cannot contaminate each other:
+entry (engine current/legacy, `enable_fast`).
 
-- **auto run** -- `convert_page_text_only` input (native text as vectors,
-  drawings removed), scored vs the `source="auto"` labels.
-- **manual run** -- `convert_page_drawings_only` input (original drawings
-  only, native text removed), scored vs the `source="manual"` labels. Only
-  fires when the page has manual labels.
+Reworked for the 4 text-type / 3 vector-type metrics suite
+(`Evaluation.Evaluate.metrics`/`vector_metrics`). Two pipeline runs happen
+per page, each on a disjoint synthetic input, mirroring the old auto/manual
+split but generalized:
+
+- **native_to_vector run** -- `convert_page_text_only` input (native text as
+  vectors, drawings removed), scored vs the `native_to_vector` GT bucket
+  (`source="native"` labels). Only fires when the page has native labels.
+- **original_vector run** -- `convert_page_drawings_only` input (original
+  drawings only, native text removed), scored vs the `original_vector` GT
+  bucket (`source="vector"` labels). Only fires when the page has
+  vector-sourced labels.
+
+`vector_to_raster`/`original_raster` (both text and vector tables) have no
+converter/pipeline stage (no raster-tracing stage exists yet) -- they are
+always scored with an empty prediction set, so their tables report GT-only
+stats + 0 recall, never a crash.
 
 One `PageTask` in -> one `PageResult` out (small, picklable). The per-page
 output PDFs go into `RECONSTRUCT_DIR/<stem>_p<N>_<variant>/`
-(`input_auto.pdf` / `input_manual.pdf` / `current.pdf` / `legacy.pdf` /
-`boxes.pdf`). Every failure -- whole job or one of the runs -- is captured
-into `PageResult.error` / a `report_blocks` line; the pool never sees an
-exception.
+(`input_native_to_vector.pdf` / `input_original_vector.pdf` / `current.pdf`
+/ `legacy.pdf` / `boxes.pdf`). Every failure -- whole job or one of the two
+runs -- is captured into `PageResult.error` / a `report_blocks` line; the
+pool never sees an exception.
 
-The `current` engine is always run `verbose=True` here -- `build_eval_
-inputs` needs `PipelineResult.clustering`/`fast_dropped_vectors` (both
-verbose-only) for `attribute_miss`, and the showcase sampler needs
-`unique_segments`/`unique_texts` (also verbose-only).
+The `current` engine is always run `verbose=True` here -- `reclassify_
+result`/`vectors`/`reassigned_text` (verbose-only) feed the classification
+funnel + vector-pairing tables, and the showcase sampler needs
+`rotated_segments`/`restored_texts` (also verbose-only).
 """
 from __future__ import annotations
 
@@ -42,31 +51,37 @@ from rastervec.Evaluation.conversion import (
     convert_page_drawings_only,
     convert_page_text_only,
 )
+from rastervec.Evaluation.Evaluate import vector_metrics as vm
 from rastervec.Evaluation.Evaluate.adapters import (
-    build_eval_inputs,
-    gt_regions_from_labelset,
+    build_vector_eval_inputs,
+    entries_by_text_type,
+    enrich_native_vector_signatures,
+    gt_regions_by_text_type,
+    gt_vector_signatures_by_text_type,
     predictions_from_texts,
-    text_candidate_boxes,
+    reclass_passed_signatures,
 )
 from rastervec.Evaluation.Evaluate.benchmark import format_report
 from rastervec.Evaluation.Evaluate.variants import PipelineVariant, resolve_variant
 from rastervec.Evaluation.Evaluate.metrics import (
+    TEXT_TYPES,
     MetricConfig,
-    MetricSuiteResult,
-    evaluate_metrics,
-    overlay_boxes_split,
+    TextMetricSuiteResult,
+    evaluate_text_metrics,
+    overlay_boxes_by_type,
+    build_overlap_graphs_by_type,
 )
-from rastervec.Evaluation.Labelling.auto_label import auto_label_pdf
+from rastervec.Evaluation.Labelling.native_label import native_label_pdf
 from rastervec.Evaluation.Labelling.label_schema import (
     LabelEntry,
     LabelSet,
-    split_labelset_by_source,
 )
 from rastervec.logging_setup import get_logger
 from rastervec.models import PageMeta, Segment, Text
 from rastervec.pipelines.current import run_pipeline
 from rastervec.Reader.reader import Reader
 from rastervec.renderer import render_boxes_pdf, render_reconstructed_pdf
+from rastervec.Vector.vector import extract_vectors
 
 _LOG = get_logger("reader.parallel.jobs")
 
@@ -77,8 +92,6 @@ class PageTask:
     page_index: int
     manual_entries: list[LabelEntry] = field(default_factory=list)
     iou_edge_min: float = MetricConfig().iou_edge_min
-    # A name from rastervec.Evaluation.Evaluate.variants.VARIANTS -- selects
-    # the engine (current/legacy), enable_fast, and the OCR backend.
     variant: str = "current"
     reconstruct_dir: str | None = None
     showcase_per_page: int = 4
@@ -98,8 +111,8 @@ class PageResult:
     pdf_path: str
     page_index: int
     variant: str
-    auto: MetricSuiteResult | None = None
-    manual: MetricSuiteResult | None = None
+    text_metrics: TextMetricSuiteResult | None = None
+    vector_metrics: "vm.VectorMetricSuiteResult | None" = None
     stage_durations: dict[str, float] = field(default_factory=dict)
     total_seconds: float = 0.0
     report_blocks: list[str] = field(default_factory=list)
@@ -111,27 +124,24 @@ class PageResult:
 # helpers
 # --------------------------------------------------------------------------
 def _ground_truth(task: PageTask) -> LabelSet:
-    labels = auto_label_pdf(task.pdf_path, task.page_index)  # source="auto"
-    labels.entries.extend(task.manual_entries)  # source="manual"
+    labels = native_label_pdf(task.pdf_path, task.page_index)  # source="native"
+    labels.entries.extend(task.manual_entries)  # source in ("vector", "raster")
     return labels
 
 
-def _page_inputs(task: PageTask, has_manual: bool) -> tuple[bytes, bytes | None]:
-    """The two disjoint benchmark inputs for this page: text-only (auto) and,
-    when the page has manual labels, drawings-only (manual)."""
-    auto_input = convert_page_text_only(task.pdf_path, task.page_index)
-    manual_input = (
-        convert_page_drawings_only(task.pdf_path, task.page_index)
-        if has_manual else None
-    )
-    return auto_input, manual_input
+def _fresh_vectors(pdf_path: str, page_index: int) -> list:
+    with Reader(pdf_path) as reader:
+        page = reader.get_page(page_index)
+        return extract_vectors(page)
 
 
 def _run_pipeline(
-    input_bytes: bytes, *, enable_fast: bool = True, compute=None, progress_counter=None,
+    input_bytes: bytes, *, enable_fast: bool = True,
+    compute=None, progress_counter=None,
 ):
-    """Full current-pipeline run on one input PDF -> its PipelineResult.
-    Always `verbose=True` -- see this module's docstring."""
+    """Full `pipelines.current.run_pipeline` run on one input PDF -> its
+    PipelineResult ("legacy" is handled separately by `_run_legacy`, never
+    reaches here). Always `verbose=True` -- see this module's docstring."""
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "in.pdf"
         path.write_bytes(input_bytes)
@@ -149,11 +159,6 @@ def _original_page_meta(pdf_path: str, page_index: int) -> PageMeta:
 def _showcase(
     unique_pairs: "list[tuple[Segment, Text]]", per_page: int, seed: int,
 ) -> list[ShowcaseSample]:
-    """`unique_pairs` is `[(Segment, Text), ...]` -- one elected
-    representative word and its own OCR reading, sampling the deduped
-    representatives instead of every candidate word. The displayed image is
-    the representative's own captured crop (`seg.image` -- already the
-    exact image OCR itself recognized, no re-render needed)."""
     if per_page <= 0 or not unique_pairs:
         return []
     passed = [(seg, t) for seg, t in unique_pairs if t.text.strip()]
@@ -189,137 +194,222 @@ def _page_dir(task: PageTask) -> Path | None:
     return directory
 
 
+def _evaluate_one_type(
+    text_type: str,
+    gt_by_type: dict, entries_by_type_: dict, predictions: list,
+    gt_vec_sigs_by_type: dict, survived_signatures: set,
+    cfg: MetricConfig,
+):
+    """`evaluate_text_metrics` scores all 4 types from one shared
+    `predictions` list; since `native_to_vector`/`original_vector` come
+    from two disjoint pipeline runs here, this is called once per run and
+    only that run's own type is kept from the result (the other 3 types'
+    entries in that call used an empty/irrelevant gt bucket and are
+    discarded)."""
+    restricted_gt = {t: (gt_by_type.get(t, []) if t == text_type else []) for t in TEXT_TYPES}
+    restricted_entries = {
+        t: (entries_by_type_.get(t, []) if t == text_type else []) for t in TEXT_TYPES
+    }
+    result = evaluate_text_metrics(
+        restricted_gt, restricted_entries, predictions,
+        gt_vector_signatures_by_type=gt_vec_sigs_by_type,
+        survived_signatures=survived_signatures,
+        cfg=cfg,
+    )
+    return result
+
+
+def _merge_text_results(
+    empty_result: TextMetricSuiteResult,
+    per_type_results: "dict[str, TextMetricSuiteResult]",
+) -> TextMetricSuiteResult:
+    by_type = dict(empty_result.by_type)
+    bbox_unclassified = empty_result.bbox_unclassified
+    for text_type, result in per_type_results.items():
+        by_type[text_type] = result.by_type[text_type]
+        bbox_unclassified = result.bbox_unclassified  # last real run wins
+    return TextMetricSuiteResult(by_type=by_type, bbox_unclassified=bbox_unclassified)
+
+
 # --------------------------------------------------------------------------
-# the job -- current pipeline (run twice)
+# the job -- current pipeline (run twice, disjoint inputs)
 # --------------------------------------------------------------------------
 def _run_current(
     task: PageTask, gt: LabelSet, cfg: MetricConfig, variant: PipelineVariant,
     compute=None, progress_counter=None,
 ) -> PageResult:
-    by_src = split_labelset_by_source(gt)
-    auto_gt = gt_regions_from_labelset(by_src["auto"])
-    manual_gt = gt_regions_from_labelset(by_src["manual"])
-    has_manual = bool(by_src["manual"].entries)
-    auto_input, manual_input = _page_inputs(task, has_manual)
+    entries = entries_by_text_type(gt)
+    has_native = bool(entries["native_to_vector"])
+    has_vector = bool(entries["original_vector"])
+
+    if has_native:
+        enrich_native_vector_signatures(gt, task.pdf_path, task.page_index)
+
+    gt_by_type = gt_regions_by_text_type(gt)
+    gt_vec_sigs_by_type = gt_vector_signatures_by_text_type(gt)
 
     result = PageResult(
         pdf_path=task.pdf_path, page_index=task.page_index, variant=task.variant,
     )
-    auto_ctx = manual_ctx = None
-    auto_preds: list = []
-    manual_preds: list = []
+    per_type_results: "dict[str, TextMetricSuiteResult]" = {}
+    native_ctx = vector_ctx = None
     total = 0.0
-    run_kw = dict(enable_fast=variant.enable_fast, compute=compute, progress_counter=progress_counter)
+    run_kw = dict(
+        enable_fast=variant.enable_fast,
+        compute=compute, progress_counter=progress_counter,
+    )
     lbl = task.variant
 
-    try:
-        auto_ctx = _run_pipeline(auto_input, **run_kw)
-        inp = build_eval_inputs(auto_ctx)
-        auto_preds = inp.predictions
-        result.auto = evaluate_metrics(
-            auto_gt, inp.predictions, inp.text_candidate_boxes,
-            clustering=inp.clustering, fast_dropped=inp.fast_dropped,
-            ocr_failed=inp.ocr_failed, cfg=cfg,
-        )
-        result.report_blocks.append(
-            format_report(f"[{lbl}/auto]   {task.pdf_path}", task.page_index, result.auto)
-        )
-        total += sum((auto_ctx.step_durations or {}).values())
-    except Exception as exc:  # noqa: BLE001
-        result.report_blocks.append(
-            f"[{lbl}/auto] {task.pdf_path} p{task.page_index}: run failed: {exc}"
-        )
-
-    if has_manual and manual_input is not None:
+    if has_native:
         try:
-            manual_ctx = _run_pipeline(manual_input, **run_kw)
-            inp = build_eval_inputs(manual_ctx)
-            manual_preds = inp.predictions
-            result.manual = evaluate_metrics(
-                manual_gt, inp.predictions, inp.text_candidate_boxes,
-                clustering=inp.clustering, fast_dropped=inp.fast_dropped,
-                ocr_failed=inp.ocr_failed, cfg=cfg,
+            native_input = convert_page_text_only(task.pdf_path, task.page_index)
+            native_ctx = _run_pipeline(native_input, **run_kw)
+            ocr_texts = [t for t in native_ctx.texts if t.source == "ocr"]
+            preds = predictions_from_texts(ocr_texts)
+            per_type_results["native_to_vector"] = _evaluate_one_type(
+                "native_to_vector", gt_by_type, entries, preds,
+                gt_vec_sigs_by_type, reclass_passed_signatures(native_ctx), cfg,
             )
             result.report_blocks.append(
-                format_report(f"[{lbl}/manual] {task.pdf_path}", task.page_index, result.manual)
+                f"[{lbl}/native_to_vector] {task.pdf_path} p{task.page_index}: scored"
             )
-            total += sum((manual_ctx.step_durations or {}).values())
+            total += sum((native_ctx.step_durations or {}).values())
         except Exception as exc:  # noqa: BLE001
             result.report_blocks.append(
-                f"[{lbl}/manual] {task.pdf_path} p{task.page_index}: run failed: {exc}"
+                f"[{lbl}/native_to_vector] {task.pdf_path} p{task.page_index}: run failed: {exc}"
             )
 
-    result.stage_durations = dict((auto_ctx.step_durations or {}) if auto_ctx else {})
+    if has_vector:
+        try:
+            vector_input = convert_page_drawings_only(task.pdf_path, task.page_index)
+            vector_ctx = _run_pipeline(vector_input, **run_kw)
+            ocr_texts = [t for t in vector_ctx.texts if t.source == "ocr"]
+            preds = predictions_from_texts(ocr_texts)
+            per_type_results["original_vector"] = _evaluate_one_type(
+                "original_vector", gt_by_type, entries, preds,
+                gt_vec_sigs_by_type, reclass_passed_signatures(vector_ctx), cfg,
+            )
+            result.report_blocks.append(
+                f"[{lbl}/original_vector] {task.pdf_path} p{task.page_index}: scored"
+            )
+            total += sum((vector_ctx.step_durations or {}).values())
+        except Exception as exc:  # noqa: BLE001
+            result.report_blocks.append(
+                f"[{lbl}/original_vector] {task.pdf_path} p{task.page_index}: run failed: {exc}"
+            )
+
+    empty_result = evaluate_text_metrics(
+        {t: [] for t in TEXT_TYPES}, {t: [] for t in TEXT_TYPES}, [],
+        cfg=cfg,
+    )
+    result.text_metrics = _merge_text_results(empty_result, per_type_results)
+
+    try:
+        fresh_vectors = _fresh_vectors(task.pdf_path, task.page_index)
+        vector_inputs = build_vector_eval_inputs(gt, vector_ctx, fresh_vectors)
+        result.vector_metrics = vm.evaluate_vector_metrics(
+            vector_inputs.gt_by_type, vector_inputs.preds_by_type, vector_inputs.label_counts,
+        )
+    except Exception as exc:  # noqa: BLE001
+        result.report_blocks.append(
+            f"[{lbl}/vectors] {task.pdf_path} p{task.page_index}: vector scoring failed: {exc}"
+        )
+
+    result.stage_durations = dict((native_ctx.step_durations or {}) if native_ctx else {})
     result.total_seconds = total
 
     unique_pairs: list[tuple] = []
-    for ctx in (auto_ctx, manual_ctx):
+    for ctx in (native_ctx, vector_ctx):
         if ctx is not None:
-            unique_pairs.extend(zip(ctx.unique_segments or [], ctx.unique_texts or []))
+            unique_pairs.extend(zip(ctx.rotated_segments or [], ctx.restored_texts or []))
     result.showcase = _showcase(unique_pairs, task.showcase_per_page, task.showcase_seed)
 
-    ocr_texts = [
-        t for ctx in (auto_ctx, manual_ctx) if ctx is not None
+    ocr_texts_all = [
+        t for ctx in (native_ctx, vector_ctx) if ctx is not None
         for t in ctx.texts if t.source == "ocr"
     ]
     _write_current_outputs(
         task,
         page_meta=(
-            (auto_ctx or manual_ctx).page.meta if (auto_ctx or manual_ctx)
+            (native_ctx or vector_ctx).page.meta if (native_ctx or vector_ctx)
             else _original_page_meta(task.pdf_path, task.page_index)
         ),
-        auto_input=auto_input,
-        manual_input=manual_input if has_manual else None,
-        merged_ocr_results=ocr_texts,
-        auto_gt=auto_gt, auto_preds=auto_preds,
-        manual_gt=manual_gt if has_manual else [], manual_preds=manual_preds,
+        native_input=(convert_page_text_only(task.pdf_path, task.page_index) if has_native else None),
+        vector_input=(convert_page_drawings_only(task.pdf_path, task.page_index) if has_vector else None),
+        merged_ocr_results=ocr_texts_all,
+        gt_by_type=gt_by_type,
+        preds_native=(predictions_from_texts([t for t in native_ctx.texts if t.source == "ocr"]) if native_ctx else []),
+        preds_vector=(predictions_from_texts([t for t in vector_ctx.texts if t.source == "ocr"]) if vector_ctx else []),
         cfg=cfg,
     )
     return result
 
 
 def _write_current_outputs(
-    task: PageTask, *, page_meta: PageMeta, auto_input: bytes,
-    manual_input: bytes | None, merged_ocr_results, auto_gt, auto_preds,
-    manual_gt, manual_preds, cfg: MetricConfig,
+    task: PageTask, *, page_meta: PageMeta, native_input: "bytes | None",
+    vector_input: "bytes | None", merged_ocr_results, gt_by_type,
+    preds_native, preds_vector, cfg: MetricConfig,
 ) -> None:
     directory = _page_dir(task)
     if directory is None:
         return
-    (directory / "input_auto.pdf").write_bytes(auto_input)
-    if manual_input is not None:
-        (directory / "input_manual.pdf").write_bytes(manual_input)
+    if native_input is not None:
+        (directory / "input_native_to_vector.pdf").write_bytes(native_input)
+    if vector_input is not None:
+        (directory / "input_original_vector.pdf").write_bytes(vector_input)
     (directory / "current.pdf").write_bytes(
         render_reconstructed_pdf(page_meta, ocr_results=merged_ocr_results)
     )
+    # Box overlay: native predictions scored against native_to_vector GT,
+    # vector predictions against original_vector GT; the other two types
+    # (no pipeline run) contribute GT-only (all-red) boxes.
+    graphs_by_type = build_overlap_graphs_by_type(
+        {
+            "native_to_vector": gt_by_type.get("native_to_vector", []),
+            "original_vector": [],
+            "vector_to_raster": [],
+            "original_raster": [],
+        },
+        preds_native, cfg,
+    )
+    graphs_by_type["original_vector"] = build_overlap_graphs_by_type(
+        {"native_to_vector": [], "original_vector": gt_by_type.get("original_vector", []),
+         "vector_to_raster": [], "original_raster": []},
+        preds_vector, cfg,
+    )["original_vector"]
+    for t in ("vector_to_raster", "original_raster"):
+        graphs_by_type[t] = build_overlap_graphs_by_type(
+            {tt: (gt_by_type.get(t, []) if tt == t else []) for tt in TEXT_TYPES}, [], cfg,
+        )[t]
     (directory / "boxes.pdf").write_bytes(
-        render_boxes_pdf(
-            page_meta,
-            overlay_boxes_split(auto_gt, auto_preds, manual_gt, manual_preds, cfg),
-        )
+        render_boxes_pdf(page_meta, overlay_boxes_by_type(graphs_by_type))
     )
 
 
 # --------------------------------------------------------------------------
-# the job -- legacy pipeline (run twice)
+# the job -- legacy pipeline (run twice, disjoint inputs)
 # --------------------------------------------------------------------------
 def _run_legacy(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
     from rastervec.Evaluation.Evaluate.legacy_adapter import run_archive_pipeline, to_texts
 
-    by_src = split_labelset_by_source(gt)
-    auto_gt = gt_regions_from_labelset(by_src["auto"])
-    manual_gt = gt_regions_from_labelset(by_src["manual"])
-    has_manual = bool(by_src["manual"].entries)
-    auto_input, manual_input = _page_inputs(task, has_manual)
+    entries = entries_by_text_type(gt)
+    has_native = bool(entries["native_to_vector"])
+    has_vector = bool(entries["original_vector"])
+
+    if has_native:
+        enrich_native_vector_signatures(gt, task.pdf_path, task.page_index)
+    gt_by_type = gt_regions_by_text_type(gt)
+    gt_vec_sigs_by_type = gt_vector_signatures_by_text_type(gt)
 
     result = PageResult(
         pdf_path=task.pdf_path, page_index=task.page_index, variant=task.variant,
     )
+    per_type_results: "dict[str, TextMetricSuiteResult]" = {}
     merged_ocr: list = []
     total = 0.0
     lbl = task.variant
 
-    def _legacy_run(input_bytes: bytes, gt_regions, label: str) -> MetricSuiteResult:
+    def _legacy_run(input_bytes: bytes, text_type: str) -> None:
         nonlocal total
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "in.pdf"
@@ -331,22 +421,43 @@ def _run_legacy(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
             total += time.perf_counter() - t0
         texts = to_texts(elements, page_index=task.page_index)
         merged_ocr.extend(texts)
-        res = evaluate_metrics(
-            gt_regions, predictions_from_texts(texts),
-            text_candidate_boxes(texts), cfg=cfg,
+        preds = predictions_from_texts(texts)
+        # Legacy has no ReclassifyResult -- funnel is always N/A for it.
+        per_type_results[text_type] = _evaluate_one_type(
+            text_type, gt_by_type, entries, preds, gt_vec_sigs_by_type, set(), cfg,
         )
         result.report_blocks.append(
-            format_report(f"[{lbl}/{label}] {task.pdf_path}", task.page_index, res)
+            f"[{lbl}/{text_type}] {task.pdf_path} p{task.page_index}: scored"
         )
-        return res
 
     # No per-run try/except here: a legacy failure (archive import, LibreOffice,
     # PaddleOCR) must propagate to `run_page_task`'s outer boundary -- which
     # logs it and records `PageResult.error` -- rather than be swallowed into a
     # `report_blocks` line with `None` metrics (a silent near-zero score).
-    result.auto = _legacy_run(auto_input, auto_gt, "auto")
-    if has_manual and manual_input is not None:
-        result.manual = _legacy_run(manual_input, manual_gt, "manual")
+    if has_native:
+        native_input = convert_page_text_only(task.pdf_path, task.page_index)
+        _legacy_run(native_input, "native_to_vector")
+    if has_vector:
+        vector_input = convert_page_drawings_only(task.pdf_path, task.page_index)
+        _legacy_run(vector_input, "original_vector")
+
+    empty_result = evaluate_text_metrics(
+        {t: [] for t in TEXT_TYPES}, {t: [] for t in TEXT_TYPES}, [], cfg=cfg,
+    )
+    result.text_metrics = _merge_text_results(empty_result, per_type_results)
+
+    try:
+        fresh_vectors = _fresh_vectors(task.pdf_path, task.page_index)
+        # Legacy has no comparable "final drawing vector" population exposed
+        # here -- original_vector vector-type scoring is skipped (res=None).
+        vector_inputs = build_vector_eval_inputs(gt, None, fresh_vectors)
+        result.vector_metrics = vm.evaluate_vector_metrics(
+            vector_inputs.gt_by_type, vector_inputs.preds_by_type, vector_inputs.label_counts,
+        )
+    except Exception as exc:  # noqa: BLE001
+        result.report_blocks.append(
+            f"[{lbl}/vectors] {task.pdf_path} p{task.page_index}: vector scoring failed: {exc}"
+        )
 
     result.total_seconds = total
     directory = _page_dir(task)
@@ -363,12 +474,7 @@ def _run_legacy(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
 def run_page_task(task: PageTask, compute=None, progress_counter=None) -> PageResult:
     """One benchmarked page, end to end. Never raises -- a failure is
     captured into `PageResult.error` (a whole-job failure) or a
-    `report_blocks` line (one of the two runs). `compute`, when given a
-    shared compute-pool proxy (see `run_benchmark`'s `compute_workers`),
-    is forwarded to the `current` engine only -- the `legacy` engine is
-    completely unaffected by this parameter. `progress_counter` is
-    likewise forwarded to the `current` engine only -- see
-    `run_benchmark`'s own docstring for the full picture."""
+    `report_blocks` line (one of the two runs)."""
     cfg = MetricConfig(iou_edge_min=task.iou_edge_min)
     try:
         variant = resolve_variant(task.variant)
@@ -390,24 +496,8 @@ def run_benchmark(
 ) -> list[PageResult]:
     """Run `run_page_task` over `tasks` (serial when `workers <= 1`,
     otherwise a spawn process pool -- Pool 1), results in input order.
-
-    `compute_workers > 0` additionally starts a `multiprocessing.Manager`
-    -hosted `Pool` (Pool 2) sized `compute_workers` (via `pool.compute_pool`),
-    shared by every page job regardless of which Pool-1 worker runs it -- a
-    complex page's many FAST/OCR jobs and simple pages' few jobs all queue
-    into this one pool, so idle capacity is never stranded on a page that
-    finished early. Pool 2 never imports `fitz`/`pymupdf`. `compute_workers=0`
-    (the default) preserves today's fully-local-per-page behavior.
-
-    A dedicated `multiprocessing.Manager().Value` progress counter is
-    always created here (independent of `compute_pool`'s own Manager, which
-    only exists when `compute_workers > 0`) and threaded into every page
-    job -- each FAST tile / OCR crop-batch completed, from any Pool-1
-    worker and/or Pool-2 job, increments this one shared counter, which
-    `run_parallel` polls to show a combined "N done" figure as the outer
-    page-level bar's postfix instead of each worker opening its own
-    (garbling, or -- once Pool 2 is involved -- entirely silent) `tqdm`
-    bar. See `OCR/fast_detect.py::detect_tiled`'s own docstring."""
+    `compute_workers > 0` additionally starts a shared Pool 2 -- see
+    `Reader/Parallel/pool.py`."""
     import functools
     import multiprocessing
 
