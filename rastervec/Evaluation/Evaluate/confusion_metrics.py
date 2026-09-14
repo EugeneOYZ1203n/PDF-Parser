@@ -168,7 +168,11 @@ def align_chars(gt_word: str, pred_word: str) -> list[tuple[str, str]]:
 def confusion_table(graph: OverlapGraph) -> "dict[str, Counter[str]]":
     """`{gt_char: Counter({replacement: count})}` over every gt word (of
     every gt region with overlaps) that has NO exact verbatim match among
-    the set of its region's overlapping predictions' word tokens."""
+    the set of its region's overlapping predictions' word tokens. Only
+    genuine mismatches are recorded -- `align_chars` emits one pair per gt
+    char including correct diagonal-match steps (needed for alignment), but
+    a `(gt_char, replacement)` pair where they're equal is a correct match,
+    not a confusion, and is skipped here."""
     table: "dict[str, Counter[str]]" = {}
     for gi, g in enumerate(graph.gt):
         overlapping = graph.overlapping_preds_by_gt[gi]
@@ -187,6 +191,8 @@ def confusion_table(graph: OverlapGraph) -> "dict[str, Counter[str]]":
                     table.setdefault(ch, Counter())[""] += 1
                 continue
             for gt_char, replacement in align_chars(gt_word, closest):
+                if gt_char == replacement:
+                    continue
                 table.setdefault(gt_char, Counter())[replacement] += 1
     return table
 
@@ -201,4 +207,16 @@ def extra_predicted_chars(graph: OverlapGraph) -> "Counter[str]":
     for pj, p in enumerate(graph.preds):
         if not graph.edges_by_pred[pj]:
             counter.update(char_multiset(p.text))
+    return counter
+
+
+def extra_predicted_chars_for_indices(predictions: list, pred_idxs: "list[int]") -> "Counter[str]":
+    """`Counter` of characters in `predictions[i].text` for `i in pred_idxs`
+    -- generalization of `extra_predicted_chars` for a caller (`metrics.
+    evaluate_text_metrics`) that already computed the truly-unclassified
+    (zero overlap across EVERY text type's graph) prediction indices
+    itself, to avoid double-counting across per-type graphs."""
+    counter: "Counter[str]" = Counter()
+    for pj in pred_idxs:
+        counter.update(char_multiset(predictions[pj].text))
     return counter

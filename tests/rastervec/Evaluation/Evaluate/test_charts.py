@@ -67,7 +67,7 @@ def test_font_size_histogram_chart(tmp_path):
 
 
 def test_extra_chars_table_image(tmp_path):
-    charts.extra_chars_table_image(_text_result(), "native_to_vector", title="t", path=tmp_path / "ec.png")
+    charts.extra_chars_table_image(_text_result(), title="t", path=tmp_path / "ec.png")
     _assert_png(tmp_path / "ec.png")
 
 

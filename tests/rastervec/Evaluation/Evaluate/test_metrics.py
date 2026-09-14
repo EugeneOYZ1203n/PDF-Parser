@@ -201,7 +201,19 @@ def test_evaluate_text_metrics_includes_font_size_and_extra_chars():
     r = result.by_type["native_to_vector"]
     assert r.font_size.unit == "pt"
     assert len(r.font_size.all_sizes) == 1
-    assert sum(r.extra_chars.values()) == len("SPURIOUS")
+    assert sum(result.extra_chars.values()) == len("SPURIOUS")
+
+
+def test_evaluate_text_metrics_extra_chars_excludes_preds_overlapping_any_type():
+    # A prediction overlapping one type's GT but not another's must NOT be
+    # counted as "extra" -- only truly cross-type-unclassified predictions
+    # (zero overlap in EVERY type's graph) count.
+    gt_by_type = {t: [] for t in TEXT_TYPES}
+    gt_by_type["native_to_vector"] = [_gt("HELLO", bbox=(0, 0, 50, 10))]
+    entries_by_type = {t: [] for t in TEXT_TYPES}
+    preds = [_pred("HELLO", bbox=(0, 0, 50, 10))]
+    result = evaluate_text_metrics(gt_by_type, entries_by_type, preds)
+    assert sum(result.extra_chars.values()) == 0
 
 
 def test_overlay_boxes_by_type_dashes_and_colors():

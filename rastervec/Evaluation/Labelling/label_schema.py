@@ -192,3 +192,40 @@ def save_labels(labels: LabelSet, path: str) -> None:
 
 def load_labels(path: str) -> LabelSet:
     return LabelSet.model_validate_json(Path(path).read_text(encoding="utf-8"))
+
+
+_MASTER_LABEL_FILES = ("native_labels.json", "vector_labels.json", "raster_labels.json")
+
+
+def load_labels_from_master_folder(folder: "str | Path") -> LabelSet:
+    """Merges a `scripts/label/master_label.py` output folder's up-to-3
+    label files (`native_labels.json`/`vector_labels.json`/`raster_labels.
+    json`, whichever exist -- source="native"/"vector"/"raster"
+    respectively) into one `LabelSet`. `pdf_path` is the folder's own
+    `original.pdf` (a verbatim copy master_label.py made of the source PDF)
+    when present, else the first loaded file's own `pdf_path`. Raises
+    `FileNotFoundError` if none of the three files exist -- not a
+    master_label folder."""
+    folder = Path(folder)
+    entries: list[LabelEntry] = []
+    geometry_entries: list[GeometryAnnotation] = []
+    pdf_path: str | None = None
+    found_any = False
+    for name in _MASTER_LABEL_FILES:
+        path = folder / name
+        if not path.is_file():
+            continue
+        found_any = True
+        labels = load_labels(str(path))
+        entries.extend(labels.entries)
+        geometry_entries.extend(labels.geometry_entries)
+        if pdf_path is None:
+            pdf_path = labels.pdf_path
+    if not found_any:
+        raise FileNotFoundError(
+            f"{folder} has none of {_MASTER_LABEL_FILES} -- not a master_label.py folder"
+        )
+    original_pdf = folder / "original.pdf"
+    if original_pdf.is_file():
+        pdf_path = str(original_pdf.resolve())
+    return LabelSet(pdf_path=pdf_path or "", entries=entries, geometry_entries=geometry_entries)

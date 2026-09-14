@@ -175,13 +175,13 @@ def font_size_histogram_chart(
 
 
 def extra_chars_table_image(
-    result: "TextMetricSuiteResult | None", text_type: str, *, title: str, path: Path, top_n: int = 20,
+    result: "TextMetricSuiteResult | None", *, title: str, path: Path, top_n: int = 20,
 ) -> None:
     """Table image of characters predicted with zero overlapping GT at all
-    (`metrics.confusion_metrics.extra_predicted_chars`), sorted by count."""
+    across EVERY text type (`result.extra_chars`), sorted by count."""
     fig, ax = plt.subplots(figsize=(4, 4))
     ax.axis("off")
-    extra = result.by_type[text_type].extra_chars if result is not None else None
+    extra = result.extra_chars if result is not None else None
     if not extra:
         ax.text(0.5, 0.5, "(no extra predictions)", ha="center", va="center")
     else:

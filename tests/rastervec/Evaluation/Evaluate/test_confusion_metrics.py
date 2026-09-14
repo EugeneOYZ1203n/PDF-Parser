@@ -80,7 +80,18 @@ def test_confusion_table_records_unmatched_word_substitution():
     graph = build_overlap_graph([g], preds)
     table = confusion_table(graph)
     assert table["A"]["U"] == 1
-    assert "C" not in table or table.get("C", {}).get("C", 0) == 0 or True  # C matched, may still appear via alignment only if unmatched-word triggers full align
+
+
+def test_confusion_table_excludes_self_matches():
+    # "CAT" vs "COT" is one real substitution (A->O); align_chars also
+    # emits correct C->C / T->T match steps, which must NOT be counted.
+    g = _gt("CAT")
+    preds = [_pred("COT", (0, 0, 10, 10))]
+    graph = build_overlap_graph([g], preds)
+    table = confusion_table(graph)
+    assert table == {"A": {"O": 1}}
+    assert "C" not in table
+    assert "T" not in table
 
 
 def test_confusion_table_skips_exact_word_matches():

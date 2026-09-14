@@ -206,9 +206,9 @@ def main(argv: list[str] | None = None) -> int:
                 charts.font_size_histogram_chart(
                     agg, text_type, title=f"{key} {name} {text_type} font size",
                     path=charts_dir / f"{kslug}__{nslug}__{text_type}__font_size.png")
-                charts.extra_chars_table_image(
-                    agg, text_type, title=f"{key} {name} {text_type} extra predicted chars",
-                    path=charts_dir / f"{kslug}__{nslug}__{text_type}__extra_chars.png")
+            charts.extra_chars_table_image(
+                agg, title=f"{key} {name} extra predicted chars",
+                path=charts_dir / f"{kslug}__{nslug}__extra_chars.png")
 
         for name, (pp, _agg) in scored.items():
             grand.setdefault(name, []).extend(r for _pi, r in pp)

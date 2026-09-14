@@ -432,6 +432,20 @@ def bbox_accuracy_stats(graph: OverlapGraph, text_type: str) -> BboxAccuracyStat
     )
 
 
+def truly_unclassified_pred_indices(graphs_by_type: dict[str, OverlapGraph]) -> list[int]:
+    """Indices (into any one graph's `.preds`, since `build_overlap_graphs_
+    by_type` shares one predication filter across all 4 type graphs, so
+    their `.preds` lists line up 1:1) of predictions with zero overlap
+    across EVERY text type's graph -- i.e. genuinely unclassified, not just
+    unclassified with respect to one type. Shared by `bbox_accuracy_
+    unclassified` and `evaluate_text_metrics`'s top-level `extra_chars`."""
+    graphs = list(graphs_by_type.values())
+    if not graphs:
+        return []
+    n_preds = len(graphs[0].preds)
+    return [pj for pj in range(n_preds) if all(not g.edges_by_pred[pj] for g in graphs)]
+
+
 def bbox_accuracy_unclassified(
     graphs_by_type: dict[str, OverlapGraph], *, page_area: float | None = None,
 ) -> BboxAccuracyStats:
@@ -439,13 +453,9 @@ def bbox_accuracy_unclassified(
     `graphs_by_type` must come from `build_overlap_graphs_by_type` so
     `graph.preds` indices line up across types."""
     graphs = list(graphs_by_type.values())
+    spurious_idxs = truly_unclassified_pred_indices(graphs_by_type)
     if not graphs:
         return BboxAccuracyStats(text_type="unclassified")
-    n_preds = len(graphs[0].preds)
-    spurious_idxs = [
-        pj for pj in range(n_preds)
-        if all(not g.edges_by_pred[pj] for g in graphs)
-    ]
     total_area = sum(bbox_area(graphs[0].preds[pj].bbox) for pj in spurious_idxs)
     area_frac = (total_area / page_area) if page_area else math.nan
     return BboxAccuracyStats(
@@ -609,7 +619,6 @@ class PerTypeTextResult:
     rotation: RotationStats
     reading_order: "object"  # confusion_metrics.ReadingOrderStats
     confusion: "dict[str, Counter[str]]"
-    extra_chars: "Counter[str]"  # chars of predictions with zero GT overlap at all
     font_size: FontSizeDistribution
     funnel: "ClassificationFunnelStats | None" = None
 
@@ -618,6 +627,10 @@ class PerTypeTextResult:
 class TextMetricSuiteResult:
     by_type: dict[str, PerTypeTextResult]
     bbox_unclassified: BboxAccuracyStats
+    # chars of predictions with zero overlap across EVERY text type's graph
+    # -- merged once here (not per type) to avoid quadruple-counting the
+    # same truly-unclassified prediction across 4 type graphs.
+    extra_chars: "Counter[str]" = field(default_factory=Counter)
 
 
 def evaluate_text_metrics(
@@ -635,7 +648,7 @@ def evaluate_text_metrics(
     # cycle (confusion_metrics imports OverlapGraph/GtRegion from here).
     from rastervec.Evaluation.Evaluate.confusion_metrics import (
         confusion_table,
-        extra_predicted_chars,
+        extra_predicted_chars_for_indices,
         reading_order_stats,
     )
 
@@ -661,14 +674,17 @@ def evaluate_text_metrics(
             rotation=rotation_stats(graph, text_type),
             reading_order=reading_order_stats(graph, text_type),
             confusion=confusion_table(graph),
-            extra_chars=extra_predicted_chars(graph),
             font_size=font_size_distribution(graph, text_type, dpi=dpi),
             funnel=funnel,
         )
 
+    extra_chars = extra_predicted_chars_for_indices(
+        predictions, truly_unclassified_pred_indices(graphs_by_type),
+    )
     return TextMetricSuiteResult(
         by_type=by_type,
         bbox_unclassified=bbox_accuracy_unclassified(graphs_by_type, page_area=page_area),
+        extra_chars=extra_chars,
     )
 
 
@@ -764,10 +780,6 @@ def aggregate_text_metrics(results: list[TextMetricSuiteResult]) -> "TextMetricS
             for ch, counter in p.confusion.items():
                 merged.setdefault(ch, Counter()).update(counter)
 
-        extra_chars: "Counter[str]" = Counter()
-        for p in per_type:
-            extra_chars.update(p.extra_chars)
-
         unit = per_type[0].font_size.unit if per_type else "pt"
         font_size = FontSizeDistribution(
             text_type=text_type, unit=unit,
@@ -789,11 +801,16 @@ def aggregate_text_metrics(results: list[TextMetricSuiteResult]) -> "TextMetricS
         by_type[text_type] = PerTypeTextResult(
             label_stats=label_stats, char_overlap=char_overlap, word_overlap=word_overlap,
             bbox_accuracy=bbox_accuracy, rotation=rotation, reading_order=reading_order,
-            confusion=merged, extra_chars=extra_chars, font_size=font_size, funnel=funnel,
+            confusion=merged, font_size=font_size, funnel=funnel,
         )
 
     bbox_unclassified = BboxAccuracyStats(
         text_type="unclassified",
         spurious_pred_count=sum(r.bbox_unclassified.spurious_pred_count for r in results),
     )
-    return TextMetricSuiteResult(by_type=by_type, bbox_unclassified=bbox_unclassified)
+    extra_chars: "Counter[str]" = Counter()
+    for r in results:
+        extra_chars.update(r.extra_chars)
+    return TextMetricSuiteResult(
+        by_type=by_type, bbox_unclassified=bbox_unclassified, extra_chars=extra_chars,
+    )
