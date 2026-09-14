@@ -72,6 +72,12 @@ class PageDump:
     vectors: list[Vector]
     engine: str
     step_durations: dict
+    # OCR texts from a SEPARATE pipeline run on this page's rasterised
+    # counterpart (a flattened-to-image PDF page, no vector paths) -- feeds
+    # vector_to_raster/original_raster/native_to_raster scoring, which must
+    # never be scored from `texts` (the vectorised-PDF run's own output).
+    # Empty when no rasterised run was made (older dumps default to []).
+    raster_texts: list[Text] = dataclasses.field(default_factory=list)
 
 
 def _page_dump_to_json(pd: PageDump) -> dict:
@@ -81,6 +87,7 @@ def _page_dump_to_json(pd: PageDump) -> dict:
         "vectors": [vector_to_json(v) for v in pd.vectors],
         "engine": pd.engine,
         "step_durations": pd.step_durations,
+        "raster_texts": [text_to_json(t) for t in pd.raster_texts],
     }
 
 
@@ -96,6 +103,7 @@ def _page_dump_from_json(d: dict) -> PageDump:
         vectors=[vector_from_json(v) for v in d["vectors"]],
         engine=d.get("engine", "current"),
         step_durations=d.get("step_durations", {}),
+        raster_texts=[text_from_json(t) for t in d.get("raster_texts", [])],
     )
 
 

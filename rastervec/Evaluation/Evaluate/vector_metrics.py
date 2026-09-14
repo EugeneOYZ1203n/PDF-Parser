@@ -2,10 +2,12 @@
 pairing, vector count accuracy, endpoint accuracy, per-property accuracy),
 plus the vector half of category 1 (label description).
 
-3 vector types (`VECTOR_TYPES`): `original_vector` (real `Vector`-level GT,
-matched via `path_signature` against pipeline `Vector` predictions),
-`vector_to_raster` (`GeometryAnnotation` entries with `source=="auto"`),
-`original_raster` (`GeometryAnnotation` entries with `source=="manual"`).
+2 vector types (`VECTOR_TYPES`): `vector_to_raster` (`GeometryAnnotation`
+entries with `source=="auto"`), `original_raster` (`GeometryAnnotation`
+entries with `source=="manual"`). `original_vector` (real `Vector`-level GT
+vs. pipeline `Vector` predictions) was dropped from vector-geometry scoring
+-- it stays a `metrics.TEXT_TYPES` text-provenance type, scored by the text
+metrics suite instead.
 
 Pure -- no pipeline/label_schema import; callers (`adapters.py`) build
 `GeometryEntry` lists from `Vector`/`GeometryAnnotation` objects via
@@ -20,7 +22,7 @@ from dataclasses import dataclass, field
 
 from rastervec.Evaluation.Evaluate.metrics import Ratio
 
-VECTOR_TYPES: tuple[str, ...] = ("original_vector", "vector_to_raster", "original_raster")
+VECTOR_TYPES: tuple[str, ...] = ("vector_to_raster", "original_raster")
 
 Point = tuple[float, float]
 
@@ -115,12 +117,10 @@ class VectorLabelStats:
 
 
 def vector_label_stats(
-    original_vector_count: int,
     vector_to_raster_geoms: list,
     original_raster_geoms: list,
 ) -> list[VectorLabelStats]:
     return [
-        VectorLabelStats("original_vector", original_vector_count),
         VectorLabelStats("vector_to_raster", len(vector_to_raster_geoms)),
         VectorLabelStats("original_raster", len(original_raster_geoms)),
     ]
@@ -354,7 +354,6 @@ def evaluate_vector_metrics(
 ) -> VectorMetricSuiteResult:
     label_rows = {
         r.vector_type: r for r in vector_label_stats(
-            label_counts.get("original_vector", 0),
             [None] * label_counts.get("vector_to_raster", 0),
             [None] * label_counts.get("original_raster", 0),
         )

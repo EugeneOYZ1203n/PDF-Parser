@@ -5,10 +5,11 @@
 `PageTask.variant` names a `rastervec.Evaluation.Evaluate.variants.VARIANTS`
 entry (engine current/legacy, `enable_fast`).
 
-Reworked for the 4 text-type / 3 vector-type metrics suite
-(`Evaluation.Evaluate.metrics`/`vector_metrics`). Two pipeline runs happen
-per page, each on a disjoint synthetic input, mirroring the old auto/manual
-split but generalized:
+Reworked for the 4 text-type / 2 vector-type metrics suite
+(`Evaluation.Evaluate.metrics`/`vector_metrics` -- `original_vector` is a
+text-provenance type only, not scored at the vector-geometry level). Two
+pipeline runs happen per page, each on a disjoint synthetic input,
+mirroring the old auto/manual split but generalized:
 
 - **native_to_vector run** -- `convert_page_text_only` input (native text as
   vectors, drawings removed), scored vs the `native_to_vector` GT bucket
@@ -81,7 +82,6 @@ from rastervec.models import PageMeta, Segment, Text
 from rastervec.pipelines.current import run_pipeline
 from rastervec.Reader.reader import Reader
 from rastervec.renderer import render_boxes_pdf, render_reconstructed_pdf
-from rastervec.Vector.vector import extract_vectors
 
 _LOG = get_logger("reader.parallel.jobs")
 
@@ -127,12 +127,6 @@ def _ground_truth(task: PageTask) -> LabelSet:
     labels = native_label_pdf(task.pdf_path, task.page_index)  # source="native"
     labels.entries.extend(task.manual_entries)  # source in ("vector", "raster")
     return labels
-
-
-def _fresh_vectors(pdf_path: str, page_index: int) -> list:
-    with Reader(pdf_path) as reader:
-        page = reader.get_page(page_index)
-        return extract_vectors(page)
 
 
 def _run_pipeline(
@@ -305,8 +299,7 @@ def _run_current(
     result.text_metrics = _merge_text_results(empty_result, per_type_results)
 
     try:
-        fresh_vectors = _fresh_vectors(task.pdf_path, task.page_index)
-        vector_inputs = build_vector_eval_inputs(gt, vector_ctx, fresh_vectors)
+        vector_inputs = build_vector_eval_inputs(gt)
         result.vector_metrics = vm.evaluate_vector_metrics(
             vector_inputs.gt_by_type, vector_inputs.preds_by_type, vector_inputs.label_counts,
         )
@@ -447,10 +440,7 @@ def _run_legacy(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
     result.text_metrics = _merge_text_results(empty_result, per_type_results)
 
     try:
-        fresh_vectors = _fresh_vectors(task.pdf_path, task.page_index)
-        # Legacy has no comparable "final drawing vector" population exposed
-        # here -- original_vector vector-type scoring is skipped (res=None).
-        vector_inputs = build_vector_eval_inputs(gt, None, fresh_vectors)
+        vector_inputs = build_vector_eval_inputs(gt)
         result.vector_metrics = vm.evaluate_vector_metrics(
             vector_inputs.gt_by_type, vector_inputs.preds_by_type, vector_inputs.label_counts,
         )

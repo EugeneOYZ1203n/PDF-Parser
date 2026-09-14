@@ -4,14 +4,21 @@ inputs.
 `metrics.py`/`vector_metrics.py` are deliberately pipeline-agnostic (plain
 `GtRegion`/`Prediction`/`GeometryEntry` lists). This module turns a
 `LabelSet` and a `PipelineResult` into those inputs, and buckets a mixed
-`LabelSet` into the 4 text types / 3 vector types the rework scores
+`LabelSet` into the 5 text types / 2 vector types the rework scores
 separately (see the plan this rework was built from):
 
 - `native_to_vector` = `LabelEntry.source == "native"`
 - `original_vector` = `LabelEntry.source == "vector"`
+- `native_to_raster` = `LabelEntry.source == "raster"`, `label_id` prefixed
+  `"natsync:"` (raster_label.py's own prefix for a native-label text copy --
+  the same native text region, scored against a rasterised-PDF pipeline run
+  instead of the vectorised one)
 - `vector_to_raster` = `LabelEntry.source == "raster"`, `label_id` prefixed
   `"vecsync:"` (raster_label.py's own prefix for a vector-label text copy)
-- `original_raster` = `LabelEntry.source == "raster"`, no such prefix
+- `original_raster` = `LabelEntry.source == "raster"`, neither prefix
+
+Checked in that order -- `natsync:`/`vecsync:` must be checked before the
+plain `source == "raster"` fallback.
 """
 from __future__ import annotations
 
@@ -19,22 +26,20 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from rastervec.Evaluation.Evaluate.metrics import TEXT_TYPES, Bbox, GtRegion, Prediction
-from rastervec.Evaluation.Evaluate.vector_metrics import (
-    GeometryEntry,
-    geometry_entries_from_annotations,
-    geometry_entries_from_vector,
-)
+from rastervec.Evaluation.Evaluate.vector_metrics import GeometryEntry, geometry_entries_from_annotations
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet, path_signature
 from rastervec.models import Text
 
 if TYPE_CHECKING:
-    from rastervec.models import Vector
     from rastervec.pipelines.result import PipelineResult
 
 _VECSYNC_PREFIX = "vecsync:"
+_NATSYNC_PREFIX = "natsync:"
 
 
 def _text_type_of(entry: LabelEntry) -> str:
+    if entry.label_id.startswith(_NATSYNC_PREFIX):
+        return "native_to_raster"
     if entry.source == "native":
         return "native_to_vector"
     if entry.source == "vector":
@@ -117,35 +122,6 @@ def gt_geometry_by_vector_type(labels: LabelSet) -> "dict[str, list]":
     }
 
 
-def gt_original_vectors_from_labelset(
-    labels: LabelSet, fresh_vectors: "list[Vector]",
-) -> "list[Vector]":
-    """Reconstructs the `original_vector` GT `Vector`-level ground truth:
-    matches every `path_signature` in every `source=="vector"` entry's
-    `vector_signatures` against `path_signature(v)` for `v` in
-    `fresh_vectors` -- a fresh `extract_vectors()` call on the SAME
-    original, unconverted PDF page, NOT a pipeline run's own
-    `PipelineResult.vectors` (already filtered/reclassified into
-    text-vs-drawing, so it no longer contains every original path)."""
-    sigs: "set[str]" = set()
-    for e in labels.entries:
-        if e.source == "vector":
-            sigs.update(e.vector_signatures)
-    if not sigs:
-        return []
-    return [v for v in fresh_vectors if path_signature(v) in sigs]
-
-
-def vector_predictions_from_pipeline_result(res: "PipelineResult") -> "list[Vector]":
-    """`res.vectors` (final drawing content) + `res.reassigned_text`
-    (verbose-only -- every Vector actually assigned to an OCR detection) --
-    together the full predicted-vector population for `original_vector`
-    scoring. `[]` cleanly on a non-verbose run (no crash)."""
-    vectors = list(res.vectors or [])
-    vectors.extend(getattr(res, "reassigned_text", None) or [])
-    return vectors
-
-
 def reclass_passed_signatures(res: "PipelineResult") -> "set[str]":
     """`path_signature`s of `PipelineResult.reclassify_result.passed`
     (verbose-only) -- the vectors that survived to the step immediately
@@ -217,33 +193,25 @@ class VectorEvalInputs:
     label_counts: "dict[str, int]"
 
 
-def build_vector_eval_inputs(
-    labels: LabelSet, res: "PipelineResult | None", fresh_vectors: "list[Vector]",
-) -> VectorEvalInputs:
-    """`fresh_vectors` must come from `extract_vectors` on the SAME
-    original, unconverted PDF page `labels` was built against (see
-    `gt_original_vectors_from_labelset`'s docstring). `res=None` (no
-    pipeline run available for `original_vector`, e.g. the page has no
-    `source=="vector"` labels) yields an empty prediction set for that
-    type -- label stats/GT counts still populate."""
-    gt_original_vectors = gt_original_vectors_from_labelset(labels, fresh_vectors)
+def build_vector_eval_inputs(labels: LabelSet) -> VectorEvalInputs:
+    """`original_vector` (real `Vector`-level GT vs. pipeline `Vector`
+    predictions) is not scored here -- dropped from vector-geometry
+    calculations; it stays a `metrics.TEXT_TYPES` text-provenance type,
+    scored by the text metrics suite instead. `vector_to_raster`/
+    `original_raster` have no prediction population either (no
+    raster-tracing pipeline stage exists) -- label stats/GT counts still
+    populate."""
     gt_geometry = gt_geometry_by_vector_type(labels)
-    pred_original_vectors = (
-        vector_predictions_from_pipeline_result(res) if res is not None else []
-    )
 
     gt_by_type: "dict[str, list[GeometryEntry]]" = {
-        "original_vector": [e for v in gt_original_vectors for e in geometry_entries_from_vector(v)],
         "vector_to_raster": geometry_entries_from_annotations(gt_geometry["vector_to_raster"]),
         "original_raster": geometry_entries_from_annotations(gt_geometry["original_raster"]),
     }
     preds_by_type: "dict[str, list[GeometryEntry]]" = {
-        "original_vector": [e for v in pred_original_vectors for e in geometry_entries_from_vector(v)],
-        "vector_to_raster": [],  # no raster-tracing pipeline stage exists
+        "vector_to_raster": [],
         "original_raster": [],
     }
     label_counts = {
-        "original_vector": len({path_signature(v) for v in gt_original_vectors}),
         "vector_to_raster": len(gt_geometry["vector_to_raster"]),
         "original_raster": len(gt_geometry["original_raster"]),
     }

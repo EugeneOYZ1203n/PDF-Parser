@@ -12,6 +12,7 @@ from rastervec.Evaluation.Evaluate.metrics import (
     build_overlap_graphs_by_type,
     char_overlap_stats,
     classification_funnel_stats,
+    combine_text_metrics_by_type,
     evaluate_text_metrics,
     aggregate_text_metrics,
     font_size_distribution,
@@ -150,6 +151,31 @@ def test_aggregate_text_metrics_micro_averages():
     co = agg.by_type["native_to_vector"].char_overlap
     assert co.total_gt == 10
     assert co.matched == 5 + 4
+
+
+def test_combine_text_metrics_by_type_routes_each_type_from_its_owning_result():
+    vec_gt = {t: [] for t in TEXT_TYPES}
+    vec_gt["native_to_vector"] = [_gt("HELLO")]
+    res_vec = evaluate_text_metrics(vec_gt, {t: [] for t in TEXT_TYPES}, [_pred("HELLO")])
+
+    raster_gt = {t: [] for t in TEXT_TYPES}
+    raster_gt["vector_to_raster"] = [_gt("WORLD", text_type="vector_to_raster")]
+    res_raster = evaluate_text_metrics(
+        raster_gt, {t: [] for t in TEXT_TYPES}, [_pred("SPURIOUS", bbox=(100, 100, 110, 110))],
+    )
+
+    combined = combine_text_metrics_by_type({
+        "native_to_vector": res_vec, "original_vector": res_vec,
+        "vector_to_raster": res_raster, "original_raster": res_raster,
+        "native_to_raster": res_raster,
+    })
+    assert combined.by_type["native_to_vector"].char_overlap.matched == 5
+    assert combined.by_type["vector_to_raster"].char_overlap.total_gt == 5  # "WORLD"
+    # spurious predictions summed once per distinct result, not once per type
+    assert combined.bbox_unclassified.spurious_pred_count == (
+        res_vec.bbox_unclassified.spurious_pred_count
+        + res_raster.bbox_unclassified.spurious_pred_count
+    )
 
 
 def test_font_size_distribution_pt_units_for_vector_types():

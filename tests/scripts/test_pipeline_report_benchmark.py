@@ -121,6 +121,42 @@ def test_single_run_allowed(tmp_path):
     assert (out / "report.html").is_file()
 
 
+def test_score_text_routes_vectorised_vs_rasterised_predictions(tmp_path):
+    doc = tmp_path / "doc"
+    doc.mkdir()
+    dump_io.write_dump(
+        doc / "dump.json", "x.pdf",
+        [dump_io.PageDump(
+            _meta(),
+            texts=[_text("HELLO", (0, 0, 50, 12))],
+            vectors=[], engine="current", step_durations={},
+            raster_texts=[_text("WORLD", (0, 100, 50, 112))],
+        )],
+    )
+    save_labels(
+        LabelSet(pdf_path="x.pdf", entries=[_label("HELLO", (0, 0, 50, 12), "native")]),
+        str(doc / "ground_truth_native_to_vector.json"),
+    )
+    vector_to_raster_label = LabelEntry(
+        page_index=0, cluster_bbox=(0, 100, 50, 112), cluster_signature="s",
+        label_id="vecsync:x", text="WORLD", source="raster",
+    )
+    save_labels(
+        LabelSet(pdf_path="x.pdf", entries=[vector_to_raster_label]),
+        str(doc / "ground_truth_vector_to_raster.json"),
+    )
+
+    entry = prb.RunEntry(
+        run_name="run", run_dir=tmp_path, key="labels:doc", pdf_stem="doc",
+        doc_dir=doc, dump_path=doc / "dump.json", gt=prb._merge_gt(doc),
+    )
+    _per_page, agg = prb._score_text(entry, prb.MetricConfig())
+    assert agg.by_type["native_to_vector"].char_overlap.matched == 5  # "HELLO"
+    assert agg.by_type["native_to_vector"].char_overlap.missing == 0
+    assert agg.by_type["vector_to_raster"].char_overlap.matched == 5  # "WORLD"
+    assert agg.by_type["vector_to_raster"].char_overlap.missing == 0
+
+
 def test_merge_gt_supports_legacy_auto_manual_filenames(tmp_path):
     doc = tmp_path / "doc"
     doc.mkdir()

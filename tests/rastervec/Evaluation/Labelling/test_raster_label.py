@@ -4,6 +4,7 @@ from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet
 from rastervec.Evaluation.Labelling.raster_label import (
     embedded_images_for_page,
     raster_geometry_for_page,
+    sync_native_text_from_native_labels,
     sync_text_from_vector_labels,
 )
 
@@ -84,6 +85,56 @@ def test_sync_text_from_vector_labels_replaces_only_its_own_entries():
     synced = next(e for e in raster_labels.entries if e.label_id == "vecsync:v1")
     assert synced.text == "Updated"
     assert any(e.label_id == "manual-uuid" and e.text == "hand labelled" for e in raster_labels.entries)
+
+
+def _native_entry(page_index: int, label_id: str, text: str) -> LabelEntry:
+    return LabelEntry(
+        page_index=page_index, cluster_bbox=(0, 0, 10, 5), cluster_signature="s",
+        label_id=label_id, text=text, source="native", expected_rotation=0,
+    )
+
+
+def test_sync_native_text_from_native_labels_adds_prefixed_entries():
+    raster_labels = LabelSet(pdf_path="x.pdf")
+    native_labels = LabelSet(
+        pdf_path="x.pdf",
+        entries=[_native_entry(0, "line:0:0:0", "Hello"), _native_entry(1, "line:1:0:0", "World")],
+    )
+
+    sync_native_text_from_native_labels(raster_labels, native_labels, page_indices=[0, 1])
+
+    assert len(raster_labels.entries) == 2
+    ids = {e.label_id for e in raster_labels.entries}
+    assert ids == {"natsync:line:0:0:0", "natsync:line:1:0:0"}
+    assert all(e.source == "raster" for e in raster_labels.entries)
+    synced = next(e for e in raster_labels.entries if e.label_id == "natsync:line:0:0:0")
+    assert synced.text == "Hello"
+
+
+def test_sync_native_text_from_native_labels_replaces_only_its_own_entries():
+    manual_entry = LabelEntry(
+        page_index=0, cluster_bbox=(0, 0, 1, 1), cluster_signature="raster:0:0",
+        label_id="manual-uuid", text="hand labelled", source="raster",
+    )
+    vecsync_entry = LabelEntry(
+        page_index=0, cluster_bbox=(0, 0, 1, 1), cluster_signature="s",
+        label_id="vecsync:v1", text="from vector", source="raster",
+    )
+    raster_labels = LabelSet(pdf_path="x.pdf", entries=[manual_entry, vecsync_entry])
+    native_labels = LabelSet(pdf_path="x.pdf", entries=[_native_entry(0, "line:0:0:0", "Hello")])
+
+    sync_native_text_from_native_labels(raster_labels, native_labels, page_indices=[0])
+    assert len(raster_labels.entries) == 3
+    ids = {e.label_id for e in raster_labels.entries}
+    assert ids == {"manual-uuid", "vecsync:v1", "natsync:line:0:0:0"}
+
+    native_labels.entries[0].text = "Updated"
+    sync_native_text_from_native_labels(raster_labels, native_labels, page_indices=[0])
+    assert len(raster_labels.entries) == 3
+    synced = next(e for e in raster_labels.entries if e.label_id == "natsync:line:0:0:0")
+    assert synced.text == "Updated"
+    assert any(e.label_id == "vecsync:v1" for e in raster_labels.entries)
+    assert any(e.label_id == "manual-uuid" for e in raster_labels.entries)
 
 
 def test_embedded_images_for_page_finds_inserted_image(synthetic_pdf_factory, tmp_pdf_path, tmp_path):

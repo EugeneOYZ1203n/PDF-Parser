@@ -15,8 +15,9 @@ Folder layout (all paths relative to `<stem>_label/`):
     vector_labels.json      -- VectorLabelApp's human-entered labels
     raster_labels.json      -- auto geometry (source="auto") + text re-synced
                                 from vector_labels.json (source="raster",
-                                label_id "vecsync:...") + hand-drawn entries
-                                from RasterLabelApp
+                                label_id "vecsync:...") + from native_labels.json
+                                (source="raster", label_id "natsync:...") +
+                                hand-drawn entries from RasterLabelApp
     manifest.json           -- per-page {"native_done", "rasterise_done",
                                 "geometry_done"} flags driving the skip logic
 
@@ -32,7 +33,8 @@ Steps, in order:
    reuse-or-recompute way; `raster_geometry_for_page` replaces that page's
    `source="auto"` entries in `raster_labels.json`.
 3. **Text re-sync** (always runs, no skip): `sync_text_from_vector_labels`
-   against whatever `vector_labels.json` currently holds.
+   against whatever `vector_labels.json` currently holds, plus
+   `sync_native_text_from_native_labels` against `native_labels.json`.
 4. Opens `VectorLabelApp` on `original.pdf` / `vector_labels.json` --
    blocks until closed.
 5. Re-syncs (step 3 again, now against the just-edited vector labels).
@@ -69,6 +71,7 @@ from rastervec.Evaluation.Labelling.label_schema import LabelSet, load_labels, s
 from rastervec.Evaluation.Labelling.native_label import attach_vector_signatures, native_label_pdf
 from rastervec.Evaluation.Labelling.raster_label import (
     raster_geometry_for_page,
+    sync_native_text_from_native_labels,
     sync_text_from_vector_labels,
 )
 from rastervec.logging_setup import configure_logging, get_logger
@@ -191,6 +194,7 @@ def _run_raster_step(
 def _resync_raster_text(folder: Path, original_path: Path, page_count: int) -> None:
     raster_path = folder / "raster_labels.json"
     vector_path = folder / "vector_labels.json"
+    native_path = folder / "native_labels.json"
     raster_labels = (
         load_labels(str(raster_path)) if raster_path.exists()
         else LabelSet(pdf_path=str(original_path))
@@ -199,7 +203,12 @@ def _resync_raster_text(folder: Path, original_path: Path, page_count: int) -> N
         load_labels(str(vector_path)) if vector_path.exists()
         else LabelSet(pdf_path=str(original_path))
     )
+    native_labels = (
+        load_labels(str(native_path)) if native_path.exists()
+        else LabelSet(pdf_path=str(original_path))
+    )
     sync_text_from_vector_labels(raster_labels, vector_labels, list(range(page_count)))
+    sync_native_text_from_native_labels(raster_labels, native_labels, list(range(page_count)))
     save_labels(raster_labels, str(raster_path))
 
 
@@ -235,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     stem = src_path.stem
     folder = output_dir("labels") / f"{stem}_label"
     original_path = folder / "original.pdf"
+    folder.mkdir(parents=True, exist_ok=True)
     if not original_path.exists():
         shutil.copy(str(src_path), str(original_path))
         _LOG.info("copied %s -> %s", src_path, original_path)

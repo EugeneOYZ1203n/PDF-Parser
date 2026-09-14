@@ -16,6 +16,10 @@ Two auto-derived pieces of raster ground truth:
   done" flag) so editing vector labels later keeps raster labels in sync;
   only ever touches its own previously-synced entries (`label_id` prefixed
   `"vecsync:"`), never a genuine hand-drawn raster text entry.
+- `sync_native_text_from_native_labels` -- same idea, from `native_label`'s
+  auto-derived text instead, for the `native_to_raster` text type (native
+  text scored against a rasterised-PDF pipeline run, not the vectorised
+  one). Own prefix `"natsync:"`.
 
 `embedded_images_for_page` enumerates the original PDF's own embedded
 raster images (not a full-page render) -- the manual `raster_label` tool's
@@ -42,6 +46,7 @@ from rastervec.Vector.vector import extract_vectors
 _LOG = get_logger("raster_label")
 
 _VECSYNC_PREFIX = "vecsync:"
+_NATSYNC_PREFIX = "natsync:"
 
 
 def raster_geometry_for_page(pdf_path: str, page_index: int) -> list[GeometryAnnotation]:
@@ -85,6 +90,37 @@ def sync_text_from_vector_labels(
             vector_signatures=list(v.vector_signatures),
         )
         for v in vector_labels.entries if v.page_index in pages
+    ]
+    raster_labels.entries.extend(synced)
+
+
+def sync_native_text_from_native_labels(
+    raster_labels: LabelSet, native_labels: LabelSet, page_indices: list[int],
+) -> None:
+    """Mutates `raster_labels.entries` in place: drops every existing entry
+    whose `label_id` starts with `"natsync:"` on the given pages, then
+    re-adds one fresh entry per `native_labels` entry on those pages
+    (`label_id=f"natsync:{n.label_id}"`, `source="native"`, text/
+    cluster_bbox/expected_rotation carried over verbatim -- native labels
+    never populate `vector_signatures`). Ground truth for the
+    `native_to_raster` text type (native text scored against a rasterised-
+    PDF pipeline run): the same native text region, just tracked as ground
+    truth for the rasterised page instead of the vectorised one. Mirrors
+    `sync_text_from_vector_labels`; never touches a genuine manually-added
+    raster entry."""
+    pages = set(page_indices)
+    raster_labels.entries = [
+        e for e in raster_labels.entries
+        if not (e.page_index in pages and e.label_id.startswith(_NATSYNC_PREFIX))
+    ]
+    synced = [
+        LabelEntry(
+            page_index=n.page_index, cluster_bbox=n.cluster_bbox,
+            cluster_signature=n.cluster_signature,
+            label_id=f"{_NATSYNC_PREFIX}{n.label_id}",
+            text=n.text, source="raster", expected_rotation=n.expected_rotation,
+        )
+        for n in native_labels.entries if n.page_index in pages
     ]
     raster_labels.entries.extend(synced)
     _LOG.debug(

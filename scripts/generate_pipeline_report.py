@@ -26,11 +26,15 @@ Replaces `rastervec/notebooks/pipeline_stage_visualization.ipynb`.
 
 With `benchmark: true` the same `<pdf-stem>/` folder is also a scoring
 artifact for `pipeline_report_benchmark.py`: one `convert_page_to_vector_text`
-run per page, plus `ground_truth_<text_type>.json` (only the non-empty of
-the 4 text types: `native_to_vector`/`original_vector`/`vector_to_raster`/
-`original_raster`) and the matching `<text_type>_{bbox,text}.pdf` overlays
-(registered in the manifest under stage `benchmark`), and a run-root
-`benchmark.json` marker. `input_files`/`input_dir` entries may be a `.pdf`
+run per page (predictions for `native_to_vector`/`original_vector`) plus,
+when the input is a master_label.py folder with its own `rasterised.pdf`, a
+SEPARATE pipeline run directly on that rasterised page (predictions for
+`vector_to_raster`/`original_raster`/`native_to_raster` -- these 3 types are
+never scored from the vectorised run). Writes `ground_truth_<text_type>.json`
+(only the non-empty of the 5 text types) and the matching
+`<text_type>_{bbox,text}.pdf` overlays (registered in the manifest under
+stage `benchmark`), and a run-root `benchmark.json` marker.
+`input_files`/`input_dir` entries may be a `.pdf`
 (auto-only), a `.json` label sidecar, or a directory (a
 `scripts/label/master_label.py` output folder, merging its
 `native_labels.json`/`vector_labels.json`/`raster_labels.json`). See
@@ -61,6 +65,7 @@ from rastervec.Evaluation.Evaluate.variants import resolve_variant
 from rastervec.Evaluation.Labelling import native_label
 from rastervec.Evaluation.Evaluate.metrics import TEXT_TYPES
 from rastervec.Evaluation.Labelling.label_schema import (
+    LabelEntry,
     LabelSet,
     load_labels,
     load_labels_from_master_folder,
@@ -182,10 +187,13 @@ class ReportConfig(BaseModel):
         out: list[BenchInput] = []
         seen: set[str] = set()
 
-        def _add(key: str, pdf: Path, labels: Path | None) -> None:
+        def _add(key: str, pdf: Path, labels: Path | None, rasterised: Path | None = None) -> None:
             if key not in seen:
                 seen.add(key)
-                out.append(BenchInput(key=key, pdf_path=pdf.resolve(), labels_path=labels))
+                out.append(BenchInput(
+                    key=key, pdf_path=pdf.resolve(), labels_path=labels,
+                    rasterised_pdf_path=rasterised.resolve() if rasterised else None,
+                ))
 
         raw: list[Path] = list(self.input_files)
         if self.input_dir is not None:
@@ -196,7 +204,8 @@ class ReportConfig(BaseModel):
                 folder = item.resolve()
                 labels = load_labels_from_master_folder(folder)
                 pdf = Path(labels.pdf_path)
-                _add(f"labels:{folder.stem}", pdf, folder)
+                rasterised = folder / "rasterised.pdf"
+                _add(f"labels:{folder.stem}", pdf, folder, rasterised if rasterised.is_file() else None)
                 continue
             if item.suffix.lower() == ".json":
                 labels = item.resolve()
@@ -216,6 +225,14 @@ class BenchInput(NamedTuple):
     key: str
     pdf_path: Path
     labels_path: Path | None
+    # A master_label.py folder's own `rasterised.pdf` (per-page flattened-
+    # to-image renders, 1:1 page-index-aligned with `original.pdf`) -- when
+    # present, `_process_pdf_benchmark` runs the pipeline a SECOND time per
+    # page directly on this file, and vector_to_raster/original_raster/
+    # native_to_raster are scored from that run's own OCR output instead of
+    # the vectorised run's. `None` for a bare `.pdf`/`.json` input (no
+    # rasterised counterpart known) -- those 3 types stay GT-only.
+    rasterised_pdf_path: Path | None = None
 
 
 ReportConfig.model_rebuild()
@@ -494,22 +511,33 @@ _OVERLAY_COLORS = {
     "original_vector": "#2563eb",
     "vector_to_raster": "#f97316",
     "original_raster": "#a855f7",
+    "native_to_raster": "#eab308",
 }
 
 
 def _bench_ground_truth_by_type(bench: BenchInput, pages: list[int]) -> "dict[str, LabelSet]":
-    """One `LabelSet` per text type (all 4 `TEXT_TYPES` keys always present,
-    entries filtered to `pages`).
+    """One `LabelSet` per text type (all `TEXT_TYPES` keys always present,
+    entries + geometry_entries filtered to `pages`).
 
     `native_to_vector` is live-derived via `native_label.native_label_pdf`
     per page -- UNLESS `bench.labels_path` is a master_label.py folder that
     already has its own `native_labels.json`, in which case that file's
     entries are used instead (avoids redundant re-derivation).
 
-    `original_vector`/`vector_to_raster`/`original_raster` come from
-    `bench.labels_path`: `None` -> all empty; a `.json` file -> `load_labels`
-    + `entries_by_text_type` (single-file convention); a directory ->
-    `load_labels_from_master_folder` + `entries_by_text_type`.
+    `original_vector`/`vector_to_raster`/`original_raster`/`native_to_raster`
+    come from `bench.labels_path`: `None` -> all empty; a `.json` file ->
+    `load_labels` + `entries_by_text_type` (single-file convention); a
+    directory -> `load_labels_from_master_folder` + `entries_by_text_type`
+    (+ geometry_entries, needed for vector_to_raster/original_raster
+    vector-geometry scoring).
+
+    `native_to_raster` ground truth is the SAME text as `native_to_vector`
+    (the same native region, just scored against a rasterised-PDF pipeline
+    run instead of the vectorised one) -- taken from the label folder's own
+    `"natsync:"`-prefixed raster_labels.json entries
+    (`raster_label.sync_native_text_from_native_labels`) when present, else
+    synthesized on the fly from `native_entries` (a label folder predating
+    that sync step).
     """
     pdf_str = str(bench.pdf_path)
     by_type: "dict[str, LabelSet]" = {t: LabelSet(pdf_path=pdf_str, entries=[]) for t in TEXT_TYPES}
@@ -526,9 +554,8 @@ def _bench_ground_truth_by_type(bench: BenchInput, pages: list[int]) -> "dict[st
         native_entries = []
         for p in pages:
             native_entries += native_label.native_label_pdf(str(bench.pdf_path), p).entries
-    by_type["native_to_vector"] = LabelSet(
-        pdf_path=pdf_str, entries=[e for e in native_entries if e.page_index in pages],
-    )
+    native_entries = [e for e in native_entries if e.page_index in pages]
+    by_type["native_to_vector"] = LabelSet(pdf_path=pdf_str, entries=native_entries)
 
     if bench.labels_path is not None:
         if bench.labels_path.is_dir():
@@ -536,12 +563,45 @@ def _bench_ground_truth_by_type(bench: BenchInput, pages: list[int]) -> "dict[st
         else:
             merged = load_labels(str(bench.labels_path))
         buckets = adapters.entries_by_text_type(merged)
-        for t in ("original_vector", "vector_to_raster", "original_raster"):
+        # geometry_entries (vector-geometry GT, distinct from these text
+        # `entries`) only ever belong on vector_to_raster ("auto"-source)
+        # and original_raster ("manual"-source) -- split the same way
+        # `adapters.gt_geometry_by_vector_type` does, and only there, so
+        # `_merge_gt` (pipeline_report_benchmark.py) doesn't double them up
+        # by finding them duplicated across several ground_truth_*.json.
+        geometry_by_source = {
+            "vector_to_raster": "auto", "original_raster": "manual",
+        }
+        for t in ("original_vector", "vector_to_raster", "original_raster", "native_to_raster"):
+            geom_source = geometry_by_source.get(t)
             by_type[t] = LabelSet(
-                pdf_path=pdf_str, entries=[e for e in buckets[t] if e.page_index in pages],
+                pdf_path=pdf_str,
+                entries=[e for e in buckets[t] if e.page_index in pages],
+                geometry_entries=(
+                    [g for g in merged.geometry_entries
+                     if g.page_index in pages and g.source == geom_source]
+                    if geom_source else []
+                ),
             )
 
+    if not by_type["native_to_raster"].entries:
+        by_type["native_to_raster"] = LabelSet(
+            pdf_path=pdf_str,
+            entries=[
+                LabelEntry(
+                    page_index=e.page_index, cluster_bbox=e.cluster_bbox,
+                    cluster_signature=e.cluster_signature,
+                    label_id=f"natsync:{e.label_id}", text=e.text, source="raster",
+                    expected_rotation=e.expected_rotation,
+                )
+                for e in native_entries
+            ],
+        )
+
     return by_type
+
+
+RASTER_TEXT_TYPES = ("vector_to_raster", "original_raster", "native_to_raster")
 
 
 def _write_label_overlays(
@@ -550,16 +610,21 @@ def _write_label_overlays(
 ) -> None:
     """`<source>_bbox.pdf` (GT boxes green=covered by a prediction / red=missed)
     and `<source>_text.pdf` (GT text, per word green/yellow/red by read
-    accuracy) -- one page per report page, scored against the single shared
-    run's OCR predictions. `source` is a text-type name."""
+    accuracy) -- one page per report page. `source` is a text-type name;
+    `vector_to_raster`/`original_raster`/`native_to_raster` are scored
+    against that page's `raster_texts` (the SEPARATE rasterised-PDF run),
+    every other type against `texts` (the vectorised-PDF run) -- never the
+    other's predictions."""
     gt_regions = adapters.gt_regions_from_labelset(gt)
     bbox_pages: list[bytes] = []
     text_pages: list[bytes] = []
+    use_raster = source in RASTER_TEXT_TYPES
     for pd in dumps:
         pi = pd.page_meta.index
         regions = [g for g in gt_regions if g.page_index == pi]
+        run_texts = pd.raster_texts if use_raster else pd.texts
         preds = adapters.predictions_from_texts(
-            [t for t in pd.texts if t.source == "ocr"]
+            [t for t in run_texts if t.source == "ocr"]
         )
         graph = metrics.build_overlap_graph(regions, preds, cfg)
         bbox_pages.append(
@@ -574,14 +639,32 @@ def _write_label_overlays(
     _merge_pdfs(text_pages, doc_dir / f"{source}_text.pdf")
 
 
+def _extract_single_page(src_pdf: Path, page_index: int, out_path: Path) -> None:
+    doc = fitz.open(str(src_pdf))
+    try:
+        out = fitz.open()
+        try:
+            out.insert_pdf(doc, from_page=page_index, to_page=page_index)
+            out.save(str(out_path))
+        finally:
+            out.close()
+    finally:
+        doc.close()
+
+
 def _process_pdf_benchmark(
     bench: BenchInput, config: ReportConfig, variant, run_dir: Path,
 ) -> dict:
     """One benchmark input -> `run_dir/<pdf-stem>/`: the full per-stage
-    report for a **single** `convert_page_to_vector_text` run per page, plus
-    `ground_truth_auto.json` (+ `ground_truth_manual.json`) and the split
-    `{auto,manual}_{bbox,text}.pdf` overlays (all scored against that one
-    run). Returns the `benchmark.json` entry."""
+    report for a `convert_page_to_vector_text` run per page (predictions for
+    `native_to_vector`/`original_vector`), plus -- when `bench.rasterised_
+    pdf_path` is set -- a SEPARATE pipeline run directly on that rasterised
+    PDF's own page (predictions for `vector_to_raster`/`original_raster`/
+    `native_to_raster`; that page has no vector paths at all, so this run
+    currently always yields empty predictions -- see `PageDump.raster_
+    texts`'s docstring). Writes `ground_truth_<type>.json` (only the
+    non-empty types) and `<type>_{bbox,text}.pdf` overlays for whichever
+    types have labels. Returns the `benchmark.json` entry."""
     from rastervec.pipelines.current import run_pipeline as run_current
     from rastervec.pipelines.legacy import run_pipeline as run_legacy
 
@@ -612,10 +695,31 @@ def _process_pdf_benchmark(
         _restamp_page(res, p)
         _accumulate_page(res, p, active, layer_pages, layer_meta, stats_pages,
                          detect_dir, recog_dir, fast_tile_dir)
+
+        raster_texts = []
+        if bench.rasterised_pdf_path is not None:
+            raster_page_path = doc_dir / f"rasterised_p{p}.pdf"
+            try:
+                _extract_single_page(bench.rasterised_pdf_path, p, raster_page_path)
+                if is_legacy:
+                    res_raster = run_legacy(str(raster_page_path), 0, verbose=True)
+                else:
+                    res_raster = run_current(
+                        str(raster_page_path), 0, enable_fast=variant.enable_fast,
+                        verbose=True, stop_after=config.final_stage,
+                    )
+                _restamp_page(res_raster, p)
+                raster_texts = list(res_raster.texts or [])
+            except Exception as exc:  # noqa: BLE001
+                _LOG.warning(
+                    "%s: rasterised-PDF run failed for page %d: %s", bench.key, p, exc,
+                )
+
         dumps.append(dump_io.PageDump(
             page_meta=res.page.meta, texts=list(res.texts or []),
             vectors=list(res.vectors or []), engine=res.engine,
             step_durations=dict(res.step_durations or {}),
+            raster_texts=raster_texts,
         ))
 
     sources: list[str] = []
@@ -623,12 +727,13 @@ def _process_pdf_benchmark(
     gt_by_type = _bench_ground_truth_by_type(bench, pages)
     for text_type in TEXT_TYPES:
         gt = gt_by_type[text_type]
-        if not gt.entries:
+        if not gt.entries and not gt.geometry_entries:
             if text_type != "native_to_vector":
                 _LOG.info("%s: no %s labels for pages %s", bench.key, text_type, pages)
             continue
         save_labels(gt, str(doc_dir / f"ground_truth_{text_type}.json"))
-        _write_label_overlays(doc_dir, text_type, gt, dumps, cfg)
+        if gt.entries:
+            _write_label_overlays(doc_dir, text_type, gt, dumps, cfg)
         sources.append(text_type)
 
     for s in sources:

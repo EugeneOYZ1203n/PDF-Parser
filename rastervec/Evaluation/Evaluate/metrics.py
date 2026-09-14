@@ -50,6 +50,7 @@ Bbox = tuple[float, float, float, float]
 
 TEXT_TYPES: tuple[str, ...] = (
     "native_to_vector", "original_vector", "vector_to_raster", "original_raster",
+    "native_to_raster",
 )
 
 
@@ -368,6 +369,7 @@ _TEXT_TYPE_SIZE_UNIT: dict[str, str] = {
     "original_vector": "pt",
     "vector_to_raster": "pt",
     "original_raster": "px",
+    "native_to_raster": "pt",  # native label bbox, still page-space pt
 }
 
 
@@ -581,6 +583,7 @@ _TEXT_TYPE_DASHES: dict[str, "str | None"] = {
     "original_vector": None,
     "vector_to_raster": "[2 2] 0",
     "original_raster": "[6 2 2 2] 0",
+    "native_to_raster": "[1 1] 0",
 }
 _PRED_DASHES = "[1 2] 0"
 
@@ -631,6 +634,37 @@ class TextMetricSuiteResult:
     # -- merged once here (not per type) to avoid quadruple-counting the
     # same truly-unclassified prediction across 4 type graphs.
     extra_chars: "Counter[str]" = field(default_factory=Counter)
+
+
+def combine_text_metrics_by_type(
+    results_by_type: "dict[str, TextMetricSuiteResult]",
+) -> TextMetricSuiteResult:
+    """Combines several `TextMetricSuiteResult`s -- each produced by scoring
+    a distinct partition of `TEXT_TYPES` against its own prediction source
+    (e.g. a vectorised-PDF pipeline run for `native_to_vector`/
+    `original_vector`, a separate rasterised-PDF run for `vector_to_raster`/
+    `original_raster`/`native_to_raster`) -- into one. `results_by_type`
+    maps each text type to the `TextMetricSuiteResult` that scored it (the
+    SAME result object repeated for every type it scored); each type's
+    `PerTypeTextResult` is taken from its owning result, and `bbox_
+    unclassified`/`extra_chars` (both run-scoped: "predictions with zero
+    overlap across every type THAT RUN scored") are summed once per
+    distinct result object referenced, not once per type."""
+    by_type = {t: results_by_type[t].by_type[t] for t in TEXT_TYPES if t in results_by_type}
+    seen: "set[int]" = set()
+    total_spurious = 0
+    extra_chars: "Counter[str]" = Counter()
+    for r in results_by_type.values():
+        if id(r) in seen:
+            continue
+        seen.add(id(r))
+        total_spurious += r.bbox_unclassified.spurious_pred_count
+        extra_chars.update(r.extra_chars)
+    return TextMetricSuiteResult(
+        by_type=by_type,
+        bbox_unclassified=BboxAccuracyStats(text_type="unclassified", spurious_pred_count=total_spurious),
+        extra_chars=extra_chars,
+    )
 
 
 def evaluate_text_metrics(

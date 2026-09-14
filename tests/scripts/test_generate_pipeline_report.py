@@ -80,3 +80,42 @@ def test_benchmark_inputs_directory_is_master_label_folder(tmp_path):
     assert set(inputs) == {"labels:D_label"}
     assert inputs["labels:D_label"].labels_path == folder.resolve()
     assert inputs["labels:D_label"].pdf_path == (folder / "original.pdf").resolve()
+    assert inputs["labels:D_label"].rasterised_pdf_path is None
+
+
+def test_benchmark_inputs_directory_detects_rasterised_pdf(tmp_path):
+    folder = tmp_path / "E_label"
+    folder.mkdir()
+    (folder / "original.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    (folder / "rasterised.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    (folder / "native_labels.json").write_text(
+        f'{{"pdf_path": "{(folder / "original.pdf").as_posix()}", "entries": []}}',
+        encoding="utf-8",
+    )
+    cfg = gpr.ReportConfig(benchmark=True, input_files=[str(folder)])
+    inputs = {b.key: b for b in cfg.benchmark_inputs()}
+    assert inputs["labels:E_label"].rasterised_pdf_path == (folder / "rasterised.pdf").resolve()
+
+
+def test_bench_ground_truth_by_type_synthesizes_native_to_raster(tmp_path):
+    from rastervec.Evaluation.Labelling.label_schema import LabelEntry, save_labels
+
+    folder = tmp_path / "F_label"
+    folder.mkdir()
+    (folder / "original.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    native_entry = LabelEntry(
+        page_index=0, cluster_bbox=(0, 0, 10, 10), cluster_signature="s",
+        label_id="line:0:0:0", text="HELLO", source="native",
+    )
+    save_labels(
+        gpr.LabelSet(pdf_path=str((folder / "original.pdf").resolve()), entries=[native_entry]),
+        str(folder / "native_labels.json"),
+    )
+    bench = gpr.BenchInput(
+        key="labels:F_label", pdf_path=(folder / "original.pdf").resolve(),
+        labels_path=folder,
+    )
+    by_type = gpr._bench_ground_truth_by_type(bench, [0])
+    assert [e.text for e in by_type["native_to_vector"].entries] == ["HELLO"]
+    assert [e.text for e in by_type["native_to_raster"].entries] == ["HELLO"]
+    assert by_type["native_to_raster"].entries[0].label_id.startswith("natsync:")

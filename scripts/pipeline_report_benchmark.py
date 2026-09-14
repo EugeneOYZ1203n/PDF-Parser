@@ -3,7 +3,7 @@
 Each folder is a `generate_pipeline_report.py` run with `benchmark: true`.
 Such a run scores **one** combined pipeline run per page
 (`convert_page_to_vector_text`) against ground truth for up to 4 text types
-and 3 vector types, and embeds `<pdf-stem>/dump.json` +
+and 2 vector types, and embeds `<pdf-stem>/dump.json` +
 `ground_truth_<text_type>.json` (only the non-empty types) + a
 `benchmark.json` marker.
 
@@ -11,9 +11,10 @@ This script matches the folders on the inputs they **share** (by input
 identity: `pdf:<stem>` = native_to_vector-only, `labels:<stem>` = whatever
 label sources the run had), scores each shared input's text metrics
 (`metrics.evaluate_text_metrics`) and vector metrics
-(`vector_metrics.evaluate_vector_metrics`, built from `dump.json`'s own
-`vectors` -- a weaker approximation of `original_vector` predictions than a
-live pipeline run since a dump has no `reassigned_text`), and writes one
+(`vector_metrics.evaluate_vector_metrics`, GT-only for both
+`vector_to_raster`/`original_raster` -- no raster-tracing pipeline stage
+exists; `original_vector` is scored as a text-provenance type only, not
+at the vector-geometry level), and writes one
 self-contained `report.html` -- one section per shared key, broken into
 Text (Char/Word/Font size/Rotation/Bbox/Vector classification/Reading
 order/Confusion) and Vector (Count/Endpoint/Property) subsections, each
@@ -65,6 +66,7 @@ from rastervec.Evaluation.Evaluate.metrics import (
     TextMetricSuiteResult,
     aggregate_text_metrics,
     build_overlap_graphs_by_type,
+    combine_text_metrics_by_type,
     evaluate_text_metrics,
 )
 from rastervec.Evaluation.Evaluate.text_metrics import word_tokens
@@ -77,8 +79,6 @@ from rastervec.Evaluation.Evaluate.vector_metrics import (
 from rastervec.Evaluation.Labelling.label_schema import LabelSet, load_labels
 from rastervec.logging_setup import configure_logging, get_logger
 from rastervec.paths import output_dir
-from rastervec.Reader.reader import Reader
-from rastervec.Vector.vector import extract_vectors
 
 _LOG = get_logger("pipeline_report_benchmark")
 
@@ -97,9 +97,8 @@ class RunEntry(NamedTuple):
 
 
 def _merge_gt(doc: Path) -> LabelSet:
-    """Merges whichever `ground_truth_*.json` files this run wrote (the
-    4-way `native_to_vector`/`original_vector`/`vector_to_raster`/
-    `original_raster` names, falling back to the pre-rework `auto`/`manual`
+    """Merges whichever `ground_truth_*.json` files this run wrote (every
+    name in `TEXT_TYPES`, falling back to the pre-rework `auto`/`manual`
     names for an older report folder) into one `LabelSet`."""
     entries = []
     geometry_entries = []
@@ -137,6 +136,14 @@ def _load_run(run_dir: Path, parser: argparse.ArgumentParser) -> dict[str, RunEn
     return entries
 
 
+# native_to_vector/original_vector are scored from the vectorised-PDF run's
+# own OCR predictions; vector_to_raster/original_raster/native_to_raster are
+# scored from the SEPARATE rasterised-PDF run's own OCR predictions -- never
+# each other's. Mirrors `generate_pipeline_report.py`'s `RASTER_TEXT_TYPES`.
+_VECTORISED_TEXT_TYPES = ("native_to_vector", "original_vector")
+_RASTER_TEXT_TYPES = ("vector_to_raster", "original_raster", "native_to_raster")
+
+
 def _score_text(
     entry: RunEntry, cfg: MetricConfig,
 ) -> "tuple[list[tuple[int, TextMetricSuiteResult, dict[str, OverlapGraph]]], TextMetricSuiteResult | None]":
@@ -146,11 +153,34 @@ def _score_text(
     per_page: "list[tuple[int, TextMetricSuiteResult, dict[str, OverlapGraph]]]" = []
     for page in dump.pages:
         pi = page.page_meta.index
-        ocr = [t for t in page.texts if t.source == "ocr"]
-        preds = adapters.predictions_from_texts(ocr)
+        page_area = page.page_meta.width * page.page_meta.height
         gt_by_type = {t: [g for g in gt_by_type_all[t] if g.page_index == pi] for t in TEXT_TYPES}
-        graphs_by_type = build_overlap_graphs_by_type(gt_by_type, preds, cfg)
-        res = evaluate_text_metrics(gt_by_type, entries_by_type_all, preds, cfg=cfg)
+
+        def _restricted(types, src=gt_by_type):
+            return {t: (src[t] if t in types else []) for t in TEXT_TYPES}
+
+        vec_preds = adapters.predictions_from_texts([t for t in page.texts if t.source == "ocr"])
+        vec_gt = _restricted(_VECTORISED_TEXT_TYPES)
+        vec_entries = _restricted(_VECTORISED_TEXT_TYPES, entries_by_type_all)
+        res_vec = evaluate_text_metrics(vec_gt, vec_entries, vec_preds, cfg=cfg, page_area=page_area)
+        vec_graphs = build_overlap_graphs_by_type(vec_gt, vec_preds, cfg)
+
+        raster_preds = adapters.predictions_from_texts(
+            [t for t in page.raster_texts if t.source == "ocr"]
+        )
+        raster_gt = _restricted(_RASTER_TEXT_TYPES)
+        raster_entries = _restricted(_RASTER_TEXT_TYPES, entries_by_type_all)
+        res_raster = evaluate_text_metrics(raster_gt, raster_entries, raster_preds, cfg=cfg, page_area=page_area)
+        raster_graphs = build_overlap_graphs_by_type(raster_gt, raster_preds, cfg)
+
+        res = combine_text_metrics_by_type({
+            **{t: res_vec for t in _VECTORISED_TEXT_TYPES},
+            **{t: res_raster for t in _RASTER_TEXT_TYPES},
+        })
+        graphs_by_type = {
+            **{t: vec_graphs[t] for t in _VECTORISED_TEXT_TYPES},
+            **{t: raster_graphs[t] for t in _RASTER_TEXT_TYPES},
+        }
         per_page.append((pi, res, graphs_by_type))
     return per_page, aggregate_text_metrics([r for _pi, r, _g in per_page])
 
@@ -158,43 +188,25 @@ def _score_text(
 def _score_vectors(
     entry: RunEntry, cfg: VectorMetricConfig,
 ) -> "tuple[list[tuple[int, VectorMetricSuiteResult]], VectorMetricSuiteResult | None]":
-    """Vector metrics from `dump.json` alone. `original_vector` predictions
-    come from that page's dump `vectors` (the final drawing content a
-    pipeline run kept) -- weaker than the live `benchmark_jobs.py` path,
-    which also includes `reassigned_text` (not serialized in a dump), a
-    known accepted limitation. GT vectors are reconstructed by extracting
-    fresh vectors from the run's own original PDF and matching
-    `path_signature`s recorded in the labels."""
+    """Vector metrics from the run's own ground-truth labels alone --
+    `vector_to_raster`/`original_raster` only (`original_vector` is a
+    text-provenance type, not scored at the vector-geometry level; see
+    `adapters.build_vector_eval_inputs`). Neither has a prediction
+    population (no raster-tracing pipeline stage exists), so this reports
+    GT-only stats."""
     dump = dump_io.load_dump(entry.dump_path)
     per_page: "list[tuple[int, VectorMetricSuiteResult]]" = []
-    if not entry.gt.pdf_path or not Path(entry.gt.pdf_path).is_file():
-        return per_page, None
-    try:
-        reader = Reader(entry.gt.pdf_path)
-    except ValueError:
-        return per_page, None
 
     for page in dump.pages:
         pi = page.page_meta.index
-        try:
-            fresh_page = reader.get_page(pi)
-            fresh_vectors = extract_vectors(fresh_page)
-        except Exception as exc:  # noqa: BLE001
-            _LOG.warning("vector GT extraction failed for %s page %d: %s", entry.key, pi, exc)
-            fresh_vectors = []
-
         page_gt = LabelSet(
             pdf_path=entry.gt.pdf_path,
             entries=[e for e in entry.gt.entries if e.page_index == pi],
             geometry_entries=[g for g in entry.gt.geometry_entries if g.page_index == pi],
         )
-        inputs = adapters.build_vector_eval_inputs(page_gt, None, fresh_vectors)
-        preds_by_type = dict(inputs.preds_by_type)
-        preds_by_type["original_vector"] = [
-            e for v in page.vectors for e in vector_metrics.geometry_entries_from_vector(v)
-        ]
+        inputs = adapters.build_vector_eval_inputs(page_gt)
         res = vector_metrics.evaluate_vector_metrics(
-            inputs.gt_by_type, preds_by_type, inputs.label_counts, cfg=cfg,
+            inputs.gt_by_type, inputs.preds_by_type, inputs.label_counts, cfg=cfg,
         )
         per_page.append((pi, res))
     return per_page, aggregate_vector_metrics([r for _pi, r in per_page])
@@ -258,7 +270,10 @@ def _collect_examples(
         confusion: "list[ExampleCard]" = []
         for pi, _res, graphs_by_type in per_page:
             graph = graphs_by_type[text_type]
-            conv_pdf = entry.doc_dir / f"converted_p{pi}.pdf"
+            conv_pdf = entry.doc_dir / (
+                f"rasterised_p{pi}.pdf" if text_type in _RASTER_TEXT_TYPES
+                else f"converted_p{pi}.pdf"
+            )
 
             if len(extra) < _EXAMPLE_CAP:
                 for pj, p in enumerate(graph.preds):

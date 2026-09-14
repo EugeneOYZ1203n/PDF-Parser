@@ -22,9 +22,9 @@ def _text_result():
 
 def _vector_result():
     line = GeometryEntry(kind="l", points=((0, 0), (10, 0)))
-    gt_by_type = {"original_vector": [line], "vector_to_raster": [], "original_raster": []}
-    preds_by_type = {"original_vector": [line], "vector_to_raster": [], "original_raster": []}
-    return evaluate_vector_metrics(gt_by_type, preds_by_type, {"original_vector": 1, "vector_to_raster": 0, "original_raster": 0})
+    gt_by_type = {"vector_to_raster": [line], "original_raster": []}
+    preds_by_type = {"vector_to_raster": [line], "original_raster": []}
+    return evaluate_vector_metrics(gt_by_type, preds_by_type, {"vector_to_raster": 1, "original_raster": 0})
 
 
 def _assert_png(path):
