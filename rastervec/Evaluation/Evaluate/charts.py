@@ -147,6 +147,55 @@ def reading_order_chart(
     _grouped_bar(list(TEXT_TYPES), series, title=title, ylabel="in-order rate", path=path, ylim=(0, 1))
 
 
+def font_size_histogram_chart(
+    result: "TextMetricSuiteResult | None", text_type: str, *, title: str, path: Path, bins: int = 20,
+) -> None:
+    """Overlaid histogram: distribution of every GT region's size (bbox
+    height, the font-size proxy -- see `metrics.font_size_distribution`)
+    against the distribution of just the GT sizes that were actually
+    localized by a prediction. Unit (pt for native_to_vector/
+    original_vector/vector_to_raster, px for original_raster) comes off
+    the result itself."""
+    fig, ax = plt.subplots(figsize=(6, 4))
+    if result is None or not result.by_type[text_type].font_size.all_sizes:
+        ax.text(0.5, 0.5, "(no data)", ha="center", va="center")
+    else:
+        fs = result.by_type[text_type].font_size
+        ax.hist(fs.all_sizes, bins=bins, alpha=0.5, label="all GT", color=_BAR_COLORS[0])
+        if fs.detected_sizes:
+            ax.hist(fs.detected_sizes, bins=bins, alpha=0.5, label="detected GT", color=_BAR_COLORS[1])
+        ax.set_xlabel(f"font size ({fs.unit})", fontsize=8)
+        ax.set_ylabel("count", fontsize=8)
+        ax.legend(fontsize=7)
+    ax.set_title(title, fontsize=9)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
+def extra_chars_table_image(
+    result: "TextMetricSuiteResult | None", text_type: str, *, title: str, path: Path, top_n: int = 20,
+) -> None:
+    """Table image of characters predicted with zero overlapping GT at all
+    (`metrics.confusion_metrics.extra_predicted_chars`), sorted by count."""
+    fig, ax = plt.subplots(figsize=(4, 4))
+    ax.axis("off")
+    extra = result.by_type[text_type].extra_chars if result is not None else None
+    if not extra:
+        ax.text(0.5, 0.5, "(no extra predictions)", ha="center", va="center")
+    else:
+        rows = extra.most_common(top_n)
+        total = sum(extra.values())
+        cell_text = [[ch, str(c), f"{100 * c / total:.0f}%"] for ch, c in rows]
+        ax.table(cellText=cell_text, colLabels=["char", "count", "%"], loc="center", cellLoc="left")
+    ax.set_title(title, fontsize=9)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
 def confusion_char_table_image(
     result: "TextMetricSuiteResult | None", text_type: str, *, title: str, path: Path, top_n: int = 5,
 ) -> None:

@@ -51,6 +51,16 @@ def entries_by_text_type(labels: LabelSet) -> "dict[str, list[LabelEntry]]":
     return buckets
 
 
+def gt_regions_from_labelset(labels: LabelSet) -> "list[GtRegion]":
+    """Flat `GtRegion` list (every text type together, `text_type` still set
+    on each) -- kept for callers that score one shared graph across every
+    label source at once (`scripts/generate_pipeline_report.py`'s
+    single-combined-run benchmark mode), as opposed to
+    `gt_regions_by_text_type`'s 4-way bucketing."""
+    buckets = gt_regions_by_text_type(labels)
+    return [g for t in TEXT_TYPES for g in buckets[t]]
+
+
 def gt_regions_by_text_type(labels: LabelSet) -> "dict[str, list[GtRegion]]":
     buckets: "dict[str, list[GtRegion]]" = {t: [] for t in TEXT_TYPES}
     for e in labels.entries:
@@ -208,14 +218,19 @@ class VectorEvalInputs:
 
 
 def build_vector_eval_inputs(
-    labels: LabelSet, res: "PipelineResult", fresh_vectors: "list[Vector]",
+    labels: LabelSet, res: "PipelineResult | None", fresh_vectors: "list[Vector]",
 ) -> VectorEvalInputs:
     """`fresh_vectors` must come from `extract_vectors` on the SAME
     original, unconverted PDF page `labels` was built against (see
-    `gt_original_vectors_from_labelset`'s docstring)."""
+    `gt_original_vectors_from_labelset`'s docstring). `res=None` (no
+    pipeline run available for `original_vector`, e.g. the page has no
+    `source=="vector"` labels) yields an empty prediction set for that
+    type -- label stats/GT counts still populate."""
     gt_original_vectors = gt_original_vectors_from_labelset(labels, fresh_vectors)
     gt_geometry = gt_geometry_by_vector_type(labels)
-    pred_original_vectors = vector_predictions_from_pipeline_result(res)
+    pred_original_vectors = (
+        vector_predictions_from_pipeline_result(res) if res is not None else []
+    )
 
     gt_by_type: "dict[str, list[GeometryEntry]]" = {
         "original_vector": [e for v in gt_original_vectors for e in geometry_entries_from_vector(v)],

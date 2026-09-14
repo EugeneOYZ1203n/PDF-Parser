@@ -87,6 +87,11 @@ def format_text_report(pdf_path: str, page_index: int, result: TextMetricSuiteRe
             f"{wo.unclassified} extra unmatched (FP) | {wo.missing} missing (FN) | "
             f"precision {_fmt_ratio(wo.precision)} | recall {_fmt_ratio(wo.recall)}"
         )
+        fs = r.font_size
+        lines.append(
+            f"    font size ({fs.unit}): all n={len(fs.all_sizes)} | "
+            f"detected n={len(fs.detected_sizes)}"
+        )
         ba = r.bbox_accuracy
         lines.append(
             f"    bbox mean IoU: {_fmt_ratio(ba.mean_iou)} "
@@ -132,6 +137,17 @@ def format_confusion_table(result: TextMetricSuiteResult, *, top_n: int = 5) -> 
                 f"{repr(r) if r else '(none)'}: {c} ({100 * c / total:.0f}%)" for r, c in top
             )
             lines.append(f"    {ch!r}: {cells}")
+    lines.append("Extra predicted characters (no ground truth overlap at all):")
+    for text_type in TEXT_TYPES:
+        extra = result.by_type[text_type].extra_chars
+        if not extra:
+            continue
+        lines.append(f"  [{text_type}]")
+        total = sum(extra.values())
+        cells = ", ".join(
+            f"{ch!r}: {c} ({100 * c / total:.0f}%)" for ch, c in extra.most_common()
+        )
+        lines.append(f"    {cells}")
     return "\n".join(lines)
 
 

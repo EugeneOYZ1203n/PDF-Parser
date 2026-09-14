@@ -14,7 +14,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from rastervec.Evaluation.Evaluate.metrics import Bbox, OverlapGraph, Ratio
-from rastervec.Evaluation.Evaluate.text_metrics import levenshtein, word_tokens
+from rastervec.Evaluation.Evaluate.text_metrics import char_multiset, levenshtein, word_tokens
 
 _NA_RATIO = Ratio(0.0, math.nan)
 
@@ -189,3 +189,16 @@ def confusion_table(graph: OverlapGraph) -> "dict[str, Counter[str]]":
             for gt_char, replacement in align_chars(gt_word, closest):
                 table.setdefault(gt_char, Counter())[replacement] += 1
     return table
+
+
+def extra_predicted_chars(graph: OverlapGraph) -> "Counter[str]":
+    """`Counter` of characters belonging to predictions with ZERO
+    overlapping GT at all -- the same 'unclassified' whole-prediction set
+    `metrics.char_overlap_stats` counts as page-level FP chars, broken down
+    per character here instead of just summed. Answers "what did the model
+    predict with no ground truth backing it at all"."""
+    counter: "Counter[str]" = Counter()
+    for pj, p in enumerate(graph.preds):
+        if not graph.edges_by_pred[pj]:
+            counter.update(char_multiset(p.text))
+    return counter

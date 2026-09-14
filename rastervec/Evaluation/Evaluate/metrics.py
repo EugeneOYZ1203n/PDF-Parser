@@ -354,6 +354,50 @@ def word_overlap_stats(graph: OverlapGraph, text_type: str) -> WordOverlapStats:
 
 
 # --------------------------------------------------------------------------
+# Font-size distribution -- GT size histogram vs. detected-GT size histogram
+# --------------------------------------------------------------------------
+# LabelEntry carries no font_size field (native/vector/raster labels all
+# reduce to a bbox + text), so bbox height is used as the size proxy for
+# every text type -- the same measurement `native_label_pdf`'s own GT bbox
+# already carries, no label-schema change needed. `native_to_vector`/
+# `original_vector`/`vector_to_raster` report it in PDF points (their bbox
+# is already page-space pt); `original_raster` converts pt -> px via
+# `dpi / 72` (raster labelling's own default dpi, see `master_label.py`).
+_TEXT_TYPE_SIZE_UNIT: dict[str, str] = {
+    "native_to_vector": "pt",
+    "original_vector": "pt",
+    "vector_to_raster": "pt",
+    "original_raster": "px",
+}
+
+
+@dataclass(frozen=True)
+class FontSizeDistribution:
+    text_type: str
+    unit: str  # "pt" | "px"
+    all_sizes: "tuple[float, ...]" = ()
+    detected_sizes: "tuple[float, ...]" = ()  # sizes of gt that were localized
+
+
+def _gt_size(bbox: Bbox) -> float:
+    return bbox[3] - bbox[1]  # bbox height, the font-size proxy
+
+
+def font_size_distribution(
+    graph: OverlapGraph, text_type: str, *, dpi: float = 300.0,
+) -> FontSizeDistribution:
+    unit = _TEXT_TYPE_SIZE_UNIT[text_type]
+    scale = (dpi / 72.0) if unit == "px" else 1.0
+    all_sizes = tuple(_gt_size(g.bbox) * scale for g in graph.gt)
+    detected_sizes = tuple(
+        _gt_size(graph.gt[gi].bbox) * scale for gi in graph.localized_gt_idxs
+    )
+    return FontSizeDistribution(
+        text_type=text_type, unit=unit, all_sizes=all_sizes, detected_sizes=detected_sizes,
+    )
+
+
+# --------------------------------------------------------------------------
 # Category 4 -- text bbox accuracy
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
@@ -565,6 +609,8 @@ class PerTypeTextResult:
     rotation: RotationStats
     reading_order: "object"  # confusion_metrics.ReadingOrderStats
     confusion: "dict[str, Counter[str]]"
+    extra_chars: "Counter[str]"  # chars of predictions with zero GT overlap at all
+    font_size: FontSizeDistribution
     funnel: "ClassificationFunnelStats | None" = None
 
 
@@ -582,12 +628,14 @@ def evaluate_text_metrics(
     gt_vector_signatures_by_type: "dict[str, set[str]] | None" = None,
     survived_signatures: "set[str] | None" = None,
     page_area: float | None = None,
+    dpi: float = 300.0,
     cfg: MetricConfig = MetricConfig(),
 ) -> TextMetricSuiteResult:
     # Local import to avoid a metrics.py <-> confusion_metrics.py import
     # cycle (confusion_metrics imports OverlapGraph/GtRegion from here).
     from rastervec.Evaluation.Evaluate.confusion_metrics import (
         confusion_table,
+        extra_predicted_chars,
         reading_order_stats,
     )
 
@@ -613,6 +661,8 @@ def evaluate_text_metrics(
             rotation=rotation_stats(graph, text_type),
             reading_order=reading_order_stats(graph, text_type),
             confusion=confusion_table(graph),
+            extra_chars=extra_predicted_chars(graph),
+            font_size=font_size_distribution(graph, text_type, dpi=dpi),
             funnel=funnel,
         )
 
@@ -709,11 +759,21 @@ def aggregate_text_metrics(results: list[TextMetricSuiteResult]) -> "TextMetricS
         )
         reading_order = aggregate_reading_order_stats([p.reading_order for p in per_type])
 
-        confusion: "Counter[str]" = Counter()
         merged: dict[str, "Counter[str]"] = {}
         for p in per_type:
             for ch, counter in p.confusion.items():
                 merged.setdefault(ch, Counter()).update(counter)
+
+        extra_chars: "Counter[str]" = Counter()
+        for p in per_type:
+            extra_chars.update(p.extra_chars)
+
+        unit = per_type[0].font_size.unit if per_type else "pt"
+        font_size = FontSizeDistribution(
+            text_type=text_type, unit=unit,
+            all_sizes=tuple(s for p in per_type for s in p.font_size.all_sizes),
+            detected_sizes=tuple(s for p in per_type for s in p.font_size.detected_sizes),
+        )
 
         funnel = None
         if text_type in FUNNEL_TEXT_TYPES:
@@ -729,7 +789,7 @@ def aggregate_text_metrics(results: list[TextMetricSuiteResult]) -> "TextMetricS
         by_type[text_type] = PerTypeTextResult(
             label_stats=label_stats, char_overlap=char_overlap, word_overlap=word_overlap,
             bbox_accuracy=bbox_accuracy, rotation=rotation, reading_order=reading_order,
-            confusion=merged, funnel=funnel,
+            confusion=merged, extra_chars=extra_chars, font_size=font_size, funnel=funnel,
         )
 
     bbox_unclassified = BboxAccuracyStats(

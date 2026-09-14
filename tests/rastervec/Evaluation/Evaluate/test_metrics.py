@@ -14,11 +14,13 @@ from rastervec.Evaluation.Evaluate.metrics import (
     classification_funnel_stats,
     evaluate_text_metrics,
     aggregate_text_metrics,
+    font_size_distribution,
     overlay_boxes_by_type,
     rotation_stats,
     text_label_stats,
     word_overlap_stats,
 )
+from rastervec.Evaluation.Evaluate.confusion_metrics import extra_predicted_chars
 
 
 def _gt(text, bbox=(0, 0, 10, 10), rot=0, text_type="native_to_vector"):
@@ -148,6 +150,58 @@ def test_aggregate_text_metrics_micro_averages():
     co = agg.by_type["native_to_vector"].char_overlap
     assert co.total_gt == 10
     assert co.matched == 5 + 4
+
+
+def test_font_size_distribution_pt_units_for_vector_types():
+    g = _gt("HELLO", bbox=(0, 0, 10, 12))  # height 12
+    graph = build_overlap_graph([g], [_pred("HELLO", bbox=(0, 0, 10, 12))])
+    dist = font_size_distribution(graph, "native_to_vector")
+    assert dist.unit == "pt"
+    assert dist.all_sizes == (12.0,)
+    assert dist.detected_sizes == (12.0,)
+
+
+def test_font_size_distribution_px_units_for_original_raster():
+    g = _gt("HELLO", bbox=(0, 0, 10, 12), text_type="original_raster")
+    graph = build_overlap_graph([g], [])
+    dist = font_size_distribution(graph, "original_raster", dpi=144.0)
+    assert dist.unit == "px"
+    assert dist.all_sizes == (24.0,)  # 12pt * (144/72)
+    assert dist.detected_sizes == ()
+
+
+def test_font_size_distribution_detected_excludes_missed_gt():
+    g1 = _gt("A", bbox=(0, 0, 5, 10))
+    g2 = _gt("B", bbox=(100, 100, 105, 106))
+    graph = build_overlap_graph([g1, g2], [_pred("A", bbox=(0, 0, 5, 10))])
+    dist = font_size_distribution(graph, "native_to_vector")
+    assert dist.all_sizes == (10.0, 6.0)
+    assert dist.detected_sizes == (10.0,)
+
+
+def test_extra_predicted_chars_counts_only_zero_overlap_predictions():
+    g = _gt("HELLO")
+    graph = build_overlap_graph([g], [_pred("HELLO"), _pred("WORLD", bbox=(100, 100, 110, 110))])
+    extra = extra_predicted_chars(graph)
+    assert extra == {"W": 1, "O": 1, "R": 1, "L": 1, "D": 1}
+
+
+def test_extra_predicted_chars_empty_when_all_predictions_overlap():
+    g = _gt("HELLO")
+    graph = build_overlap_graph([g], [_pred("HELLO")])
+    assert extra_predicted_chars(graph) == {}
+
+
+def test_evaluate_text_metrics_includes_font_size_and_extra_chars():
+    gt_by_type = {t: [] for t in TEXT_TYPES}
+    gt_by_type["native_to_vector"] = [_gt("HELLO")]
+    entries_by_type = {t: [] for t in TEXT_TYPES}
+    preds = [_pred("HELLO"), _pred("SPURIOUS", bbox=(100, 100, 110, 110))]
+    result = evaluate_text_metrics(gt_by_type, entries_by_type, preds)
+    r = result.by_type["native_to_vector"]
+    assert r.font_size.unit == "pt"
+    assert len(r.font_size.all_sizes) == 1
+    assert sum(r.extra_chars.values()) == len("SPURIOUS")
 
 
 def test_overlay_boxes_by_type_dashes_and_colors():
