@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from rastervec.Evaluation.Labelling.label_schema import (
     GeometryAnnotation,
     LabelEntry,
@@ -7,6 +9,7 @@ from rastervec.Evaluation.Labelling.label_schema import (
     cluster_signature,
     geometry_annotations_for_vector,
     load_labels,
+    load_labels_from_master_folder,
     path_signature,
     save_labels,
 )
@@ -108,3 +111,52 @@ def test_geometry_annotations_for_vector_quad_becomes_4_lines(vector):
     out = geometry_annotations_for_vector(v)
     assert len(out) == 4
     assert all(a.kind == "l" for a in out)
+
+
+def _entry(source, text, label_id):
+    return LabelEntry(
+        page_index=0, cluster_bbox=(0, 0, 1, 1), cluster_signature="s",
+        label_id=label_id, text=text, source=source,
+    )
+
+
+def test_load_labels_from_master_folder_merges_all_three(tmp_path):
+    folder = tmp_path / "stem_label"
+    folder.mkdir()
+    (folder / "original.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    save_labels(
+        LabelSet(pdf_path="orig.pdf", entries=[_entry("native", "N", "n1")]),
+        str(folder / "native_labels.json"),
+    )
+    save_labels(
+        LabelSet(pdf_path="orig.pdf", entries=[_entry("vector", "V", "v1")]),
+        str(folder / "vector_labels.json"),
+    )
+    save_labels(
+        LabelSet(pdf_path="orig.pdf", entries=[_entry("raster", "R", "r1")]),
+        str(folder / "raster_labels.json"),
+    )
+
+    merged = load_labels_from_master_folder(folder)
+
+    assert {e.label_id for e in merged.entries} == {"n1", "v1", "r1"}
+    assert merged.pdf_path == str((folder / "original.pdf").resolve())
+
+
+def test_load_labels_from_master_folder_partial_files(tmp_path):
+    folder = tmp_path / "partial_label"
+    folder.mkdir()
+    save_labels(
+        LabelSet(pdf_path="orig.pdf", entries=[_entry("native", "N", "n1")]),
+        str(folder / "native_labels.json"),
+    )
+    merged = load_labels_from_master_folder(folder)
+    assert {e.label_id for e in merged.entries} == {"n1"}
+    assert merged.pdf_path == "orig.pdf"  # no original.pdf -> falls back
+
+
+def test_load_labels_from_master_folder_raises_when_no_files(tmp_path):
+    folder = tmp_path / "empty"
+    folder.mkdir()
+    with pytest.raises(FileNotFoundError):
+        load_labels_from_master_folder(folder)

@@ -65,3 +65,18 @@ def test_benchmark_inputs_keys(tmp_path):
     assert inputs["pdf:A"].labels_path is None
     assert inputs["labels:C"].labels_path == labels.resolve()
     assert inputs["labels:C"].pdf_path == (tmp_path / "C.pdf").resolve()
+
+
+def test_benchmark_inputs_directory_is_master_label_folder(tmp_path):
+    folder = tmp_path / "D_label"
+    folder.mkdir()
+    (folder / "original.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    (folder / "native_labels.json").write_text(
+        f'{{"pdf_path": "{(folder / "original.pdf").as_posix()}", "entries": []}}',
+        encoding="utf-8",
+    )
+    cfg = gpr.ReportConfig(benchmark=True, input_files=[str(folder)])
+    inputs = {b.key: b for b in cfg.benchmark_inputs()}
+    assert set(inputs) == {"labels:D_label"}
+    assert inputs["labels:D_label"].labels_path == folder.resolve()
+    assert inputs["labels:D_label"].pdf_path == (folder / "original.pdf").resolve()

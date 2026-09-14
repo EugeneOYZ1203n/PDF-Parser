@@ -13,21 +13,27 @@ timestamped run folder:
                                                        the viewer toggles each)
             native_text.txt ...                       (one stats file per stage)
             dump.json                                 (every Text + Vector, reloadable)
-            radon_images/    (one PNG per FAST-surviving cluster: the rendered
-                             cluster image Radon sees *before* segmentation,
-                             with the detected word/segment boxes drawn on it)
-            paddle_images/   (one PNG per elected unique segment: the exact
-                             deskewed, white-padded crop handed to PaddleOCR
-                             *before* recognition, unpadded word region boxed,
-                             recognised text in the filename)
+            paddle_detect_images/  (one PNG per cluster: exactly what
+                                   PaddleOCR's text *detector* saw -- the
+                                   cluster's own single render -- with every
+                                   detected box drawn on top)
+            paddle_recog_images/   (one PNG per rotated detection crop: exactly
+                                   what PaddleOCR's text *recognizer* saw, no
+                                   dedup/election, recognised text in the
+                                   filename)
 
 Replaces `rastervec/notebooks/pipeline_stage_visualization.ipynb`.
 
 With `benchmark: true` the same `<pdf-stem>/` folder is also a scoring
 artifact for `pipeline_report_benchmark.py`: one `convert_page_to_vector_text`
-run per page, plus `ground_truth_{auto,manual}.json` and the split
-`{auto,manual}_{bbox,text}.pdf` overlays (registered in the manifest under
-stage `benchmark`), and a run-root `benchmark.json` marker. See
+run per page, plus `ground_truth_<text_type>.json` (only the non-empty of
+the 4 text types: `native_to_vector`/`original_vector`/`vector_to_raster`/
+`original_raster`) and the matching `<text_type>_{bbox,text}.pdf` overlays
+(registered in the manifest under stage `benchmark`), and a run-root
+`benchmark.json` marker. `input_files`/`input_dir` entries may be a `.pdf`
+(auto-only), a `.json` label sidecar, or a directory (a
+`scripts/label/master_label.py` output folder, merging its
+`native_labels.json`/`vector_labels.json`/`raster_labels.json`). See
 `docs/SCRIPTS.md`.
 
     .venv/Scripts/python.exe scripts/generate_pipeline_report.py --config run.json
@@ -52,18 +58,19 @@ import rastervec.config as rvconfig
 from rastervec.Evaluation import conversion, dump_io
 from rastervec.Evaluation.Evaluate import adapters, label_overlays, metrics
 from rastervec.Evaluation.Evaluate.variants import resolve_variant
-from rastervec.Evaluation.Labelling import auto_label
+from rastervec.Evaluation.Labelling import native_label
+from rastervec.Evaluation.Evaluate.metrics import TEXT_TYPES
 from rastervec.Evaluation.Labelling.label_schema import (
     LabelSet,
     load_labels,
+    load_labels_from_master_folder,
     save_labels,
-    split_labelset_by_source,
 )
 from rastervec.helpers.geometry import union_bbox
 from rastervec.Evaluation.Report import stage_stats
 from rastervec.logging_setup import configure_logging, get_logger
 from rastervec.paths import output_dir
-from rastervec.pipelines._common import STEP_NAMES
+from rastervec.pipelines.current import STEP_NAMES
 from rastervec.renderer import render_boxes_pdf, render_reconstructed_pdf, stages
 
 _LOG = get_logger("generate_pipeline_report")
@@ -80,12 +87,15 @@ _CONVERT = {
 _ARTIFACTS: list[tuple[str, str, str | None, str]] = [
     ("native_text", "native", "native", "native"),
     ("vector_extraction", "vectors", "vectors", "vectors"),
-    ("separation", "separation", "separation", "classify"),
-    ("vector_classification", "classify", "classify", "classify"),
-    ("fast_heatmap", "fast", "fast", "fast"),
-    ("segmentation", "segment", "segment", "segment"),
     ("similarity", "similarity", "similarity", "similarity"),
-    ("paddle_ocr", "ocr", "ocr", "restore"),
+    ("fast_heatmap", "fast", "fast", "fast"),
+    ("reclassify", "reclassify", "reclassify", "reclassify"),
+    ("separation", "separation", "separation", "separation"),
+    ("clusters", "clusters", "clusters", "clusters"),
+    ("paddle_detect", "paddle_detect", "paddle_detect", "paddle_detect"),
+    ("assignment", "assignment", "assignment", "assignment"),
+    ("rotate", "rotate", "rotate", "rotate"),
+    ("paddle_ocr", "ocr", "ocr", "ocr"),
     ("drawing_vectors", "drawing", None, "drawing"),
     ("reconstructed", "reconstructed", None, "drawing"),
 ]
@@ -162,10 +172,13 @@ class ReportConfig(BaseModel):
 
     def benchmark_inputs(self) -> list["BenchInput"]:
         """One `BenchInput` per config input, benchmark mode only. A `.json`
-        input (or a pdf with a `label_files` entry) carries manual ground
-        truth and is keyed `labels:<json-stem>`; a bare `.pdf` is auto-only
-        and keyed `pdf:<pdf-stem>`. The key is what the benchmark script
-        matches shared inputs on."""
+        input (or a pdf with a `label_files` entry) carries ground truth and
+        is keyed `labels:<json-stem>`; a directory (a `scripts/label/
+        master_label.py` output folder) is keyed `labels:<folder-stem>`,
+        `pdf_path` from the folder's own `original.pdf`, `labels_path` the
+        directory itself; a bare `.pdf` is auto-only and keyed
+        `pdf:<pdf-stem>`. The key is what the benchmark script matches
+        shared inputs on."""
         out: list[BenchInput] = []
         seen: set[str] = set()
 
@@ -179,6 +192,12 @@ class ReportConfig(BaseModel):
             raw += sorted(Path(self.input_dir).glob("*.pdf"))
         for item in raw:
             item = Path(item)
+            if item.is_dir():
+                folder = item.resolve()
+                labels = load_labels_from_master_folder(folder)
+                pdf = Path(labels.pdf_path)
+                _add(f"labels:{folder.stem}", pdf, folder)
+                continue
             if item.suffix.lower() == ".json":
                 labels = item.resolve()
                 pdf = Path(load_labels(str(labels)).pdf_path)
@@ -227,71 +246,51 @@ def _draw_boxes(img: Image.Image, boxes, outline=(220, 30, 30), width=2) -> Imag
     return out
 
 
-# `_common.run_current_pipeline` calls `segment_clusters` with the default
-# dpi, so the report must render Radon's input at the same dpi to line the
-# detected boxes up.
-_RADON_DPI = 300
-
-
-def _save_radon_inputs(res, folder: Path, page_index: int) -> int:
-    """One PNG per FAST-surviving cluster: the rendered cluster image exactly
-    as Radon sees it (pre-deskew, pre-split), with the original cluster bbox
-    (green) and the final grown crop box sent to PaddleOCR (blue) drawn on
-    top (`res.segmentation_debug`)."""
-    clusters = getattr(res, "fast_passed", None) or []
-    if not clusters:
+def _save_paddle_detect_inputs(res, folder: Path, page_index: int) -> int:
+    """One PNG per cluster -- exactly what `PaddleDetectBackend.
+    detect_on_cluster` saw (`ClusterDetection.image`, already white-padded),
+    with every detected box drawn on top. Each `PaddleDetection.bbox` is
+    page space, so it must be mapped back into that render's own pixel
+    space via `page_points_to_pixel` using the *same* `padding` the render
+    itself used (`cluster_render_padding`), then shifted by the render's
+    own white-pad offset (`cd.pad_x_px`/`cd.pad_y_px`) -- getting either
+    wrong silently misaligns the overlay boxes."""
+    clusters = getattr(res, "spatial_clusters", None) or []
+    cluster_detections = getattr(res, "cluster_detections", None) or []
+    if not clusters or not cluster_detections:
         return 0
-    from rastervec.config import RADON_RENDER_PADDING_EXTRA_PT
-    from rastervec.OCR.radon import render_cluster_for_radon
+    from rastervec.pipelines._steps import cluster_render_padding
     from rastervec.renderer import page_points_to_pixel
 
-    dbg_by_bbox = {
-        tuple(round(c, 2) for c in d["cluster_bbox"]): d
-        for d in (res.segmentation_debug or [])
-    }
     folder.mkdir(parents=True, exist_ok=True)
     n = 0
-    for i, cluster in enumerate(clusters):
-        if not cluster:
+    for i, cd in enumerate(cluster_detections):
+        if cd is None or cd.image is None:
             continue
-        # Must match segment_clusters' own per-cluster padding exactly, or
-        # this debug render and its overlay boxes will be misaligned.
-        stroke_padding = (
-            max((v.width or 0.0) for v in cluster) / 2.0 + RADON_RENDER_PADDING_EXTRA_PT
-        )
-        gray, dpi_used = render_cluster_for_radon(cluster, _RADON_DPI, padding=stroke_padding)
-        img = Image.fromarray(gray)
-        key = tuple(round(c, 2) for c in union_bbox([v.bbox for v in cluster]))
-        dbg = dbg_by_bbox.get(key)
-
-        def _to_px(page_bboxes):
-            out = []
-            for x0, y0, x1, y1 in page_bboxes:
-                (px0, py0), (px1, py1) = page_points_to_pixel(
-                    cluster, dpi_used, [(x0, y0), (x1, y1)], padding=stroke_padding,
-                )
-                out.append((px0, py0, px1, py1))
-            return out
-
-        if dbg is not None:
-            img = _draw_boxes(img, _to_px([dbg["cluster_bbox"]]), outline=(22, 163, 74))
-            img = _draw_boxes(
-                img, _to_px(dbg.get("grown_segment_bboxes", [])), outline=(37, 99, 235)
+        cluster = clusters[i] if i < len(clusters) else []
+        padding = cluster_render_padding(cluster) if cluster else 0.0
+        img = Image.fromarray(np.asarray(cd.image)[..., ::-1])  # BGR -> RGB
+        boxes = []
+        for det in cd.detections:
+            (px0, py0), (px1, py1) = page_points_to_pixel(
+                cluster, cd.dpi, [(det.bbox[0], det.bbox[1]), (det.bbox[2], det.bbox[3])],
+                padding=padding,
             )
+            boxes.append((px0 + cd.pad_x_px, py0 + cd.pad_y_px, px1 + cd.pad_x_px, py1 + cd.pad_y_px))
+        img = _draw_boxes(img, boxes, outline=(220, 30, 30))
         img.save(folder / f"p{page_index}_cluster_{i:03d}.png")
         n += 1
     return n
 
 
-def _save_paddle_inputs(res, folder: Path, page_index: int) -> int:
-    """One PNG per elected unique segment -- the exact deskewed, white-padded
-    crop handed to PaddleOCR verbatim, with the recognised text in the
-    filename. No overlay: PaddleOCR here is recognition-only and returns no
-    box."""
-    segs = getattr(res, "unique_segments", None) or []
+def _save_paddle_recog_inputs(res, folder: Path, page_index: int) -> int:
+    """One PNG per rotated detection crop -- the exact crop handed to
+    PaddleOCR recognition (`Segment.image`), no election/dedup, recognised
+    text in the filename."""
+    segs = getattr(res, "rotated_segments", None) or []
     if not segs:
         return 0
-    texts = getattr(res, "unique_texts", None) or []
+    texts = getattr(res, "restored_texts", None) or []
     folder.mkdir(parents=True, exist_ok=True)
     n = 0
     for i, seg in enumerate(segs):
@@ -299,7 +298,31 @@ def _save_paddle_inputs(res, folder: Path, page_index: int) -> int:
             continue
         img = Image.fromarray(np.asarray(seg.image))
         rec = texts[i].text if i < len(texts) else ""
-        img.save(folder / f"p{page_index}_uniq_{i:03d}__{_safe_slug(rec)}.png")
+        img.save(folder / f"p{page_index}_word_{i:03d}__{_safe_slug(rec)}.png")
+        n += 1
+    return n
+
+
+def _save_fast_tile_images(res, folder: Path, page_index: int) -> int:
+    """One PNG per FAST tile -- the exact crop of the whole-page FAST render
+    (`FastPageResult.page_image`, which is `debug_image_scale`-downsampled
+    from the full-res image `FastDetector.detect`/`_detect_job` actually
+    saw for that tile) matching that tile's page-space rect (`all_tiles`)."""
+    fr = getattr(res, "fast_result", None)
+    tiles = getattr(fr, "all_tiles", None) if fr is not None else None
+    if fr is None or fr.page_image is None or not tiles:
+        return 0
+    from rastervec.config import FAST_PAGE_RENDER_DPI, FAST_TILE_SCALE_FACTOR
+    from rastervec.helpers.geometry import PDF_POINTS_PER_INCH
+
+    debug_scale = getattr(fr, "debug_image_scale", 1.0)
+    zoom = (FAST_PAGE_RENDER_DPI * FAST_TILE_SCALE_FACTOR) / PDF_POINTS_PER_INCH * debug_scale
+    folder.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for i, rect in enumerate(tiles):
+        x0, y0, x1, y1 = (c * zoom for c in rect)
+        crop = fr.page_image.crop((int(x0), int(y0), int(x1), int(y1)))
+        crop.save(folder / f"p{page_index}_tile_{i:03d}.png")
         n += 1
     return n
 
@@ -350,11 +373,11 @@ def _accumulate_page(
     res, page_index: int, active: list[tuple],
     layer_pages: dict[str, list[bytes]], layer_meta: dict[str, dict],
     stats_pages: dict[str, list[tuple[int, dict]]],
-    radon_dir: Path, paddle_dir: Path,
+    detect_dir: Path, recog_dir: Path, fast_tile_dir: Path,
 ) -> None:
     """Render every active stage's layer PDFs + numeric stats for one page,
-    accumulating into the caller's dicts; also dump the radon / paddle
-    input PNGs."""
+    accumulating into the caller's dicts; also dump the paddle detect/recog
+    PNG debug images (what PaddleOCR's own text detector / recognizer saw)."""
     for stem, stage_key, stats_key, _gate in active:
         try:
             layers = stages.render_stage_layers(res, stage_key)
@@ -371,8 +394,10 @@ def _accumulate_page(
             stats_pages[stem].append(
                 (page_index, stage_stats.stats_for_stage(res, stats_key))
             )
-    _save_radon_inputs(res, radon_dir, page_index)
-    _save_paddle_inputs(res, paddle_dir, page_index)
+    if res.engine != "legacy":
+        _save_paddle_detect_inputs(res, detect_dir, page_index)
+        _save_paddle_recog_inputs(res, recog_dir, page_index)
+        _save_fast_tile_images(res, fast_tile_dir, page_index)
 
 
 def _finalize_doc_dir(
@@ -408,14 +433,23 @@ def _finalize_doc_dir(
     _LOG.info("wrote %s", doc_dir)
 
 
+def _image_dirs(doc_dir: Path) -> tuple[Path, Path, Path]:
+    """(detect-input dir, recog-input dir, fast-tile dir): what PaddleOCR's
+    own text *detector* saw vs. what its text *recognizer* saw vs. what FAST
+    saw per tile."""
+    return (
+        doc_dir / "paddle_detect_images", doc_dir / "paddle_recog_images",
+        doc_dir / "fast_tile_images",
+    )
+
+
 def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -> None:
     from rastervec.pipelines.current import run_pipeline as run_current
     from rastervec.pipelines.legacy import run_pipeline as run_legacy
 
     doc_dir = run_dir / pdf_path.stem
     doc_dir.mkdir(parents=True, exist_ok=True)
-    radon_dir = doc_dir / "radon_images"
-    paddle_dir = doc_dir / "paddle_images"
+    detect_dir, recog_dir, fast_tile_dir = _image_dirs(doc_dir)
 
     pages = config.pages_for(pdf_path.stem)
     active = _active_artifacts(config, variant)
@@ -444,7 +478,7 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
             _restamp_page(res, page_index)
 
         _accumulate_page(res, page_index, active, layer_pages, layer_meta, stats_pages,
-                         radon_dir, paddle_dir)
+                         detect_dir, recog_dir, fast_tile_dir)
         dumps.append(dump_io.PageDump(
             page_meta=res.page.meta, texts=list(res.texts or []),
             vectors=list(res.vectors or []), engine=res.engine,
@@ -455,25 +489,59 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
                       layer_pages, layer_meta, stats_pages, dumps)
 
 
-_OVERLAY_COLORS = {"auto": "#22c55e", "manual": "#2563eb"}
+_OVERLAY_COLORS = {
+    "native_to_vector": "#22c55e",
+    "original_vector": "#2563eb",
+    "vector_to_raster": "#f97316",
+    "original_raster": "#a855f7",
+}
 
 
-def _bench_ground_truth(source: str, bench: BenchInput, pages: list[int]) -> LabelSet:
-    """The combined `LabelSet` (all `pages`) for one label source. `auto`
-    merges `auto_label_pdf` per page; `manual` reads the paired label JSON's
-    `source="manual"` entries filtered to `pages`."""
-    if source == "auto":
-        entries = []
-        for p in pages:
-            entries += auto_label.auto_label_pdf(str(bench.pdf_path), p).entries
-        return LabelSet(pdf_path=str(bench.pdf_path), entries=entries)
-    if bench.labels_path is None:
-        return LabelSet(pdf_path=str(bench.pdf_path), entries=[])
-    manual = split_labelset_by_source(load_labels(str(bench.labels_path)))["manual"]
-    return LabelSet(
-        pdf_path=str(bench.pdf_path),
-        entries=[e for e in manual.entries if e.page_index in pages],
+def _bench_ground_truth_by_type(bench: BenchInput, pages: list[int]) -> "dict[str, LabelSet]":
+    """One `LabelSet` per text type (all 4 `TEXT_TYPES` keys always present,
+    entries filtered to `pages`).
+
+    `native_to_vector` is live-derived via `native_label.native_label_pdf`
+    per page -- UNLESS `bench.labels_path` is a master_label.py folder that
+    already has its own `native_labels.json`, in which case that file's
+    entries are used instead (avoids redundant re-derivation).
+
+    `original_vector`/`vector_to_raster`/`original_raster` come from
+    `bench.labels_path`: `None` -> all empty; a `.json` file -> `load_labels`
+    + `entries_by_text_type` (single-file convention); a directory ->
+    `load_labels_from_master_folder` + `entries_by_text_type`.
+    """
+    pdf_str = str(bench.pdf_path)
+    by_type: "dict[str, LabelSet]" = {t: LabelSet(pdf_path=pdf_str, entries=[]) for t in TEXT_TYPES}
+
+    native_from_folder = (
+        bench.labels_path is not None
+        and bench.labels_path.is_dir()
+        and (bench.labels_path / "native_labels.json").is_file()
     )
+    if native_from_folder:
+        merged = load_labels_from_master_folder(bench.labels_path)
+        native_entries = adapters.entries_by_text_type(merged)["native_to_vector"]
+    else:
+        native_entries = []
+        for p in pages:
+            native_entries += native_label.native_label_pdf(str(bench.pdf_path), p).entries
+    by_type["native_to_vector"] = LabelSet(
+        pdf_path=pdf_str, entries=[e for e in native_entries if e.page_index in pages],
+    )
+
+    if bench.labels_path is not None:
+        if bench.labels_path.is_dir():
+            merged = load_labels_from_master_folder(bench.labels_path)
+        else:
+            merged = load_labels(str(bench.labels_path))
+        buckets = adapters.entries_by_text_type(merged)
+        for t in ("original_vector", "vector_to_raster", "original_raster"):
+            by_type[t] = LabelSet(
+                pdf_path=pdf_str, entries=[e for e in buckets[t] if e.page_index in pages],
+            )
+
+    return by_type
 
 
 def _write_label_overlays(
@@ -483,7 +551,7 @@ def _write_label_overlays(
     """`<source>_bbox.pdf` (GT boxes green=covered by a prediction / red=missed)
     and `<source>_text.pdf` (GT text, per word green/yellow/red by read
     accuracy) -- one page per report page, scored against the single shared
-    run's OCR predictions."""
+    run's OCR predictions. `source` is a text-type name."""
     gt_regions = adapters.gt_regions_from_labelset(gt)
     bbox_pages: list[bytes] = []
     text_pages: list[bytes] = []
@@ -520,8 +588,7 @@ def _process_pdf_benchmark(
     is_legacy = variant.engine == "legacy"
     doc_dir = run_dir / bench.pdf_path.stem
     doc_dir.mkdir(parents=True, exist_ok=True)
-    radon_dir = doc_dir / "radon_images"
-    paddle_dir = doc_dir / "paddle_images"
+    detect_dir, recog_dir, fast_tile_dir = _image_dirs(doc_dir)
     pages = config.pages_for(bench.pdf_path.stem)
     cfg = metrics.MetricConfig(iou_edge_min=config.iou_edge_min)
     active = _active_artifacts(config, variant)
@@ -544,7 +611,7 @@ def _process_pdf_benchmark(
             )
         _restamp_page(res, p)
         _accumulate_page(res, p, active, layer_pages, layer_meta, stats_pages,
-                         radon_dir, paddle_dir)
+                         detect_dir, recog_dir, fast_tile_dir)
         dumps.append(dump_io.PageDump(
             page_meta=res.page.meta, texts=list(res.texts or []),
             vectors=list(res.vectors or []), engine=res.engine,
@@ -553,18 +620,16 @@ def _process_pdf_benchmark(
 
     sources: list[str] = []
     extra_layers: list[dict] = []
-    gt_auto = _bench_ground_truth("auto", bench, pages)
-    save_labels(gt_auto, str(doc_dir / "ground_truth_auto.json"))
-    _write_label_overlays(doc_dir, "auto", gt_auto, dumps, cfg)
-    sources.append("auto")
-
-    gt_manual = _bench_ground_truth("manual", bench, pages)
-    if gt_manual.entries:
-        save_labels(gt_manual, str(doc_dir / "ground_truth_manual.json"))
-        _write_label_overlays(doc_dir, "manual", gt_manual, dumps, cfg)
-        sources.append("manual")
-    elif bench.labels_path is not None:
-        _LOG.info("%s: no manual labels for pages %s", bench.key, pages)
+    gt_by_type = _bench_ground_truth_by_type(bench, pages)
+    for text_type in TEXT_TYPES:
+        gt = gt_by_type[text_type]
+        if not gt.entries:
+            if text_type != "native_to_vector":
+                _LOG.info("%s: no %s labels for pages %s", bench.key, text_type, pages)
+            continue
+        save_labels(gt, str(doc_dir / f"ground_truth_{text_type}.json"))
+        _write_label_overlays(doc_dir, text_type, gt, dumps, cfg)
+        sources.append(text_type)
 
     for s in sources:
         for kind in ("bbox", "text"):
