@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from rastervec.config import SIMILARITY_MSE_THRESHOLD
+from rastervec.P3_Vector_Parsing.FastIntoPaddle.config import SIMILARITY_MSE_THRESHOLD
 from rastervec.commons.helpers.geometry import item_points
 from rastervec.commons.models import Vector
 

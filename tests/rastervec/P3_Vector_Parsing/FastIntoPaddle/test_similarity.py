@@ -1,6 +1,6 @@
 import numpy as np
 
-from rastervec.Vector_Similarity.similarity import (
+from rastervec.P3_Vector_Parsing.FastIntoPaddle.similarity import (
     item_type_signature,
     normalize_vector,
     point_cloud_mse,

@@ -1,8 +1,8 @@
-"""The high-level step functions `pipelines/current.py` calls. Each is a
-thin adapter over one folder's own entrypoint -- the real work lives in
-those folders, not here -- except the FAST/reassignment/drawing-merge logic
-below, which is small enough to live here directly (see each function's own
-docstring).
+"""FastIntoPaddle's own step functions -- similarity grouping through
+rotation refinement. Self-contained: imports only this folder's own
+duplicated fast_detect.py/paddle_engine.py/radon.py/layer_color_separation.py
+and commons/. Ported from the old rastervec/pipelines/_steps.py +
+pipelines/current.py before those were retired in favor of this folder.
 """
 from __future__ import annotations
 
@@ -11,7 +11,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from rastervec.config import (
+from rastervec.P3_Vector_Parsing.FastIntoPaddle.config import (
+    CLUSTER_TOLERANCE_MAX,
+    CLUSTER_TOLERANCE_SCALE,
     FAST_DEBUG_IMAGE_SCALE,
     FAST_PAGE_RENDER_DPI,
     FAST_TILE_BLOCK_SIZE,
@@ -22,47 +24,52 @@ from rastervec.config import (
     RADON_RENDER_PADDING_EXTRA_PT,
     RECLASSIFY_PASS_FRACTION,
 )
-from rastervec.commons.helpers.geometry import PDF_POINTS_PER_INCH, item_bbox, union_bbox
-from rastervec.commons.helpers.geometry import bbox_area, bbox_intersection_area
+from rastervec.commons.helpers.geometry import (
+    PDF_POINTS_PER_INCH,
+    bbox_area,
+    bbox_intersection_area,
+    item_bbox,
+    rect_gap,
+    union_bbox,
+)
 from rastervec.commons.logging_setup import get_logger
 from rastervec.commons.models import Page, Segment, Vector
-from rastervec.P1_Reading_Native.native_text import extract_native_text as _extract_native_text
-from rastervec.OCR.fast_detect import FastDetector
-from rastervec.OCR.Paddle_OCR.ocr_backend import (
+from rastervec.commons.renderer import render_page_paths
+from rastervec.P3_Vector_Parsing.FastIntoPaddle.fast_detect import FastDetector
+from rastervec.P3_Vector_Parsing.FastIntoPaddle.layer_color_separation import (
+    separate_by_color,
+    separate_by_layer,
+    separate_by_width,
+)
+from rastervec.P3_Vector_Parsing.FastIntoPaddle.paddle_engine import (
     ClusterDetection,
     PaddleDetectBackend,
     crop_rotated_detection,
 )
-from rastervec.OCR.radon import sweep_rotation
-from rastervec.pipelines.result import FastPageResult
-from rastervec.commons.renderer import render_page_paths
-from rastervec.commons.renderer.stages import render_drawing  # noqa: F401 -- re-exported for callers
-from rastervec.P1_Reading_Native.vector_extract import extract_vectors as _extract_vectors
+from rastervec.P3_Vector_Parsing.FastIntoPaddle.radon import sweep_rotation
 from rastervec.P3_Vector_Parsing.FastIntoPaddle.similarity import SimilarityGroup, vector_similarity_group
 
-log = get_logger("pipelines.steps")
-
-# re-exported so `current.py` reads `extract_native_text(page)` etc.
-extract_native_text = _extract_native_text
-extract_vectors = _extract_vectors
+log = get_logger("P3.FastIntoPaddle.steps")
 
 
-def read_page(reader, page_index: int) -> Page:
-    return reader.get_page(page_index)
-
-
-# --------------------------------------------------------------------------
-# FAST detection directly on every extracted Vector, independently, before
-# any grouping/clustering exists at all. A Vector is scored over its own
-# items' bboxes (`helpers.geometry.item_bbox` -- its actual line/fill
-# geometry), not its aggregate `.bbox`, so a large near-empty bounding rect
-# doesn't dilute the score with the heatmap value of its own empty interior.
-# --------------------------------------------------------------------------
 @dataclass
-class FastFilterResult:
-    passed: list[Vector]
-    dropped: list[Vector]
-    page_result: FastPageResult
+class FastPageResult:
+    """`filter_vectors_fast`'s whole-page result. `scores` is keyed by a
+    Vector's own index into that step's `vectors` input list."""
+
+    page_image: object
+    page_mask: "np.ndarray | None"
+    detect_seconds: float | None
+    scores: dict
+    skipped_tiles: list | None = None
+    all_tiles: list | None = None
+    tile_count: int | None = None
+    tile_seconds: list | None = None
+    debug_image_scale: float = 1.0
+
+
+def similarity_group(vectors: list[Vector]) -> list[SimilarityGroup]:
+    return vector_similarity_group(vectors)
 
 
 def _sample_mask_items(mask, items: list[tuple], zoom: float) -> float:
@@ -87,13 +94,6 @@ def _sample_mask_items(mask, items: list[tuple], zoom: float) -> float:
 def _candidate_tile_bboxes(
     clusters: list[list[Vector]], *, zoom: float, margin: float,
 ) -> list[tuple[float, float, float, float]]:
-    """Every cluster's page-space bbox, converted into `detect_tiled`'s
-    tile-pixel space (page pt -> render px via `zoom`, the *combined*
-    render dpi already baked in -- see `FAST_PAGE_RENDER_DPI`'s own note)
-    and padded by `margin` px on every side, so a cluster sitting right at
-    a tile boundary isn't dropped by an off-by-one intersection test -- the
-    text-candidate set `detect_tiled` should only bother detecting tiles
-    near."""
     boxes: list[tuple[float, float, float, float]] = []
     for cluster in clusters:
         if not cluster:
@@ -106,6 +106,13 @@ def _candidate_tile_bboxes(
     return boxes
 
 
+@dataclass
+class FastFilterResult:
+    passed: list[Vector]
+    dropped: list[Vector]
+    page_result: FastPageResult
+
+
 def filter_vectors_fast(
     vectors: list[Vector],
     page: Page,
@@ -115,12 +122,6 @@ def filter_vectors_fast(
     compute=None,
     progress_counter=None,
 ) -> FastFilterResult:
-    """Scores every extracted Vector, independently, against a whole-page
-    FAST mask, sampled over each of its own items' bboxes (its real
-    line/fill geometry) rather than its aggregate bbox, and keeps it only if
-    that per-item coverage exceeds `FAST_VECTOR_KEEP_THRESHOLD`.
-    `enable_fast=False` is a pass-through (every Vector passes). `compute`/
-    `progress_counter` are forwarded to `detect_tiled`."""
     if not enable_fast:
         result = FastPageResult(None, None, None, {})
         return FastFilterResult(list(vectors), [], result)
@@ -189,29 +190,13 @@ def filter_vectors_fast(
     return FastFilterResult(passed, dropped, result)
 
 
-# --------------------------------------------------------------------------
-# Vector-level similarity grouping (Vector_Similarity.similarity), run
-# before FAST -- every raw extracted Vector, independently, groups into a
-# shape-similarity bucket regardless of FAST's own per-vector verdict.
-# --------------------------------------------------------------------------
-def similarity_group(vectors: list[Vector]) -> list[SimilarityGroup]:
-    return vector_similarity_group(vectors)
-
-
-# --------------------------------------------------------------------------
-# Reclassify FAST's per-vector pass/fail up to a similarity-group consensus,
-# one direction only: a shape FAST mostly accepted probably has a few
-# members that only barely missed, so pull those up to pass too. There is
-# no opposite "whole group fails" rule -- a member FAST passed keeps that
-# verdict regardless of how the rest of its group scored.
-# --------------------------------------------------------------------------
 @dataclass
 class ReclassifyResult:
     passed: list[Vector]
     dropped: list[Vector]
-    fail_reclassified_pass: int  # members FAST dropped, reclassified to pass
-    fail_count: int  # final dropped count (post-reclassification)
-    pass_count: int  # final passed count (post-reclassification)
+    fail_reclassified_pass: int
+    fail_count: int
+    pass_count: int
 
 
 def reclassify_by_similarity(
@@ -221,11 +206,6 @@ def reclassify_by_similarity(
     *,
     pass_fraction: float = RECLASSIFY_PASS_FRACTION,
 ) -> ReclassifyResult:
-    """Per similarity group: if under `pass_fraction` of its members failed
-    FAST, every member passes; otherwise each member keeps FAST's own
-    individual verdict. Groups are matched to `passed`/`dropped` by Vector
-    identity (`id`), so `groups` must come from `similarity_group` run on
-    the same Vector objects `filter_vectors_fast` scored."""
     dropped_ids = {id(v) for v in dropped}
     new_passed: list[Vector] = []
     new_dropped: list[Vector] = []
@@ -251,12 +231,86 @@ def reclassify_by_similarity(
     )
 
 
-# --------------------------------------------------------------------------
-# drawing output
-# --------------------------------------------------------------------------
+def separate_by_layer_color_width(vectors: list) -> list[list]:
+    buckets: list[list] = []
+    for layer_bucket in separate_by_layer(vectors).values():
+        for color_bucket in separate_by_color(layer_bucket).values():
+            buckets.extend(separate_by_width(color_bucket).values())
+    return buckets
+
+
+def _dynamic_tolerance(bbox: tuple, base_tolerance: float, scale: float, cap: float) -> float:
+    x0, y0, x1, y1 = bbox
+    return min(base_tolerance + scale * max(x1 - x0, y1 - y0), cap)
+
+
+class _BBoxUnionFind:
+    def __init__(self) -> None:
+        self.parent: list[int] = []
+        self.bbox: list[tuple] = []
+
+    def make_set(self, bbox: tuple) -> int:
+        idx = len(self.parent)
+        self.parent.append(idx)
+        self.bbox.append(bbox)
+        return idx
+
+    def find(self, x: int) -> int:
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]
+            x = self.parent[x]
+        return x
+
+    def union(self, a: int, b: int) -> int:
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return ra
+        self.parent[ra] = rb
+        self.bbox[rb] = union_bbox([self.bbox[ra], self.bbox[rb]])
+        return rb
+
+
+def cluster_bucket_spatial(
+    vectors: list,
+    base_tolerance: float,
+    scale: float = CLUSTER_TOLERANCE_SCALE,
+    cap: float = CLUSTER_TOLERANCE_MAX,
+) -> list[list]:
+    if not vectors:
+        return []
+    uf = _BBoxUnionFind()
+    ids: list[int] = []
+    for v in vectors:
+        idx = uf.make_set(v.bbox)
+        existing_roots = {uf.find(j) for j in ids}
+        matched = [
+            r for r in existing_roots
+            if rect_gap(uf.bbox[r], v.bbox) <= _dynamic_tolerance(uf.bbox[r], base_tolerance, scale, cap)
+        ]
+        cur = idx
+        for r in matched:
+            cur = uf.union(cur, r)
+        ids.append(idx)
+
+    groups: dict[int, list] = {}
+    for v, idx in zip(vectors, ids):
+        groups.setdefault(uf.find(idx), []).append(v)
+    return list(groups.values())
+
+
+def cluster_buckets(
+    buckets: list[list],
+    base_tolerance: float,
+    scale: float = CLUSTER_TOLERANCE_SCALE,
+    cap: float = CLUSTER_TOLERANCE_MAX,
+) -> list[list]:
+    clusters: list[list] = []
+    for bucket in buckets:
+        clusters.extend(cluster_bucket_spatial(bucket, base_tolerance, scale, cap))
+    return clusters
+
+
 def build_drawing_output(*drop_lists: list[Vector]) -> list[Vector]:
-    """Merges every rejected Vector -- FAST/reclassify/perimeter drops,
-    PaddleOCR-reassignment drops -- into one flat, source-order list."""
     vectors: list[Vector] = []
     for drops in drop_lists:
         vectors.extend(drops)
@@ -264,28 +318,13 @@ def build_drawing_output(*drop_lists: list[Vector]) -> list[Vector]:
     return vectors
 
 
-# --------------------------------------------------------------------------
-# Per-cluster PaddleOCR detect + overlap-based reassignment + rotation
-# refinement/crop. See `pipelines/current.py` for the full step sequence
-# these plug into.
-# --------------------------------------------------------------------------
 def cluster_render_padding(cluster: list[Vector]) -> float:
-    """Half the cluster's own max stroke width, plus a small fixed margin
-    (`RADON_RENDER_PADDING_EXTRA_PT`) so a stroke sitting at the exact edge
-    of the cluster's bbox isn't clipped by the render frame -- shared by
-    `detect_text_paddle_per_cluster` (which renders with it) and
-    `rotate_paddle_detections` (which must map page-space points back into
-    that exact same padded render's pixel space, or every coordinate
-    drifts by `padding * zoom` px)."""
     return max((v.width or 0.0) for v in cluster) / 2.0 + RADON_RENDER_PADDING_EXTRA_PT
 
 
 def detect_text_paddle_per_cluster(
     clusters: list[list[Vector]], *, dpi: int = 300,
 ) -> "list[ClusterDetection | None]":
-    """One `PaddleDetectBackend.detect_on_cluster` call per cluster (never
-    tiled, never whole-page -- see that method's own docstring), padded via
-    `cluster_render_padding`. `None` for an empty cluster."""
     backend = PaddleDetectBackend()
     results: list[ClusterDetection | None] = []
     for cluster in clusters:
@@ -300,7 +339,7 @@ def detect_text_paddle_per_cluster(
 
 @dataclass
 class ReassignResult:
-    text: "list[list[list[Vector]]]"  # per cluster, per detection
+    text: "list[list[list[Vector]]]"
     drawing: list[Vector]
 
 
@@ -310,16 +349,6 @@ def reassign_by_overlap(
     *,
     min_coverage: float = PADDLE_REASSIGN_MIN_COVERAGE,
 ) -> ReassignResult:
-    """For every Vector in every cluster, reassigns it to whichever of that
-    cluster's own PaddleOCR detections covers the most of its own bbox area
-    -- a real three-way outcome: a Vector whose best coverage is still
-    under `min_coverage` (including a cluster with no detections at all)
-    becomes a drawing vector instead. This is the "FAST said maybe,
-    PaddleOCR didn't back it up" half of the pipeline's final drawing
-    output (the other half is `filter_vectors_fast`'s own `dropped`) --
-    combine both into `build_drawing_output`'s input. A detection that ends
-    up with zero assigned vectors is implicitly dropped:
-    `rotate_paddle_detections` skips it (nothing to crop)."""
     per_cluster_text: list[list[list[Vector]]] = []
     drawing: list[Vector] = []
     for cluster, cd in zip(clusters, cluster_detections):
@@ -350,15 +379,6 @@ def rotate_paddle_detections(
     *,
     debug_out: "list | None" = None,
 ) -> list[Segment]:
-    """For each cluster's own PaddleOCR detections with at least one
-    assigned vector: refine PaddleOCR's coarse `rotation_deg` via
-    `OCR.radon.sweep_rotation` (pure vector geometry, no pixels), then crop
-    the already-rendered cluster image to that detection's own region at
-    the refined angle (`ocr_backend.crop_rotated_detection`, which also
-    applies the recognition-side white pad). One `Segment` per detection --
-    no word/character splitting, "just rotated clusters". `debug_out`, when
-    given, collects one dict per detection: `detection_bbox`,
-    `resolved_theta`, `source_theta`."""
     segments: list[Segment] = []
     for cluster, cd, assigned in zip(clusters, cluster_detections, reassigned):
         if cd is None or not cd.detections:
