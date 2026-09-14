@@ -58,6 +58,10 @@ C_RECLASS_PASS = "#059669"
 C_OCR_PASS = "#059669"
 C_OCR_FAIL = "#dc2626"
 C_OCR_BOX = "#2563eb"
+# New pluggable core.pipeline engine's generic phase1/phase2/final layers.
+C_P2_VECTOR = "#7c3aed"
+C_P2_TEXT = "#c026d3"
+C_P3_TEXT = "#16a34a"
 
 # Human-readable legend per generated stage PDF (filename -> [(label, hex)]).
 STAGE_COLOR_LEGEND: dict[str, list[tuple[str, str]]] = {
@@ -86,6 +90,9 @@ STAGE_COLOR_LEGEND: dict[str, list[tuple[str, str]]] = {
     ],
     "drawing_vectors.pdf": [("drawing vector", C_DRAWING)],
     "reconstructed.pdf": [("reconstructed page", "#111827")],
+    "phase1.pdf": [("native word", C_NATIVE), ("raw vector", "#888888")],
+    "phase2.pdf": [("phase2 vector", C_P2_VECTOR), ("phase2 text", C_P2_TEXT)],
+    "final.pdf": [("final vector", C_DRAWING), ("final text", C_P3_TEXT)],
 }
 
 STAGE_ARTIFACTS = {
@@ -102,6 +109,13 @@ STAGE_ARTIFACTS = {
     "ocr": "paddle_ocr.pdf",
     "drawing": "drawing_vectors.pdf",
     "reconstructed": "reconstructed.pdf",
+    # New pluggable core.pipeline engine (P2/P3 registry) -- a deliberately
+    # small, generic artifact set (see render_stage_layers' "phase1"/
+    # "phase2"/"final" branches below) since the three P3 backends share no
+    # code and populate verbose intermediates differently.
+    "phase1": "phase1.pdf",
+    "phase2": "phase2.pdf",
+    "final": "final.pdf",
 }
 
 
@@ -556,4 +570,46 @@ def render_stage_layers(
     if stage_key == "reconstructed":
         return [("reconstructed page", "#111827", render_reconstructed(res, page_meta=pm))]
 
+    # -----------------------------------------------------------------
+    # New pluggable core.pipeline engine (P2/P3 registry). Deliberately
+    # generic -- the three P3 backends share no code and populate `res.extra`
+    # differently, so this renders only what every combination guarantees:
+    # phase1's raw extraction, phase2's raw output, and the final result.
+    # -----------------------------------------------------------------
+    if stage_key == "phase1":
+        phase1 = (res.extra or {}).get("phase1") if hasattr(res, "extra") else None
+        native = list(getattr(phase1, "texts", None) or [])
+        raw_vectors = list(getattr(phase1, "vectors", None) or [])
+        return [
+            ("native word", C_NATIVE,
+             render_text_pdf(pm, native, color_of=lambda _t: _hex_to_rgb01(C_NATIVE))
+             if native else _blank(pm)),
+            ("raw vector", "#888888", V(raw_vectors, "#888888")),
+        ]
+
+    if stage_key == "phase2":
+        extra = res.extra or {} if hasattr(res, "extra") else {}
+        p2_vectors = list(extra.get("phase2_vectors") or [])
+        p2_texts = list(extra.get("phase2_texts") or [])
+        return [
+            ("phase2 vector", C_P2_VECTOR, V(p2_vectors, C_P2_VECTOR)),
+            ("phase2 text", C_P2_TEXT, _text_layer_pdf(pm, p2_texts, C_P2_TEXT)),
+        ]
+
+    if stage_key == "final":
+        return [
+            ("final vector", C_DRAWING, render_drawing(res, page_meta=pm)),
+            ("final text", C_P3_TEXT, _text_layer_pdf(pm, res.texts or [], C_P3_TEXT)),
+        ]
+
     raise ValueError(f"unknown stage_key {stage_key!r}")
+
+
+def _text_layer_pdf(page_meta: "PageMeta", texts, hexcol: str) -> bytes:
+    """One-page PDF of `texts` (any `Text` list) drawn via `_compose`'s
+    generic `text_layer` -- used by the new pluggable engine's phase2/final
+    layers, which don't distinguish native vs OCR provenance the way the old
+    engine's `render_ocr_results`/`render_reconstructed` do."""
+    rgb = _hex_to_rgb01(hexcol)
+    layer = [(t.text or "", tuple(t.bbox), t.angle(), rgb) for t in texts]
+    return _compose(page_meta, text_layer=layer) if layer else _blank(page_meta)
