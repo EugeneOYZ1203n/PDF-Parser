@@ -5,8 +5,8 @@ from typing import Iterator
 
 import pymupdf as fitz
 
-from rastervec.logging_setup import get_logger
-from rastervec.models import Page, PageMeta
+from rastervec.commons.logging_setup import get_logger
+from rastervec.commons.models import Page, PageMeta
 
 _LOG = get_logger("reader")
 

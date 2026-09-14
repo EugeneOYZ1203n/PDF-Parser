@@ -76,7 +76,7 @@ from rastervec.Evaluation.Labelling.raster_label import ImageRegion, embedded_im
 from rastervec.commons.helpers.geometry import bbox_contains
 from rastervec.commons.logging_setup import configure_logging, get_logger
 from rastervec.commons.paths import output_dir
-from rastervec.Reader.reader import Reader
+from rastervec.P1_Reading_Native.reader import Reader
 
 _LOG = get_logger("raster_label")
 

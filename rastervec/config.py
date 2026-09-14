@@ -95,31 +95,131 @@ UNIQUE_CLUSTER_TOLERANCE = 0.04
 # fast_text_detect stage (pipeline.py)
 # ======================================================================
 
-# DPI the whole-page FAST render is rasterized at, before
-# FastDetector.detect_tiled's own further upscale. Not full OCR resolution
-# (RenderOCR's per-cluster renders use 300 DPI).
+# DPI the whole-page FAST render is rasterized at. Not full OCR resolution
+# (RenderOCR's per-cluster renders use 300 DPI). FastDetector.detect_tiled
+# used to receive this render and further upscale it in-process by
+# FAST_TILE_SCALE_FACTOR via a PIL resize; callers now render directly at
+# `FAST_PAGE_RENDER_DPI * FAST_TILE_SCALE_FACTOR` (see that constant) and
+# pass detect_tiled(scale=1.0), so no raster-upscale ever happens on the
+# path to detection -- a native higher-dpi render is sharper.
 FAST_PAGE_RENDER_DPI = 150
-
-# A classification cluster passes FAST if its own page-mask score exceeds
-# this. FAST now runs before similarity grouping (no groups exist yet at
-# this point), so this applies per cluster, independently -- kept at 0.5
-# (its prior group-min value from when this threshold was last raised from
-# an even older per-cluster value of 0.2) rather than reverted, pending
-# real-world re-tuning now that the group-min check is gone.
-FAST_COMBINED_KEEP_THRESHOLD = 0.5
 
 # FastDetector.detect_tiled: FAST's own preprocessing always downsizes to a
 # 640px short side, so a whole large page loses most of its resolution in
-# one pass. Instead the render is upscaled by FAST_TILE_SCALE_FACTOR and cut
-# into FAST_TILE_BLOCK_SIZE-square tiles, each detected once (no rotation).
+# one pass. Instead the page is rendered at FAST_PAGE_RENDER_DPI *
+# FAST_TILE_SCALE_FACTOR (a native higher-dpi render, not a raster upscale
+# of a lower-dpi one -- see FAST_PAGE_RENDER_DPI's own note) and cut into
+# FAST_TILE_BLOCK_SIZE-square tiles, each detected once (no rotation).
 FAST_TILE_BLOCK_SIZE = 2048
-FAST_TILE_SCALE_FACTOR = 5
+FAST_TILE_SCALE_FACTOR = 2
 
 # FastDetector.detect_tiled: a text-candidate segment's bbox is padded by
 # this fraction of FAST_TILE_BLOCK_SIZE (in the same scaled-tile pixel
 # space) before testing which tiles it overlaps, so a segment sitting
 # right at a tile boundary isn't dropped by an off-by-one intersection.
 FAST_TILE_CANDIDATE_MARGIN_FRAC = 0.05
+
+# FastDetector.detect_tiled: adjacent tiles overlap by this fraction of
+# FAST_TILE_BLOCK_SIZE (stride = block_size * (1 - overlap)); overlapping
+# regions are resolved by taking the max score, so a text line that would
+# otherwise be split across a tile boundary is fully covered by at least
+# one tile.
+FAST_TILE_OVERLAP_FRAC = 0.15
+
+# ======================================================================
+# `current` pipeline (pipelines/current.py) -- extract_vectors -> per-Vector
+# FAST filter -> (layer, color, width) separation -> seqno-consecutive
+# spatial cluster -> per-cluster PaddleOCR detect -> overlap reassignment ->
+# rotation refinement -> PaddleOCR recognize. The old Vector_Classification
+# chain is retired, preserved untouched under archive/rastervec/.
+# ======================================================================
+
+# Vector_Similarity/similarity.py -- vector_similarity_group's step 5: two
+# normalized (PCA-aligned, unit-boxed, origin-anchored) point clouds count
+# as "the same shape" if their mean squared corresponding-point distance is
+# at or under this.
+SIMILARITY_MSE_THRESHOLD = 0.01
+
+# pipelines/_steps.py::reclassify_by_similarity -- after FAST scores every
+# Vector independently, a similarity group's members are pulled up to a
+# group consensus in one direction only: if under this fraction of a
+# group's members failed FAST, the whole group passes (a legible shape FAST
+# mostly accepted probably has a few members that only barely missed).
+# There is no opposite "whole group fails" rule -- a member FAST passed
+# keeps its own verdict regardless of how the rest of its group scored.
+RECLASSIFY_PASS_FRACTION = 0.10
+
+# filter_vectors_fast (pipelines/_steps.py): a Vector passes if its own
+# per-item heatmap coverage (helpers.geometry.item_bbox per item, not the
+# Vector's aggregate bbox) exceeds this.
+FAST_VECTOR_KEEP_THRESHOLD = 0.1
+
+# filter_vectors_fast: report-only downsample factor applied to the verbose
+# `FastPageResult.page_image` kept for heatmap/tile-image visualization --
+# never applied to the image actually handed to FastDetector for real
+# detection/scoring. Keeps report generation (and any further per-tile
+# crops) from building an oversized image on a physically huge page.
+FAST_DEBUG_IMAGE_SCALE = 0.5
+
+# current.py's cluster_buckets step: base bbox-gap tolerance (PDF points)
+# for the union-find spatial merge of surviving Vectors into clusters, run
+# separately within each (layer, color, width) bucket, order-independent
+# (every vector is compared against every current set's own bbox, not just
+# a seqno-adjacent neighbor). The *effective* tolerance for a given
+# candidate set is this plus CLUSTER_TOLERANCE_SCALE times that set's own
+# current max side length (see CLUSTER_TOLERANCE_SCALE), capped at
+# CLUSTER_TOLERANCE_MAX -- a set that has grown so far is allowed a looser
+# gap to admit its next member than a set that is still just a speck.
+FAST_PADDLE_SEQ_MERGE_TOLERANCE = 15.0
+
+# current.py's cluster_buckets step: multiplies a candidate set's own
+# current max bbox side length, added on top of FAST_PADDLE_SEQ_MERGE_
+# TOLERANCE, to get that set's effective gap tolerance.
+CLUSTER_TOLERANCE_SCALE = 0.05
+
+# current.py's cluster_buckets step: hard cap (PDF points) on the effective
+# gap tolerance computed above. Without one, a growing set's own bbox
+# feeds its own tolerance (bigger set -> looser admission -> bigger set) --
+# a runaway spiral that could merge an entire dense bucket into one giant
+# cluster, reproducing an oversized-render problem one step later in
+# detect_text_paddle_per_cluster's own per-cluster render.
+CLUSTER_TOLERANCE_MAX = 200.0
+
+# detect_on_cluster (OCR/Paddle_OCR/ocr_backend.py): same dynamic-dpi-bump
+# rule as MIN_RENDER_SIDE_PX/MAX_RENDER_DPI (below), applied when rendering
+# one cluster for PaddleOCR's own detector.
+PADDLE_DETECT_MIN_RENDER_SIDE_PX = 200
+PADDLE_DETECT_MAX_RENDER_DPI = 4800
+
+# reassign_by_overlap (pipelines/_steps.py): a Vector is reassigned to a
+# PaddleOCR-detected box only if at least this fraction of the Vector's own
+# bbox area is covered by that box; otherwise it becomes a drawing vector,
+# even if FAST itself thought the cluster it came from was text.
+PADDLE_REASSIGN_MIN_COVERAGE = 0.5
+
+# White pixel-space margin (fraction of the image's own width/height) added
+# around a cluster's render before PaddleOCR's own detector sees it
+# (OCR/Paddle_OCR/ocr_backend.py::PaddleDetectBackend.detect_on_cluster), and
+# again around each detection's final rotated crop before recognition
+# (ocr_backend.py::crop_rotated_detection) -- the only two places anything
+# is padded in the pipeline now that OCR/radon.py is pure vector geometry.
+PADDLE_WHITE_PAD_FRACTION = 0.1
+
+# OCR/radon.py::sweep_rotation -- refines PaddleOCR's own coarse per-
+# detection rotation estimate by sweeping this many degrees on either side
+# of it (step size below), scoring each candidate angle purely on vector
+# geometry (no rasterization). Narrow because PaddleOCR's quad already
+# localizes the line's rough orientation; there is no 90-degree ambiguity
+# left to resolve here, unlike a blind full-page sweep.
+VECTOR_RADON_SWEEP_RANGE_DEG = 10.0
+VECTOR_RADON_SWEEP_STEP_DEG = 0.5
+
+# OCR/radon.py::project -- division-line spacing (PDF points) and safety cap
+# for the number of horizontal projection rays swept across a rotated
+# cluster's own bbox; ported from notebooks/radon_vector_deskew_lab.ipynb's
+# LINE_SPACING/MAX_LINES.
+VECTOR_RADON_LINE_SPACING_PT = 1.0
+VECTOR_RADON_MAX_LINES = 600
 
 # ======================================================================
 # OCR (OCR/Paddle_OCR/ocr_backend.py)

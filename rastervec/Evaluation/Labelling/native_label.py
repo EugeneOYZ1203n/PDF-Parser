@@ -43,9 +43,9 @@ from rastervec.Evaluation.Labelling.label_schema import (
 from rastervec.commons.helpers.geometry import bbox_intersection_area, union_bbox
 from rastervec.commons.logging_setup import get_logger
 from rastervec.commons.models import Text, Vector
-from rastervec.native_text import extract_native_text as extract_native_words
-from rastervec.Reader.reader import Reader
-from rastervec.Vector.vector import extract_vectors
+from rastervec.P1_Reading_Native.native_text import extract_native_text as extract_native_words
+from rastervec.P1_Reading_Native.reader import Reader
+from rastervec.P1_Reading_Native.vector_extract import extract_vectors
 
 _LOG = get_logger("native_label")
 

@@ -35,7 +35,7 @@ from pathlib import Path
 import pymupdf as fitz
 
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet, load_labels
-from rastervec.logging_setup import get_logger
+from rastervec.commons.logging_setup import get_logger
 
 _LOG = get_logger("reader.dataset")
 

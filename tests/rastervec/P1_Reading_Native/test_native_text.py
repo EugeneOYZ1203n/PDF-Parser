@@ -3,9 +3,9 @@ from __future__ import annotations
 import pymupdf as fitz
 import pytest
 
-from rastervec import native_text as native
-from rastervec.native_text import _Span
-from rastervec.Reader.reader import Reader
+from rastervec.P1_Reading_Native import native_text as native
+from rastervec.P1_Reading_Native.native_text import _Span
+from rastervec.P1_Reading_Native.reader import Reader
 
 
 def _span(bbox: fitz.Rect, **overrides) -> _Span:

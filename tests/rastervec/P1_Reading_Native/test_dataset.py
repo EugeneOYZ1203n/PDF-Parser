@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet, save_labels
-from rastervec.Reader.dataset import (
+from rastervec.P1_Reading_Native.dataset import (
     collect_dataset,
     find_label_sets,
     find_pdfs,

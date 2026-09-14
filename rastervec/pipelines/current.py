@@ -62,7 +62,7 @@ from rastervec.pipelines._steps import (
     similarity_group,
 )
 from rastervec.pipelines.result import PipelineResult, StepOutcome
-from rastervec.Reader.reader import Reader
+from rastervec.P1_Reading_Native.reader import Reader
 from rastervec.Vector.layer_color_separation import separate_by_color, separate_by_layer, separate_by_width
 
 _LOG = get_logger("pipelines.current")

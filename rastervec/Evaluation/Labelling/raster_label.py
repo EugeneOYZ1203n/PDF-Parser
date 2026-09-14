@@ -40,8 +40,8 @@ from rastervec.Evaluation.Labelling.label_schema import (
 )
 from rastervec.commons.logging_setup import get_logger
 from rastervec.commons.models import Vector
-from rastervec.Reader.reader import Reader
-from rastervec.Vector.vector import extract_vectors
+from rastervec.P1_Reading_Native.reader import Reader
+from rastervec.P1_Reading_Native.vector_extract import extract_vectors
 
 _LOG = get_logger("raster_label")
 

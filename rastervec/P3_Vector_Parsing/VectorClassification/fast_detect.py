@@ -57,7 +57,7 @@ from rastervec.commons.helpers.geometry import bbox_intersection_area
 _MODEL_CACHE: dict[str, object] = {}
 
 _DEFAULT_WEIGHTS_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "weights",
     "fast_tiny_ic17mlt_640.pth",
 )

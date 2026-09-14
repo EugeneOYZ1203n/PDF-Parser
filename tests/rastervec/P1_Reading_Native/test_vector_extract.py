@@ -5,8 +5,8 @@ from pathlib import Path
 import pymupdf as fitz
 import pytest
 
-from rastervec.Reader.reader import Reader
-from rastervec.Vector import vector
+from rastervec.P1_Reading_Native.reader import Reader
+from rastervec.P1_Reading_Native import vector_extract as vector
 
 REFERENCES_DIR = Path(__file__).resolve().parents[2] / "references"
 REFERENCE_PDFS = sorted(REFERENCES_DIR.glob("test_pdfs_*.pdf"))
@@ -136,7 +136,7 @@ def test_extract_vectors_folds_group_blend_mode_onto_vector(tmp_path):
 
 
 def test_separate_by_layer_groups_by_layer_field(vector):
-    from rastervec.Vector.vector import separate_by_layer
+    from rastervec.P1_Reading_Native.vector_extract import separate_by_layer
 
     vectors = [
         vector(layer="A"),
@@ -156,7 +156,7 @@ def test_separate_by_layer_groups_by_layer_field(vector):
 
 
 def test_separate_by_color_groups_by_color_fill_and_opacity(vector):
-    from rastervec.Vector.vector import separate_by_color
+    from rastervec.P1_Reading_Native.vector_extract import separate_by_color
 
     v0 = vector(color=(1, 0, 0), fill=(0, 1, 0))
     v1 = vector(color=None, fill=(0, 1, 0))
@@ -178,7 +178,7 @@ def test_separate_by_color_groups_by_color_fill_and_opacity(vector):
 
 @pytest.mark.skipif(not REFERENCE_PDFS, reason="tests/references/test_pdfs_*.pdf not generated")
 def test_separation_invariants_hold_for_reference_pdf_vectors():
-    from rastervec.Vector.vector import separate_by_color, separate_by_layer
+    from rastervec.P1_Reading_Native.vector_extract import separate_by_color, separate_by_layer
 
     with Reader(str(REFERENCE_PDFS[0])) as reader:
         page = reader.get_page(0)

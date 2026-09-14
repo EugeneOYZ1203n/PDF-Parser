@@ -19,8 +19,8 @@ import pytest
 from PIL import Image
 
 from rastervec.commons.models import PageMeta, Text, Vector
-from rastervec.native_text import extract_native_text
-from rastervec.Reader.reader import Reader
+from rastervec.P1_Reading_Native.native_text import extract_native_text
+from rastervec.P1_Reading_Native.reader import Reader
 from rastervec.commons.renderer import (
     page_points_to_pixel,
     pixel_to_page_bbox,
@@ -30,7 +30,7 @@ from rastervec.commons.renderer import (
     render_reconstructed_pdf,
     render_vector_cluster,
 )
-from rastervec.Vector.vector import extract_vectors
+from rastervec.P1_Reading_Native.vector_extract import extract_vectors
 
 REFERENCES_DIR = Path(__file__).resolve().parents[2] / "references"
 REFERENCE_PDFS = sorted(REFERENCES_DIR.glob("test_pdfs_*.pdf"))

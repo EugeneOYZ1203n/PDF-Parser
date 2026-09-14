@@ -1,6 +1,6 @@
 from rastervec.commons.models import Page, PageMeta, Text
-from rastervec.native_text import extract_native_text as extract_native_words
-from rastervec.Reader.reader import Reader
+from rastervec.P1_Reading_Native.native_text import extract_native_text as extract_native_words
+from rastervec.P1_Reading_Native.reader import Reader
 
 __all__ = [
     "Page",

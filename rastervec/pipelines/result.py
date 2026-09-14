@@ -118,7 +118,7 @@ class PipelineResult:
         page. The pipeline closes its `Reader` before returning, so
         `self.page.fitz_page` is `None`; use this whenever you need to
         rasterize or otherwise call into `fitz`."""
-        from rastervec.Reader.reader import Reader
+        from rastervec.P1_Reading_Native.reader import Reader
 
         with Reader(self.page.doc_path) as reader:
             yield reader.get_page(self.page.meta.index)

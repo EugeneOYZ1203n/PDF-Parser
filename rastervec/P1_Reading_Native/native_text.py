@@ -8,9 +8,9 @@ from itertools import groupby
 
 import pymupdf as fitz
 
-from rastervec.logging_setup import get_logger
-from rastervec.models import Page, Text
-from rastervec.renderer.stages import render_native  # noqa: F401 -- re-exported for callers
+from rastervec.commons.logging_setup import get_logger
+from rastervec.commons.models import Page, Text
+from rastervec.commons.renderer.stages import render_native  # noqa: F401 -- re-exported for callers
 
 _LOG = get_logger("native")
 

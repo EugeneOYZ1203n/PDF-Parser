@@ -102,7 +102,7 @@ from rastervec.commons.models import Vector
 from rastervec.commons.paths import output_dir
 from rastervec.pipelines._steps import extract_vectors
 from rastervec.pipelines.current import separate_by_layer_color_width
-from rastervec.Reader.reader import Reader
+from rastervec.P1_Reading_Native.reader import Reader
 from rastervec.commons.renderer._shapes import path_color_hex
 
 _LOG = get_logger("vector_label")

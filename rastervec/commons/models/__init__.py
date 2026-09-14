@@ -18,6 +18,7 @@ own output. See `docs/PIPELINE.md` for the full data flow.
 """
 from __future__ import annotations
 
+from rastervec.commons.models.image import Image
 from rastervec.commons.models.page import Page, PageMeta
 from rastervec.commons.models.segment import Segment, SegmentMeta
 from rastervec.commons.models.text import Text
@@ -30,4 +31,5 @@ __all__ = [
     "Text",
     "Segment",
     "SegmentMeta",
+    "Image",
 ]

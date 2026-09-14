@@ -11,7 +11,7 @@ import sys
 import time
 
 from rastervec.pipelines.result import PipelineResult
-from rastervec.Reader.reader import Reader
+from rastervec.P1_Reading_Native.reader import Reader
 
 __all__ = ["run_pipeline"]
 

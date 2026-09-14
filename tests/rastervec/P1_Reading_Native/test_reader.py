@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from rastervec.Reader.reader import Reader
+from rastervec.P1_Reading_Native.reader import Reader
 
 
 def test_page_count(synthetic_pdf_factory, tmp_pdf_path):
