@@ -1,13 +1,22 @@
-# The `current` pipeline, end to end
+# The `VectorClassification` P3 backend, end to end
 
-This document describes the *data flow* of `rastervec.pipelines.current` -- what goes in and out of
-each step and why the step exists -- independent of `CLAUDE.md`'s file-by-file architecture notes.
-Read `_common.py::run_current_pipeline` alongside this; every step named below is one named call
-there.
+**This document describes one P3 backend's algorithm, not the whole pipeline.** `rastervec/`
+today is three pluggable phases behind `core.pipeline.run_pipeline(pdf_path, page_index, *, p2,
+p3, ...)` (see `CLAUDE.md`'s architecture section) -- Phase 1 (always the same, native text + raw
+vectors + images), Phase 2 (pluggable raster→vector, `Stub`/`Junction`), Phase 3 (pluggable
+vector-parsing/OCR, `VectorClassification`/`FastIntoPaddle`/`LegacyRecreation`). This document's
+`classify → fast → segment → similarity → ocr → restore → drawing` sequence is
+`P3_Vector_Parsing/VectorClassification/`'s own algorithm (`parse.py` -- what used to be
+`rastervec.pipelines.current`'s only algorithm, before the phase split; that module is now dead
+code). It's selected via `p3="VectorClassification"`; the *default* P3 backend today is
+`FastIntoPaddle`, a materially different algorithm (similarity grouping → FAST filter →
+reclassify → layer/color/width separation → spatial clustering → per-cluster PaddleOCR detect →
+overlap reassignment → rotation refine → PaddleOCR recognize) not documented step-by-step here --
+see its own `CLAUDE.md` bullet and `P3_Vector_Parsing/FastIntoPaddle/parse.py`'s docstring.
 
 ## The two core models
 
-Everything in this pipeline is either a `Vector` or a `Text` (`rastervec/models/`):
+Everything in this backend is either a `Vector` or a `Text` (`rastervec/commons/models/`):
 
 - **`Vector`** mirrors one whole `get_drawings()` drawing. `items` is stored as PyMuPDF's own raw
   item shape (`("l", p1, p2)` / `("re", rect)` / `("qu", quad)` / `("c", p1, p2, p3, p4)`, fitz
@@ -36,13 +45,15 @@ read -> native -> vectors -> classify -> fast -> segment -> similarity -> ocr ->
    per-kind item parsing happens here -- this step is deliberately thin, just drawing-level field
    copying plus stripping fitz objects out of `items`.
 4. **`classify`** (`classify_vectors`) -- the fixed 12-step Vector Classification chain (see
-   `Vector_Classification/classification.py`), run separately within each `(layer, color)` bucket.
+   `P3_Vector_Parsing/VectorClassification/classification.py`), run separately within each
+   `(layer, color)` bucket.
    Every `Vector` any filter step drops is drawing content; everything that survives every step is a
    *text candidate cluster* -- there is no drawing-vs-text heuristic, OCR success/failure later is
    the real signal. Output: `text_clusters` (tiered `list[list[list[Vector]]]` -- clusters of their
    member groups of `Vector`s, real nested structure, no `id()`-keyed lineage side-channel) and
    `drawing_vectors` (flat, every dropped `Vector`).
-5. **`fast`** (`detect_text_fast`, `pipelines/_steps.py`) -- runs directly on classification's kept
+5. **`fast`** (`detect_text_fast`, `P3_Vector_Parsing/VectorClassification/fast_filter.py`) --
+   runs directly on classification's kept
    clusters (flattened to plain `list[Vector]` per cluster -- no `Segment` wrapping, no rotation
    estimate of any kind), scoring each cluster (at its real page position) against one whole-page
    FAST detection mask. **Each cluster passes or fails entirely on its own score** -- there is no
@@ -50,7 +61,8 @@ read -> native -> vectors -> classify -> fast -> segment -> similarity -> ocr ->
    weak render of an otherwise-common shape is dropped on its own, independent of its stronger
    siblings. A passing cluster's real, unmodified `Vector`s flow on to Radon segmentation; a
    failing cluster's vectors are flattened into drawing output.
-6. **`segment`** (`OCR/radon.py::segment_clusters`, called directly from `_common.py`) --
+6. **`segment`** (`P3_Vector_Parsing/VectorClassification/radon.py::segment_clusters`, called
+   directly from `parse.py`) --
    Radon-transform deskew, run on **every FAST-surviving cluster** (not a deduped subset -- dedup
    happens after this step now). One call, `segment_clusters(fast.passed)`, over the whole list at
    once: for each cluster, render, estimate skew at full precision, deskew, split into line/word
@@ -58,7 +70,8 @@ read -> native -> vectors -> classify -> fast -> segment -> similarity -> ocr ->
    capture that word's own deskewed pixel crop directly (`Segment.image`) so OCR never has to
    re-render. Output: one flat `list[Segment]`, combined across every input cluster, each entry one
    word at its real page position with Radon's precise `angle`.
-7. **`similarity`** (`group_similar_segments` + `elect_unique_segments`, `pipelines/_steps.py`) --
+7. **`similarity`** (`group_similar_segments` + `elect_unique_segments`,
+   `P3_Vector_Parsing/VectorClassification/fast_filter.py`) --
    groups the flat word `Segment` list from step 6 by whole-page, translation+rotation-tolerant
    shape equivalence, using each `Segment`'s own Radon-precise `angle` to normalize rotation -- this
    is the *only* rotation estimate anywhere in this pipeline now (there is no separate, coarser
@@ -68,8 +81,8 @@ read -> native -> vectors -> classify -> fast -> segment -> similarity -> ocr ->
    per group member (including the representative's own occurrence) recording how to transform its
    eventual OCR result back onto its own real position. Output: `unique_segments` (one canonical
    `Segment` per group) and `segment_metas` (one per real word occurrence).
-8. **`ocr`** (`recognize_unique_words`, `pipelines/sub_pipelines/ocr.py` ->
-   `OCR/Paddle_OCR/ocr_backend.py::recognize_segments`) -- recognizes every elected representative's
+8. **`ocr`** (`recognize_unique_words`, `P3_Vector_Parsing/VectorClassification/ocr.py` ->
+   `paddle_engine.py::recognize_segments`) -- recognizes every elected representative's
    own captured `.image` crop directly -- **no render happens in this step at all**. Recognition is
    a single pass per batch: PaddleOCR's own angle classifier (`use_angle_cls=True`) resolves the one
    remaining 0-vs-180-degree ambiguity Radon can't (a baseline is a line, not an arrow), flagged
@@ -77,7 +90,7 @@ read -> native -> vectors -> classify -> fast -> segment -> similarity -> ocr ->
    representative's own residual angle (0.0, since `elect_unique_segments` already canonicalized it)
    with the classifier's flip. Output: `unique_texts`, one canonical-frame `Text` per
    `unique_segments` entry, same order/length.
-9. **`restore`** (`restore_word_texts`, `pipelines/sub_pipelines/ocr.py`) -- for every `SegmentMeta`
+9. **`restore`** (`restore_word_texts`, `P3_Vector_Parsing/VectorClassification/ocr.py`) -- for every `SegmentMeta`
    (one real word occurrence), replays `unique_texts[meta.unique_index]` through
    `transform_bbox`/`transform_direction`/`transform_point` by that meta's own `(offset, rotation)`
    -- the exact inverse of the canonicalization applied in step 7 -- placing it onto that
@@ -117,28 +130,17 @@ one of them rotated 90 degrees.
   previous ordering, dedup here only saves OCR calls: Radon still ran once per surviving occurrence,
   since grouping isn't known until after Radon produces a precise angle to group by.
 
-## `PipelineResult`'s verbose-only fields
+## Debug/verbose output
 
-Set only when `run_pipeline(..., verbose=True)`; each corresponds to one step above and is what the
-visualization notebook reads via its own `render_<stage_name>` function:
-
-| Field | Step | What it shows |
-|---|---|---|
-| `native_words` | native | The native `Text`s alone (same objects as in `texts`) |
-| `vectors_raw` | vectors | Every extracted `Vector`, unclassified |
-| `vectors_by_layer` / `vectors_by_layer_color` | classify | The bucketing classification runs within |
-| `text_clusters` | classify | Tiered surviving clusters (`list[list[list[Vector]]]`) |
-| `clustering` | classify | Per-bucket `ClusteringStageResult` (every step's kept/dropped categories) |
-| `classification_dropped` | classify | Flat drawing-content `Vector`s from this step alone |
-| `fast_result` | fast | Whole-page render/mask/per-cluster scores |
-| `fast_passed` | fast | FAST-surviving clusters, pre-Radon (`list[list[Vector]]`) |
-| `fast_dropped_vectors` | fast | Real vectors from failing clusters |
-| `word_segments` | segment | Every FAST-surviving cluster's own Radon word `Segment`s, flat |
-| `similarity_groups` | similarity | `list[list[int]]` indices into `word_segments` |
-| `unique_segments` / `segment_metas` | similarity | One canonical `Segment` per similarity group, one `SegmentMeta` per real word occurrence |
-| `unique_texts` | ocr | One `Text` per `unique_segments` entry, canonical frame |
-| `restored_texts` | restore | One `Text` per real word occurrence, real position |
-| `step_outputs` | (all) | Per-step `StepOutcome` (status/error/duration) |
+This backend doesn't populate the old per-stage named-Optional `PipelineResult` fields the table
+below once described -- that dataclass (`rastervec/pipelines/result.py`) is dead code. Instead,
+`parse(..., debug_out=some_dict)` stashes its own intermediate step objects verbatim into the
+dict it's given (`classification` -- the `ClassificationResult`; `fast_passed`/`fast_dropped`;
+`word_segments`; `restored`; `drawing`), and this module's own `render_debug(debug_out,
+page_meta)` reads that back to build one PDF layer per classification step (kept/dropped) plus
+fast/segment/ocr/drawing layers -- see `CLAUDE.md`'s `core/`/`P3_Vector_Parsing/` bullets for how
+`core.pipeline.run_pipeline(..., verbose=True)` wires this through
+`PipelineResult.extra["p3_debug"]` and `core/registry.py::P3_RENDER_DEBUG`.
 
 ## Simplifications, honestly stated
 

@@ -29,20 +29,26 @@ paths.
 
 Config-driven per-stage report. Runs the pipeline once per `(pdf, page)` and
 writes a timestamped run folder with **one multi-page PDF per visual layer**
-(`<stage>__<layer>.pdf`, e.g. `vector_classification__group_bbox.pdf` --
-each a single element in one colour, so the viewer toggles it by
-loading/not-loading the file), per-stage `.txt` stats, `dump.json`
-(reloadable `Text`/`Vector`), `radon_images/` / `paddle_images/` (see
-below), plus `manifest.json` (its `layers` list drives the viewer) and
-`config_and_hyperparameters.txt`.
+(`<stage>__<layer>.pdf` -- each a single element in one colour, so the
+viewer toggles it by loading/not-loading the file), `dump.json` (reloadable
+`Text`/`Vector`), plus `manifest.json` (its `layers` list drives the
+viewer) and `config_and_hyperparameters.txt`.
 
-`radon_images/` and `paddle_images/` are *different inputs*, not the same
-crop twice:
-
-| folder | what | when |
-|---|---|---|
-| `radon_images/p<pg>_cluster_<i>.png` | the rendered cluster image Radon segments, one per FAST-surviving cluster, with the detected word/segment boxes drawn on it (red) | **before** Radon deskew + word split |
-| `paddle_images/p<pg>_uniq_<i>__<text>.png` | the exact deskewed, white-padded word crop handed to PaddleOCR (one per elected unique segment), unpadded word region boxed (blue), recognised text in the filename | **before** PaddleOCR recognition |
+For `pipeline: "current"` (the default, pluggable `core.pipeline` engine):
+the fixed `phase1__*.pdf` / `phase2__*.pdf` / `final__*.pdf` /
+`reconstructed__*.pdf` layers, **plus every debug layer the active `p2`/`p3`
+backend's own `render_debug` produces** (e.g. `p3: "VectorClassification"`
+emits one kept/dropped layer per classification step plus
+fast/segment/ocr/drawing; `p3: "FastIntoPaddle"` emits one layer per named
+step; `p2: "Junction"` emits its own raster-stage layers) -- see
+`CLAUDE.md`'s `P2_Raster_To_Vec/`/`P3_Vector_Parsing/` bullets for what each
+backend actually renders. `paddle_detect_images/` / `paddle_recog_images/` /
+`fast_tile_images/` (PNG debug crops -- what PaddleOCR's detector/recognizer
+and FAST actually saw) are populated only for backends whose verbose fields
+those particular helpers can read; they no-op harmlessly otherwise. There
+are no per-stage `.txt` stats for the `current` engine -- `dump.json` is the
+reloadable source of truth. `pipeline: "legacy"` still only ever emits the
+single `reconstructed` row.
 
 ```
 .venv/Scripts/python.exe scripts/generate_pipeline_report.py \
@@ -54,8 +60,11 @@ one of `input_dir` / `input_files`):
 
 | field | meaning |
 |---|---|
-| `pipeline` | `current` (default) / `current_nofast` / `legacy` |
-| `final_stage` | a step name (`read native vectors classify fast segment similarity ocr restore drawing`); `null` = all. Later steps skipped, their layer PDFs not emitted. |
+| `pipeline` | `current` (default, the pluggable `core.pipeline` engine) / `legacy` (archive/raster_parser, unmodified) |
+| `p2` | only meaningful when `pipeline: "current"` -- a `core.registry.P2_REGISTRY` name (`Stub` default, or `Junction`) |
+| `p3` | only meaningful when `pipeline: "current"` -- a `core.registry.P3_REGISTRY` name (`FastIntoPaddle` default, `VectorClassification`, or `LegacyRecreation`) |
+| `enable_fast` | forwarded to `p3` backends that accept it (default `true`) |
+| `final_stage` | one of `core.pipeline`'s short step names (`phase1`/`phase2`/`phase3`); `null` = all. Only trims which of the 4 fixed phase-level artifacts render -- doesn't skip any actual pipeline work, and doesn't gate the per-backend debug layers (those always render in full). Ignored entirely for `pipeline: "legacy"`. |
 | `input_dir` | folder scanned for `*.pdf` |
 | `input_files` | explicit PDF paths (merged with `input_dir`, deduped) |
 | `label_files` | `{ "<pdf-stem>": "path/to/labels.json" }` - recorded in the manifest only |
@@ -69,7 +78,7 @@ one of `input_dir` / `input_files`):
 
 Output: `outputs/pipeline_report/<ts>__<config-stem>/<pdf-stem>/`.
 Sample configs live in `scripts/report_configs/` (`full_current`,
-`quick_classify`, `nofast_vectorised`, `directory_with_labels`, `benchmark`).
+`quick_classify`, `directory_with_labels`, `benchmark`).
 
 ### Benchmark mode (`benchmark: true`)
 
@@ -81,9 +90,10 @@ A self-contained scoring artifact for `pipeline_report_benchmark.py`.
 Per input, per page: the page is converted **once** with
 `convert_page_to_vector_text` (native text as vectors on top of the untouched
 drawings) and the pipeline runs **once**. `<pdf-stem>/` then gets the **full**
-per-stage report (`manifest.json`, every `<stage>__<layer>.pdf`, `<stage>.txt`,
-`radon_images/`, `paddle_images/`, `dump.json`, `converted_p*.pdf`) - legacy
-engine only emits `reconstructed` - **plus**:
+per-stage report (`manifest.json`, every `<stage>__<layer>.pdf`, `dump.json`,
+`converted_p*.pdf`, per-backend debug layers/PNG dirs for `pipeline:
+"current"` -- see above) - `pipeline: "legacy"` only emits `reconstructed` -
+**plus**:
 
 - `ground_truth_auto.json` (from `native_label_pdf`), `ground_truth_manual.json`
   (the JSON's `source in ("vector", "raster")` entries; absent when there are none)
@@ -103,8 +113,10 @@ page - needs LibreOffice on PATH). Run one `benchmark` config with
 `report_configs/benchmark.json` / `benchmark_legacy.json`), then diff the two
 folders with `pipeline_report_benchmark.py --run ... --run ...`.
 
-`quick_classify.json` (`final_stage: "classify"`) is the fast smoke test - it
-never touches OCR.
+`quick_classify.json` (`final_stage: "phase2"`) is the fast smoke test - it
+skips rendering the `final`/`reconstructed` artifacts (OCR still runs as
+part of the pipeline itself -- `final_stage` doesn't skip pipeline work, see
+above).
 
 ## `scripts/pipeline_report_viewer.py`
 
@@ -300,22 +312,29 @@ random seed, so regeneration is byte-identical. No arguments.
 
 ## Module CLIs (`python -m ...`)
 
-### `rastervec.pipelines.current`
+### `rastervec.core.pipeline`
 
-Run the current 9-step pipeline on one page; logs per-step wall-clock.
+Run the pluggable Phase1 -> P2_REGISTRY[p2] -> P3_REGISTRY[p3] pipeline on
+one page; prints texts/vectors counts + per-phase wall-clock
+(`step_durations`). This is the primary CLI now -- the old
+`rastervec.pipelines.current` module still exists but is dead code, not
+called by any live script.
 
 ```
-.venv/Scripts/python.exe -m rastervec.pipelines.current \
-    --pdf "references/<stem>.pdf" --page 0
+.venv/Scripts/python.exe -m rastervec.core.pipeline \
+    --pdf "references/<stem>.pdf" --page 0 --p2 Stub --p3 FastIntoPaddle
 ```
 
 | arg | meaning |
 |---|---|
 | `--pdf PATH` | input PDF (required) |
 | `--page N` | 0-based page index (default 0) |
-| `--no-fast` | FAST detection becomes a pass-through (speed testing) |
-| `--stop-after STEP` | skip every step after `STEP` |
-| `-v` / `-q` | DEBUG + keep intermediates / WARNING-only |
+| `--p2 NAME` | `core.registry.P2_REGISTRY` name (default `Stub`) |
+| `--p3 NAME` | `core.registry.P3_REGISTRY` name (default `FastIntoPaddle`) |
+| `--no-fast` | `enable_fast=False`, forwarded to `p3` backends that accept it |
+| `-v` / `--verbose` | DEBUG logging + populate `PipelineResult.extra` (phase1/phase2 intermediates + each backend's `debug_out`) |
+
+No `--stop-after` -- always a full Phase1->P2->P3 run.
 
 ### `rastervec.pipelines.legacy`
 
@@ -347,7 +366,7 @@ per variant, with an aggregate + timing comparison.
 | `--reconstruct-dir DIR` | per-page reconstruction / input / box-overlay PDFs (default `outputs/benchmark_cli/reconstructions/`) |
 | `--workers N` | run pages across a spawn pool of size `N` (>1); default 1 serial |
 | `--compute-workers N` | run FAST tiles + OCR crops on a shared pool of size `N` (>0); default 0 local |
-| `--variants a,b` | `variants.VARIANTS` names to run/compare (default `current,legacy`) |
+| `--variants a,b` | `variants.VARIANTS` names to run/compare (default `current,legacy`) -- also `current_vectorclassification`, `current_legacyrecreation`, `current_junction` (named P2/P3 combo presets for benchmark comparisons) |
 
 `--variants current,legacy` needs LibreOffice (legacy). `main()`'s real
 OCR path is a manual smoke test; the pure formatting/aggregation helpers are
