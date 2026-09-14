@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from rastervec.helpers.clustering import cluster_spatial
+from rastervec.commons.helpers.clustering import cluster_spatial
 
 
 def _item(x0, y0, x1, y1, seq=0):

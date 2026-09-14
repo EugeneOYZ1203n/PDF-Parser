@@ -30,8 +30,8 @@ from rastervec.Evaluation.Labelling.native_label import (
     attach_vector_signatures,
     native_label_pdf,
 )
-from rastervec.logging_setup import configure_logging, get_logger
-from rastervec.paths import output_dir
+from rastervec.commons.logging_setup import configure_logging, get_logger
+from rastervec.commons.paths import output_dir
 
 _LOG = get_logger("native_label_cli")
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from rastervec.helpers import geometry
+from rastervec.commons.helpers import geometry
 
 
 def test_round_color_none():
@@ -280,7 +280,7 @@ def test_transform_vector_translates_items_and_rect(vector):
 
 
 def test_transform_vector_rotation_recomputes_rect_from_new_items():
-    from rastervec.models import Vector
+    from rastervec.commons.models import Vector
 
     v = Vector(
         type="s", items=[("l", (0.0, 0.0), (10.0, 0.0))], color=(0, 0, 0), fill=None,

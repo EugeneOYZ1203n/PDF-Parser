@@ -36,7 +36,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import atan2, degrees
 
-from rastervec.helpers.geometry import compute_origin, make_oriented_quad
+from rastervec.commons.helpers.geometry import compute_origin, make_oriented_quad
 
 
 @dataclass

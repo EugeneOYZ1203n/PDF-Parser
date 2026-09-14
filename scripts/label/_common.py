@@ -12,8 +12,8 @@ import tkinter as tk
 
 import pymupdf as fitz
 
-from rastervec.helpers.geometry import item_points
-from rastervec.models import Vector
+from rastervec.commons.helpers.geometry import item_points
+from rastervec.commons.models import Vector
 
 MIN_ZOOM = 0.25
 MAX_ZOOM = 6.0

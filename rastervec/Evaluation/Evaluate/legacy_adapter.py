@@ -25,9 +25,9 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from rastervec.helpers.geometry import compute_origin
-from rastervec.logging_setup import get_logger
-from rastervec.models import Text
+from rastervec.commons.helpers.geometry import compute_origin
+from rastervec.commons.logging_setup import get_logger
+from rastervec.commons.models import Text
 
 _LOG = get_logger("eval.legacy_adapter")
 

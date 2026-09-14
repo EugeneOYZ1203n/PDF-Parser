@@ -52,8 +52,8 @@ from rastervec.Evaluation.Evaluate.vector_metrics import (
     aggregate_vector_metrics,
 )
 from rastervec.Evaluation.Evaluate.variants import DEFAULT_VARIANTS, resolve_variant
-from rastervec.logging_setup import configure_logging, get_logger
-from rastervec.paths import output_dir
+from rastervec.commons.logging_setup import configure_logging, get_logger
+from rastervec.commons.paths import output_dir
 
 _LOG = get_logger("benchmark")
 

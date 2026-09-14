@@ -17,7 +17,7 @@ import dataclasses
 import json
 from pathlib import Path
 
-from rastervec.models import PageMeta, Text, Vector
+from rastervec.commons.models import PageMeta, Text, Vector
 
 _SCHEMA = 1
 

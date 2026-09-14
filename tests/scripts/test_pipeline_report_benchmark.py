@@ -9,7 +9,7 @@ import pytest
 
 from rastervec.Evaluation import dump_io
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet, save_labels
-from rastervec.models import PageMeta, Text
+from rastervec.commons.models import PageMeta, Text
 
 _MOD = Path(__file__).resolve().parents[2] / "scripts" / "pipeline_report_benchmark.py"
 _spec = importlib.util.spec_from_file_location("pipeline_report_benchmark", _MOD)

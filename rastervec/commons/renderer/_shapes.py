@@ -27,8 +27,8 @@ from itertools import groupby
 
 import pymupdf as fitz
 
-from rastervec.helpers.geometry import item_points
-from rastervec.models import Vector
+from rastervec.commons.helpers.geometry import item_points
+from rastervec.commons.models import Vector
 
 _DEFAULT_PATH_COLOR = "#111827"
 

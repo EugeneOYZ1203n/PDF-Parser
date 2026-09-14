@@ -71,12 +71,12 @@ from rastervec.Evaluation.Labelling.label_schema import (
     load_labels_from_master_folder,
     save_labels,
 )
-from rastervec.helpers.geometry import union_bbox
+from rastervec.commons.helpers.geometry import union_bbox
 from rastervec.Evaluation.Report import stage_stats
-from rastervec.logging_setup import configure_logging, get_logger
-from rastervec.paths import output_dir
+from rastervec.commons.logging_setup import configure_logging, get_logger
+from rastervec.commons.paths import output_dir
 from rastervec.pipelines.current import STEP_NAMES
-from rastervec.renderer import render_boxes_pdf, render_reconstructed_pdf, stages
+from rastervec.commons.renderer import render_boxes_pdf, render_reconstructed_pdf, stages
 
 _LOG = get_logger("generate_pipeline_report")
 
@@ -277,7 +277,7 @@ def _save_paddle_detect_inputs(res, folder: Path, page_index: int) -> int:
     if not clusters or not cluster_detections:
         return 0
     from rastervec.pipelines._steps import cluster_render_padding
-    from rastervec.renderer import page_points_to_pixel
+    from rastervec.commons.renderer import page_points_to_pixel
 
     folder.mkdir(parents=True, exist_ok=True)
     n = 0
@@ -330,7 +330,7 @@ def _save_fast_tile_images(res, folder: Path, page_index: int) -> int:
     if fr is None or fr.page_image is None or not tiles:
         return 0
     from rastervec.config import FAST_PAGE_RENDER_DPI, FAST_TILE_SCALE_FACTOR
-    from rastervec.helpers.geometry import PDF_POINTS_PER_INCH
+    from rastervec.commons.helpers.geometry import PDF_POINTS_PER_INCH
 
     debug_scale = getattr(fr, "debug_image_scale", 1.0)
     zoom = (FAST_PAGE_RENDER_DPI * FAST_TILE_SCALE_FACTOR) / PDF_POINTS_PER_INCH * debug_scale

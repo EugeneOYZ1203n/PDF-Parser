@@ -22,7 +22,6 @@ def test_engines_and_flags():
     assert VARIANTS["legacy"].engine == "legacy"
     assert VARIANTS["current"].engine == "current"
     assert VARIANTS["current"].enable_fast is True
-    assert VARIANTS["current_nofast"].enable_fast is False
 
 
 def test_resolve_variant_rejects_unknown():

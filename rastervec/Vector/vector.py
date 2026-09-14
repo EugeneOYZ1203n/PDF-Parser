@@ -23,12 +23,13 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Iterator
 
-from rastervec.logging_setup import get_logger
-from rastervec.models import Page, Vector
-from rastervec.renderer.stages import render_vectors  # noqa: F401 -- re-exported for callers
+from rastervec.commons.logging_setup import get_logger
+from rastervec.commons.models import Page, Vector
+from rastervec.commons.renderer.stages import render_vectors  # noqa: F401 -- re-exported for callers
 from rastervec.Vector.layer_color_separation import (  # noqa: F401 -- re-exported for callers
     separate_by_color,
     separate_by_layer,
+    separate_by_width,
 )
 
 _LOG = get_logger("vector")

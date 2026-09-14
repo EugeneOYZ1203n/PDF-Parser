@@ -62,6 +62,7 @@ class _Panel:
         self.layer_docs: dict[str, fitz.Document] = {
             e["file"]: fitz.open(str(doc_dir / e["file"])) for e in self.layers
         }
+        self.doc_dir = doc_dir
 
 
 class ViewerApp:

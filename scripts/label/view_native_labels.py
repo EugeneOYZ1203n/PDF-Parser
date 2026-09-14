@@ -25,8 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from rastervec.Evaluation.Labelling.label_schema import LabelSet, load_labels, save_labels
 from rastervec.Evaluation.Labelling.native_label import native_label_pdf
-from rastervec.logging_setup import configure_logging, get_logger
-from rastervec.paths import output_dir
+from rastervec.commons.logging_setup import configure_logging, get_logger
+from rastervec.commons.paths import output_dir
 
 from vector_label import VectorLabelApp  # noqa: E402 -- sys.path set up above
 

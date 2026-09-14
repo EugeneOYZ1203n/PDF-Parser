@@ -3,7 +3,7 @@ from __future__ import annotations
 import pymupdf as fitz
 import pytest
 
-from rastervec.helpers import fitz_geometry
+from rastervec.commons.helpers import fitz_geometry
 
 
 def test_point_angle_horizontal():

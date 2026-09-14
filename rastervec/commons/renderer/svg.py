@@ -10,7 +10,7 @@ output back into a PDF for known-answer testing.
 """
 from __future__ import annotations
 
-from rastervec.models import Page
+from rastervec.commons.models import Page
 
 
 def render_page_svg(page: Page) -> str:

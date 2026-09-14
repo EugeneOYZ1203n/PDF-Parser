@@ -1,13 +1,8 @@
 """Named pipeline variants for the benchmark.
 
-The benchmark scores a few pipeline configurations against the same ground
-truth -- the current pipeline (FAST on / off) and the archive/legacy
+The benchmark scores the current pipeline against the archive/legacy
 pipeline. Each is a named `PipelineVariant`; `benchmark.py --variants` and
 the notebook's `VARIANTS_TO_RUN` select from `VARIANTS` by name.
-
-Adding an ablation = one entry in `VARIANTS`:
-`Reader/Parallel/benchmark_jobs.run_page_task` reads it and threads
-`enable_fast` into `rastervec.pipelines.current.run_pipeline`.
 """
 from __future__ import annotations
 
@@ -31,7 +26,6 @@ class PipelineVariant:
 
 VARIANTS: dict[str, PipelineVariant] = {
     "current": PipelineVariant("current", "current", True),
-    "current_nofast": PipelineVariant("current_nofast", "current", False),
     "legacy": PipelineVariant("legacy", "legacy"),
 }
 

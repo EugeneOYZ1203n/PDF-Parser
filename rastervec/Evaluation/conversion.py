@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import pymupdf as fitz
 
-from rastervec.logging_setup import get_logger
+from rastervec.commons.logging_setup import get_logger
 
 _LOG = get_logger("conversion")
 

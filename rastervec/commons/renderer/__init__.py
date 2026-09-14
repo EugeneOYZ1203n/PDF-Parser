@@ -20,28 +20,29 @@ Split by output concern:
   `pipeline_stage_visualization.ipynb`. Deliberately **not** re-exported
   here -- it imports matplotlib, and this package is imported by the real
   pipeline itself; import it directly
-  (`from rastervec.renderer.notebook import ...`) instead.
+  (`from rastervec.commons.renderer.notebook import ...`) instead.
 
 Module-level functions, no `Renderer` class -- import what you need
-straight from `rastervec.renderer`.
+straight from `rastervec.commons.renderer`.
 """
 from __future__ import annotations
 
-from rastervec.renderer._shapes import path_color_hex, replay_drawing_paths
-from rastervec.renderer.pdf import (
+from rastervec.commons.renderer._shapes import path_color_hex, replay_drawing_paths
+from rastervec.commons.renderer.pdf import (
     render_boxes_pdf,
     render_reconstructed_page,
     render_reconstructed_pdf,
     render_text_pdf,
     render_vectors_pdf,
 )
-from rastervec.renderer.png import (
+from rastervec.commons.renderer.png import (
     page_points_to_pixel,
     pixel_to_page_bbox,
+    pixel_to_page_points,
     render_page_paths,
     render_vector_cluster,
 )
-from rastervec.renderer.svg import render_page_svg
+from rastervec.commons.renderer.svg import render_page_svg
 
 __all__ = [
     "path_color_hex",
@@ -54,6 +55,7 @@ __all__ = [
     "render_vector_cluster",
     "render_page_paths",
     "pixel_to_page_bbox",
+    "pixel_to_page_points",
     "page_points_to_pixel",
     "render_page_svg",
 ]

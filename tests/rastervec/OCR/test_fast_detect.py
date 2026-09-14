@@ -62,10 +62,52 @@ def test_detect_tiled_calls_detect_once_per_tile_no_rotation(monkeypatch):
     monkeypatch.setattr(FastDetector, "detect", counting_detect)
     image = Image.new("RGB", (64, 32), (0, 0, 0))
     FastDetector(weights_path="fake.pth").detect_tiled(
-        image, block_size=32, scale=1.0, show_progress=False,
+        image, block_size=32, scale=1.0, overlap=0.0, show_progress=False,
     )
-    # 64x32 at block_size=32 -> 2 cols x 1 row = 2 tiles, one call each (no rotation sweep)
+    # 64x32 at block_size=32, no overlap -> 2 cols x 1 row = 2 tiles, one call each (no rotation sweep)
     assert len(calls) == 2
+
+
+def test_tile_starts_single_tile_when_total_fits():
+    from rastervec.OCR.fast_detect import _tile_starts
+
+    assert _tile_starts(20, 32, 27) == [0]
+
+
+def test_tile_starts_overlap_covers_edge_exactly():
+    from rastervec.OCR.fast_detect import _tile_starts
+
+    # 64px, 32px tiles, stride 27 -> [0, 27], last start extended to 32 so
+    # the final tile (32-64) reaches the far edge exactly.
+    assert _tile_starts(64, 32, 27) == [0, 27, 32]
+
+
+def test_tile_starts_no_extra_tile_when_grid_already_reaches_edge():
+    from rastervec.OCR.fast_detect import _tile_starts
+
+    # 64px, 32px tiles, stride 32 (no overlap) -> grid already ends exactly
+    # at the far edge, no extra tile appended.
+    assert _tile_starts(64, 32, 32) == [0, 32]
+
+
+def test_detect_tiled_overlap_stitches_by_max(monkeypatch):
+    """Two overlapping tiles disagree in their shared region -- the
+    stitched mask must take the max, never the second tile's overwrite."""
+    calls = []
+
+    def alternating_detect(self, image: "Image.Image") -> np.ndarray:
+        value = 0.2 if len(calls) == 0 else 0.9
+        calls.append(image.size)
+        return np.full((image.height, image.width), value, dtype=np.float32)
+
+    monkeypatch.setattr(FastDetector, "detect", alternating_detect)
+    image = Image.new("RGB", (64, 32), (0, 0, 0))
+    mask = FastDetector(weights_path="fake.pth").detect_tiled(
+        image, block_size=32, scale=1.0, overlap=0.15, show_progress=False,
+    )
+    # The overlap band between the two tiles must reflect the max (0.9),
+    # not the first tile's lower value or a blind overwrite.
+    assert mask[:, 27:32].min() > 0.8
 
 
 def test_tile_has_candidate():
@@ -108,7 +150,7 @@ def test_detect_tiled_candidate_bboxes_none_detects_every_tile(monkeypatch):
     monkeypatch.setattr(FastDetector, "detect", counting_detect)
     image = Image.new("RGB", (64, 32), (0, 0, 0))
     FastDetector(weights_path="fake.pth").detect_tiled(
-        image, block_size=32, scale=1.0, show_progress=False, candidate_bboxes=None,
+        image, block_size=32, scale=1.0, overlap=0.0, show_progress=False, candidate_bboxes=None,
     )
     assert len(calls) == 2
 
@@ -120,9 +162,9 @@ def test_detect_tiled_progress_counter_local_increments_per_tile(monkeypatch):
     counter = _FakeCounter()
 
     detector.detect_tiled(
-        image, block_size=32, scale=1.0, show_progress=False, progress_counter=counter,
+        image, block_size=32, scale=1.0, overlap=0.0, show_progress=False, progress_counter=counter,
     )
-    # 64x32 at block_size=32 -> 2 tiles.
+    # 64x32 at block_size=32, no overlap -> 2 tiles.
     assert counter.value == 2
 
 
@@ -133,7 +175,7 @@ def test_detect_tiled_progress_counter_with_compute_uses_imap_and_increments(mon
     counter = _FakeCounter()
 
     mask = detector.detect_tiled(
-        image, block_size=32, scale=1.0, show_progress=False,
+        image, block_size=32, scale=1.0, overlap=0.0, show_progress=False,
         compute=_FakeComputePool(), progress_counter=counter,
     )
     assert counter.value == 2

@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 from rastervec.Evaluation.Evaluate.metrics import TEXT_TYPES, Bbox, GtRegion, Prediction
 from rastervec.Evaluation.Evaluate.vector_metrics import GeometryEntry, geometry_entries_from_annotations
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet, path_signature
-from rastervec.models import Text
+from rastervec.commons.models import Text
 
 if TYPE_CHECKING:
     from rastervec.pipelines.result import PipelineResult

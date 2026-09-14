@@ -18,7 +18,7 @@ import pymupdf as fitz
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from rastervec.paths import output_dir
+from rastervec.commons.paths import output_dir
 
 
 def rasterize_pdf(src_path: str, dst_path: str, dpi: int = 300) -> None:

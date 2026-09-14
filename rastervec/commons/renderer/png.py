@@ -32,9 +32,9 @@ from __future__ import annotations
 import pymupdf as fitz
 from PIL import Image
 
-from rastervec.helpers.geometry import PDF_POINTS_PER_INCH, union_bbox
-from rastervec.models import PageMeta, Vector
-from rastervec.renderer._shapes import replay_drawing_paths
+from rastervec.commons.helpers.geometry import PDF_POINTS_PER_INCH, union_bbox
+from rastervec.commons.models import PageMeta, Vector
+from rastervec.commons.renderer._shapes import replay_drawing_paths
 
 # One `fitz.Document` reused across every render_vector_cluster/
 # render_page_paths call in this process, instead of a fresh fitz.open()
@@ -129,6 +129,22 @@ def pixel_to_page_bbox(
     xs = [px / zoom + x0 for px, _py in pixel_points]
     ys = [py / zoom + y0 for _px, py in pixel_points]
     return (min(xs), min(ys), max(xs), max(ys))
+
+
+def pixel_to_page_points(
+    vectors: list[Vector],
+    dpi: int,
+    pixel_points: list[tuple[float, float]],
+    padding: float = 0.0,
+) -> list[tuple[float, float]]:
+    """Like `pixel_to_page_bbox` but returns each mapped point individually
+    instead of collapsing them into a bbox -- for a caller that needs a
+    detector's own quad corners in page space (e.g. `PaddleDetectBackend.
+    detect_on_cluster`'s rotation-approx quad), not just their envelope."""
+    x0, y0, _x1, _y1 = union_bbox([v.bbox for v in vectors])
+    x0, y0 = x0 - padding, y0 - padding
+    zoom = dpi / PDF_POINTS_PER_INCH
+    return [(px / zoom + x0, py / zoom + y0) for px, py in pixel_points]
 
 
 def page_points_to_pixel(

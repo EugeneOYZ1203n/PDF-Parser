@@ -19,8 +19,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rastervec.helpers.fitz_geometry import fitz_item, plain_item
-from rastervec.helpers.geometry import round_color
+from rastervec.commons.helpers.fitz_geometry import fitz_item, plain_item
+from rastervec.commons.helpers.geometry import round_color
 
 
 @dataclass

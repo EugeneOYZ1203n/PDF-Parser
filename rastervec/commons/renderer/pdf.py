@@ -28,8 +28,8 @@ import io
 import pymupdf as fitz
 from PIL import Image
 
-from rastervec.models import PageMeta, Text, Vector
-from rastervec.renderer._shapes import replay_drawing_paths
+from rastervec.commons.models import PageMeta, Text, Vector
+from rastervec.commons.renderer._shapes import replay_drawing_paths
 
 # One reconstructed text box: (text, page-space bbox, rotation in degrees),
 # optionally a fourth element, an (r, g, b) 0..1 fill color (default black).

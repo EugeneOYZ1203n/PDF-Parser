@@ -18,17 +18,17 @@ def one_page_pdf(synthetic_pdf_factory, tmp_pdf_path) -> str:
 def test_stop_after_vectors(one_page_pdf):
     res = run_pipeline(one_page_pdf, 0, verbose=True, stop_after="vectors", enable_fast=False)
     assert set(res.step_durations) == {"read", "native", "vectors"}
-    assert res.clustering is None
-    assert res.word_segments is None
-    assert res.text_clusters is None
+    assert res.spatial_clusters is None
+    assert res.rotated_segments is None
+    assert res.cluster_detections is None
 
 
-def test_stop_after_classify(one_page_pdf):
-    res = run_pipeline(one_page_pdf, 0, verbose=True, stop_after="classify", enable_fast=False)
-    assert "classify" in res.step_durations
-    assert "segment" not in res.step_durations
-    assert res.word_segments is None
-    assert res.clustering is not None
+def test_stop_after_clusters(one_page_pdf):
+    res = run_pipeline(one_page_pdf, 0, verbose=True, stop_after="clusters", enable_fast=False)
+    assert "clusters" in res.step_durations
+    assert "paddle_detect" not in res.step_durations
+    assert res.rotated_segments is None
+    assert res.spatial_clusters is not None
 
 
 def test_invalid_stop_after(one_page_pdf):

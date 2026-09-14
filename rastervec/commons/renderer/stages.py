@@ -11,10 +11,17 @@ that need several of those layers on one page.
 
 Kept matplotlib-free and free of any `rastervec.pipelines` import at module
 level: this module is imported (for its name re-exports) by
-`Vector_Classification/classification.py`, `OCR/fast_detect.py`,
-`pipelines/_steps.py` and others, so a heavy import here would land in the
-real pipeline's import graph. Every stage module keeps its one-line
-`from rastervec.renderer.stages import render_x` re-export.
+`OCR/fast_detect.py`, `pipelines/_steps.py` and others, so a heavy import
+here would land in the real pipeline's import graph. Every stage module
+keeps its one-line `from rastervec.commons.renderer.stages import render_x`
+re-export.
+
+The old Vector_Classification/pixel-Radon pipeline's own stage renderers
+(`render_layers`, `render_layer_color_buckets` (nested-dict version),
+`render_clustering_steps`, `render_text_candidates`, `render_radon`,
+`render_similarity`, `render_restore`) moved to `archive/rastervec/
+renderer/stages_old.py` when that pipeline was retired -- this module now
+only covers the current pipeline's own stages.
 """
 from __future__ import annotations
 
@@ -25,11 +32,11 @@ import numpy as np
 import pymupdf as fitz
 from PIL import Image
 
-from rastervec.helpers.geometry import union_bbox
-from rastervec.renderer import render_reconstructed_pdf, render_text_pdf, render_vectors_pdf
+from rastervec.commons.helpers.geometry import union_bbox
+from rastervec.commons.renderer import render_reconstructed_pdf, render_text_pdf, render_vectors_pdf
 
 if TYPE_CHECKING:
-    from rastervec.models import PageMeta
+    from rastervec.commons.models import PageMeta
     from rastervec.pipelines.result import PipelineResult
 
 # ---------------------------------------------------------------------------
@@ -37,47 +44,42 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 C_NATIVE = "#1d4ed8"
 C_DRAWING = "#111827"
-C_TEXT_CANDIDATE = "#059669"
-C_GROUP_BBOX = "#7c3aed"
 C_CLUSTER_BBOX = "#ea580c"
-C_ORIG_BBOX = "#2563eb"
-C_SEGMENT_BBOX = "#059669"
-C_LINE_GAP = "#dc2626"
-C_WORD_GAP = "#f59e0b"
-C_GROWN_BBOX = "#0d9488"
-C_VEC_ASSIGNED = "#16a34a"
-C_VEC_DROPPED = "#dc2626"
-C_SEG_DROPPED = "#b91c1c"
+C_RENDER_BBOX = "#2563eb"
+C_DETECTION_BOX = "#16a34a"
+C_ASSIGNED_TEXT = "#16a34a"
+C_ASSIGNED_DRAWING = "#dc2626"
+C_ROTATED_BBOX = "#0d9488"
 C_FAST_PASS = "#059669"
 C_FAST_DROP = "#dc2626"
 C_TILE_SKIP = "#9ca3af"
+C_TILE_GRID = "#6b7280"
+C_RECLASS_PASS = "#059669"
 C_OCR_PASS = "#059669"
 C_OCR_FAIL = "#dc2626"
 C_OCR_BOX = "#2563eb"
-
-_DROP_CATEGORIES = [
-    "dropped_oversized", "duplicate_runs", "dropped_tiny", "dropped_mixed_fill_rule",
-    "dropped_perimeter", "dropped_low_density", "dropped_constant_spacing",
-    "dropped_low_variety",
-]
 
 # Human-readable legend per generated stage PDF (filename -> [(label, hex)]).
 STAGE_COLOR_LEGEND: dict[str, list[tuple[str, str]]] = {
     "native_text.pdf": [("native word", C_NATIVE)],
     "vector_extraction.pdf": [("(one colour per vector type)", "#888888")],
-    "separation.pdf": [("(one colour per (layer, colour) bucket)", "#888888")],
-    "vector_classification.pdf": [],  # filled in below, once _drop_color exists
     "fast_heatmap.pdf": [
-        ("text heatmap", "#dc2626"), ("skipped tile", C_TILE_SKIP),
-        ("passed cluster", C_FAST_PASS), ("dropped vector", C_FAST_DROP),
-    ],
-    "segmentation.pdf": [
-        ("original cluster bbox", C_ORIG_BBOX), ("segment bbox", C_SEGMENT_BBOX),
-        ("post-growth segment bbox", C_GROWN_BBOX), ("line gap", C_LINE_GAP),
-        ("word gap", C_WORD_GAP), ("vectors assigned", C_VEC_ASSIGNED),
-        ("vectors dropped", C_VEC_DROPPED), ("segments dropped", C_SEG_DROPPED),
+        ("text heatmap", "#dc2626"), ("skipped tile", C_TILE_SKIP), ("tile grid", C_TILE_GRID),
+        ("kept vector", C_FAST_PASS), ("dropped vector", C_FAST_DROP),
     ],
     "similarity.pdf": [("(one colour per similarity group)", "#888888")],
+    "reclassify.pdf": [("final pass", C_RECLASS_PASS)],
+    "separation.pdf": [("(one colour per (layer, colour, width) bucket)", "#888888")],
+    "clusters.pdf": [("cluster bbox", C_CLUSTER_BBOX)],
+    "paddle_detect.pdf": [
+        ("cluster render bbox", C_RENDER_BBOX), ("detected box", C_DETECTION_BOX),
+    ],
+    "assignment.pdf": [
+        ("vector assigned to text", C_ASSIGNED_TEXT), ("vector reassigned to drawing", C_ASSIGNED_DRAWING),
+    ],
+    "rotate.pdf": [
+        ("detection bbox", C_RENDER_BBOX), ("rotated crop bbox", C_ROTATED_BBOX),
+    ],
     "paddle_ocr.pdf": [
         ("predicted text (ok)", C_OCR_PASS), ("predicted text (blank)", C_OCR_FAIL),
         ("OCR-detected box", C_OCR_BOX),
@@ -89,11 +91,14 @@ STAGE_COLOR_LEGEND: dict[str, list[tuple[str, str]]] = {
 STAGE_ARTIFACTS = {
     "native": "native_text.pdf",
     "vectors": "vector_extraction.pdf",
-    "separation": "separation.pdf",
-    "classify": "vector_classification.pdf",
-    "fast": "fast_heatmap.pdf",
-    "segment": "segmentation.pdf",
     "similarity": "similarity.pdf",
+    "fast": "fast_heatmap.pdf",
+    "reclassify": "reclassify.pdf",
+    "separation": "separation.pdf",
+    "clusters": "clusters.pdf",
+    "paddle_detect": "paddle_detect.pdf",
+    "assignment": "assignment.pdf",
+    "rotate": "rotate.pdf",
     "ocr": "paddle_ocr.pdf",
     "drawing": "drawing_vectors.pdf",
     "reconstructed": "reconstructed.pdf",
@@ -114,28 +119,8 @@ def _hash_color(key) -> tuple[float, float, float]:
     return colorsys.hsv_to_rgb(hue, 0.62, 0.85)
 
 
-def _drop_color(name: str) -> str:
-    r, g, b = _hash_color(("drop", name))
-    return "#%02x%02x%02x" % (round(r * 255), round(g * 255), round(b * 255))
-
-
-STAGE_COLOR_LEGEND["vector_classification.pdf"] = (
-    [("text-candidate vectors", C_TEXT_CANDIDATE), ("group bbox", C_GROUP_BBOX),
-     ("cluster bbox", C_CLUSTER_BBOX)]
-    + [(name, _drop_color(name)) for name in _DROP_CATEGORIES]
-)
-
-
 def _meta(res: "PipelineResult", page_meta: "PageMeta | None") -> "PageMeta":
     return page_meta if page_meta is not None else res.page.meta
-
-
-def _entry_vectors(entry: list) -> list:
-    """Flatten one classification category entry (a group `list[Vector]` or a
-    cluster `list[list[Vector]]`) to a flat `list[Vector]`."""
-    if entry and isinstance(entry[0], list):
-        return [v for g in entry for v in g]
-    return entry
 
 
 # ---------------------------------------------------------------------------
@@ -147,13 +132,17 @@ def _compose(
     image: "Image.Image | None" = None,
     vector_layers: "list[tuple[list, str]] | None" = None,
     rect_layers: "list[tuple[list, str, bool]] | None" = None,
+    poly_layers: "list[tuple[list, str]] | None" = None,
     text_layer: "list[tuple[str, tuple, float, tuple]] | None" = None,
 ) -> bytes:
     """Build one page sized/rotated to `page_meta`, painting (in order): a
     full-page raster `image`; each `(vectors, hex)` in `vector_layers` as
-    recoloured strokes; each `(bboxes, hex, filled)` in `rect_layers`; then
-    `text_layer` `(text, bbox, rotation, rgb)` tuples. Returns PDF bytes."""
-    from rastervec.renderer._shapes import replay_drawing_paths
+    recoloured strokes; each `(bboxes, hex, filled)` in `rect_layers`; each
+    `(polys, hex)` in `poly_layers` as closed, unfilled polylines (`polys`
+    is a list of `(N, 2)` point sequences -- for a genuinely rotated
+    rectangle, not just an axis-aligned bbox); then `text_layer` `(text,
+    bbox, rotation, rgb)` tuples. Returns PDF bytes."""
+    from rastervec.commons.renderer._shapes import replay_drawing_paths
 
     doc = fitz.open()
     try:
@@ -193,6 +182,14 @@ def _compose(
                     kw["fill"] = rgb
                     kw["fill_opacity"] = 0.25
                 page.draw_rect(fitz.Rect(*b), **kw)
+
+        for polys, hexcol in poly_layers or []:
+            rgb = _hex_to_rgb01(hexcol)
+            for poly in polys:
+                if poly is None or len(poly) < 2:
+                    continue
+                pts = [fitz.Point(float(px), float(py)) for px, py in poly]
+                page.draw_polyline(pts + [pts[0]], color=rgb, width=1.0)
 
         if text_layer:
             base_font = fitz.Font("helv")
@@ -240,158 +237,25 @@ def render_vectors(res: "PipelineResult", *, page_meta: "PageMeta | None" = None
 
 
 # ---------------------------------------------------------------------------
-# Layer / (layer, colour) separation
-# ---------------------------------------------------------------------------
-def render_layers(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
-    vbl = res.vectors_by_layer or {}
-    color_by_id = {
-        id(v): _hash_color(("layer", name))
-        for name, vs in vbl.items() for v in vs
-    }
-    flat = [v for vs in vbl.values() for v in vs]
-    return render_vectors_pdf(
-        _meta(res, page_meta), flat,
-        color_of=lambda v: color_by_id.get(id(v), (0.0, 0.0, 0.0)),
-    )
-
-
-def render_layer_color_buckets(
-    res: "PipelineResult", *, page_meta: "PageMeta | None" = None
-) -> bytes:
-    """`separation.pdf`: every vector coloured by its (layer, colour) bucket."""
-    vblc = res.vectors_by_layer_color or {}
-    color_by_id: dict[int, tuple] = {}
-    flat = []
-    for layer, by_color in vblc.items():
-        for color, vs in by_color.items():
-            rgb = _hash_color(("bucket", layer, color))
-            for v in vs:
-                color_by_id[id(v)] = rgb
-                flat.append(v)
-    return render_vectors_pdf(
-        _meta(res, page_meta), flat,
-        color_of=lambda v: color_by_id.get(id(v), (0.0, 0.0, 0.0)),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Vector classification
-# ---------------------------------------------------------------------------
-def _classification_groups_and_clusters(res: "PipelineResult"):
-    """`(group_bboxes, cluster_bboxes)` in page space from `res.clustering`."""
-    group_bboxes: list = []
-    cluster_bboxes: list = []
-    for stage in (res.clustering or {}).values():
-        steps = stage.steps
-        spatial_i = next(
-            (i for i, s in enumerate(steps) if s.label.lower().startswith("spatial")), None
-        )
-        if spatial_i is not None and spatial_i > 0:
-            for entry in steps[spatial_i - 1].categories["kept"].groups:
-                vs = _entry_vectors(entry)
-                if vs:
-                    group_bboxes.append(union_bbox([v.bbox for v in vs]))
-        if steps:
-            for entry in steps[-1].categories["kept"].groups:
-                vs = _entry_vectors(entry)
-                if vs:
-                    cluster_bboxes.append(union_bbox([v.bbox for v in vs]))
-    return group_bboxes, cluster_bboxes
-
-
-def render_clustering_steps(
-    res: "PipelineResult", *, page_meta: "PageMeta | None" = None
-) -> bytes:
-    """`vector_classification.pdf`: every filter-dropped vector coloured by
-    which filter dropped it, the surviving text-candidate vectors in one
-    colour, and group / cluster bboxes."""
-    drop_layers: list[tuple[list, str]] = []
-    for name in _DROP_CATEGORIES:
-        vs: list = []
-        for stage in (res.clustering or {}).values():
-            for step in stage.steps:
-                cat = step.categories.get(name)
-                if cat is not None and cat.role == "dropped":
-                    for entry in cat.groups:
-                        vs.extend(_entry_vectors(entry))
-        if vs:
-            drop_layers.append((vs, _drop_color(name)))
-
-    candidates = [v for c in (res.text_clusters or []) for v in _entry_vectors(c)]
-    if candidates:
-        drop_layers.append((candidates, C_TEXT_CANDIDATE))
-
-    groups, clusters = _classification_groups_and_clusters(res)
-    return _compose(
-        _meta(res, page_meta),
-        vector_layers=drop_layers,
-        rect_layers=[(groups, C_GROUP_BBOX, False), (clusters, C_CLUSTER_BBOX, False)],
-    )
-
-
-def render_text_candidates(
-    res: "PipelineResult", *, page_meta: "PageMeta | None" = None
-) -> bytes:
-    clusters = [_entry_vectors(c) for c in (res.text_clusters or [])]
-    bboxes = [union_bbox([v.bbox for v in c]) for c in clusters if c]
-    return _compose(
-        _meta(res, page_meta),
-        vector_layers=[([v for c in clusters for v in c], C_TEXT_CANDIDATE)],
-        rect_layers=[(bboxes, C_CLUSTER_BBOX, False)],
-    )
-
-
-# ---------------------------------------------------------------------------
-# Segment (Radon)
-# ---------------------------------------------------------------------------
-def render_radon(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
-    """`segmentation.pdf`: original cluster bbox, per-word segment bbox, and
-    the detected line / word gap markers, from `res.segmentation_debug`."""
-    dbg = res.segmentation_debug or []
-    cluster_b = [d["cluster_bbox"] for d in dbg]
-    seg_b = [b for d in dbg for b in d["segment_bboxes"]]
-    grown_b = [b for d in dbg for b in d.get("grown_segment_bboxes", [])]
-    line_g = [b for d in dbg for b in d["line_gap_lines"]]
-    word_g = [b for d in dbg for b in d["word_gap_lines"]]
-    vec_ok = [b for d in dbg for b in d.get("assigned_vector_bboxes", [])]
-    vec_drop = [b for d in dbg for b in d.get("dropped_vector_bboxes", [])]
-    seg_drop = [b for d in dbg for b in d.get("dropped_segment_bboxes", [])]
-    return _compose(
-        _meta(res, page_meta),
-        rect_layers=[
-            (cluster_b, C_ORIG_BBOX, False),
-            (seg_b, C_SEGMENT_BBOX, False),
-            (grown_b, C_GROWN_BBOX, False),
-            (line_g, C_LINE_GAP, True),
-            (word_g, C_WORD_GAP, True),
-            (vec_ok, C_VEC_ASSIGNED, False),
-            (vec_drop, C_VEC_DROPPED, False),
-            (seg_drop, C_SEG_DROPPED, True),
-        ],
-    )
-
-
-# ---------------------------------------------------------------------------
-# Similarity
+# Vector-level similarity grouping -- one colour per group (run before FAST)
 # ---------------------------------------------------------------------------
 def render_similarity(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
-    segments = res.word_segments or []
-    groups = res.similarity_groups or [[i] for i in range(len(segments))]
-    rect_layers: list = []
-    for gi, group in enumerate(groups):
-        r, g, b = _hash_color(("simgroup", gi))
-        hexc = "#%02x%02x%02x" % (round(r * 255), round(g * 255), round(b * 255))
-        bboxes = [
-            union_bbox([v.bbox for v in segments[i].vectors])
-            for i in group if segments[i].vectors
-        ]
-        if bboxes:
-            rect_layers.append((bboxes, hexc, False))
-    return _compose(_meta(res, page_meta), rect_layers=rect_layers)
+    groups = res.similarity_groups or []
+    color_by_id: dict[int, tuple] = {}
+    flat = []
+    for gi, g in enumerate(groups):
+        rgb = _hash_color(("similarity_group", gi))
+        for v in g.members:
+            color_by_id[id(v)] = rgb
+            flat.append(v)
+    return render_vectors_pdf(
+        _meta(res, page_meta), flat,
+        color_of=lambda v: color_by_id.get(id(v), (0.0, 0.0, 0.0)),
+    )
 
 
 # ---------------------------------------------------------------------------
-# FAST text detection
+# FAST text detection (per-Vector)
 # ---------------------------------------------------------------------------
 def _fast_heat_image(page_image: "Image.Image", mask: "np.ndarray | None") -> "Image.Image":
     base = page_image.convert("RGB")
@@ -418,9 +282,119 @@ def render_fast(
         image=image,
         rect_layers=[
             (list(getattr(fr, "skipped_tiles", None) or []), C_TILE_SKIP, True),
+            (list(getattr(fr, "all_tiles", None) or []), C_TILE_GRID, False),
             ([union_bbox([v.bbox for v in c]) for c in passed if c], C_FAST_PASS, False),
             ([v.bbox for v in dropped], C_FAST_DROP, False),
         ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reclassify FAST's per-vector verdict up to a similarity-group consensus
+# (fail -> pass only) -- shows just the final passed set.
+# ---------------------------------------------------------------------------
+def render_reclassify(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
+    rc = res.reclassify_result
+    final_passed = rc.passed if rc else []
+    return _compose(
+        _meta(res, page_meta),
+        rect_layers=[([v.bbox for v in final_passed], C_RECLASS_PASS, False)],
+    )
+
+
+# ---------------------------------------------------------------------------
+# (layer, colour, width) separation
+# ---------------------------------------------------------------------------
+def render_separation(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
+    """`separation.pdf`: every vector coloured by its own flat
+    `res.separation_buckets` entry (one bucket = one (layer, colour, width)
+    group)."""
+    buckets = res.separation_buckets or []
+    color_by_id: dict[int, tuple] = {}
+    flat = []
+    for bi, bucket in enumerate(buckets):
+        rgb = _hash_color(("bucket", bi))
+        for v in bucket:
+            color_by_id[id(v)] = rgb
+            flat.append(v)
+    return render_vectors_pdf(
+        _meta(res, page_meta), flat,
+        color_of=lambda v: color_by_id.get(id(v), (0.0, 0.0, 0.0)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# seqno-consecutive clusters
+# ---------------------------------------------------------------------------
+def render_clusters(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
+    clusters = res.spatial_clusters or []
+    bboxes = [union_bbox([v.bbox for v in c]) for c in clusters if c]
+    return _compose(_meta(res, page_meta), rect_layers=[(bboxes, C_CLUSTER_BBOX, False)])
+
+
+# ---------------------------------------------------------------------------
+# Per-cluster PaddleOCR detect
+# ---------------------------------------------------------------------------
+def render_paddle_detect(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
+    clusters = res.spatial_clusters or []
+    cluster_detections = res.cluster_detections or []
+    render_bboxes = [union_bbox([v.bbox for v in c]) for c in clusters if c]
+    detection_boxes = [
+        d.bbox for cd in cluster_detections if cd is not None for d in cd.detections
+    ]
+    return _compose(
+        _meta(res, page_meta),
+        rect_layers=[
+            (render_bboxes, C_RENDER_BBOX, False),
+            (detection_boxes, C_DETECTION_BOX, False),
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Overlap-based text/drawing reassignment
+# ---------------------------------------------------------------------------
+def render_assignment(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
+    text_vecs = res.reassigned_text or []
+    drawing_vecs = res.reassigned_drawing or []
+    return _compose(
+        _meta(res, page_meta),
+        vector_layers=[(text_vecs, C_ASSIGNED_TEXT), (drawing_vecs, C_ASSIGNED_DRAWING)],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rotation refinement (vector-geometry Radon sweep) -- no splitting
+# ---------------------------------------------------------------------------
+def _rotated_crop_quad(seg) -> "list[tuple[float, float]] | None":
+    """The segment's own tight bbox in its deskewed (`seg.angle`) frame,
+    rotated back into page space -- a genuinely tilted quad matching the
+    detected angle, not a plain axis-aligned `union_bbox` (which is what
+    this used to draw despite the "rotated" name/colour)."""
+    from rastervec.OCR.radon import cluster_centre, rotate_pts, rotated_segments
+
+    if not seg.vectors:
+        return None
+    _, (x0, x1, y0, y1) = rotated_segments(seg.vectors, seg.angle)
+    centre = cluster_centre(seg.vectors)
+    corners = rotate_pts(
+        np.array([(x0, y0), (x1, y0), (x1, y1), (x0, y1)], dtype=float), -seg.angle, centre,
+    )
+    return [(float(px), float(py)) for px, py in corners]
+
+
+def render_rotate(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
+    """`rotate.pdf`: each detection's own bbox, and the final rotated
+    crop's own true (tilted) bbox, rotated to the detected angle."""
+    dbg = res.rotation_debug or []
+    detection_b = [d["detection_bbox"] for d in dbg]
+    rotated_polys = [
+        q for seg in (res.rotated_segments or []) if (q := _rotated_crop_quad(seg)) is not None
+    ]
+    return _compose(
+        _meta(res, page_meta),
+        rect_layers=[(detection_b, C_RENDER_BBOX, False)],
+        poly_layers=[(rotated_polys, C_ROTATED_BBOX)],
     )
 
 
@@ -435,7 +409,7 @@ def render_drawing(res: "PipelineResult", *, page_meta: "PageMeta | None" = None
 
 
 # ---------------------------------------------------------------------------
-# OCR / restore
+# OCR
 # ---------------------------------------------------------------------------
 def render_ocr_results(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
     """`paddle_ocr.pdf`: predicted text drawn at each restored word position
@@ -453,10 +427,6 @@ def render_ocr_results(res: "PipelineResult", *, page_meta: "PageMeta | None" = 
     )
 
 
-def render_restore(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
-    return render_ocr_results(res, page_meta=page_meta)
-
-
 # ---------------------------------------------------------------------------
 # Final reconstruction
 # ---------------------------------------------------------------------------
@@ -471,7 +441,7 @@ def render_reconstructed(res: "PipelineResult", *, page_meta: "PageMeta | None" 
 
 # ---------------------------------------------------------------------------
 # Per-layer split -- one single-purpose PDF per visual element, so the viewer
-# toggles a layer by loading / not loading its PDF (no colour-keying, so no
+# toggles a layer by loading / not loading its file (no colour-keying, so no
 # anti-alias fringe from a partially-knocked-out colour).
 #
 # `render_stage_layers(res, stage_key)` returns `[(label, hex, pdf_bytes)]`
@@ -479,19 +449,8 @@ def render_reconstructed(res: "PipelineResult", *, page_meta: "PageMeta | None" 
 # emits a blank one-page PDF) so every layer PDF has the same page count as
 # every other and the viewer can index them all by the same page position.
 # The composite `render_<stage>` functions above are unchanged (still used by
-# tests / the notebook).
+# tests).
 # ---------------------------------------------------------------------------
-def _drop_vectors(res: "PipelineResult", name: str) -> list:
-    vs: list = []
-    for stage in (res.clustering or {}).values():
-        for step in stage.steps:
-            cat = step.categories.get(name)
-            if cat is not None and cat.role == "dropped":
-                for entry in cat.groups:
-                    vs.extend(_entry_vectors(entry))
-    return vs
-
-
 def _blank(page_meta: "PageMeta") -> bytes:
     return _compose(page_meta)
 
@@ -509,21 +468,9 @@ def render_stage_layers(
     if stage_key == "vectors":
         return [("vectors (colour per type)", "#888888", render_vectors(res, page_meta=pm))]
 
-    if stage_key == "separation":
-        return [("bucket (colour per layer+colour)", "#888888",
-                 render_layer_color_buckets(res, page_meta=pm))]
-
-    if stage_key == "classify":
-        groups, clusters = _classification_groups_and_clusters(res)
-        cand = [v for c in (res.text_clusters or []) for v in _entry_vectors(c)]
-        out = [
-            ("text candidate", C_TEXT_CANDIDATE, V(cand, C_TEXT_CANDIDATE)),
-            ("group bbox", C_GROUP_BBOX, R(groups, C_GROUP_BBOX)),
-            ("cluster bbox", C_CLUSTER_BBOX, R(clusters, C_CLUSTER_BBOX)),
-        ]
-        for name in _DROP_CATEGORIES:
-            out.append((name, _drop_color(name), V(_drop_vectors(res, name), _drop_color(name))))
-        return out
+    if stage_key == "similarity":
+        return [("vectors (colour per similarity group)", "#888888",
+                 render_similarity(res, page_meta=pm))]
 
     if stage_key == "fast":
         fr = res.fast_result
@@ -536,34 +483,58 @@ def render_stage_layers(
             ("text heatmap", "#dc2626", heat if heat is not None else _blank(pm)),
             ("skipped tile", C_TILE_SKIP,
              R(list(getattr(fr, "skipped_tiles", None) or []), C_TILE_SKIP, True)),
-            ("passed cluster", C_FAST_PASS, R(passed, C_FAST_PASS)),
+            ("tile grid", C_TILE_GRID, R(list(getattr(fr, "all_tiles", None) or []), C_TILE_GRID)),
+            ("kept vector", C_FAST_PASS, R(passed, C_FAST_PASS)),
             ("dropped vector", C_FAST_DROP, R(dropped, C_FAST_DROP)),
         ]
 
-    if stage_key == "segment":
-        dbg = res.segmentation_debug or []
+    if stage_key == "reclassify":
+        rc = res.reclassify_result
+        final_passed = rc.passed if rc else []
+        return [("final pass", C_RECLASS_PASS, R([v.bbox for v in final_passed], C_RECLASS_PASS))]
+
+    if stage_key == "separation":
+        return [("bucket (colour per layer+colour+width)", "#888888",
+                 render_separation(res, page_meta=pm))]
+
+    if stage_key == "clusters":
+        clusters = res.spatial_clusters or []
+        bboxes = [union_bbox([v.bbox for v in c]) for c in clusters if c]
+        return [("cluster bbox", C_CLUSTER_BBOX, R(bboxes, C_CLUSTER_BBOX))]
+
+    if stage_key == "paddle_detect":
+        clusters = res.spatial_clusters or []
+        cluster_detections = res.cluster_detections or []
+        render_bboxes = [union_bbox([v.bbox for v in c]) for c in clusters if c]
+        detection_boxes = [
+            d.bbox for cd in cluster_detections if cd is not None for d in cd.detections
+        ]
         return [
-            ("original cluster bbox", C_ORIG_BBOX,
-             R([d["cluster_bbox"] for d in dbg], C_ORIG_BBOX)),
-            ("segment bbox", C_SEGMENT_BBOX,
-             R([b for d in dbg for b in d["segment_bboxes"]], C_SEGMENT_BBOX)),
-            ("post-growth segment bbox", C_GROWN_BBOX,
-             R([b for d in dbg for b in d.get("grown_segment_bboxes", [])], C_GROWN_BBOX)),
-            ("line gap", C_LINE_GAP,
-             R([b for d in dbg for b in d["line_gap_lines"]], C_LINE_GAP, True)),
-            ("word gap", C_WORD_GAP,
-             R([b for d in dbg for b in d["word_gap_lines"]], C_WORD_GAP, True)),
-            ("vectors assigned", C_VEC_ASSIGNED,
-             R([b for d in dbg for b in d.get("assigned_vector_bboxes", [])], C_VEC_ASSIGNED)),
-            ("vectors dropped", C_VEC_DROPPED,
-             R([b for d in dbg for b in d.get("dropped_vector_bboxes", [])], C_VEC_DROPPED)),
-            ("segments dropped", C_SEG_DROPPED,
-             R([b for d in dbg for b in d.get("dropped_segment_bboxes", [])], C_SEG_DROPPED, True)),
+            ("cluster render bbox", C_RENDER_BBOX, R(render_bboxes, C_RENDER_BBOX)),
+            ("detected box", C_DETECTION_BOX, R(detection_boxes, C_DETECTION_BOX)),
         ]
 
-    if stage_key == "similarity":
-        return [("similarity group (colour per group)", "#888888",
-                 render_similarity(res, page_meta=pm))]
+    if stage_key == "assignment":
+        return [
+            ("vector assigned to text", C_ASSIGNED_TEXT, V(res.reassigned_text or [], C_ASSIGNED_TEXT)),
+            ("vector reassigned to drawing", C_ASSIGNED_DRAWING,
+             V(res.reassigned_drawing or [], C_ASSIGNED_DRAWING)),
+        ]
+
+    if stage_key == "rotate":
+        dbg = res.rotation_debug or []
+        detection_b = [d["detection_bbox"] for d in dbg]
+        rotated_polys = [
+            q for seg in (res.rotated_segments or []) if (q := _rotated_crop_quad(seg)) is not None
+        ]
+        rotated_pdf = (
+            _compose(pm, poly_layers=[(rotated_polys, C_ROTATED_BBOX)])
+            if rotated_polys else _blank(pm)
+        )
+        return [
+            ("detection bbox", C_RENDER_BBOX, R(detection_b, C_RENDER_BBOX)),
+            ("rotated crop bbox", C_ROTATED_BBOX, rotated_pdf),
+        ]
 
     if stage_key == "ocr":
         restored = res.restored_texts or []

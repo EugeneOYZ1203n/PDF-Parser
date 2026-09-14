@@ -3,7 +3,7 @@ returns. Final-output fields are always populated; intermediate fields are
 left `None` unless the run was `verbose=True`.
 
 Also the new home for the small types that used to live in the old
-`pipeline.py`: `GroupKey`, `ClusteringStageResult`, `FastPageResult`.
+`pipeline.py`: `SeparationKey`, `FastPageResult`.
 
 NOTE: the pipeline closes its `Reader` before returning, so `page.fitz_page`
 is `None` on a returned result -- use `PipelineResult.open_page()` to reopen
@@ -22,43 +22,42 @@ if TYPE_CHECKING:
     import numpy as np
     from PIL import Image
 
-    from rastervec.models import Page, Segment, SegmentMeta, Text, Vector
-    from rastervec.Vector_Classification.classification import StepResult
+    from rastervec.commons.models import Page, Segment, Text, Vector
+    from rastervec.OCR.Paddle_OCR.ocr_backend import ClusterDetection
+    from rastervec.pipelines._steps import ReclassifyResult
+    from rastervec.Vector_Similarity.similarity import SimilarityGroup
 
-# (layer, color) -- one Vector.separate_by_color() bucket.
-GroupKey = "tuple[str, tuple]"
-
-
-@dataclass
-class ClusteringStageResult:
-    """One (layer, color) bucket's Vector Classification result: `steps` is
-    exactly `classify_bucket()` / `classification.cluster()`'s return
-    value. `steps[-1].categories["kept"]` is the final surviving (tiered)
-    clusters; every `role="dropped"` category across every step is drawing
-    content."""
-
-    steps: "list[StepResult]"
+# (layer, color, width) -- one pipeline separation bucket.
+SeparationKey = "tuple[str, tuple | None, float | None]"
 
 
 @dataclass
 class FastPageResult:
-    """FAST text detection's whole-page result (see
-    `pipelines/_steps.detect_text_fast`). `scores` is keyed by a
-    classification cluster's own index into that step's `clusters` input
-    list -- each cluster is scored and kept/dropped independently, before
-    any similarity grouping exists."""
+    """`filter_vectors_fast`'s whole-page result. `scores` is keyed by a
+    Vector's own index into that step's `vectors` input list -- each Vector
+    is scored and kept/dropped independently, before any clustering
+    exists."""
 
-    page_image: "Image.Image | None"
+    page_image: "Image.Image | None"  # verbose only -- downsampled by
+    # `debug_image_scale` for report visualization, NOT what FastDetector
+    # actually scored (that happens at full resolution inside
+    # filter_vectors_fast, before this downsample)
     page_mask: "np.ndarray | None"
     detect_seconds: float | None
     scores: dict[int, float]
-    # verbose-only tiling diagnostics (see pipelines/_steps.detect_text_fast):
+    # verbose-only tiling diagnostics (see pipelines/_steps.filter_vectors_fast):
     # `skipped_tiles` are page-space bboxes of tiles that overlapped no text
-    # candidate and were never run; `tile_count` is the whole tile grid;
-    # `tile_seconds` is per-run-tile wall time (local runs only, else []).
+    # candidate and were never run; `all_tiles` is every tile in the grid
+    # (run or skipped); `tile_count` is len(all_tiles); `tile_seconds` is
+    # per-run-tile wall time (local runs only, else []).
     skipped_tiles: "list[tuple[float, float, float, float]] | None" = None
+    all_tiles: "list[tuple[float, float, float, float]] | None" = None
     tile_count: int | None = None
     tile_seconds: "list[float] | None" = None
+    # downsample factor applied to `page_image` relative to the full-res
+    # render FastDetector actually scored (1.0 when not verbose, or when no
+    # downsample was applied).
+    debug_image_scale: float = 1.0
 
 
 @dataclass
@@ -83,33 +82,35 @@ class PipelineResult:
     # ---- verbose only (None unless verbose=True) -------------------------
     native_words: "list[Text] | None" = None
     vectors_raw: "list[Vector] | None" = None
-    vectors_by_layer: dict | None = None
-    vectors_by_layer_color: dict | None = None
-    text_clusters: "list[list[list[Vector]]] | None" = None
-    clustering: dict | None = None
-    classification_dropped: "list[Vector] | None" = None
-    fast_result: FastPageResult | None = None
-    fast_passed: "list[list[Vector]] | None" = None  # clusters that cleared
-    # FAST, pre-Radon -- Radon's own input
+    similarity_groups: "list[SimilarityGroup] | None" = None  # vector_similarity_group's
+    # output over every raw extracted Vector, run before FAST
+    fast_result: FastPageResult | None = None  # filter_vectors_fast's
+    # page-level result (per-Vector scores)
+    fast_passed: "list[list[Vector]] | None" = None  # every passed Vector,
+    # each wrapped as its own singleton list (render-layer compatibility)
     fast_dropped_vectors: "list[Vector] | None" = None
-    word_segments: "list[Segment] | None" = None  # Radon's output: every
-    # FAST-surviving cluster's own word-level Segments (with `.image`),
-    # flat, combined across every cluster -- similarity's input
-    similarity_groups: "list[list[int]] | None" = None  # indices into
-    # word_segments -- each inner list one similarity group of words
-    unique_segments: "list[Segment] | None" = None  # one canonicalized
-    # (angle=0.0) representative word Segment per similarity group
-    segment_metas: "list[SegmentMeta] | None" = None  # one per real word
-    # occurrence (including the representative's own)
-    unique_texts: "list[Text] | None" = None  # one Text per
-    # `unique_segments` entry, in canonical frame
+    reclassify_result: "ReclassifyResult | None" = None  # FAST's per-vector
+    # verdict pulled up to a similarity-group consensus (fail -> pass only)
+    separation_buckets: "list[list[Vector]] | None" = None  # one list per
+    # (layer, color, width) bucket -- see `SeparationKey`
+    spatial_clusters: "list[list[Vector]] | None" = None  # one per
+    # (layer, color, width) bucket's union-find spatial merge, flattened
+    cluster_detections: "list[ClusterDetection | None] | None" = None  # one
+    # entry per spatial_clusters entry, same index -- each carries the
+    # cluster's own one render (`.image`/`.dpi`, what PaddleOCR's detector
+    # saw) plus its `PaddleDetection`s; `None` for an empty cluster
+    reassigned_drawing: "list[Vector] | None" = None  # FAST passed these,
+    # but no PaddleOCR detection was backed by them -- reassigned to drawing
+    reassigned_text: "list[Vector] | None" = None  # the complementary half:
+    # every Vector actually assigned to a PaddleOCR detection
+    rotated_segments: "list[Segment] | None" = None  # one Segment per
+    # PaddleOCR detection with an assigned vector -- no word/character
+    # splitting, "just rotated clusters" (see `_steps.rotate_paddle_
+    # detections`); recognition's own input
+    rotation_debug: list | None = None  # one dict per detection, page
+    # space: detection_bbox, resolved_theta, source_theta
     restored_texts: "list[Text] | None" = None
     step_outputs: dict | None = None
-    segmentation_debug: list | None = None  # one dict per cluster, page space:
-    # cluster_bbox, line_gap_lines, word_gap_lines, segment_bboxes (kept, tight),
-    # grown_segment_bboxes (kept, post-growth crop box), dropped_segment_bboxes
-    # (zero-vector segments), assigned_vector_bboxes, dropped_vector_bboxes
-    # (member vectors of a wholly-skipped cluster)
 
     @contextmanager
     def open_page(self) -> "Iterator[Page]":

@@ -18,10 +18,10 @@ import pymupdf as fitz
 import pytest
 from PIL import Image
 
-from rastervec.models import PageMeta, Text, Vector
+from rastervec.commons.models import PageMeta, Text, Vector
 from rastervec.native_text import extract_native_text
 from rastervec.Reader.reader import Reader
-from rastervec.renderer import (
+from rastervec.commons.renderer import (
     page_points_to_pixel,
     pixel_to_page_bbox,
     render_boxes_pdf,
@@ -459,12 +459,12 @@ def test_render_vector_cluster_line_kind(vector):
 
 
 def test_render_vector_cluster_reuses_doc_without_bleeding_between_calls(vector):
-    """The shared per-process render document (rastervec.renderer.png's
+    """The shared per-process render document (rastervec.commons.renderer.png's
     _get_render_doc) must never hold more than one page at a time, and
     successive calls with different content must not bleed into each
     other -- a regression test for the fitz.Document-reuse performance
     fix."""
-    from rastervec.renderer import png as png_module
+    from rastervec.commons.renderer import png as png_module
 
     filled = vector(kind="re", bbox=(0, 0, 20, 10), fill=(0, 0, 0))
     blank = vector(kind="re", bbox=(0, 0, 20, 10), color=None, fill=None)
@@ -523,7 +523,7 @@ def test_render_vector_cluster_degenerate_flat_cluster_still_renders(vector):
 # render_page_svg (from the old test_svg.py)
 # --------------------------------------------------------------------------
 def test_render_page_svg_returns_svg_string(synthetic_pdf_factory):
-    from rastervec.models import Page
+    from rastervec.commons.models import Page
 
     doc = synthetic_pdf_factory([
         {"texts": [{"point": (20, 40), "text": "hello"}]},

@@ -2,11 +2,11 @@
 
 Not used by the real pipeline, and deliberately not re-exported through
 `renderer/__init__.py` -- this module imports `matplotlib`, and every
-pipeline module already does `from rastervec.renderer import ...` for
+pipeline module already does `from rastervec.commons.renderer import ...` for
 lightweight things (`render_vector_cluster`, `render_reconstructed_page`,
 ...), so folding this module into that package's own `__init__` would drag
 matplotlib into every real pipeline run's import graph. Import it directly
-(`from rastervec.renderer.notebook import ...`) instead -- the notebook
+(`from rastervec.commons.renderer.notebook import ...`) instead -- the notebook
 does this at the top; every stage module's own `render_<stage_name>`
 function does it lazily, inside the function body, for the same reason.
 
@@ -25,13 +25,13 @@ import matplotlib.pyplot as plt
 import pymupdf as fitz
 from PIL import Image, ImageDraw
 
-from rastervec.helpers.geometry import item_points
-from rastervec.renderer._shapes import path_color_hex
+from rastervec.commons.helpers.geometry import item_points
+from rastervec.commons.renderer._shapes import path_color_hex
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from rastervec.models import PageMeta, Vector
+    from rastervec.commons.models import PageMeta, Vector
     from rastervec.pipelines.result import PipelineResult
 
 DEFAULT_PATH_COLOR = "#111827"
@@ -174,7 +174,7 @@ def export_stage_boxes_pdf(page_meta: "PageMeta", result: "RenderResult") -> byt
     """`result`'s categories as colored bbox-outline overlays on a single
     page-sized PDF (real page space, not a raster) -- one rectangle per
     bbox/path/poly entry across every category, colored per category."""
-    from rastervec.renderer.pdf import render_boxes_pdf
+    from rastervec.commons.renderer.pdf import render_boxes_pdf
 
     boxes = [b for cat in result.categories for b in _category_boxes(cat)]
     return render_boxes_pdf(page_meta, boxes)

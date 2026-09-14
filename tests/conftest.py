@@ -22,7 +22,7 @@ from typing import Callable
 import pymupdf as fitz
 import pytest
 
-from rastervec.models import PageMeta, Text, Vector
+from rastervec.commons.models import PageMeta, Text, Vector
 
 
 @pytest.fixture
@@ -187,7 +187,7 @@ def text() -> Callable[..., Text]:
         raw_word: tuple | None = None,
         raw_span: dict | None = None,
     ) -> Text:
-        from rastervec.helpers.geometry import compute_origin
+        from rastervec.commons.helpers.geometry import compute_origin
 
         return Text(
             text=text,

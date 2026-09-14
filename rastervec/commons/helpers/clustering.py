@@ -12,8 +12,8 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, Callable
 
-from rastervec.helpers.geometry import rect_gap
-from rastervec.logging_setup import get_logger
+from rastervec.commons.helpers.geometry import rect_gap
+from rastervec.commons.logging_setup import get_logger
 
 _LOG = get_logger("clustering")
 

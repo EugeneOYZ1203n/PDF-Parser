@@ -79,7 +79,7 @@ def geometry_entries_from_vector(v) -> list[GeometryEntry]:
     an `original_vector` GT (real `Vector`) and prediction (real `Vector`)
     compare on identical primitive granularity. Every sub-entry carries the
     FULL Vector's properties."""
-    from rastervec.helpers.geometry import item_points
+    from rastervec.commons.helpers.geometry import item_points
 
     common = dict(
         color=v.color, fill=v.fill, width=v.width, dashes=v.dashes,

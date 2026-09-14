@@ -33,10 +33,10 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 
-from rastervec.helpers.geometry import item_points, union_bbox
+from rastervec.commons.helpers.geometry import item_points, union_bbox
 
 if TYPE_CHECKING:
-    from rastervec.models import Vector
+    from rastervec.commons.models import Vector
 
 LabelSource = Literal["native", "vector", "raster"]
 

@@ -9,8 +9,8 @@ Every field is optional except that you need at least one of `input_dir` /
 
 | field | meaning |
 |---|---|
-| `pipeline` | `current` (default) / `current_nofast` / `legacy` |
-| `final_stage` | a pipeline step name (`read native vectors classify fast segment similarity ocr restore drawing`); `null` = run all. Steps after it are skipped, so their stage PDFs are not emitted. |
+| `pipeline` | `current` (default) / `legacy` |
+| `final_stage` | a pipeline step name (`read native vectors fast separation clusters paddle_detect assignment rotate ocr drawing`); `null` = run all. Steps after it are skipped, so their stage PDFs are not emitted. |
 | `input_dir` | folder scanned for `*.pdf` |
 | `input_files` | explicit list of PDF paths (merged with `input_dir`, deduped) |
 | `label_files` | `{ "<pdf-stem>": "path/to/labels.json" }` — recorded in the manifest for the benchmark step |

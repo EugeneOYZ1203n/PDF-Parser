@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import logging
 
-from rastervec.logging_setup import configure_logging, get_logger
+from rastervec.commons.logging_setup import configure_logging, get_logger
 
 _LOG = get_logger("pipelines.cli")
 

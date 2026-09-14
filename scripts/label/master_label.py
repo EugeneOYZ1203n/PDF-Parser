@@ -74,8 +74,8 @@ from rastervec.Evaluation.Labelling.raster_label import (
     sync_native_text_from_native_labels,
     sync_text_from_vector_labels,
 )
-from rastervec.logging_setup import configure_logging, get_logger
-from rastervec.paths import output_dir
+from rastervec.commons.logging_setup import configure_logging, get_logger
+from rastervec.commons.paths import output_dir
 
 from raster_label import RasterLabelApp  # noqa: E402 -- sibling import, see module docstring
 from vector_label import VectorLabelApp  # noqa: E402

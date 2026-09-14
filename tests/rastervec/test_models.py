@@ -9,8 +9,8 @@ from pathlib import Path
 import pymupdf as fitz
 import pytest
 
-from rastervec.helpers.geometry import round_color
-from rastervec.models import Text, Vector
+from rastervec.commons.helpers.geometry import round_color
+from rastervec.commons.models import Text, Vector
 
 REFERENCES_DIR = Path(__file__).resolve().parents[1] / "references"
 REFERENCE_PDFS = sorted(REFERENCES_DIR.glob("test_pdfs_*.pdf"))

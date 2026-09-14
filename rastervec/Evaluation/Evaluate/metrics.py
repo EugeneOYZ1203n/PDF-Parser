@@ -39,7 +39,7 @@ from rastervec.Evaluation.Evaluate.text_metrics import (
     normalize_text,
     word_tokens,
 )
-from rastervec.helpers.geometry import (
+from rastervec.commons.helpers.geometry import (
     bbox_area,
     bbox_intersection_area,
     bbox_iou,

@@ -91,19 +91,19 @@ from rastervec.Evaluation.Labelling.label_schema import (
     save_labels,
     vector_signatures_for,
 )
-from rastervec.helpers.geometry import (
+from rastervec.commons.helpers.geometry import (
     bbox_area,
     bbox_contains,
     bboxes_intersect,
     union_bbox,
 )
-from rastervec.logging_setup import configure_logging, get_logger
-from rastervec.models import Vector
-from rastervec.paths import output_dir
+from rastervec.commons.logging_setup import configure_logging, get_logger
+from rastervec.commons.models import Vector
+from rastervec.commons.paths import output_dir
 from rastervec.pipelines._steps import extract_vectors
 from rastervec.pipelines.current import separate_by_layer_color_width
 from rastervec.Reader.reader import Reader
-from rastervec.renderer._shapes import path_color_hex
+from rastervec.commons.renderer._shapes import path_color_hex
 
 _LOG = get_logger("vector_label")
 

@@ -1,6 +1,6 @@
 {
   "pipeline": "current",
-  "final_stage": "classify",
+  "final_stage": "clusters",
   "input_files": ["references/240118-Proposed OW Shopdrawings for Thomson Height CC.pdf"],
   "pages": [0],
   "vectorise": false

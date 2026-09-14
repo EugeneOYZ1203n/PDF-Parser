@@ -62,9 +62,9 @@ from rastervec.Evaluation.Labelling.label_schema import (
     load_labels,
     path_signature,
 )
-from rastervec.helpers.geometry import bbox_contains
-from rastervec.logging_setup import configure_logging, get_logger
-from rastervec.paths import output_dir
+from rastervec.commons.helpers.geometry import bbox_contains
+from rastervec.commons.logging_setup import configure_logging, get_logger
+from rastervec.commons.paths import output_dir
 from rastervec.pipelines._steps import extract_vectors
 from rastervec.Reader.reader import Reader
 

@@ -38,8 +38,8 @@ from rastervec.Evaluation.Labelling.label_schema import (
     LabelSet,
     geometry_annotations_for_vector,
 )
-from rastervec.logging_setup import get_logger
-from rastervec.models import Vector
+from rastervec.commons.logging_setup import get_logger
+from rastervec.commons.models import Vector
 from rastervec.Reader.reader import Reader
 from rastervec.Vector.vector import extract_vectors
 

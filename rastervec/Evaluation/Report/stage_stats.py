@@ -12,17 +12,11 @@ import json
 from collections import Counter
 
 from rastervec.Evaluation.Evaluate.benchmark import distribution_stats
-from rastervec.helpers.geometry import max_dimension, union_bbox
+from rastervec.commons.helpers.geometry import max_dimension, union_bbox
 
 
 def _dist(values) -> dict:
     return distribution_stats([float(v) for v in values])
-
-
-def _entry_vectors(entry: list) -> list:
-    if entry and isinstance(entry[0], list):
-        return [v for g in entry for v in g]
-    return entry
 
 
 # ---------------------------------------------------------------------------
@@ -58,49 +52,25 @@ def stats_vectors(res) -> dict:
     }
 
 
-def stats_separation(res) -> dict:
-    vbl = res.vectors_by_layer or {}
-    vblc = res.vectors_by_layer_color or {}
-    layer_counts = {str(k): len(v) for k, v in vbl.items()}
-    color_counts: Counter = Counter()
-    bucket_counts: dict[str, int] = {}
-    for layer, by_color in vblc.items():
-        for color, vs in by_color.items():
-            color_counts[str(color)] += len(vs)
-            bucket_counts[f"{layer!r} / {color!r}"] = len(vs)
+def stats_similarity(res) -> dict:
+    groups = res.similarity_groups or []
+    sizes = [len(g.members) for g in groups]
     return {
-        "layer_counts": layer_counts,
-        "color_counts": dict(color_counts),
-        "bucket_counts": bucket_counts,
+        "group_count": len(groups),
+        "vector_count": sum(sizes),
+        "members_per_group": _dist(sizes),
+        "group_sizes_by_count_desc": sorted(sizes, reverse=True)[:50],
     }
 
 
-def stats_classify(res) -> dict:
-    clustering = res.clustering or {}
-    per_step: dict[str, dict] = {}
-    for stage in clustering.values():
-        for step in stage.steps:
-            slot = per_step.setdefault(
-                step.label, {"dropped_entries": 0, "dropped_vectors": 0, "kept_entries": 0}
-            )
-            for name, cat in step.categories.items():
-                if cat.role == "dropped":
-                    slot["dropped_entries"] += len(cat.groups)
-                    slot["dropped_vectors"] += sum(
-                        len(_entry_vectors(e)) for e in cat.groups
-                    )
-                elif cat.role == "kept":
-                    slot["kept_entries"] = len(cat.groups)
-
-    final_clusters = res.text_clusters or []
-    vecs_per_cluster = [len(_entry_vectors(c)) for c in final_clusters]
-    groups_per_cluster = [len(c) for c in final_clusters]  # tiered: groups per cluster
+def stats_reclassify(res) -> dict:
+    rc = res.reclassify_result
+    if rc is None:
+        return {}
     return {
-        "per_step": per_step,
-        "final_cluster_count": len(final_clusters),
-        "final_vector_count": sum(vecs_per_cluster),
-        "vectors_per_cluster": _dist(vecs_per_cluster),
-        "groups_per_cluster": _dist(groups_per_cluster),
+        "fail_reclassified_pass": rc.fail_reclassified_pass,
+        "pass": rc.pass_count,
+        "fail": rc.fail_count,
     }
 
 
@@ -110,46 +80,73 @@ def stats_fast(res) -> dict:
     dropped = res.fast_dropped_vectors or []
     out = {
         "dropped_vectors": len(dropped),
-        "passed_clusters": len(passed),
+        "passed_vectors": len(passed),
         "detect_seconds": getattr(fr, "detect_seconds", None) if fr else None,
     }
     if fr is not None:
         out["tile_count"] = fr.tile_count
         out["skipped_tiles"] = len(fr.skipped_tiles or [])
         out["per_tile_seconds"] = _dist(fr.tile_seconds or [])
-        out["cluster_score"] = _dist((fr.scores or {}).values())
+        out["vector_score"] = _dist((fr.scores or {}).values())
     return out
 
 
-def stats_segment(res) -> dict:
-    segs = res.word_segments or []
-    dbg = res.segmentation_debug or []
+def stats_separation(res) -> dict:
+    buckets = res.separation_buckets or []
     return {
-        "segment_count": len(segs),
-        "cluster_count": len(dbg),
-        "segments_per_cluster": _dist(len(d["segment_bboxes"]) for d in dbg),
-        "dropped_segments": sum(len(d.get("dropped_segment_bboxes", [])) for d in dbg),
-        "dropped_vectors": sum(len(d.get("dropped_vector_bboxes", [])) for d in dbg),
-        "skew_angle": _dist(s.angle for s in segs),
+        "bucket_count": len(buckets),
+        "vectors_per_bucket": _dist(len(b) for b in buckets),
+        "total_vectors": sum(len(b) for b in buckets),
     }
 
 
-def stats_similarity(res) -> dict:
-    groups = res.similarity_groups or []
+def stats_clusters(res) -> dict:
+    clusters = res.spatial_clusters or []
     return {
-        "group_count": len(groups),
-        "word_count": len(res.word_segments or []),
-        "group_size": _dist(len(g) for g in groups),
-        "groups_with_multiple_members": sum(1 for g in groups if len(g) > 1),
+        "cluster_count": len(clusters),
+        "vectors_per_cluster": _dist(len(c) for c in clusters),
+        "cluster_size": _dist(max_dimension(union_bbox([v.bbox for v in c])) for c in clusters if c),
+    }
+
+
+def stats_paddle_detect(res) -> dict:
+    cds = [cd for cd in (res.cluster_detections or []) if cd is not None]
+    detections_per_cluster = [len(cd.detections) for cd in cds]
+    rotations = [d.rotation_deg for cd in cds for d in cd.detections]
+    return {
+        "clusters_with_detections": sum(1 for n in detections_per_cluster if n > 0),
+        "cluster_count": len(res.cluster_detections or []),
+        "detection_count": sum(detections_per_cluster),
+        "detections_per_cluster": _dist(detections_per_cluster),
+        "rotation_deg": _dist(rotations),
+    }
+
+
+def stats_assignment(res) -> dict:
+    text_assigned = res.reassigned_text or []
+    drawing = res.reassigned_drawing or []
+    return {
+        "assigned_to_text": len(text_assigned),
+        "reassigned_to_drawing": len(drawing),
+    }
+
+
+def stats_rotate(res) -> dict:
+    segs = res.rotated_segments or []
+    dbg = res.rotation_debug or []
+    deltas = [d["resolved_theta"] - d["source_theta"] for d in dbg]
+    return {
+        "segment_count": len(segs),
+        "detection_count": len(dbg),
+        "resolved_theta": _dist(d["resolved_theta"] for d in dbg),
+        "refinement_delta_deg": _dist(deltas),
     }
 
 
 def stats_ocr(res) -> dict:
     restored = res.restored_texts or []
-    uniques = res.unique_texts or []
     passed = [t for t in restored if t.text.strip()]
     return {
-        "unique_words_ocr_d": len(uniques),
         "restored_texts": len(restored),
         "passed": len(passed),
         "failed": len(restored) - len(passed),
@@ -162,11 +159,14 @@ def stats_ocr(res) -> dict:
 _STATS = {
     "native": stats_native,
     "vectors": stats_vectors,
-    "separation": stats_separation,
-    "classify": stats_classify,
-    "fast": stats_fast,
-    "segment": stats_segment,
     "similarity": stats_similarity,
+    "fast": stats_fast,
+    "reclassify": stats_reclassify,
+    "separation": stats_separation,
+    "clusters": stats_clusters,
+    "paddle_detect": stats_paddle_detect,
+    "assignment": stats_assignment,
+    "rotate": stats_rotate,
     "ocr": stats_ocr,
 }
 
