@@ -649,20 +649,32 @@ def combine_text_metrics_by_type(
     `PerTypeTextResult` is taken from its owning result, and `bbox_
     unclassified`/`extra_chars` (both run-scoped: "predictions with zero
     overlap across every type THAT RUN scored") are summed once per
-    distinct result object referenced, not once per type."""
+    distinct result object referenced, not once per type. `spurious_pred_
+    area_frac` is summed too (as a fraction of the SAME page area each
+    contributing result was computed against -- true whenever every result
+    scored the same page, which is the only case this is called for)."""
     by_type = {t: results_by_type[t].by_type[t] for t in TEXT_TYPES if t in results_by_type}
     seen: "set[int]" = set()
     total_spurious = 0
+    total_area_frac = 0.0
+    any_area_frac = False
     extra_chars: "Counter[str]" = Counter()
     for r in results_by_type.values():
         if id(r) in seen:
             continue
         seen.add(id(r))
         total_spurious += r.bbox_unclassified.spurious_pred_count
+        frac = r.bbox_unclassified.spurious_pred_area_frac
+        if not math.isnan(frac):
+            total_area_frac += frac
+            any_area_frac = True
         extra_chars.update(r.extra_chars)
     return TextMetricSuiteResult(
         by_type=by_type,
-        bbox_unclassified=BboxAccuracyStats(text_type="unclassified", spurious_pred_count=total_spurious),
+        bbox_unclassified=BboxAccuracyStats(
+            text_type="unclassified", spurious_pred_count=total_spurious,
+            spurious_pred_area_frac=total_area_frac if any_area_frac else math.nan,
+        ),
         extra_chars=extra_chars,
     )
 
@@ -838,9 +850,17 @@ def aggregate_text_metrics(results: list[TextMetricSuiteResult]) -> "TextMetricS
             confusion=merged, font_size=font_size, funnel=funnel,
         )
 
+    _area_fracs = [
+        r.bbox_unclassified.spurious_pred_area_frac for r in results
+        if not math.isnan(r.bbox_unclassified.spurious_pred_area_frac)
+    ]
     bbox_unclassified = BboxAccuracyStats(
         text_type="unclassified",
         spurious_pred_count=sum(r.bbox_unclassified.spurious_pred_count for r in results),
+        # mean across pages -- not true area-weighted (per-page area isn't
+        # carried, only each page's own fraction), an acceptable
+        # approximation for the common near-uniform-page-size case.
+        spurious_pred_area_frac=(sum(_area_fracs) / len(_area_fracs)) if _area_fracs else math.nan,
     )
     extra_chars: "Counter[str]" = Counter()
     for r in results:
