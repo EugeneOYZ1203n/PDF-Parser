@@ -37,13 +37,14 @@ from rastervec.Evaluation import dump_io
 from rastervec.Evaluation.Evaluate import adapters, charts
 from rastervec.Evaluation.Evaluate.benchmark import (
     format_aggregate_comparison,
-    format_confusion,
+    format_confusion_table,
 )
 from rastervec.Evaluation.Evaluate.metrics import (
+    TEXT_TYPES,
     MetricConfig,
-    MulticlassResult,
-    aggregate_multiclass,
-    evaluate_multiclass,
+    TextMetricSuiteResult,
+    aggregate_text_metrics,
+    evaluate_text_metrics,
 )
 from rastervec.Evaluation.Labelling.label_schema import LabelSet, load_labels
 from rastervec.logging_setup import configure_logging, get_logger
@@ -61,8 +62,23 @@ class RunEntry(NamedTuple):
     pdf_stem: str
     doc_dir: Path
     dump_path: Path
-    auto_gt: LabelSet
-    manual_gt: LabelSet | None
+    gt: LabelSet  # merged native/vector/raster labels for this input
+
+
+def _merge_gt(doc: Path) -> LabelSet:
+    """Merges whichever `ground_truth_*.json` files this run wrote (the
+    4-way `native_to_vector`/`original_vector`/`vector_to_raster`/
+    `original_raster` names, falling back to the pre-rework `auto`/`manual`
+    names for an older report folder) into one `LabelSet`."""
+    entries = []
+    pdf_path = ""
+    for name in (*TEXT_TYPES, "auto", "manual"):
+        p = doc / f"ground_truth_{name}.json"
+        if p.is_file():
+            ls = load_labels(str(p))
+            pdf_path = pdf_path or ls.pdf_path
+            entries.extend(ls.entries)
+    return LabelSet(pdf_path=pdf_path, entries=entries)
 
 
 def _load_run(run_dir: Path, parser: argparse.ArgumentParser) -> dict[str, RunEntry]:
@@ -76,7 +92,6 @@ def _load_run(run_dir: Path, parser: argparse.ArgumentParser) -> dict[str, RunEn
     entries: dict[str, RunEntry] = {}
     for e in meta.get("entries", []):
         doc = run_dir / e["dir"]
-        manual_path = doc / "ground_truth_manual.json"
         entries[e["key"]] = RunEntry(
             run_name=run_dir.name,
             run_dir=run_dir.resolve(),
@@ -84,31 +99,24 @@ def _load_run(run_dir: Path, parser: argparse.ArgumentParser) -> dict[str, RunEn
             pdf_stem=e["pdf_stem"],
             doc_dir=doc,
             dump_path=doc / "dump.json",
-            auto_gt=load_labels(str(doc / "ground_truth_auto.json")),
-            manual_gt=load_labels(str(manual_path)) if manual_path.is_file() else None,
+            gt=_merge_gt(doc),
         )
     return entries
 
 
-def _score(entry: RunEntry, cfg: MetricConfig) -> tuple[list[tuple[int, MulticlassResult]], MulticlassResult | None]:
+def _score(entry: RunEntry, cfg: MetricConfig) -> "tuple[list[tuple[int, TextMetricSuiteResult]], TextMetricSuiteResult | None]":
     dump = dump_io.load_dump(entry.dump_path)
-    auto_regions = adapters.gt_regions_from_labelset(entry.auto_gt)
-    manual_regions = (
-        adapters.gt_regions_from_labelset(entry.manual_gt) if entry.manual_gt else []
-    )
-    per_page: list[tuple[int, MulticlassResult]] = []
+    gt_by_type_all = adapters.gt_regions_by_text_type(entry.gt)
+    entries_by_type_all = adapters.entries_by_text_type(entry.gt)
+    per_page: "list[tuple[int, TextMetricSuiteResult]]" = []
     for page in dump.pages:
         pi = page.page_meta.index
         ocr = [t for t in page.texts if t.source == "ocr"]
         preds = adapters.predictions_from_texts(ocr)
-        cand = adapters.text_candidate_boxes(ocr)
-        res = evaluate_multiclass(
-            [g for g in auto_regions if g.page_index == pi],
-            [g for g in manual_regions if g.page_index == pi],
-            preds, cand, cfg=cfg,
-        )
+        gt_by_type = {t: [g for g in gt_by_type_all[t] if g.page_index == pi] for t in TEXT_TYPES}
+        res = evaluate_text_metrics(gt_by_type, entries_by_type_all, preds, cfg=cfg)
         per_page.append((pi, res))
-    return per_page, aggregate_multiclass([r for _pi, r in per_page])
+    return per_page, aggregate_text_metrics([r for _pi, r in per_page])
 
 
 def _slug(text: str) -> str:
@@ -148,29 +156,17 @@ def main(argv: list[str] | None = None) -> int:
     charts_dir.mkdir(parents=True, exist_ok=True)
 
     blocks: list[str] = []
-    # (source -> list[MulticlassResult]) for the grand aggregate charts
-    grand: dict[str, list[MulticlassResult]] = {}
+    # name -> list[TextMetricSuiteResult] for the grand aggregate charts
+    grand: "dict[str, list[TextMetricSuiteResult]]" = {}
 
     for key in sorted(shared_keys):
         scored = {r[key].run_name: _score(r[key], cfg) for r in runs}
-        has_manual = all(r[key].manual_gt is not None for r in runs)
 
-        # ---- text ----
-        for src in ("auto", "manual"):
-            if src == "manual" and not has_manual:
-                continue
-            by_run = {
-                name: (agg.auto if src == "auto" else agg.manual) if agg else None
-                for name, (_pp, agg) in scored.items()
-            }
-            blocks.append(format_aggregate_comparison(
-                by_run, title=f"{key}  --  {src.upper()} ground truth"))
-        blocks.append(format_confusion(
-            {name: (agg.confusion if agg else {}) for name, (_pp, agg) in scored.items()},
-            title=f"{key}  --  confusion matrix"))
-        blocks.append("combined candidate precision: " + "  ".join(
-            f"{name}={('n/a' if not agg or not agg.combined_candidate_precision.applicable else f'{agg.combined_candidate_precision.value:.3f}')}"
-            for name, (_pp, agg) in scored.items()))
+        by_run = {name: agg for name, (_pp, agg) in scored.items()}
+        blocks.append(format_aggregate_comparison(by_run, title=f"{key}"))
+        for name, agg in by_run.items():
+            if agg is not None:
+                blocks.append(f"[{key} / {name}] " + format_confusion_table(agg))
 
         # ---- charts ----
         pages = sorted({pi for (pp, _agg) in scored.values() for pi, _r in pp})
@@ -180,44 +176,43 @@ def main(argv: list[str] | None = None) -> int:
                 name: next((r for p, r in pp if p == pi), None)
                 for name, (pp, _agg) in scored.items()
             }
-            charts.metric_comparison_chart(
-                {n: (r.auto if r else None) for n, r in per_run.items()},
-                title=f"{key} p{pi} auto", path=charts_dir / f"{kslug}__p{pi}__auto.png")
-            if has_manual:
-                charts.metric_comparison_chart(
-                    {n: (r.manual if r else None) for n, r in per_run.items()},
-                    title=f"{key} p{pi} manual", path=charts_dir / f"{kslug}__p{pi}__manual.png")
-            charts.confusion_heatmap(
-                {n: (r.confusion if r else {}) for n, r in per_run.items()},
-                title=f"{key} p{pi} confusion", path=charts_dir / f"{kslug}__p{pi}__confusion.png")
+            charts.label_description_chart(
+                per_run, title=f"{key} p{pi} labels", path=charts_dir / f"{kslug}__p{pi}__labels.png")
+            charts.char_word_overlap_chart(
+                per_run, field="char_overlap", title=f"{key} p{pi} char recall",
+                path=charts_dir / f"{kslug}__p{pi}__char.png")
+            charts.char_word_overlap_chart(
+                per_run, field="word_overlap", title=f"{key} p{pi} word recall",
+                path=charts_dir / f"{kslug}__p{pi}__word.png")
+            charts.bbox_accuracy_chart(
+                per_run, title=f"{key} p{pi} bbox IoU", path=charts_dir / f"{kslug}__p{pi}__bbox.png")
+            charts.rotation_chart(
+                per_run, title=f"{key} p{pi} rotation", path=charts_dir / f"{kslug}__p{pi}__rotation.png")
+            charts.reading_order_chart(
+                per_run, title=f"{key} p{pi} reading order", path=charts_dir / f"{kslug}__p{pi}__reading_order.png")
 
         agg_by_run = {n: a for n, (_pp, a) in scored.items()}
-        charts.metric_comparison_chart(
-            {n: (a.auto if a else None) for n, a in agg_by_run.items()},
-            title=f"{key} aggregate auto", path=charts_dir / f"{kslug}__aggregate__auto.png")
-        if has_manual:
-            charts.metric_comparison_chart(
-                {n: (a.manual if a else None) for n, a in agg_by_run.items()},
-                title=f"{key} aggregate manual", path=charts_dir / f"{kslug}__aggregate__manual.png")
-        charts.confusion_heatmap(
-            {n: (a.confusion if a else {}) for n, a in agg_by_run.items()},
-            title=f"{key} aggregate confusion", path=charts_dir / f"{kslug}__aggregate__confusion.png")
+        charts.label_description_chart(
+            agg_by_run, title=f"{key} aggregate labels", path=charts_dir / f"{kslug}__aggregate__labels.png")
+        charts.char_word_overlap_chart(
+            agg_by_run, field="char_overlap", title=f"{key} aggregate char recall",
+            path=charts_dir / f"{kslug}__aggregate__char.png")
+        charts.bbox_accuracy_chart(
+            agg_by_run, title=f"{key} aggregate bbox IoU", path=charts_dir / f"{kslug}__aggregate__bbox.png")
 
         for name, (pp, _agg) in scored.items():
             grand.setdefault(name, []).extend(r for _pi, r in pp)
 
     # ---- grand aggregate over every shared key ----
-    grand_agg = {name: aggregate_multiclass(rs) for name, rs in grand.items()}
+    grand_agg = {name: aggregate_text_metrics(rs) for name, rs in grand.items()}
     if grand_agg:
-        charts.metric_comparison_chart(
-            {n: (a.auto if a else None) for n, a in grand_agg.items()},
-            title="aggregate auto (all inputs)", path=charts_dir / "aggregate__auto.png")
-        charts.metric_comparison_chart(
-            {n: (a.manual if a else None) for n, a in grand_agg.items()},
-            title="aggregate manual (all inputs)", path=charts_dir / "aggregate__manual.png")
-        charts.confusion_heatmap(
-            {n: (a.confusion if a else {}) for n, a in grand_agg.items()},
-            title="aggregate confusion (all inputs)", path=charts_dir / "aggregate__confusion.png")
+        charts.label_description_chart(
+            grand_agg, title="aggregate labels (all inputs)", path=charts_dir / "aggregate__labels.png")
+        charts.char_word_overlap_chart(
+            grand_agg, field="char_overlap", title="aggregate char recall (all inputs)",
+            path=charts_dir / "aggregate__char.png")
+        charts.bbox_accuracy_chart(
+            grand_agg, title="aggregate bbox IoU (all inputs)", path=charts_dir / "aggregate__bbox.png")
 
     header = "compared runs:\n" + "\n".join(f"  {Path(d).name}" for d in args.run)
     (out_dir / "benchmark.txt").write_text(
