@@ -70,16 +70,22 @@ def run_pipeline(
     p3_fn = resolve_p3(p3)
     timer = _StepTimer(verbose=verbose)
     extra: dict = {}
+    import inspect
+
+    p2_debug: dict = {}
+    p3_debug: dict = {}
 
     with timer("phase1"):
         phase1 = read_and_extract(pdf_path, page_index)
 
     with timer("phase2"):
-        p2_vectors, p2_texts = p2_fn(phase1.images, phase1.page)
+        p2_kwargs = {}
+        if verbose and "debug_out" in inspect.signature(p2_fn).parameters:
+            p2_kwargs["debug_out"] = p2_debug
+        p2_vectors, p2_texts = p2_fn(phase1.images, phase1.page, **p2_kwargs)
 
     with timer("phase3"):
         p3_kwargs = {}
-        import inspect
 
         sig = inspect.signature(p3_fn)
         for name, value in (
@@ -88,12 +94,16 @@ def run_pipeline(
         ):
             if name in sig.parameters:
                 p3_kwargs[name] = value
+        if verbose and "debug_out" in sig.parameters:
+            p3_kwargs["debug_out"] = p3_debug
         p3_vectors, p3_texts = p3_fn(phase1.vectors, p2_vectors, phase1.page, **p3_kwargs)
 
     if verbose:
         extra["phase1"] = phase1
         extra["phase2_vectors"] = p2_vectors
         extra["phase2_texts"] = p2_texts
+        extra["p2_debug"] = p2_debug
+        extra["p3_debug"] = p3_debug
 
     all_texts = list(phase1.texts) + list(p2_texts) + list(p3_texts)
 

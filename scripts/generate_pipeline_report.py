@@ -75,7 +75,9 @@ from rastervec.commons.helpers.geometry import union_bbox
 from rastervec.Evaluation.Report import stage_stats
 from rastervec.commons.logging_setup import configure_logging, get_logger
 from rastervec.commons.paths import output_dir
-from rastervec.core.registry import P2_REGISTRY, P3_REGISTRY, DEFAULT_P2, DEFAULT_P3
+from rastervec.core.registry import (
+    P2_REGISTRY, P3_REGISTRY, DEFAULT_P2, DEFAULT_P3, P2_RENDER_DEBUG, P3_RENDER_DEBUG,
+)
 from rastervec.commons.renderer import render_boxes_pdf, render_reconstructed_pdf, stages
 
 # The old engine's fixed 9-step name list (`pipelines/current.py`), still
@@ -467,6 +469,35 @@ def _accumulate_page(
         _save_fast_tile_images(res, fast_tile_dir, page_index)
 
 
+def _accumulate_debug_pdfs(
+    res, variant, layer_pages: dict[str, list[bytes]], layer_meta: dict[str, dict],
+) -> None:
+    """For `pipeline: "current"` only: each backend's own `render_debug`
+    (see `core/registry.py`'s `P2_RENDER_DEBUG`/`P3_RENDER_DEBUG`), reading
+    back that backend's own `res.extra["p2_debug"]`/`["p3_debug"]` stash --
+    additive to the fixed phase1/phase2/final/reconstructed artifacts.
+    A backend without a `render_debug` entry (e.g. Stub) contributes
+    nothing here."""
+    extra = getattr(res, "extra", None) or {}
+    for prefix, fn, key in (
+        ("p2", P2_RENDER_DEBUG.get(variant.p2), "p2_debug"),
+        ("p3", P3_RENDER_DEBUG.get(variant.p3), "p3_debug"),
+    ):
+        if fn is None:
+            continue
+        try:
+            layers = fn(extra.get(key), res.page.meta)
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning("%s render_debug failed for %s: %s", prefix, variant.name, exc)
+            continue
+        for stage, label, hexc, pdf_bytes in layers:
+            fname = f"{stage}__{_layer_slug(label)}.pdf"
+            layer_pages.setdefault(fname, []).append(pdf_bytes)
+            layer_meta.setdefault(
+                fname, {"stage": stage, "layer": label, "file": fname, "color": hexc}
+            )
+
+
 def _finalize_doc_dir(
     doc_dir: Path, source_pdf: Path, pages: list[int], config: ReportConfig, variant,
     active: list[tuple], layer_pages: dict[str, list[bytes]], layer_meta: dict[str, dict],
@@ -547,6 +578,8 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
 
         _accumulate_page(res, page_index, active, layer_pages, layer_meta, stats_pages,
                          detect_dir, recog_dir, fast_tile_dir, is_legacy=is_legacy)
+        if not is_legacy:
+            _accumulate_debug_pdfs(res, variant, layer_pages, layer_meta)
         dumps.append(dump_io.PageDump(
             page_meta=res.page.meta, texts=list(res.texts or []),
             vectors=list(res.vectors or []), engine=variant.engine,
@@ -746,6 +779,8 @@ def _process_pdf_benchmark(
         _restamp_page(res, p)
         _accumulate_page(res, p, active, layer_pages, layer_meta, stats_pages,
                          detect_dir, recog_dir, fast_tile_dir, is_legacy=is_legacy)
+        if not is_legacy:
+            _accumulate_debug_pdfs(res, variant, layer_pages, layer_meta)
 
         raster_texts = []
         if bench.rasterised_pdf_path is not None:
