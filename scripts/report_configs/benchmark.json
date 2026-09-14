@@ -1,5 +1,7 @@
 {
   "pipeline": "current",
+  "p2": "Stub",
+  "p3": "FastIntoPaddle",
   "final_stage": null,
   "benchmark": true,
   "input_files": [

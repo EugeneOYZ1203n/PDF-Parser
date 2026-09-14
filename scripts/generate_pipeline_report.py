@@ -49,7 +49,7 @@ import datetime as _dt
 import json
 import sys
 from pathlib import Path
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import numpy as np
 import pymupdf as fitz
@@ -61,7 +61,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import rastervec.config as rvconfig
 from rastervec.Evaluation import conversion, dump_io
 from rastervec.Evaluation.Evaluate import adapters, label_overlays, metrics
-from rastervec.Evaluation.Evaluate.variants import resolve_variant
+from rastervec.Evaluation.Evaluate.variants import PipelineVariant, resolve_variant
 from rastervec.Evaluation.Labelling import native_label
 from rastervec.Evaluation.Evaluate.metrics import TEXT_TYPES
 from rastervec.Evaluation.Labelling.label_schema import (
@@ -75,8 +75,15 @@ from rastervec.commons.helpers.geometry import union_bbox
 from rastervec.Evaluation.Report import stage_stats
 from rastervec.commons.logging_setup import configure_logging, get_logger
 from rastervec.commons.paths import output_dir
-from rastervec.pipelines.current import STEP_NAMES
+from rastervec.core.registry import P2_REGISTRY, P3_REGISTRY, DEFAULT_P2, DEFAULT_P3
 from rastervec.commons.renderer import render_boxes_pdf, render_reconstructed_pdf, stages
+
+# The old engine's fixed 9-step name list (`pipelines/current.py`), still
+# used ONLY for `pipeline: "legacy"`'s hardcoded reconstructed-only
+# artifact row (which never actually gates on a step name). The new
+# `core.pipeline` engine (`pipeline: "current"`) uses its own short,
+# generic step list instead -- see `NEW_STEP_NAMES` below.
+NEW_STEP_NAMES = ["phase1", "phase2", "phase3"]
 
 _LOG = get_logger("generate_pipeline_report")
 
@@ -88,7 +95,10 @@ _CONVERT = {
 
 # stage stem -> (stage_key for stages.render_stage_layers, stats-key or
 # None, gate STEP_NAME). Each stage emits one single-purpose PDF per visual
-# layer: `<stem>__<layer-slug>.pdf`.
+# layer: `<stem>__<layer-slug>.pdf`. Only ever used for `pipeline: "legacy"`
+# now (`_active_artifacts` hardcodes it to the "reconstructed" row alone) --
+# kept as-is/dead otherwise since the old engine it fully described
+# (`pipelines/current.py`) is no longer what `pipeline: "current"` runs.
 _ARTIFACTS: list[tuple[str, str, str | None, str]] = [
     ("native_text", "native", "native", "native"),
     ("vector_extraction", "vectors", "vectors", "vectors"),
@@ -105,6 +115,18 @@ _ARTIFACTS: list[tuple[str, str, str | None, str]] = [
     ("reconstructed", "reconstructed", None, "drawing"),
 ]
 
+# The new `core.pipeline` engine's artifact set -- deliberately small and
+# generic (see `commons/renderer/stages.py`'s "phase1"/"phase2"/"final"
+# branches): no per-backend stats files (stats_key=None throughout), no
+# partial-run support (the new orchestrator always runs phase1->p2->p3 in
+# full; `final_stage` here only trims which of these 4 rows get rendered).
+_NEW_ARTIFACTS: list[tuple[str, str, str | None, str]] = [
+    ("phase1", "phase1", None, "phase1"),
+    ("phase2", "phase2", None, "phase2"),
+    ("final", "final", None, "phase3"),
+    ("reconstructed", "reconstructed", None, "phase3"),
+]
+
 
 def _layer_slug(label: str) -> str:
     keep = "".join(c if c.isalnum() else "_" for c in label.lower())
@@ -114,7 +136,15 @@ def _layer_slug(label: str) -> str:
 
 
 class ReportConfig(BaseModel):
-    pipeline: str = "current"
+    # `pipeline` is the top-level engine axis: "current" (the new pluggable
+    # core.pipeline, P1 -> p2 -> p3) or "legacy" (archive/raster_parser,
+    # unchanged, p2/p3 ignored). `p2`/`p3` only apply when
+    # `pipeline == "current"` -- they select a `core.registry.P2_REGISTRY`/
+    # `P3_REGISTRY` backend by name.
+    pipeline: Literal["current", "legacy"] = "current"
+    p2: str = DEFAULT_P2
+    p3: str = DEFAULT_P3
+    enable_fast: bool = True
     final_stage: str | None = None
     input_dir: Path | None = None
     input_files: list[Path] = Field(default_factory=list)
@@ -127,17 +157,27 @@ class ReportConfig(BaseModel):
     dpi: int = 300
     output_root: Path | None = None
 
-    @field_validator("pipeline")
+    @field_validator("p2")
     @classmethod
-    def _known_pipeline(cls, v: str) -> str:
-        resolve_variant(v)  # raises ValueError listing valid names
+    def _known_p2(cls, v: str) -> str:
+        if v not in P2_REGISTRY:
+            raise ValueError(f"p2 must be one of {sorted(P2_REGISTRY)}")
+        return v
+
+    @field_validator("p3")
+    @classmethod
+    def _known_p3(cls, v: str) -> str:
+        if v not in P3_REGISTRY:
+            raise ValueError(f"p3 must be one of {sorted(P3_REGISTRY)}")
         return v
 
     @field_validator("final_stage")
     @classmethod
     def _known_stage(cls, v: str | None) -> str | None:
-        if v is not None and v not in STEP_NAMES:
-            raise ValueError(f"final_stage must be one of {STEP_NAMES}")
+        # Only the new engine's short step list is meaningful here now
+        # (legacy's `_active_artifacts` never consults `final_stage` at
+        # all). Left loose (not required to be in NEW_STEP_NAMES) so a
+        # `pipeline: "legacy"` config doesn't need to omit it.
         return v
 
     @field_validator("vectorise_mode")
@@ -239,9 +279,11 @@ ReportConfig.model_rebuild()
 
 
 def _reached(step: str, final_stage: str | None) -> bool:
-    if final_stage is None:
+    if final_stage is None or final_stage not in NEW_STEP_NAMES:
         return True
-    return STEP_NAMES.index(step) <= STEP_NAMES.index(final_stage)
+    if step not in NEW_STEP_NAMES:
+        return True
+    return NEW_STEP_NAMES.index(step) <= NEW_STEP_NAMES.index(final_stage)
 
 
 def _safe_slug(text: str, limit: int = 40) -> str:
@@ -361,7 +403,10 @@ def _merge_pdfs(page_bytes: list[bytes], out_path: Path) -> None:
 def _write_hyperparams(path: Path, config: ReportConfig, variant) -> None:
     lines = ["# Run config\n", config.model_dump_json(indent=2), "\n\n# Variant\n"]
     lines.append(json.dumps(
-        {"name": variant.name, "engine": variant.engine, "enable_fast": variant.enable_fast},
+        {
+            "name": variant.name, "engine": variant.engine,
+            "p2": variant.p2, "p3": variant.p3, "enable_fast": variant.enable_fast,
+        },
         indent=2,
     ))
     lines.append("\n\n# rastervec.config constants\n")
@@ -383,7 +428,7 @@ def _restamp_page(res, page_index: int) -> None:
 def _active_artifacts(config: ReportConfig, variant) -> list[tuple]:
     if variant.engine == "legacy":
         return [row for row in _ARTIFACTS if row[0] == "reconstructed"]
-    return [row for row in _ARTIFACTS if _reached(row[3], config.final_stage)]
+    return [row for row in _NEW_ARTIFACTS if _reached(row[3], config.final_stage)]
 
 
 def _accumulate_page(
@@ -391,6 +436,7 @@ def _accumulate_page(
     layer_pages: dict[str, list[bytes]], layer_meta: dict[str, dict],
     stats_pages: dict[str, list[tuple[int, dict]]],
     detect_dir: Path, recog_dir: Path, fast_tile_dir: Path,
+    *, is_legacy: bool = False,
 ) -> None:
     """Render every active stage's layer PDFs + numeric stats for one page,
     accumulating into the caller's dicts; also dump the paddle detect/recog
@@ -411,7 +457,10 @@ def _accumulate_page(
             stats_pages[stem].append(
                 (page_index, stage_stats.stats_for_stage(res, stats_key))
             )
-    if res.engine != "legacy":
+    if not is_legacy:
+        # These read old-engine-only verbose fields via `getattr(..., None)`
+        # defaults, so they no-op harmlessly (return 0) for the new
+        # core.pipeline engine's `PipelineResult`, which has none of them.
         _save_paddle_detect_inputs(res, detect_dir, page_index)
         _save_paddle_recog_inputs(res, recog_dir, page_index)
         _save_fast_tile_images(res, fast_tile_dir, page_index)
@@ -461,9 +510,10 @@ def _image_dirs(doc_dir: Path) -> tuple[Path, Path, Path]:
 
 
 def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -> None:
-    from rastervec.pipelines.current import run_pipeline as run_current
+    from rastervec.core.pipeline import run_pipeline as run_current
     from rastervec.pipelines.legacy import run_pipeline as run_legacy
 
+    is_legacy = variant.engine == "legacy"
     doc_dir = run_dir / pdf_path.stem
     doc_dir.mkdir(parents=True, exist_ok=True)
     detect_dir, recog_dir, fast_tile_dir = _image_dirs(doc_dir)
@@ -484,21 +534,21 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
             run_input, run_page = str(conv_path), 0
 
         _LOG.info("running %s page %d (%s)", pdf_path.name, page_index, variant.name)
-        if variant.engine == "legacy":
+        if is_legacy:
             res = run_legacy(run_input, run_page, verbose=True)
         else:
             res = run_current(
-                run_input, run_page, enable_fast=variant.enable_fast, verbose=True,
-                stop_after=config.final_stage,
+                run_input, run_page, p2=variant.p2, p3=variant.p3,
+                enable_fast=variant.enable_fast, verbose=True,
             )
         if run_page != page_index:
             _restamp_page(res, page_index)
 
         _accumulate_page(res, page_index, active, layer_pages, layer_meta, stats_pages,
-                         detect_dir, recog_dir, fast_tile_dir)
+                         detect_dir, recog_dir, fast_tile_dir, is_legacy=is_legacy)
         dumps.append(dump_io.PageDump(
             page_meta=res.page.meta, texts=list(res.texts or []),
-            vectors=list(res.vectors or []), engine=res.engine,
+            vectors=list(res.vectors or []), engine=variant.engine,
             step_durations=dict(res.step_durations or {}),
         ))
 
@@ -665,7 +715,7 @@ def _process_pdf_benchmark(
     texts`'s docstring). Writes `ground_truth_<type>.json` (only the
     non-empty types) and `<type>_{bbox,text}.pdf` overlays for whichever
     types have labels. Returns the `benchmark.json` entry."""
-    from rastervec.pipelines.current import run_pipeline as run_current
+    from rastervec.core.pipeline import run_pipeline as run_current
     from rastervec.pipelines.legacy import run_pipeline as run_legacy
 
     is_legacy = variant.engine == "legacy"
@@ -689,12 +739,12 @@ def _process_pdf_benchmark(
             res = run_legacy(str(conv_path), 0, verbose=True)
         else:
             res = run_current(
-                str(conv_path), 0, enable_fast=variant.enable_fast, verbose=True,
-                stop_after=config.final_stage,
+                str(conv_path), 0, p2=variant.p2, p3=variant.p3,
+                enable_fast=variant.enable_fast, verbose=True,
             )
         _restamp_page(res, p)
         _accumulate_page(res, p, active, layer_pages, layer_meta, stats_pages,
-                         detect_dir, recog_dir, fast_tile_dir)
+                         detect_dir, recog_dir, fast_tile_dir, is_legacy=is_legacy)
 
         raster_texts = []
         if bench.rasterised_pdf_path is not None:
@@ -705,8 +755,8 @@ def _process_pdf_benchmark(
                     res_raster = run_legacy(str(raster_page_path), 0, verbose=True)
                 else:
                     res_raster = run_current(
-                        str(raster_page_path), 0, enable_fast=variant.enable_fast,
-                        verbose=True, stop_after=config.final_stage,
+                        str(raster_page_path), 0, p2=variant.p2, p3=variant.p3,
+                        enable_fast=variant.enable_fast, verbose=True,
                     )
                 _restamp_page(res_raster, p)
                 raster_texts = list(res_raster.texts or [])
@@ -717,7 +767,7 @@ def _process_pdf_benchmark(
 
         dumps.append(dump_io.PageDump(
             page_meta=res.page.meta, texts=list(res.texts or []),
-            vectors=list(res.vectors or []), engine=res.engine,
+            vectors=list(res.vectors or []), engine=variant.engine,
             step_durations=dict(res.step_durations or {}),
             raster_texts=raster_texts,
         ))
@@ -774,7 +824,17 @@ def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     configure_logging()
     config = ReportConfig.model_validate_json(Path(args.config).read_text(encoding="utf-8"))
-    variant = resolve_variant(config.pipeline)
+    # `config.pipeline` picks the engine; `config.p2`/`config.p3` (only
+    # meaningful for "current") come straight from the run config, not from
+    # a named `variants.VARIANTS` preset -- a report run wants exactly the
+    # backend combo the config asks for, not a fixed default combo.
+    if config.pipeline == "legacy":
+        variant = resolve_variant("legacy")
+    else:
+        variant = PipelineVariant(
+            name=f"current:{config.p2}:{config.p3}", engine="current",
+            p2=config.p2, p3=config.p3, enable_fast=config.enable_fast,
+        )
 
     root = config.output_root or output_dir("pipeline_report")
     ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")

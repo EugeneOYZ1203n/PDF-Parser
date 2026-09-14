@@ -1,5 +1,7 @@
 {
   "pipeline": "current",
+  "p2": "Stub",
+  "p3": "FastIntoPaddle",
   "final_stage": null,
   "input_files": ["references/240118-Proposed OW Shopdrawings for Thomson Height CC.pdf"],
   "pages": [0, 1, 2],
