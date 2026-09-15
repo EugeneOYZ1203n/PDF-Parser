@@ -13,14 +13,30 @@ timestamped run folder:
                                                        the viewer toggles each)
             native_text.txt ...                       (one stats file per stage)
             dump.json                                 (every Text + Vector, reloadable)
-            paddle_detect_images/  (one PNG per cluster: exactly what
-                                   PaddleOCR's text *detector* saw -- the
-                                   cluster's own single render -- with every
-                                   detected box drawn on top)
-            paddle_recog_images/   (one PNG per rotated detection crop: exactly
-                                   what PaddleOCR's text *recognizer* saw, no
-                                   dedup/election, recognised text in the
-                                   filename)
+
+            Pre-OCR debug image folders -- each `p3` backend's own distinct
+            set (read from res.extra["p3_debug"], see
+            `_accumulate_page`/each backend's own `parse.py`):
+              p3=FastIntoPaddle:
+                paddle_detect_images/  (one PNG per cluster: exactly what
+                                       PaddleOCR's text *detector* saw, every
+                                       detected box drawn on top)
+                paddle_recog_images/   (one PNG per rotated detection crop:
+                                       exactly what PaddleOCR's text
+                                       *recognizer* saw, recognised text in
+                                       the filename)
+                fast_tile_images/      (one PNG per FAST detector tile)
+              p3=VectorClassification (no detect stage -- pure
+              recognition-only OCR over Radon-segmented words):
+                fast_tile_images/      (one PNG per FAST-passed cluster,
+                                       cropped from the whole-page FAST
+                                       render -- not a literal tile grid)
+                paddle_recog_images/   (one PNG per deduped representative
+                                       segment actually sent to recognition)
+              p3=LegacyRecreation (no detect, no FAST stage):
+                paddle_ocr_images/     (one PNG per word group's own padded/
+                                       DPI-boosted render, recognised text
+                                       in the filename)
 
 Replaces `rastervec/notebooks/pipeline_stage_visualization.ipynb`.
 
@@ -310,7 +326,21 @@ def _draw_boxes(img: Image.Image, boxes, outline=(220, 30, 30), width=2) -> Imag
     return out
 
 
-def _save_paddle_detect_inputs(res, folder: Path, page_index: int) -> int:
+# ---------------------------------------------------------------------------
+# Per-backend pre-OCR debug image dumpers. Each P3 backend's own `debug_out`
+# dict (stashed at `res.extra["p3_debug"]` -- see `core/result.py` -- when
+# `run_pipeline(..., verbose=True)`, which this script always passes) is the
+# only source of this data: the old, pre-phase-split `PipelineResult` had
+# these as top-level attributes (`spatial_clusters`/`cluster_detections`/
+# `rotated_segments`/`restored_texts`/`fast_result`), but the current
+# `core/result.py::PipelineResult` has none of them -- reading those
+# attributes off `res` (as this used to) always returns `None`/`[]` and
+# silently writes empty folders. Each backend gets its own distinct folder
+# set (see the module docstring) since their internal pipelines genuinely
+# differ -- VectorClassification has no PaddleOCR *detect* stage at all,
+# LegacyRecreation has neither a detect nor a FAST stage.
+# ---------------------------------------------------------------------------
+def _save_fastintopaddle_detect_images(p3_debug: dict, folder: Path, page_index: int) -> int:
     """One PNG per cluster -- exactly what `PaddleDetectBackend.
     detect_on_cluster` saw (`ClusterDetection.image`, already white-padded),
     with every detected box drawn on top. Each `PaddleDetection.bbox` is
@@ -318,12 +348,13 @@ def _save_paddle_detect_inputs(res, folder: Path, page_index: int) -> int:
     space via `page_points_to_pixel` using the *same* `padding` the render
     itself used (`cluster_render_padding`), then shifted by the render's
     own white-pad offset (`cd.pad_x_px`/`cd.pad_y_px`) -- getting either
-    wrong silently misaligns the overlay boxes."""
-    clusters = getattr(res, "spatial_clusters", None) or []
-    cluster_detections = getattr(res, "cluster_detections", None) or []
+    wrong silently misaligns the overlay boxes. Reads
+    `p3_debug["clusters"]`/`p3_debug["cluster_detections"]`."""
+    clusters = p3_debug.get("clusters") or []
+    cluster_detections = p3_debug.get("cluster_detections") or []
     if not clusters or not cluster_detections:
         return 0
-    from rastervec.pipelines._steps import cluster_render_padding
+    from rastervec.P3_Vector_Parsing.FastIntoPaddle.steps import cluster_render_padding
     from rastervec.commons.renderer import page_points_to_pixel
 
     folder.mkdir(parents=True, exist_ok=True)
@@ -347,14 +378,13 @@ def _save_paddle_detect_inputs(res, folder: Path, page_index: int) -> int:
     return n
 
 
-def _save_paddle_recog_inputs(res, folder: Path, page_index: int) -> int:
-    """One PNG per rotated detection crop -- the exact crop handed to
-    PaddleOCR recognition (`Segment.image`), no election/dedup, recognised
-    text in the filename."""
-    segs = getattr(res, "rotated_segments", None) or []
+def _save_segment_recog_images(segs: list, texts: list, folder: Path, page_index: int) -> int:
+    """Shared body for FastIntoPaddle's/VectorClassification's own
+    recog-image dumpers -- both hand PaddleOCR recognition a list of
+    `commons.models.Segment` (each already carrying its own crop in
+    `.image`) 1:1-aligned with a `list[Text]` of what got recognised."""
     if not segs:
         return 0
-    texts = getattr(res, "restored_texts", None) or []
     folder.mkdir(parents=True, exist_ok=True)
     n = 0
     for i, seg in enumerate(segs):
@@ -367,16 +397,37 @@ def _save_paddle_recog_inputs(res, folder: Path, page_index: int) -> int:
     return n
 
 
-def _save_fast_tile_images(res, folder: Path, page_index: int) -> int:
+def _save_fastintopaddle_recog_images(p3_debug: dict, folder: Path, page_index: int) -> int:
+    """One PNG per rotated detection crop -- the exact crop handed to
+    PaddleOCR recognition (`Segment.image`), recognised text in the
+    filename. Reads `p3_debug["segments"]` + `p3_debug["texts"]`."""
+    return _save_segment_recog_images(
+        p3_debug.get("segments") or [], p3_debug.get("texts") or [], folder, page_index,
+    )
+
+
+def _save_vectorclassification_recog_images(p3_debug: dict, folder: Path, page_index: int) -> int:
+    """One PNG per *deduped* representative segment -- exactly what
+    PaddleOCR's recognizer saw for this backend (after
+    `elect_unique_segments`'s dedup, not the pre-dedup `word_segments`),
+    recognised text in the filename. Reads `p3_debug["ocr_uniques"]` +
+    `p3_debug["ocr_unique_texts"]`."""
+    return _save_segment_recog_images(
+        p3_debug.get("ocr_uniques") or [], p3_debug.get("ocr_unique_texts") or [], folder, page_index,
+    )
+
+
+def _save_fastintopaddle_tile_images(p3_debug: dict, folder: Path, page_index: int) -> int:
     """One PNG per FAST tile -- the exact crop of the whole-page FAST render
     (`FastPageResult.page_image`, which is `debug_image_scale`-downsampled
     from the full-res image `FastDetector.detect`/`_detect_job` actually
-    saw for that tile) matching that tile's page-space rect (`all_tiles`)."""
-    fr = getattr(res, "fast_result", None)
+    saw for that tile) matching that tile's page-space rect (`all_tiles`).
+    Reads `p3_debug["fast"]`."""
+    fr = p3_debug.get("fast")
     tiles = getattr(fr, "all_tiles", None) if fr is not None else None
     if fr is None or fr.page_image is None or not tiles:
         return 0
-    from rastervec.config import FAST_PAGE_RENDER_DPI, FAST_TILE_SCALE_FACTOR
+    from rastervec.P3_Vector_Parsing.FastIntoPaddle.config import FAST_PAGE_RENDER_DPI, FAST_TILE_SCALE_FACTOR
     from rastervec.commons.helpers.geometry import PDF_POINTS_PER_INCH
 
     debug_scale = getattr(fr, "debug_image_scale", 1.0)
@@ -387,6 +438,53 @@ def _save_fast_tile_images(res, folder: Path, page_index: int) -> int:
         x0, y0, x1, y1 = (c * zoom for c in rect)
         crop = fr.page_image.crop((int(x0), int(y0), int(x1), int(y1)))
         crop.save(folder / f"p{page_index}_tile_{i:03d}.png")
+        n += 1
+    return n
+
+
+def _save_vectorclassification_cluster_images(p3_debug: dict, folder: Path, page_index: int) -> int:
+    """VectorClassification has no per-tile FAST detector -- one whole-page
+    mask is scored per surviving classification cluster instead (see
+    `VectorClassification/fast_filter.py::detect_text_fast`). One PNG per
+    *passed* cluster, cropped from that same whole-page render
+    (`FastPageResult.page_image`) at the cluster's own bbox -- not a
+    literal detector tile grid, but the closest equivalent: exactly the
+    pixels that cluster's FAST score was sampled from. Reads
+    `p3_debug["fast_result"]` + `p3_debug["fast_passed"]`."""
+    fr = p3_debug.get("fast_result")
+    clusters = p3_debug.get("fast_passed") or []
+    if fr is None or fr.page_image is None or not clusters:
+        return 0
+    from rastervec.P3_Vector_Parsing.VectorClassification.config import FAST_PAGE_RENDER_DPI, FAST_TILE_SCALE_FACTOR
+    from rastervec.commons.helpers.geometry import PDF_POINTS_PER_INCH, union_bbox
+
+    zoom = (FAST_PAGE_RENDER_DPI * FAST_TILE_SCALE_FACTOR) / PDF_POINTS_PER_INCH
+    folder.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for i, cluster in enumerate(clusters):
+        if not cluster:
+            continue
+        x0, y0, x1, y1 = union_bbox([v.bbox for v in cluster])
+        px0, py0, px1, py1 = x0 * zoom, y0 * zoom, x1 * zoom, y1 * zoom
+        crop = fr.page_image.crop((int(px0), int(py0), int(px1) + 1, int(py1) + 1))
+        crop.save(folder / f"p{page_index}_cluster_{i:03d}.png")
+        n += 1
+    return n
+
+
+def _save_legacyrecreation_ocr_images(p3_debug: dict, folder: Path, page_index: int) -> int:
+    """One PNG per word group's own padded/DPI-boosted OCR render -- exactly
+    what PaddleOCR's (recognition-only) engine saw, recognised text in the
+    filename. Reads `p3_debug["ocr_crops"]` (`list[tuple[np.ndarray,
+    str]]`)."""
+    crops = p3_debug.get("ocr_crops") or []
+    if not crops:
+        return 0
+    folder.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for i, (crop, rec) in enumerate(crops):
+        img = Image.fromarray(np.asarray(crop))
+        img.save(folder / f"p{page_index}_word_{i:03d}__{_safe_slug(rec)}.png")
         n += 1
     return n
 
@@ -483,18 +581,19 @@ def _accumulate_page(
     res, page_index: int, active: list[tuple],
     writer: _LayerWriter,
     stats_pages: dict[str, list[tuple[int, dict]]],
-    detect_dir: Path, recog_dir: Path, fast_tile_dir: Path,
-    *, is_legacy: bool = False,
+    detect_dir: Path, recog_dir: Path, fast_tile_dir: Path, ocr_dir: Path,
+    *, is_legacy: bool = False, p3: str = "",
 ) -> None:
     """Render every active stage's fixed layer PDFs (phase1/phase2/final/
     reconstructed -- these need the whole, finished `res`, so they're
     necessarily rendered post-hoc rather than streamed) + numeric stats for
-    one page, writing each layer into `writer` immediately; also dump the
-    paddle detect/recog PNG debug images (what PaddleOCR's own text
-    detector / recognizer saw). Per-backend debug layers (the heavier,
-    genuinely streamable ones) are NOT handled here -- see
-    `_debug_layer_sink` / the `on_debug_layer` callback passed straight
-    into `run_pipeline`."""
+    one page, writing each layer into `writer` immediately; also dump each
+    backend's own pre-OCR debug images (what PaddleOCR's own text detector /
+    recognizer / FAST saw), reading them from `res.extra["p3_debug"]` --
+    each P3 backend's own folder set differs, see the module docstring.
+    Per-backend debug *layers* (the heavier, genuinely streamable PDF
+    overlays) are NOT handled here -- see `_debug_layer_sink` / the
+    `on_debug_layer` callback passed straight into `run_pipeline`."""
     for stem, stage_key, stats_key, _gate in active:
         try:
             layers = stages.render_stage_layers(res, stage_key)
@@ -508,13 +607,18 @@ def _accumulate_page(
             stats_pages[stem].append(
                 (page_index, stage_stats.stats_for_stage(res, stats_key))
             )
-    if not is_legacy:
-        # These read old-engine-only verbose fields via `getattr(..., None)`
-        # defaults, so they no-op harmlessly (return 0) for the new
-        # core.pipeline engine's `PipelineResult`, which has none of them.
-        _save_paddle_detect_inputs(res, detect_dir, page_index)
-        _save_paddle_recog_inputs(res, recog_dir, page_index)
-        _save_fast_tile_images(res, fast_tile_dir, page_index)
+    if is_legacy:
+        return
+    p3_debug = (res.extra or {}).get("p3_debug") or {}
+    if p3 == "FastIntoPaddle":
+        _save_fastintopaddle_tile_images(p3_debug, fast_tile_dir, page_index)
+        _save_fastintopaddle_detect_images(p3_debug, detect_dir, page_index)
+        _save_fastintopaddle_recog_images(p3_debug, recog_dir, page_index)
+    elif p3 == "VectorClassification":
+        _save_vectorclassification_cluster_images(p3_debug, fast_tile_dir, page_index)
+        _save_vectorclassification_recog_images(p3_debug, recog_dir, page_index)
+    elif p3 == "LegacyRecreation":
+        _save_legacyrecreation_ocr_images(p3_debug, ocr_dir, page_index)
 
 
 def _debug_layer_sink(writer: _LayerWriter):
@@ -603,13 +707,16 @@ def _bench_doc_name(bench: "BenchInput") -> str:
     return "".join(c if c not in '<>:"/\\|?*' else "_" for c in name) or "input"
 
 
-def _image_dirs(doc_dir: Path) -> tuple[Path, Path, Path]:
-    """(detect-input dir, recog-input dir, fast-tile dir): what PaddleOCR's
-    own text *detector* saw vs. what its text *recognizer* saw vs. what FAST
-    saw per tile."""
+def _image_dirs(doc_dir: Path) -> tuple[Path, Path, Path, Path]:
+    """(detect-input dir, recog-input dir, fast-tile dir, legacy-ocr dir):
+    what PaddleOCR's own text *detector* saw vs. what its text *recognizer*
+    saw vs. what FAST saw per tile/cluster vs. (LegacyRecreation only, which
+    has neither a detect nor a FAST stage) what its single recognition-only
+    OCR call saw. Not every backend populates every folder -- see
+    `_accumulate_page`'s per-`p3` dispatch."""
     return (
         doc_dir / "paddle_detect_images", doc_dir / "paddle_recog_images",
-        doc_dir / "fast_tile_images",
+        doc_dir / "fast_tile_images", doc_dir / "paddle_ocr_images",
     )
 
 
@@ -620,7 +727,7 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
     is_legacy = variant.engine == "legacy"
     doc_dir = run_dir / pdf_path.stem
     doc_dir.mkdir(parents=True, exist_ok=True)
-    detect_dir, recog_dir, fast_tile_dir = _image_dirs(doc_dir)
+    detect_dir, recog_dir, fast_tile_dir, ocr_dir = _image_dirs(doc_dir)
 
     pages = _filter_valid_pages(pdf_path, config.pages_for(pdf_path.stem), pdf_path.stem)
     active = _active_artifacts(config, variant)
@@ -649,7 +756,8 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
             _restamp_page(res, page_index)
 
         _accumulate_page(res, page_index, active, writer, stats_pages,
-                         detect_dir, recog_dir, fast_tile_dir, is_legacy=is_legacy)
+                         detect_dir, recog_dir, fast_tile_dir, ocr_dir,
+                         is_legacy=is_legacy, p3=variant.p3)
         dumps.append(dump_io.PageDump(
             page_meta=res.page.meta, texts=list(res.texts or []),
             vectors=list(res.vectors or []), engine=variant.engine,
@@ -827,7 +935,7 @@ def _process_pdf_benchmark(
     doc_name = _bench_doc_name(bench)
     doc_dir = run_dir / doc_name
     doc_dir.mkdir(parents=True, exist_ok=True)
-    detect_dir, recog_dir, fast_tile_dir = _image_dirs(doc_dir)
+    detect_dir, recog_dir, fast_tile_dir, ocr_dir = _image_dirs(doc_dir)
     pages = _filter_valid_pages(bench.pdf_path, config.pages_for(doc_name), bench.key)
     cfg = metrics.MetricConfig(iou_edge_min=config.iou_edge_min)
     active = _active_artifacts(config, variant)
@@ -850,7 +958,8 @@ def _process_pdf_benchmark(
             )
         _restamp_page(res, p)
         _accumulate_page(res, p, active, writer, stats_pages,
-                         detect_dir, recog_dir, fast_tile_dir, is_legacy=is_legacy)
+                         detect_dir, recog_dir, fast_tile_dir, ocr_dir,
+                         is_legacy=is_legacy, p3=variant.p3)
 
         raster_texts = []
         if bench.rasterised_pdf_path is not None:

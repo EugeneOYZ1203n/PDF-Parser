@@ -80,7 +80,10 @@ def parse(
         debug_out["classification"] = cls
         debug_out["fast_passed"] = fast.passed
         debug_out["fast_dropped"] = fast.dropped_vectors
+        debug_out["fast_result"] = fast.page_result
         debug_out["word_segments"] = word_segments
+        debug_out["ocr_uniques"] = uniques
+        debug_out["ocr_unique_texts"] = unique_texts
         debug_out["restored"] = restored
         debug_out["drawing"] = drawing
 

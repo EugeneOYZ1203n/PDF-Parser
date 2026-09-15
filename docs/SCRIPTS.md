@@ -42,13 +42,18 @@ emits one kept/dropped layer per classification step plus
 fast/segment/ocr/drawing; `p3: "FastIntoPaddle"` emits one layer per named
 step; `p2: "Junction"` emits its own raster-stage layers) -- see
 `CLAUDE.md`'s `P2_Raster_To_Vec/`/`P3_Vector_Parsing/` bullets for what each
-backend actually renders. `paddle_detect_images/` / `paddle_recog_images/` /
-`fast_tile_images/` (PNG debug crops -- what PaddleOCR's detector/recognizer
-and FAST actually saw) are populated only for backends whose verbose fields
-those particular helpers can read; they no-op harmlessly otherwise. There
-are no per-stage `.txt` stats for the `current` engine -- `dump.json` is the
-reloadable source of truth. `pipeline: "legacy"` still only ever emits the
-single `reconstructed` row.
+backend actually renders. Each `p3` backend also gets its own distinct
+pre-OCR debug image folder set, read from `res.extra["p3_debug"]`:
+`p3: "FastIntoPaddle"` writes `paddle_detect_images/` + `paddle_recog_images/`
++ `fast_tile_images/` (what PaddleOCR's detector/recognizer and FAST tiles
+actually saw); `p3: "VectorClassification"` (no detect stage) writes
+`fast_tile_images/` (per-cluster crops of the whole-page FAST render, not a
+literal tile grid) + `paddle_recog_images/` (post-dedup representative
+segments); `p3: "LegacyRecreation"` (no detect, no FAST stage) writes a
+single `paddle_ocr_images/` folder (one padded/DPI-boosted render per word
+group). There are no per-stage `.txt` stats for the `current` engine --
+`dump.json` is the reloadable source of truth. `pipeline: "legacy"` still
+only ever emits the single `reconstructed` row.
 
 ```
 .venv/Scripts/python.exe scripts/generate_pipeline_report.py \
