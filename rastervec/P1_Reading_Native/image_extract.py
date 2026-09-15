@@ -30,7 +30,19 @@ def _render_whole_page(page: Page, *, dpi: float) -> Image:
     zoom = dpi / 72.0
     import pymupdf as fitz
 
-    pix = page.fitz_page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    # get_pixmap() always bakes the page's own `/Rotate` into what it
+    # renders (regardless of the `matrix` passed), so a 90/270 page comes
+    # back in *rotated* display space with dimensions swapped relative to
+    # `page.meta.width`/`height`. Composing `derotation_matrix` first
+    # cancels that baked-in rotation, landing back in the unrotated
+    # MediaBox space every other Phase-1 output uses -- and that the
+    # `bbox` below already assumes. Confirmed empirically (not just by
+    # matrix algebra): `derotation_matrix * zoom` keeps pixel content
+    # anchored to the unrotated page corners at every `/Rotate` value.
+    fitz_page = page.fitz_page
+    pix = fitz_page.get_pixmap(
+        matrix=fitz_page.derotation_matrix * fitz.Matrix(zoom, zoom), alpha=False,
+    )
     array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
     if pix.n >= 3:
         array = array[:, :, :3]

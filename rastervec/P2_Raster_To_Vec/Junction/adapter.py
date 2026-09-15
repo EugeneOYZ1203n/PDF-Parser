@@ -22,21 +22,36 @@ from rastervec.P2_Raster_To_Vec.Junction.junction_test.types_ import Arc, Segmen
 
 _ITEM_COLOR = (0.0, 0.0, 0.0)
 
+DebugLayer = "tuple[str, str, str, bytes]"
+OnDebugLayer = "Callable[[str, str, str, bytes], None]"
+
 
 def extract(
     images: list[Image], page: Page, *, params: Params | None = None,
-    debug_out: "dict | None" = None,
+    debug_out: "dict | None" = None, on_debug_layer: "OnDebugLayer | None" = None,
 ) -> tuple[list[Vector], list[Text]]:
     """Runs the classical raster-to-vector pipeline on every given `Image`
     and returns every resulting line/arc primitive as a `Vector`. Returns
     no `Text` -- Phase 3 backends OCR the combined vector pool themselves.
-    When `debug_out` is given (a plain dict), each image's own
-    `junction_test.types_.PipelineResult` is stashed (with its `to_page`
-    mapper) for `render_debug` to read back and visualise."""
+
+    `debug_out`, when given (a plain dict), stashes each image's own
+    `junction_test.types_.PipelineResult` (with its `to_page` mapper)
+    verbatim for `render_debug` to read back and visualise later
+    (standalone/notebook use) -- including the raw `text_mask`/
+    `graphics_mask`/`skeleton` numpy arrays, one full set per image, for as
+    long as the caller holds `debug_out`.
+
+    `on_debug_layer`, when given (a callback), extracts each image's own
+    debug boxes (a cheap reduction, not the full mask arrays) right after
+    that image is processed, then -- once every image has been processed --
+    renders and emits this backend's pooled-across-images debug layers
+    (`render_debug`'s own layer set). No per-image mask array is retained
+    past that image's own loop iteration."""
     params = params or Params(run_ocr=False)
     vectors: list[Vector] = []
     seqno = 0
     per_image: "list[tuple[object, object]]" = []
+    boxes = _new_box_accumulator()
     for image in images:
         gray = _to_gray(image.array)
         if gray.size == 0:
@@ -59,8 +74,14 @@ def extract(
             vectors.append(_arc_to_vector(arc, to_page, page.meta.index, seqno))
             seqno += 1
 
+        if on_debug_layer is not None:
+            _accumulate_image_boxes(boxes, result, to_page)
         if debug_out is not None:
             per_image.append((result, to_page))
+
+    if on_debug_layer is not None:
+        for layer in _render_layers_from_boxes(page.meta, boxes, vectors):
+            on_debug_layer(*layer)
 
     if debug_out is not None:
         debug_out["per_image"] = per_image
@@ -122,6 +143,12 @@ def _arc_to_vector(arc: Arc, to_page, page_index: int, seqno: int) -> Vector:
 # onward render each chain/junction's own bbox, still box-based rather than
 # true polylines to keep this module's own render function simple). Nothing
 # here is shared with any P3 backend or P2_Raster_To_Vec/Stub.
+#
+# `_accumulate_image_boxes`/`_render_layers_from_boxes` are the shared
+# reduction the streaming (`on_debug_layer`, immediately per image) and
+# batch (`render_debug`, over the whole `debug_out["per_image"]` pool at
+# once) paths both build on, so the actual box-extraction logic is never
+# duplicated between them.
 # ---------------------------------------------------------------------------
 _C_TEXT_MASK = "#f97316"
 _C_GRAPHICS_MASK = "#2563eb"
@@ -148,70 +175,79 @@ def _mask_bbox(mask, to_page) -> "tuple[float, float, float, float] | None":
     return _bbox_of([p0, p1])
 
 
-def render_debug(debug_out: "dict | None", page_meta) -> "list[tuple[str, str, str, bytes]]":
-    """One (stage, label, hex, pdf_bytes) tuple per debug layer, pooling
-    across every image `extract()` processed for this page, built straight
-    from `parse()`'s own `debug_out` stash."""
+def _new_box_accumulator() -> dict:
+    return {
+        "text": [], "graphics": [], "skeleton": [], "chain": [],
+        "junction": [], "segment": [], "arc": [],
+    }
+
+
+def _accumulate_image_boxes(boxes: dict, result, to_page) -> None:
+    """Mutates `boxes` in place with this one image's own contribution --
+    only cheap bbox tuples, never the mask arrays `result` itself carries."""
+    b = _mask_bbox(result.text_mask, to_page)
+    if b is not None:
+        boxes["text"].append(b)
+    b = _mask_bbox(result.graphics_mask, to_page)
+    if b is not None:
+        boxes["graphics"].append(b)
+    b = _mask_bbox(result.skeleton, to_page)
+    if b is not None:
+        boxes["skeleton"].append(b)
+    for chain in result.graph.chains:
+        if not chain:
+            continue
+        boxes["chain"].append(_bbox_of([to_page(p) for p in chain]))
+    for junction in getattr(result, "junctions", []):
+        cx, cy = to_page(junction.xy)
+        boxes["junction"].append((cx - 2.0, cy - 2.0, cx + 2.0, cy + 2.0))
+    for seg in result.segments:
+        boxes["segment"].append(_bbox_of([to_page(seg.p0), to_page(seg.p1)]))
+    for arc in result.arcs:
+        pts = [to_page(p) for p in arc.polyline] or [to_page(arc.center)]
+        boxes["arc"].append(_bbox_of(pts))
+
+
+def _render_layers_from_boxes(page_meta, boxes: dict, vectors: list[Vector]) -> "list[DebugLayer]":
     from rastervec.commons.renderer import render_boxes_pdf, render_vectors_pdf
 
-    out: "list[tuple[str, str, str, bytes]]" = []
-    if not debug_out:
-        return out
-
-    per_image = debug_out.get("per_image") or []
-
-    text_boxes, graphics_boxes, skeleton_boxes = [], [], []
-    chain_boxes, junction_boxes, segment_boxes, arc_boxes = [], [], [], []
-    for result, to_page in per_image:
-        b = _mask_bbox(result.text_mask, to_page)
-        if b is not None:
-            text_boxes.append(b)
-        b = _mask_bbox(result.graphics_mask, to_page)
-        if b is not None:
-            graphics_boxes.append(b)
-        b = _mask_bbox(result.skeleton, to_page)
-        if b is not None:
-            skeleton_boxes.append(b)
-        for chain in result.graph.chains:
-            if not chain:
-                continue
-            pts = [to_page(p) for p in chain]
-            chain_boxes.append(_bbox_of(pts))
-        for junction in getattr(result, "junctions", []):
-            cx, cy = to_page(junction.xy)
-            junction_boxes.append((cx - 2.0, cy - 2.0, cx + 2.0, cy + 2.0))
-        for seg in result.segments:
-            p0, p1 = to_page(seg.p0), to_page(seg.p1)
-            segment_boxes.append(_bbox_of([p0, p1]))
-        for arc in result.arcs:
-            pts = [to_page(p) for p in arc.polyline] or [to_page(arc.center)]
-            arc_boxes.append(_bbox_of(pts))
-
-    out.append(("text_graphics_separation", "text mask bbox", _C_TEXT_MASK, render_boxes_pdf(
-        page_meta, [(b, _hex_rgb(_C_TEXT_MASK)) for b in text_boxes],
-    )))
-    out.append(("text_graphics_separation", "graphics mask bbox", _C_GRAPHICS_MASK, render_boxes_pdf(
-        page_meta, [(b, _hex_rgb(_C_GRAPHICS_MASK)) for b in graphics_boxes],
-    )))
-    out.append(("skeletonize", "skeleton bbox", _C_SKELETON, render_boxes_pdf(
-        page_meta, [(b, _hex_rgb(_C_SKELETON)) for b in skeleton_boxes],
-    )))
-    out.append(("graph_build", "chain bbox", _C_GRAPH_CHAIN, render_boxes_pdf(
-        page_meta, [(b, _hex_rgb(_C_GRAPH_CHAIN)) for b in chain_boxes],
-    )))
-    out.append(("graph_build", "junction", _C_JUNCTION, render_boxes_pdf(
-        page_meta, [(b, _hex_rgb(_C_JUNCTION)) for b in junction_boxes],
-    )))
-    out.append(("polyline_fit", "segment bbox", _C_SEGMENT, render_boxes_pdf(
-        page_meta, [(b, _hex_rgb(_C_SEGMENT)) for b in segment_boxes],
-    )))
-    out.append(("arc_detect", "arc bbox", _C_ARC, render_boxes_pdf(
-        page_meta, [(b, _hex_rgb(_C_ARC)) for b in arc_boxes],
-    )))
-
-    vectors = debug_out.get("vectors") or []
-    out.append(("final_vectors", "vectors", _C_SEGMENT, render_vectors_pdf(
-        page_meta, vectors, color_of=lambda _v: _hex_rgb(_C_SEGMENT),
-    )))
-
+    out: "list[DebugLayer]" = [
+        ("text_graphics_separation", "text mask bbox", _C_TEXT_MASK, render_boxes_pdf(
+            page_meta, [(b, _hex_rgb(_C_TEXT_MASK)) for b in boxes["text"]],
+        )),
+        ("text_graphics_separation", "graphics mask bbox", _C_GRAPHICS_MASK, render_boxes_pdf(
+            page_meta, [(b, _hex_rgb(_C_GRAPHICS_MASK)) for b in boxes["graphics"]],
+        )),
+        ("skeletonize", "skeleton bbox", _C_SKELETON, render_boxes_pdf(
+            page_meta, [(b, _hex_rgb(_C_SKELETON)) for b in boxes["skeleton"]],
+        )),
+        ("graph_build", "chain bbox", _C_GRAPH_CHAIN, render_boxes_pdf(
+            page_meta, [(b, _hex_rgb(_C_GRAPH_CHAIN)) for b in boxes["chain"]],
+        )),
+        ("graph_build", "junction", _C_JUNCTION, render_boxes_pdf(
+            page_meta, [(b, _hex_rgb(_C_JUNCTION)) for b in boxes["junction"]],
+        )),
+        ("polyline_fit", "segment bbox", _C_SEGMENT, render_boxes_pdf(
+            page_meta, [(b, _hex_rgb(_C_SEGMENT)) for b in boxes["segment"]],
+        )),
+        ("arc_detect", "arc bbox", _C_ARC, render_boxes_pdf(
+            page_meta, [(b, _hex_rgb(_C_ARC)) for b in boxes["arc"]],
+        )),
+        ("final_vectors", "vectors", _C_SEGMENT, render_vectors_pdf(
+            page_meta, vectors, color_of=lambda _v: _hex_rgb(_C_SEGMENT),
+        )),
+    ]
     return out
+
+
+def render_debug(debug_out: "dict | None", page_meta) -> "list[DebugLayer]":
+    """Batch/standalone counterpart to the `on_debug_layer` streaming path
+    above: one (stage, label, hex, pdf_bytes) tuple per debug layer,
+    pooling across every image `extract()` processed for this page, built
+    from `extract()`'s own `debug_out` stash."""
+    if not debug_out:
+        return []
+    boxes = _new_box_accumulator()
+    for result, to_page in debug_out.get("per_image") or []:
+        _accumulate_image_boxes(boxes, result, to_page)
+    return _render_layers_from_boxes(page_meta, boxes, debug_out.get("vectors") or [])

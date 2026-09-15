@@ -15,7 +15,20 @@ no shared interpretation of `debug_out`'s contents here or in
 with the three generic primitives in `commons/renderer`
 (`render_boxes_pdf`/`render_text_pdf`/`render_vectors_pdf`). A backend that
 defines neither `debug_out` nor `render_debug` (e.g. Stub) simply isn't in
-these dicts."""
+these dicts.
+
+A backend may ALSO declare an `on_debug_layer` kwarg (a `(stage, label,
+hex, pdf_bytes) -> None` callback) on its `extract`/`parse` function --
+`core.pipeline.run_pipeline` forwards it whenever a caller passes one,
+independent of `verbose`/`debug_out`. This is the streaming counterpart to
+`render_debug`: the backend calls it immediately after rendering each of
+its own layers, right when that step's data is available, instead of only
+after the whole run -- so a caller that only needs the layers (e.g. a
+report generator writing them straight to disk) never has to keep the
+backend's heavier step-local data (render crops, masks) around for the
+whole run just to render from it afterward. Not registered here (it's a
+call-time callback, not a lookup) -- see each backend's own module for
+whether it's supported."""
 from __future__ import annotations
 
 from rastervec.core.interfaces import Phase2Backend, Phase3Backend

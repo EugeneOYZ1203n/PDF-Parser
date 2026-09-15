@@ -19,23 +19,40 @@ from rastervec.P3_Vector_Parsing.VectorClassification.radon import segment_clust
 
 STEP_NAMES = ["classify", "fast", "segment", "similarity", "ocr", "restore", "drawing"]
 
+DebugLayer = "tuple[str, str, str, bytes]"
+OnDebugLayer = "Callable[[str, str, str, bytes], None]"
+
 
 def parse(
     vectors_p1: list[Vector], vectors_p2: list[Vector], page: Page,
     *, enable_fast: bool = True, verbose: bool = False, compute=None, progress_counter=None,
-    debug_out: "dict | None" = None,
+    debug_out: "dict | None" = None, on_debug_layer: "OnDebugLayer | None" = None,
 ) -> tuple[list[Vector], list[Text]]:
     """Combines Phase 1's raw native vectors and Phase 2's raster-derived
     vectors into one flat pool, then runs the old chain: classify -> FAST
     filter -> Radon word-segmentation -> similarity dedup -> OCR recognize
     -> restore each word occurrence's text -> merge every dropped Vector as
-    drawing content. When `debug_out` is given (a plain dict), this stage's
-    own intermediate objects are stashed into it verbatim (no shape
-    conversion) for `render_debug` to read back and visualise -- see that
-    function below."""
+    drawing content.
+
+    Two independent, optional debug outlets (see `FastIntoPaddle/parse.py`
+    for the shared convention): `debug_out` stashes every stage's own
+    intermediate object verbatim for `render_debug` to render as a
+    post-hoc batch later; `on_debug_layer` renders and emits each stage's
+    layers immediately, right after that stage runs. The 12-step
+    classification chain itself (`classify_vectors`) is one atomic call
+    either way -- its own per-step kept/dropped breakdown is rendered as
+    soon as it returns, still well before the later (heavier) fast/segment/
+    ocr stages run."""
     all_vectors = list(vectors_p1) + list(vectors_p2)
+    page_meta = page.meta
+
+    def _emit(layers: "list[DebugLayer]") -> None:
+        if on_debug_layer is not None:
+            for layer in layers:
+                on_debug_layer(*layer)
 
     cls = classify_vectors(all_vectors, page, verbose=verbose)
+    _emit(_render_classification_layers(page_meta, cls))
 
     flat_clusters = [
         [v for group in cluster for v in group] for cluster in cls.text_clusters
@@ -44,16 +61,20 @@ def parse(
         flat_clusters, page, enable_fast=enable_fast, verbose=verbose,
         compute=compute, progress_counter=progress_counter,
     )
+    _emit(_render_fast_layers(page_meta, fast.passed, fast.dropped_vectors))
 
     word_segments = segment_clusters(fast.passed)
+    _emit(_render_segment_layers(page_meta, word_segments))
 
     groups = group_similar_segments(word_segments)
     uniques, metas = elect_unique_segments(word_segments, groups)
 
     unique_texts = recognize_unique_words(uniques, compute=compute, progress_counter=progress_counter)
     restored = restore_word_texts(unique_texts, metas)
+    _emit(_render_ocr_layers(page_meta, restored))
 
     drawing = list(cls.drawing_vectors) + list(fast.dropped_vectors)
+    _emit(_render_drawing_layers(page_meta, drawing))
 
     if debug_out is not None:
         debug_out["classification"] = cls
@@ -67,10 +88,13 @@ def parse(
 
 
 # ---------------------------------------------------------------------------
-# Debug rendering -- this backend's own render function over its own
-# `debug_out` shape, built only from the three generic primitives in
-# `commons/renderer` (render_boxes_pdf/render_text_pdf/render_vectors_pdf).
-# Nothing here is shared with FastIntoPaddle/LegacyRecreation/Junction.
+# Debug rendering -- one small `_render_<stage>_layers` helper per pipeline
+# stage (same convention as `FastIntoPaddle/parse.py`), built only from the
+# three generic primitives in `commons/renderer`
+# (render_boxes_pdf/render_text_pdf/render_vectors_pdf). Each is called two
+# ways: inline from `parse()` (streaming) and from `render_debug` below
+# (batch, reading the same data back out of `debug_out`). Nothing here is
+# shared with FastIntoPaddle/LegacyRecreation/Junction.
 # ---------------------------------------------------------------------------
 _C_KEPT = "#059669"
 _C_DROPPED = "#dc2626"
@@ -108,67 +132,93 @@ def _flatten_entries(entries: list) -> list[Vector]:
     return out
 
 
-def render_debug(debug_out: "dict | None", page_meta) -> "list[tuple[str, str, str, bytes]]":
-    """One (stage, label, hex, pdf_bytes) tuple per debug layer, built
-    straight from `parse()`'s own `debug_out` stash. Called by
-    `generate_pipeline_report.py` after a `verbose=True` run."""
-    from rastervec.commons.helpers.geometry import union_bbox
-    from rastervec.commons.renderer import render_boxes_pdf, render_text_pdf, render_vectors_pdf
+def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
+    from rastervec.commons.renderer import render_vectors_pdf
 
-    out: "list[tuple[str, str, str, bytes]]" = []
-    if not debug_out:
+    out: "list[DebugLayer]" = []
+    if cls is None or not cls.clustering:
         return out
+    steps_per_bucket = [stage.steps for stage in cls.clustering.values() if stage.steps]
+    if not steps_per_bucket:
+        return out
+    n_steps = len(steps_per_bucket[0])
+    for i in range(n_steps):
+        label = steps_per_bucket[0][i].label
+        kept_groups: list = []
+        dropped_groups: list = []
+        for steps in steps_per_bucket:
+            if i >= len(steps):
+                continue
+            for cat in steps[i].categories.values():
+                if cat.role == "kept":
+                    kept_groups.extend(cat.groups)
+                elif cat.role == "dropped":
+                    dropped_groups.extend(cat.groups)
+        stage = f"classify_{i + 1:02d}_{_slug(label)}"
+        out.append((stage, "kept", _C_KEPT, render_vectors_pdf(
+            page_meta, _flatten_entries(kept_groups), color_of=lambda _v: _hex_rgb(_C_KEPT),
+        )))
+        out.append((stage, "dropped", _C_DROPPED, render_vectors_pdf(
+            page_meta, _flatten_entries(dropped_groups), color_of=lambda _v: _hex_rgb(_C_DROPPED),
+        )))
+    return out
 
-    cls = debug_out.get("classification")
-    if cls is not None and cls.clustering:
-        steps_per_bucket = [stage.steps for stage in cls.clustering.values() if stage.steps]
-        if steps_per_bucket:
-            n_steps = len(steps_per_bucket[0])
-            for i in range(n_steps):
-                label = steps_per_bucket[0][i].label
-                kept_groups: list = []
-                dropped_groups: list = []
-                for steps in steps_per_bucket:
-                    if i >= len(steps):
-                        continue
-                    for cat in steps[i].categories.values():
-                        if cat.role == "kept":
-                            kept_groups.extend(cat.groups)
-                        elif cat.role == "dropped":
-                            dropped_groups.extend(cat.groups)
-                stage = f"classify_{i + 1:02d}_{_slug(label)}"
-                out.append((stage, "kept", _C_KEPT, render_vectors_pdf(
-                    page_meta, _flatten_entries(kept_groups), color_of=lambda _v: _hex_rgb(_C_KEPT),
-                )))
-                out.append((stage, "dropped", _C_DROPPED, render_vectors_pdf(
-                    page_meta, _flatten_entries(dropped_groups), color_of=lambda _v: _hex_rgb(_C_DROPPED),
-                )))
 
-    fast_passed = debug_out.get("fast_passed") or []
-    fast_dropped = debug_out.get("fast_dropped") or []
-    passed_boxes = [union_bbox([v.bbox for v in c]) for c in fast_passed if c]
-    dropped_boxes = [v.bbox for v in fast_dropped]
-    out.append(("fast", "passed", _C_FAST_PASS, render_boxes_pdf(
-        page_meta, [(b, _hex_rgb(_C_FAST_PASS)) for b in passed_boxes],
-    )))
-    out.append(("fast", "dropped", _C_FAST_DROP, render_boxes_pdf(
-        page_meta, [(b, _hex_rgb(_C_FAST_DROP)) for b in dropped_boxes],
-    )))
+def _render_fast_layers(page_meta, fast_passed, fast_dropped) -> "list[DebugLayer]":
+    from rastervec.commons.helpers.geometry import union_bbox
+    from rastervec.commons.renderer import render_boxes_pdf
 
-    segs = debug_out.get("word_segments") or []
+    passed_boxes = [union_bbox([v.bbox for v in c]) for c in (fast_passed or []) if c]
+    dropped_boxes = [v.bbox for v in (fast_dropped or [])]
+    return [
+        ("fast", "passed", _C_FAST_PASS, render_boxes_pdf(
+            page_meta, [(b, _hex_rgb(_C_FAST_PASS)) for b in passed_boxes],
+        )),
+        ("fast", "dropped", _C_FAST_DROP, render_boxes_pdf(
+            page_meta, [(b, _hex_rgb(_C_FAST_DROP)) for b in dropped_boxes],
+        )),
+    ]
+
+
+def _render_segment_layers(page_meta, word_segments) -> "list[DebugLayer]":
+    from rastervec.commons.helpers.geometry import union_bbox
+    from rastervec.commons.renderer import render_boxes_pdf
+
+    segs = word_segments or []
     seg_boxes = [union_bbox([v.bbox for v in s.vectors]) for s in segs if s.vectors]
-    out.append(("segment", "word boxes", _C_SEGMENT, render_boxes_pdf(
+    return [("segment", "word boxes", _C_SEGMENT, render_boxes_pdf(
         page_meta, [(b, _hex_rgb(_C_SEGMENT)) for b in seg_boxes],
-    )))
+    ))]
 
-    restored = debug_out.get("restored") or []
-    out.append(("ocr", "recognized text", _C_OCR, render_text_pdf(
-        page_meta, restored, color_of=lambda _t: _hex_rgb(_C_OCR),
-    )))
 
-    drawing = debug_out.get("drawing") or []
-    out.append(("drawing", "drawing vectors", _C_DRAWING, render_vectors_pdf(
-        page_meta, drawing, color_of=lambda _v: _hex_rgb(_C_DRAWING),
-    )))
+def _render_ocr_layers(page_meta, restored) -> "list[DebugLayer]":
+    from rastervec.commons.renderer import render_text_pdf
 
+    return [("ocr", "recognized text", _C_OCR, render_text_pdf(
+        page_meta, restored or [], color_of=lambda _t: _hex_rgb(_C_OCR),
+    ))]
+
+
+def _render_drawing_layers(page_meta, drawing) -> "list[DebugLayer]":
+    from rastervec.commons.renderer import render_vectors_pdf
+
+    return [("drawing", "drawing vectors", _C_DRAWING, render_vectors_pdf(
+        page_meta, drawing or [], color_of=lambda _v: _hex_rgb(_C_DRAWING),
+    ))]
+
+
+def render_debug(debug_out: "dict | None", page_meta) -> "list[DebugLayer]":
+    """Batch/standalone counterpart to the `on_debug_layer` streaming path
+    above: one (stage, label, hex, pdf_bytes) tuple per debug layer, built
+    from a fully-populated `debug_out`. Called by
+    `generate_pipeline_report.py` after a `verbose=True` run without an
+    `on_debug_layer` callback."""
+    if not debug_out:
+        return []
+    out: "list[DebugLayer]" = []
+    out += _render_classification_layers(page_meta, debug_out.get("classification"))
+    out += _render_fast_layers(page_meta, debug_out.get("fast_passed"), debug_out.get("fast_dropped"))
+    out += _render_segment_layers(page_meta, debug_out.get("word_segments"))
+    out += _render_ocr_layers(page_meta, debug_out.get("restored"))
+    out += _render_drawing_layers(page_meta, debug_out.get("drawing"))
     return out

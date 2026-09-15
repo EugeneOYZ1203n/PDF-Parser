@@ -75,9 +75,7 @@ from rastervec.commons.helpers.geometry import union_bbox
 from rastervec.Evaluation.Report import stage_stats
 from rastervec.commons.logging_setup import configure_logging, get_logger
 from rastervec.commons.paths import output_dir
-from rastervec.core.registry import (
-    P2_REGISTRY, P3_REGISTRY, DEFAULT_P2, DEFAULT_P3, P2_RENDER_DEBUG, P3_RENDER_DEBUG,
-)
+from rastervec.core.registry import P2_REGISTRY, P3_REGISTRY, DEFAULT_P2, DEFAULT_P3
 from rastervec.commons.renderer import render_boxes_pdf, render_reconstructed_pdf, stages
 
 # The old engine's fixed 9-step name list (`pipelines/current.py`), still
@@ -403,6 +401,46 @@ def _merge_pdfs(page_bytes: list[bytes], out_path: Path) -> None:
         out.close()
 
 
+class _LayerWriter:
+    """Incremental per-layer multi-page PDF writer, replacing the old
+    "accumulate every page's rendered bytes for the whole document in a
+    `dict[str, list[bytes]]`, then merge everything in one pass at the
+    end" shape (`_merge_pdfs`, now used only for the smaller GT-overlay
+    outputs). Each call to `add` inserts that one page's bytes into its
+    layer's own already-open `fitz.Document` immediately and drops the
+    bytes right after -- so a layer's pages never sit duplicated in both a
+    growing Python list and a second, later re-parse pass. Combined with
+    each backend's own `on_debug_layer` streaming (see `core/registry.py`),
+    a debug layer's underlying heavy source data (render crops, masks) is
+    never held any longer than that one page/step's own rendering needs
+    it."""
+
+    def __init__(self) -> None:
+        self._docs: dict[str, "fitz.Document"] = {}
+        self.meta: dict[str, dict] = {}
+
+    def add(self, fname: str, meta: dict, pdf_bytes: bytes) -> None:
+        doc = self._docs.get(fname)
+        if doc is None:
+            doc = fitz.open()
+            self._docs[fname] = doc
+        src = fitz.open("pdf", pdf_bytes)
+        try:
+            doc.insert_pdf(src)
+        finally:
+            src.close()
+        self.meta.setdefault(fname, meta)
+
+    def filenames(self) -> list[str]:
+        return list(self._docs)
+
+    def finalize(self, doc_dir: Path) -> None:
+        for fname, doc in self._docs.items():
+            doc.save(str(doc_dir / fname))
+            doc.close()
+        self._docs.clear()
+
+
 def _write_hyperparams(path: Path, config: ReportConfig, variant) -> None:
     lines = ["# Run config\n", config.model_dump_json(indent=2), "\n\n# Variant\n"]
     lines.append(json.dumps(
@@ -436,14 +474,20 @@ def _active_artifacts(config: ReportConfig, variant) -> list[tuple]:
 
 def _accumulate_page(
     res, page_index: int, active: list[tuple],
-    layer_pages: dict[str, list[bytes]], layer_meta: dict[str, dict],
+    writer: _LayerWriter,
     stats_pages: dict[str, list[tuple[int, dict]]],
     detect_dir: Path, recog_dir: Path, fast_tile_dir: Path,
     *, is_legacy: bool = False,
 ) -> None:
-    """Render every active stage's layer PDFs + numeric stats for one page,
-    accumulating into the caller's dicts; also dump the paddle detect/recog
-    PNG debug images (what PaddleOCR's own text detector / recognizer saw)."""
+    """Render every active stage's fixed layer PDFs (phase1/phase2/final/
+    reconstructed -- these need the whole, finished `res`, so they're
+    necessarily rendered post-hoc rather than streamed) + numeric stats for
+    one page, writing each layer into `writer` immediately; also dump the
+    paddle detect/recog PNG debug images (what PaddleOCR's own text
+    detector / recognizer saw). Per-backend debug layers (the heavier,
+    genuinely streamable ones) are NOT handled here -- see
+    `_debug_layer_sink` / the `on_debug_layer` callback passed straight
+    into `run_pipeline`."""
     for stem, stage_key, stats_key, _gate in active:
         try:
             layers = stages.render_stage_layers(res, stage_key)
@@ -452,10 +496,7 @@ def _accumulate_page(
             layers = []
         for label, hexc, pdf_bytes in layers:
             fname = f"{stem}__{_layer_slug(label)}.pdf"
-            layer_pages.setdefault(fname, []).append(pdf_bytes)
-            layer_meta.setdefault(
-                fname, {"stage": stem, "layer": label, "file": fname, "color": hexc}
-            )
+            writer.add(fname, {"stage": stem, "layer": label, "file": fname, "color": hexc}, pdf_bytes)
         if stats_key is not None:
             stats_pages[stem].append(
                 (page_index, stage_stats.stats_for_stage(res, stats_key))
@@ -469,43 +510,31 @@ def _accumulate_page(
         _save_fast_tile_images(res, fast_tile_dir, page_index)
 
 
-def _accumulate_debug_pdfs(
-    res, variant, layer_pages: dict[str, list[bytes]], layer_meta: dict[str, dict],
-) -> None:
-    """For `pipeline: "current"` only: each backend's own `render_debug`
-    (see `core/registry.py`'s `P2_RENDER_DEBUG`/`P3_RENDER_DEBUG`), reading
-    back that backend's own `res.extra["p2_debug"]`/`["p3_debug"]` stash --
-    additive to the fixed phase1/phase2/final/reconstructed artifacts.
-    A backend without a `render_debug` entry (e.g. Stub) contributes
-    nothing here."""
-    extra = getattr(res, "extra", None) or {}
-    for prefix, fn, key in (
-        ("p2", P2_RENDER_DEBUG.get(variant.p2), "p2_debug"),
-        ("p3", P3_RENDER_DEBUG.get(variant.p3), "p3_debug"),
-    ):
-        if fn is None:
-            continue
-        try:
-            layers = fn(extra.get(key), res.page.meta)
-        except Exception as exc:  # noqa: BLE001
-            _LOG.warning("%s render_debug failed for %s: %s", prefix, variant.name, exc)
-            continue
-        for stage, label, hexc, pdf_bytes in layers:
-            fname = f"{stage}__{_layer_slug(label)}.pdf"
-            layer_pages.setdefault(fname, []).append(pdf_bytes)
-            layer_meta.setdefault(
-                fname, {"stage": stage, "layer": label, "file": fname, "color": hexc}
-            )
+def _debug_layer_sink(writer: _LayerWriter):
+    """Builds the `on_debug_layer` callback passed straight into
+    `run_pipeline` for the `current` engine: each backend calls this the
+    moment it renders one of its own debug layers (interleaved with its
+    normal computation -- see `core/registry.py`'s `P2_RENDER_DEBUG`/
+    `P3_RENDER_DEBUG` docstring), so a layer reaches `writer` -- and the
+    backend's own heavier step-local data (render crops, masks) can be
+    dropped -- well before the rest of that page's pipeline run finishes,
+    let alone the whole document's page loop."""
+
+    def _sink(stage: str, label: str, hexc: str, pdf_bytes: bytes) -> None:
+        fname = f"{stage}__{_layer_slug(label)}.pdf"
+        writer.add(fname, {"stage": stage, "layer": label, "file": fname, "color": hexc}, pdf_bytes)
+
+    return _sink
 
 
 def _finalize_doc_dir(
     doc_dir: Path, source_pdf: Path, pages: list[int], config: ReportConfig, variant,
-    active: list[tuple], layer_pages: dict[str, list[bytes]], layer_meta: dict[str, dict],
+    active: list[tuple], writer: _LayerWriter,
     stats_pages: dict[str, list[tuple[int, dict]]], dumps: list[dump_io.PageDump],
     *, extra_layers: tuple[dict, ...] = (),
 ) -> None:
-    for fname, page_bytes in layer_pages.items():
-        _merge_pdfs(page_bytes, doc_dir / fname)
+    layer_filenames = writer.filenames()
+    writer.finalize(doc_dir)
 
     for stem, _sk, stats_key, _gate in active:
         if stats_key is None:
@@ -526,7 +555,7 @@ def _finalize_doc_dir(
         "variant": variant.name,
         "final_stage": config.final_stage,
         "vectorised": config.vectorise or config.benchmark,
-        "layers": [layer_meta[f] for f in layer_pages] + list(extra_layers),
+        "layers": [writer.meta[f] for f in layer_filenames] + list(extra_layers),
     }, indent=2), encoding="utf-8")
     _LOG.info("wrote %s", doc_dir)
 
@@ -553,8 +582,7 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
     pages = config.pages_for(pdf_path.stem)
     active = _active_artifacts(config, variant)
 
-    layer_pages: dict[str, list[bytes]] = {}
-    layer_meta: dict[str, dict] = {}
+    writer = _LayerWriter()
     stats_pages: dict[str, list[tuple[int, dict]]] = {row[0]: [] for row in active}
     dumps: list[dump_io.PageDump] = []
 
@@ -572,14 +600,13 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
             res = run_current(
                 run_input, run_page, p2=variant.p2, p3=variant.p3,
                 enable_fast=variant.enable_fast, verbose=True,
+                on_debug_layer=_debug_layer_sink(writer),
             )
         if run_page != page_index:
             _restamp_page(res, page_index)
 
-        _accumulate_page(res, page_index, active, layer_pages, layer_meta, stats_pages,
+        _accumulate_page(res, page_index, active, writer, stats_pages,
                          detect_dir, recog_dir, fast_tile_dir, is_legacy=is_legacy)
-        if not is_legacy:
-            _accumulate_debug_pdfs(res, variant, layer_pages, layer_meta)
         dumps.append(dump_io.PageDump(
             page_meta=res.page.meta, texts=list(res.texts or []),
             vectors=list(res.vectors or []), engine=variant.engine,
@@ -587,7 +614,7 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
         ))
 
     _finalize_doc_dir(doc_dir, pdf_path, pages, config, variant, active,
-                      layer_pages, layer_meta, stats_pages, dumps)
+                      writer, stats_pages, dumps)
 
 
 _OVERLAY_COLORS = {
@@ -760,8 +787,7 @@ def _process_pdf_benchmark(
     cfg = metrics.MetricConfig(iou_edge_min=config.iou_edge_min)
     active = _active_artifacts(config, variant)
 
-    layer_pages: dict[str, list[bytes]] = {}
-    layer_meta: dict[str, dict] = {}
+    writer = _LayerWriter()
     stats_pages: dict[str, list[tuple[int, dict]]] = {row[0]: [] for row in active}
     dumps: list[dump_io.PageDump] = []
 
@@ -775,12 +801,11 @@ def _process_pdf_benchmark(
             res = run_current(
                 str(conv_path), 0, p2=variant.p2, p3=variant.p3,
                 enable_fast=variant.enable_fast, verbose=True,
+                on_debug_layer=_debug_layer_sink(writer),
             )
         _restamp_page(res, p)
-        _accumulate_page(res, p, active, layer_pages, layer_meta, stats_pages,
+        _accumulate_page(res, p, active, writer, stats_pages,
                          detect_dir, recog_dir, fast_tile_dir, is_legacy=is_legacy)
-        if not is_legacy:
-            _accumulate_debug_pdfs(res, variant, layer_pages, layer_meta)
 
         raster_texts = []
         if bench.rasterised_pdf_path is not None:
@@ -830,7 +855,7 @@ def _process_pdf_benchmark(
             })
 
     _finalize_doc_dir(doc_dir, bench.pdf_path, pages, config, variant, active,
-                      layer_pages, layer_meta, stats_pages, dumps,
+                      writer, stats_pages, dumps,
                       extra_layers=tuple(extra_layers))
 
     (doc_dir / "benchmark_meta.json").write_text(json.dumps({

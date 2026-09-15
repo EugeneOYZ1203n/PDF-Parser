@@ -38,7 +38,10 @@ Not unit-testable (a real Tk event loop). Smoke-test manually:
 
 1. If the PDF has embedded images, the first one loads cropped; "Image i/N"
    nav steps through the rest (`<`/`>` or PageUp/PageDown). If it has none,
-   the status bar says so and the canvas stays blank.
+   the status bar says so and the canvas stays blank. Zoom -/+ (or
+   Ctrl+wheel) changes the crop's zoom level; plain wheel/shift-wheel keep
+   panning the crop (unbound from zoom, since a zoomed-in crop can exceed
+   the canvas). Annotations stay aligned with the image at every zoom level.
 2. Text tool: drag a box over something in the crop, type + rotate + Apply
    -- a solid box with text appears; hovering shows it.
 3. Line tool: click-drag-release along a line -- a solid segment appears.
@@ -63,7 +66,16 @@ import tkinter as tk
 
 import pymupdf as fitz
 
-from _common import DRAG_THRESHOLD_PX, ROTATION_SNAP_DEG, SELECTED_COLOR, Tooltip, bezier_points
+from _common import (
+    DRAG_THRESHOLD_PX,
+    MAX_ZOOM,
+    MIN_ZOOM,
+    ROTATION_SNAP_DEG,
+    SELECTED_COLOR,
+    Tooltip,
+    ZOOM_STEP,
+    bezier_points,
+)
 
 from rastervec.Evaluation.Labelling.label_schema import (
     GeometryAnnotation,
@@ -184,6 +196,13 @@ class RasterLabelApp:
         bar = ttk.Frame(self.root)
         bar.pack(side=tk.TOP, fill=tk.X)
 
+        ttk.Button(bar, text="Zoom -", command=lambda: self._change_zoom(-1)).pack(side=tk.LEFT, padx=2)
+        self.zoom_label = ttk.Label(bar, text=f"{round(self.zoom * 100)}%")
+        self.zoom_label.pack(side=tk.LEFT, padx=4)
+        ttk.Button(bar, text="Zoom +", command=lambda: self._change_zoom(1)).pack(side=tk.LEFT, padx=2)
+
+        ttk.Separator(bar, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=8)
+
         ttk.Button(bar, text="<", width=3, command=lambda: self._change_image(-1)).pack(side=tk.LEFT, padx=1)
         self._image_label = ttk.Label(bar, text="0 / 0")
         self._image_label.pack(side=tk.LEFT, padx=4)
@@ -246,6 +265,7 @@ class RasterLabelApp:
         self.canvas.bind("<Leave>", lambda _e: self.tooltip.hide())
         self.canvas.bind("<MouseWheel>", self._on_wheel)
         self.canvas.bind("<Shift-MouseWheel>", self._on_shift_wheel)
+        self.canvas.bind("<Control-MouseWheel>", self._on_ctrl_wheel)
         self.root.bind("<Escape>", lambda _e: self._cancel_in_progress())
         self.root.bind("<Next>", lambda _e: self._change_image(1))
         self.root.bind("<Prior>", lambda _e: self._change_image(-1))
@@ -313,6 +333,26 @@ class RasterLabelApp:
             *coords, fill=color, width=2, dash=dash, tags=("overlay", "geometry", tag),
         )
 
+    # ---- zoom -----------------------------------------------------------
+
+    def _change_zoom(self, direction: int) -> None:
+        if direction > 0:
+            self.zoom = min(MAX_ZOOM, self.zoom * ZOOM_STEP)
+        else:
+            self.zoom = max(MIN_ZOOM, self.zoom / ZOOM_STEP)
+        region = self._current_region()
+        if region is not None:
+            x0, y0, _x1, _y1 = region.bbox
+            # Same crop-clip formula `_load_image` uses -- no rotation term
+            # (see that function's comment: the clip operates in
+            # pre-rotation page space and embedded insets aren't
+            # independently rotated from their page).
+            self.matrix = fitz.Matrix(
+                self.zoom, 0, 0, self.zoom, -x0 * self.zoom, -y0 * self.zoom,
+            )
+        self.zoom_label.config(text=f"{round(self.zoom * 100)}%")
+        self._render()
+
     # ---- nav --------------------------------------------------
 
     def _on_wheel(self, event: "tk.Event") -> None:
@@ -320,6 +360,9 @@ class RasterLabelApp:
 
     def _on_shift_wheel(self, event: "tk.Event") -> None:
         self.canvas.xview_scroll(int(-event.delta / 120), "units")
+
+    def _on_ctrl_wheel(self, event: "tk.Event") -> None:
+        self._change_zoom(1 if event.delta > 0 else -1)
 
     def _change_image(self, delta: int) -> None:
         if not self.images:

@@ -1,10 +1,13 @@
 # The `VectorClassification` P3 backend, end to end
 
 **This document describes one P3 backend's algorithm, not the whole pipeline.** `rastervec/`
-today is three pluggable phases behind `core.pipeline.run_pipeline(pdf_path, page_index, *, p2,
-p3, ...)` (see `CLAUDE.md`'s architecture section) -- Phase 1 (always the same, native text + raw
-vectors + images), Phase 2 (pluggable raster→vector, `Stub`/`Junction`), Phase 3 (pluggable
-vector-parsing/OCR, `VectorClassification`/`FastIntoPaddle`/`LegacyRecreation`). This document's
+today is two pluggable phases sandwiched between two always-the-same phases, behind
+`core.pipeline.run_pipeline(pdf_path, page_index, *, p2, p3, ...)` (see `CLAUDE.md`'s architecture
+section) -- Phase 1 (always the same, native text + raw vectors + images), Phase 2 (pluggable
+raster→vector, `Stub`/`Junction`), Phase 3 (pluggable vector-parsing/OCR,
+`VectorClassification`/`FastIntoPaddle`/`LegacyRecreation`), Phase 4 (always the same, combines
+every phase's output into the final `(texts, vectors)` and guards the unrotated-MediaBox-space
+coordinate contract). This document's
 `classify → fast → segment → similarity → ocr → restore → drawing` sequence is
 `P3_Vector_Parsing/VectorClassification/`'s own algorithm (`parse.py` -- what used to be
 `rastervec.pipelines.current`'s only algorithm, before the phase split; that module is now dead

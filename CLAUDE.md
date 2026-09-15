@@ -9,15 +9,18 @@ A raster-to-vector pipeline project for architectural/engineering shop drawings
 the standalone PDF-layer inspector tool that used to live at the repo root now lives inside it,
 at `rastervec/Evaluation/inspector/` (see below).
 
-`rastervec/` is the actual extraction pipeline, organized as **three pluggable phases behind one
-shared harness**, not a fixed step sequence: **Phase 1** (`P1_Reading_Native/`, always the same)
-opens the PDF and extracts native text + raw vectors + page/embedded images; **Phase 2**
-(`P2_Raster_To_Vec/`, pluggable — `Stub` no-op, or `Junction`, a ported classical raster→vector
-pipeline) turns Phase 1's images into additional vectors; **Phase 3**
-(`P3_Vector_Parsing/`, pluggable — `VectorClassification`, `FastIntoPaddle`, or
-`LegacyRecreation`) takes Phase 1's + Phase 2's vectors and produces the final vectors + OCR'd
-text. `core/` is the orchestrator + registry + the stable public API surface, and `commons/` is
-the shared foundation (dataclasses, geometry/rendering/logging/paths helpers) every phase builds
+`rastervec/` is the actual extraction pipeline, organized as **two pluggable phases sandwiched
+between two always-the-same phases, behind one shared harness**, not a fixed step sequence:
+**Phase 1** (`P1_Reading_Native/`, always the same) opens the PDF and extracts native text + raw
+vectors + page/embedded images; **Phase 2** (`P2_Raster_To_Vec/`, pluggable — `Stub` no-op, or
+`Junction`, a ported classical raster→vector pipeline) turns Phase 1's images into additional
+vectors; **Phase 3** (`P3_Vector_Parsing/`, pluggable — `VectorClassification`, `FastIntoPaddle`,
+or `LegacyRecreation`) takes Phase 1's + Phase 2's vectors and produces the final vectors + OCR'd
+text; **Phase 4** (`P4_Output_Organization/`, always the same) combines every phase's text/vector
+output into the final `(texts, vectors)` pair and is a coordinate-space consistency backstop (logs
+a warning if any item's bbox doesn't fit the page's own unrotated MediaBox — see "Coordinate
+spaces" below). `core/` is the orchestrator + registry + the stable public API surface, and
+`commons/` is the shared foundation (dataclasses, geometry/rendering/logging/paths helpers) every phase builds
 on. See "`rastervec/` architecture" below for the full breakdown, including the hard rule that
 sibling P2/P3 backends share **zero** code with each other — each is fully self-contained,
 duplicating whatever infra it needs rather than importing a sibling's.
@@ -166,12 +169,13 @@ text — don't reintroduce a bbox-width/height shortcut there, anywhere it's use
 ## `rastervec/` architecture
 
 See `docs/Glossary.md` for standardized group/cluster/global-group/similarity-group
-terminology used throughout this section. `rastervec/` is organized into five buckets:
+terminology used throughout this section. `rastervec/` is organized into six buckets:
 `commons/` (shared foundation), `core/` (orchestrator + registry + public API),
 `P1_Reading_Native/` (the one, always-run extraction phase), `P2_Raster_To_Vec/` (pluggable
-raster→vector backends), `P3_Vector_Parsing/` (pluggable vector-parsing/OCR backends) — plus
-`Evaluation/`, `notebooks/`, `weights/` alongside them (benchmarking/dev tooling, not phase
-code). **Sibling P2 backends (`Stub`/`Junction`) and sibling P3 backends
+raster→vector backends), `P3_Vector_Parsing/` (pluggable vector-parsing/OCR backends),
+`P4_Output_Organization/` (the one, always-run output-combination + coordinate-space-guard
+phase) — plus `Evaluation/`, `notebooks/`, `weights/` alongside them (benchmarking/dev tooling,
+not phase code). **Sibling P2 backends (`Stub`/`Junction`) and sibling P3 backends
 (`VectorClassification`/`FastIntoPaddle`/`LegacyRecreation`) import nothing from each other** —
 each is fully self-contained, duplicating its own copy of any infra it needs (a FAST-style text
 detector, a PaddleOCR engine wrapper, layer/color/width separation, Radon deskew, ...) rather
@@ -207,21 +211,33 @@ generic parallel-pool mechanics), never phase-specific business logic.
     layers each P2/P3 module renders itself).
 - **`core/`** — the orchestrator, registry, and stable public API:
   - **`pipeline.py`** — `run_pipeline(pdf_path, page_index=0, *, p2="Stub",
-    p3="FastIntoPaddle", enable_fast=True, verbose=False, compute=None, progress_counter=None) ->
-    PipelineResult`. Body: `phase1 = P1.read_and_extract(...)` → `p2_vectors, p2_texts =
-    P2_REGISTRY[p2](phase1.images, phase1.page)` → `p3_vectors, p3_texts =
-    P3_REGISTRY[p3](phase1.vectors, p2_vectors, phase1.page, **forwarded_kwargs)` (forwarded
-    kwargs — `enable_fast`/`verbose`/`compute`/`progress_counter`/`debug_out` — are only passed
-    to a backend whose own signature declares that parameter, via `inspect.signature`). CLI:
+    p3="FastIntoPaddle", enable_fast=True, verbose=False, compute=None, progress_counter=None,
+    on_debug_layer=None) -> PipelineResult`. Body: `phase1 = P1.read_and_extract(...)` →
+    `p2_vectors, p2_texts = P2_REGISTRY[p2](phase1.images, phase1.page)` → `p3_vectors, p3_texts =
+    P3_REGISTRY[p3](phase1.vectors, p2_vectors, phase1.page, **forwarded_kwargs)` →
+    `texts, vectors = P4.organize_outputs(phase1.texts, p2_texts, p3_texts, p3_vectors,
+    phase1.page)` (forwarded kwargs — `enable_fast`/`verbose`/`compute`/`progress_counter`/
+    `debug_out`/`on_debug_layer` — are only passed to a backend whose own signature declares that
+    parameter, via `inspect.signature`; `on_debug_layer` is the streaming counterpart to
+    `debug_out`/`render_debug` — see `registry.py`'s docstring). CLI:
     `python -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 FastIntoPaddle]
-    [--no-fast] [-v]`. No `stop_after`/partial-run support — always a full Phase1→P2→P3 run.
+    [--no-fast] [-v]`. No `stop_after`/partial-run support — always a full Phase1→P2→P3→P4 run.
   - **`registry.py`** — `P2_REGISTRY`/`P3_REGISTRY` (name → backend callable),
     `resolve_p2`/`resolve_p3` (`ValueError` listing valid names on a miss), `DEFAULT_P2="Stub"`,
     `DEFAULT_P3="FastIntoPaddle"`. Also `P2_RENDER_DEBUG`/`P3_RENDER_DEBUG` — a *separate*,
     optional registry of each backend's own `render_debug(debug_out, page_meta) ->
     list[(stage, label, hex, pdf_bytes)]` function (a backend with nothing to render, e.g. Stub,
-    simply isn't in these dicts). Adding a new backend = one folder implementing the
-    `Phase2Backend`/`Phase3Backend` interface, plus one line in each applicable dict here.
+    simply isn't in these dicts) — the *batch* debug path: reads a fully-populated `debug_out`
+    after the whole run finishes. Every P2/P3 backend with a `render_debug` also accepts an
+    `on_debug_layer` kwarg on its own `extract`/`parse` — the *streaming* counterpart, a
+    `(stage, label, hex, pdf_bytes) -> None` callback `run_pipeline` forwards whenever a caller
+    passes one (independent of `verbose`/`debug_out`), which the backend calls immediately after
+    rendering each of its own layers, interleaved with its normal computation, instead of only
+    after the whole run — so a caller (`scripts/generate_pipeline_report.py`) never has to hold a
+    backend's heavier step-local debug data (render crops, masks) any longer than that one step's
+    own rendering needs it. Not itself a registry entry (it's a call-time callback). Adding a new
+    backend = one folder implementing the `Phase2Backend`/`Phase3Backend` interface, plus one line
+    in each applicable dict here.
   - **`interfaces.py`** — the `Phase2Backend`/`Phase3Backend` `Protocol`s (structural, not
     enforced at runtime): `Phase2Backend.__call__(images, page) -> (vectors, texts)`;
     `Phase3Backend.__call__(vectors_p1, vectors_p2, page) -> (vectors, texts)`.
@@ -257,7 +273,15 @@ generic parallel-pool mechanics), never phase-specific business logic.
     classification here — that's entirely a P3 backend's job.
   - **`image_extract.py`** — `extract_images(page) -> list[Image]`: the whole-page raster
     (`page.get_pixmap` at a configured DPI) plus any embedded raster images
-    (`page.get_image_info(xrefs=True)`) — feeds Phase 2.
+    (`page.get_image_info(xrefs=True)`) — feeds Phase 2. The whole-page render composes
+    `page.fitz_page.derotation_matrix` with the zoom matrix before calling `get_pixmap` —
+    `get_pixmap()` always bakes the page's own `/Rotate` into what it renders regardless of the
+    `matrix` passed, so without counter-rotating first, a 90°/270° page's raster comes back in
+    rotated display space (dimensions swapped) while still tagged with the unrotated `Image.bbox`
+    every other Phase-1 output uses, corrupting anything downstream (e.g. `Junction`'s `to_page`
+    fraction-of-frame mapper) that trusts that bbox. Embedded images
+    (`page.get_image_info`/raw XObject pixmaps) were never subject to `/Rotate` in the first
+    place, so they need no such correction.
   - **`phase1.py`** — `read_and_extract(pdf_path, page_index) -> Phase1Result(page, texts,
     images, vectors)`, the one entrypoint `core.pipeline` calls.
 - **`P2_Raster_To_Vec/`** — pluggable raster→vector backends, selected by `p2=`:
@@ -331,6 +355,19 @@ generic parallel-pool mechanics), never phase-specific business logic.
   buckets**, in every P3 backend that separates by layer/color at all — two vectors in different
   layers, or with different stroke/fill colors, are never spatially merged together regardless of
   page proximity.
+- **`P4_Output_Organization/`** — the one, always-run output-organization phase (not pluggable,
+  same style as `P1_Reading_Native/` — no reason for this to vary by backend):
+  `organize.py::organize_outputs(texts_p1, texts_p2, texts_p3, vectors_p3, page) -> (texts,
+  vectors)`. Two jobs: (1) combine every phase's text output (`phase1.texts + p2_texts +
+  p3_texts`) with Phase 3's already-final vectors into the one `(texts, vectors)` pair
+  `core.pipeline.run_pipeline` returns — moved out of `pipeline.py` itself into this named seam;
+  (2) a coordinate-space consistency backstop — every `Text`/`Vector` is supposed to stay in
+  unrotated MediaBox space end-to-end (see "Coordinate spaces" above), so this logs a warning
+  (never silently drops or reprojects) for any item whose bbox doesn't fit the page's own
+  unrotated `width`/`height`, the shape of bug that `P1_Reading_Native/image_extract.py`'s
+  whole-page raster had before it was fixed to counter-rotate via `derotation_matrix` (see that
+  module) — this phase exists to catch a future regression like that one at the seam instead of
+  letting it silently reach final output.
 - **`rastervec/OCR/`** (top-level: `fast_detect.py`, `radon.py`, `Paddle_OCR/ocr_backend.py` +
   `render_ocr.py`) — **dead code**, superseded by each P3 backend's own duplicated copy
   (`P3_Vector_Parsing/VectorClassification/{fast_detect,radon,paddle_engine,ocr}.py` and
@@ -776,14 +813,20 @@ generic parallel-pool mechanics), never phase-specific business logic.
   Every mode writes: one multi-page PDF **per visual layer** (`<stage>__<layer>.pdf`), `dump.json`
   (`Evaluation/dump_io.py` — every `Text` + `Vector`, reloadable), `config_and_hyperparameters.txt`
   (config + every `rastervec.config` constant), `manifest.json` (its `layers` list — `{stage,
-  layer, file, color}` — drives the viewer). For `pipeline: "current"`: the fixed
+  layer, file, color}` — drives the viewer). Each layer file is written incrementally by a small
+  `_LayerWriter` (one `fitz.Document` per layer filename, kept open across that PDF's page loop):
+  every rendered page's bytes are inserted and dropped immediately rather than accumulated in a
+  Python list and merged in one pass at the end. For `pipeline: "current"`: the fixed
   `phase1__*.pdf`/`phase2__*.pdf`/`final__*.pdf`/`reconstructed__*.pdf` layers (see
-  `commons/renderer/stages.py`), **plus every backend-specific debug layer** each active P2/P3
-  backend's own `render_debug` produces (`_accumulate_debug_pdfs`, using
-  `core.registry.P2_RENDER_DEBUG`/`P3_RENDER_DEBUG` — e.g. `VectorClassification` emits one
+  `commons/renderer/stages.py` — these necessarily render post-hoc, from the whole finished
+  `PipelineResult`), **plus every backend-specific debug layer** each active P2/P3 backend
+  produces — streamed straight into the writer via `on_debug_layer` (`_debug_layer_sink`), passed
+  into `run_pipeline` itself, so each layer reaches disk the moment that backend renders it rather
+  than only after the whole page's pipeline run finishes (e.g. `VectorClassification` emits one
   kept/dropped layer per classification step plus fast/segment/ocr/drawing layers,
   `FastIntoPaddle` emits one layer per named step, `Junction` emits its own raster-stage layers —
-  see the `P2_Raster_To_Vec/`/`P3_Vector_Parsing/` bullets above for what each backend renders).
+  see the `P2_Raster_To_Vec/`/`P3_Vector_Parsing/` bullets above for what each backend renders,
+  and `core/registry.py`'s docstring for the streaming/`on_debug_layer` convention itself).
   There is no per-stage `.txt` stats file for the `current` engine (the old engine's
   `Evaluation/Report/stage_stats.py` numeric-stats convention doesn't generalize across backends
   with genuinely different internals) — `dump.json` is the reloadable source of truth instead.
@@ -831,13 +874,22 @@ for unit tests since those are gitignored and give no exact expected values to a
    `radon.segment_clusters(debug_out=...)` convention) and, when given, stash your own
    intermediate step objects into it verbatim (no shape conversion — `core.pipeline` only
    forwards it when `verbose=True` and your signature declares it, storing the result in
-   `PipelineResult.extra["p2_debug"]`/`["p3_debug"]`). Then define `render_debug(debug_out,
-   page_meta) -> list[(stage, label, hex, pdf_bytes)]` in the same module, reading your own
-   `debug_out` shape back and rendering it with the three shared primitives in `commons/renderer`
-   (`render_boxes_pdf`/`render_text_pdf`/`render_vectors_pdf`) — no generic interpreter, no
-   shared rendering abstraction; each backend renders its own data. Register it in
-   `core/registry.py`'s `P2_RENDER_DEBUG`/`P3_RENDER_DEBUG`. A backend with nothing worth
-   visualising (e.g. Stub) can skip this step entirely.
+   `PipelineResult.extra["p2_debug"]`/`["p3_debug"]`). Factor your actual rendering logic into one
+   small `_render_<stage>_layers(...)` helper per pipeline step (built from the three shared
+   primitives in `commons/renderer` — `render_boxes_pdf`/`render_text_pdf`/`render_vectors_pdf` —
+   no generic interpreter, no shared rendering abstraction; each backend renders its own data),
+   then two call sites reuse those same helpers: a `render_debug(debug_out, page_meta) ->
+   list[(stage, label, hex, pdf_bytes)]` in the same module (the *batch* path, reading your
+   `debug_out` shape back after the whole run finishes — register it in `core/registry.py`'s
+   `P2_RENDER_DEBUG`/`P3_RENDER_DEBUG`), and an `on_debug_layer: Callable[[str, str, str, bytes],
+   None] | None = None` kwarg on your `extract`/`parse` itself (the *streaming* path — call it
+   with each stage's own layer(s) immediately after that stage computes them, interleaved with
+   your normal computation, instead of only after the whole chain finishes; `core.pipeline`
+   forwards it whenever a caller passes one, independent of `verbose`/`debug_out` — see every
+   existing P2/P3 backend's `parse.py`/`adapter.py` for the pattern). This lets a caller that only
+   wants the rendered layers (e.g. the report generator) never hold your heavier step-local debug
+   data (render crops, masks) any longer than that one step's own rendering needs it. A backend
+   with nothing worth visualising (e.g. Stub) can skip this step entirely.
 
 Also add tests under the matching `tests/rastervec/P2_Raster_To_Vec/`/`P3_Vector_Parsing/`
 subfolder using the synthetic PDF fixtures, and new third-party dependencies to
