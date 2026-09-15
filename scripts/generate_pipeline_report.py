@@ -560,6 +560,28 @@ def _finalize_doc_dir(
     _LOG.info("wrote %s", doc_dir)
 
 
+def _filter_valid_pages(pdf_path: Path, pages: list[int], label: str) -> list[int]:
+    """Drop any page index out of range for `pdf_path`, warning once per
+    input rather than letting a downstream `IndexError: page N not in
+    document` abort the whole run -- a config's `pages` list is often shared
+    across several input files (`pages_for`'s `"*"` fallback, or an explicit
+    per-stem list applied too broadly) that don't all have the same page
+    count."""
+    doc = fitz.open(str(pdf_path))
+    try:
+        page_count = doc.page_count
+    finally:
+        doc.close()
+    valid = [p for p in pages if 0 <= p < page_count]
+    invalid = [p for p in pages if p not in valid]
+    if invalid:
+        _LOG.warning(
+            "%s: skipping out-of-range page(s) %s (%s has %d page%s)",
+            label, invalid, pdf_path.name, page_count, "" if page_count == 1 else "s",
+        )
+    return valid
+
+
 def _image_dirs(doc_dir: Path) -> tuple[Path, Path, Path]:
     """(detect-input dir, recog-input dir, fast-tile dir): what PaddleOCR's
     own text *detector* saw vs. what its text *recognizer* saw vs. what FAST
@@ -579,7 +601,7 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
     doc_dir.mkdir(parents=True, exist_ok=True)
     detect_dir, recog_dir, fast_tile_dir = _image_dirs(doc_dir)
 
-    pages = config.pages_for(pdf_path.stem)
+    pages = _filter_valid_pages(pdf_path, config.pages_for(pdf_path.stem), pdf_path.stem)
     active = _active_artifacts(config, variant)
 
     writer = _LayerWriter()
@@ -783,7 +805,7 @@ def _process_pdf_benchmark(
     doc_dir = run_dir / bench.pdf_path.stem
     doc_dir.mkdir(parents=True, exist_ok=True)
     detect_dir, recog_dir, fast_tile_dir = _image_dirs(doc_dir)
-    pages = config.pages_for(bench.pdf_path.stem)
+    pages = _filter_valid_pages(bench.pdf_path, config.pages_for(bench.pdf_path.stem), bench.key)
     cfg = metrics.MetricConfig(iou_edge_min=config.iou_edge_min)
     active = _active_artifacts(config, variant)
 

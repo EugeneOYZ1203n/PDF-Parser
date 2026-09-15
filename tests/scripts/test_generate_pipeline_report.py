@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pymupdf as fitz
 import pytest
 
 _MOD_PATH = Path(__file__).resolve().parents[2] / "scripts" / "generate_pipeline_report.py"
@@ -24,6 +25,36 @@ def test_defaults_and_pages():
 
     cfg3 = gpr.ReportConfig(pages=[3, 4])
     assert cfg3.pages_for("anything") == [3, 4]
+
+
+def test_filter_valid_pages_drops_out_of_range(tmp_path, caplog):
+    pdf_path = tmp_path / "two_pages.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.new_page()
+    doc.save(str(pdf_path))
+    doc.close()
+
+    with caplog.at_level("WARNING"):
+        kept = gpr._filter_valid_pages(pdf_path, [0, 1, 2], "two_pages")
+
+    assert kept == [0, 1]
+    assert "two_pages" in caplog.text
+    assert "[2]" in caplog.text
+
+
+def test_filter_valid_pages_all_valid_no_warning(tmp_path, caplog):
+    pdf_path = tmp_path / "one_page.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(str(pdf_path))
+    doc.close()
+
+    with caplog.at_level("WARNING"):
+        kept = gpr._filter_valid_pages(pdf_path, [0], "one_page")
+
+    assert kept == [0]
+    assert caplog.text == ""
 
 
 def test_rejects_unknown_pipeline():
