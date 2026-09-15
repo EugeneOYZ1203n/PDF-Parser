@@ -68,7 +68,7 @@ one of `input_dir` / `input_files`):
 | `input_dir` | folder scanned for `*.pdf` |
 | `input_files` | explicit PDF paths (merged with `input_dir`, deduped) |
 | `label_files` | `{ "<pdf-stem>": "path/to/labels.json" }` - recorded in the manifest only |
-| `pages` | `[0, 2]`, or `{ "<pdf-stem>": [0,1], "*": [0] }`, or `null` = page 0 |
+| `pages` | `[0, 2]`, or `{ "<pdf-stem>": [0,1], "*": [0] }`, or `null` = page 0. In `benchmark: true` mode, dict keys are each input's own name (see below), not the literal PDF filename. |
 | `vectorise` | run an `Evaluation/conversion.py` pre-step so the pipeline sees text-as-vector-paths |
 | `vectorise_mode` | `to_vector_text` (default) / `text_only` / `drawings_only` |
 | `benchmark` | benchmark mode (see below) - mutually exclusive with `vectorise` |
@@ -76,7 +76,8 @@ one of `input_dir` / `input_files`):
 | `dpi` | render dpi (default 300) |
 | `output_root` | default `outputs/pipeline_report/` |
 
-Output: `outputs/pipeline_report/<ts>__<config-stem>/<pdf-stem>/`.
+Output: `outputs/pipeline_report/<ts>__<config-stem>/<pdf-stem>/`. The run's
+source config path is also recorded in `config_and_hyperparameters.txt`.
 Sample configs live in `scripts/report_configs/` (`full_current`,
 `quick_classify`, `directory_with_labels`, `benchmark`).
 
@@ -89,7 +90,13 @@ A self-contained scoring artifact for `pipeline_report_benchmark.py`.
 
 Per input, per page: the page is converted **once** with
 `convert_page_to_vector_text` (native text as vectors on top of the untouched
-drawings) and the pipeline runs **once**. `<pdf-stem>/` then gets the **full**
+drawings) and the pipeline runs **once**. Each input gets its own
+`<run_dir>/<input-name>/` folder, named from the input's own unique key
+(`pdf:<stem>` / `labels:<stem>` with the prefix stripped) rather than the
+literal source PDF filename -- a `scripts/label/master_label.py` folder's
+`pdf_path` is always that folder's own `original.pdf`, so keying off the
+PDF's filename stem would collide (and overwrite) whenever a config
+benchmarks more than one labelled folder. That folder gets the **full**
 per-stage report (`manifest.json`, every `<stage>__<layer>.pdf`, `dump.json`,
 `converted_p*.pdf`, per-backend debug layers/PNG dirs for `pipeline:
 "current"` -- see above) - `pipeline: "legacy"` only emits `reconstructed` -

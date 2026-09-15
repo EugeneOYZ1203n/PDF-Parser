@@ -799,11 +799,17 @@ generic parallel-pool mechanics), never phase-specific business logic.
   `current` engine (`pipelines.legacy.run_pipeline` unchanged for `legacy` — always a full run;
   the new orchestrator has no `stop_after`, so `final_stage` only trims which report *artifacts*
   render, not how much of the pipeline executes), and writes
-  `outputs/pipeline_report/<ts>__<config-stem>/<pdf-stem>/` — see the artifact breakdown below.
-  **`benchmark: true`** (mutually exclusive with `vectorise`) additionally makes each `<pdf-stem>/` a
+  `outputs/pipeline_report/<ts>__<config-stem>/<pdf-stem>/` (the run's source config path is
+  also recorded inside `config_and_hyperparameters.txt`) — see the artifact breakdown below.
+  **`benchmark: true`** (mutually exclusive with `vectorise`) additionally makes each input's own
   scoring artifact for `pipeline_report_benchmark.py` — `input_files` may be `.pdf` or `.json` label
   sidecars; per page the pipeline runs **once** on `convert_page_to_vector_text` output (text-as-
   vectors over the untouched drawings) and that one run's OCR is scored against both label classes.
+  In benchmark mode the per-input folder is named from `BenchInput.key` with its `pdf:`/`labels:`
+  prefix stripped (`generate_pipeline_report.py::_bench_doc_name`), not the literal `<pdf-stem>` —
+  a `scripts/label/master_label.py` folder's `pdf_path` is always that folder's own `original.pdf`,
+  so keying off the PDF filename would collide (and silently overwrite) whenever a config
+  benchmarks more than one labelled folder.
   Alongside the normal report artifacts (below) it writes `ground_truth_auto.json` (+
   `ground_truth_manual.json`), the split `{auto,manual}_{bbox,text}.pdf` overlays (`label_overlays.py`,
   registered in the manifest under stage `benchmark`), and a run-root `benchmark.json` marker

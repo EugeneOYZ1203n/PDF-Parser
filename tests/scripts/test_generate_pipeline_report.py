@@ -128,6 +128,37 @@ def test_benchmark_inputs_directory_detects_rasterised_pdf(tmp_path):
     assert inputs["labels:E_label"].rasterised_pdf_path == (folder / "rasterised.pdf").resolve()
 
 
+def test_bench_doc_name_disambiguates_master_label_originals():
+    # Two different master_label.py folders both name their PDF copy
+    # "original.pdf" -- `bench.pdf_path.stem` is "original" for both, which
+    # is exactly the collision that used to make one input's report
+    # overwrite the other's. `_bench_doc_name` must key off `bench.key`
+    # instead, which `ReportConfig.benchmark_inputs()` already guarantees
+    # unique per input.
+    foo = gpr.BenchInput(
+        key="labels:foo_label", pdf_path=Path("/x/foo_label/original.pdf"),
+        labels_path=Path("/x/foo_label"),
+    )
+    bar = gpr.BenchInput(
+        key="labels:bar_label", pdf_path=Path("/x/bar_label/original.pdf"),
+        labels_path=Path("/x/bar_label"),
+    )
+    assert foo.pdf_path.stem == bar.pdf_path.stem == "original"
+    assert gpr._bench_doc_name(foo) == "foo_label"
+    assert gpr._bench_doc_name(bar) == "bar_label"
+    assert gpr._bench_doc_name(foo) != gpr._bench_doc_name(bar)
+
+
+def test_bench_doc_name_bare_pdf_and_sanitizes_unsafe_chars():
+    bare = gpr.BenchInput(key="pdf:A", pdf_path=Path("/x/A.pdf"), labels_path=None)
+    assert gpr._bench_doc_name(bare) == "A"
+
+    unsafe = gpr.BenchInput(
+        key='labels:weird?name', pdf_path=Path("/x/original.pdf"), labels_path=Path("/x"),
+    )
+    assert gpr._bench_doc_name(unsafe) == "weird_name"
+
+
 def test_bench_ground_truth_by_type_synthesizes_native_to_raster(tmp_path):
     from rastervec.Evaluation.Labelling.label_schema import LabelEntry, save_labels
 

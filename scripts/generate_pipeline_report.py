@@ -4,7 +4,7 @@ Reads a JSON config, runs the pipeline once per (pdf, page), and writes a
 timestamped run folder:
 
     outputs/pipeline_report/<ts>__<config-stem>/
-        config_and_hyperparameters.txt
+        config_and_hyperparameters.txt        (also records the source config path)
         <pdf-stem>/
             manifest.json
             <stage>__<layer>.pdf                       (one multi-page PDF per
@@ -24,8 +24,12 @@ timestamped run folder:
 
 Replaces `rastervec/notebooks/pipeline_stage_visualization.ipynb`.
 
-With `benchmark: true` the same `<pdf-stem>/` folder is also a scoring
-artifact for `pipeline_report_benchmark.py`: one `convert_page_to_vector_text`
+With `benchmark: true`, each input gets its own report folder (named from
+`BenchInput.key`, not the literal `<pdf-stem>` -- see `_bench_doc_name`; a
+`scripts/label/master_label.py` folder's `pdf_path` is always that folder's
+own `original.pdf`, so naming by PDF filename would collide across inputs)
+that is also a scoring artifact for `pipeline_report_benchmark.py`: one
+`convert_page_to_vector_text`
 run per page (predictions for `native_to_vector`/`original_vector`) plus,
 when the input is a master_label.py folder with its own `rasterised.pdf`, a
 SEPARATE pipeline run directly on that rasterised page (predictions for
@@ -441,8 +445,11 @@ class _LayerWriter:
         self._docs.clear()
 
 
-def _write_hyperparams(path: Path, config: ReportConfig, variant) -> None:
-    lines = ["# Run config\n", config.model_dump_json(indent=2), "\n\n# Variant\n"]
+def _write_hyperparams(path: Path, config: ReportConfig, variant, config_path: Path) -> None:
+    lines = [
+        "# Source config\n", str(config_path.resolve()), "\n\n",
+        "# Run config\n", config.model_dump_json(indent=2), "\n\n# Variant\n",
+    ]
     lines.append(json.dumps(
         {
             "name": variant.name, "engine": variant.engine,
@@ -580,6 +587,20 @@ def _filter_valid_pages(pdf_path: Path, pages: list[int], label: str) -> list[in
             label, invalid, pdf_path.name, page_count, "" if page_count == 1 else "s",
         )
     return valid
+
+
+def _bench_doc_name(bench: "BenchInput") -> str:
+    """Filesystem-safe, per-input-unique folder name for a benchmark input's
+    `<run_dir>/<name>/` report folder. Can't use `bench.pdf_path.stem`
+    directly -- a `scripts/label/master_label.py` folder's `pdf_path` is
+    always that folder's own `original.pdf` (`label_schema.
+    load_labels_from_master_folder`), so every master-label input in one
+    report run would otherwise share the literal "original" stem and
+    silently overwrite each other's output. `bench.key` (`pdf:<stem>` /
+    `labels:<stem>`) is already unique per `ReportConfig.benchmark_inputs()`
+    entry, so strip its source-type prefix instead."""
+    name = bench.key.split(":", 1)[-1]
+    return "".join(c if c not in '<>:"/\\|?*' else "_" for c in name) or "input"
 
 
 def _image_dirs(doc_dir: Path) -> tuple[Path, Path, Path]:
@@ -788,8 +809,9 @@ def _extract_single_page(src_pdf: Path, page_index: int, out_path: Path) -> None
 def _process_pdf_benchmark(
     bench: BenchInput, config: ReportConfig, variant, run_dir: Path,
 ) -> dict:
-    """One benchmark input -> `run_dir/<pdf-stem>/`: the full per-stage
-    report for a `convert_page_to_vector_text` run per page (predictions for
+    """One benchmark input -> `run_dir/<name>/` (named from `bench.key`, see
+    `_bench_doc_name`): the full per-stage report for a
+    `convert_page_to_vector_text` run per page (predictions for
     `native_to_vector`/`original_vector`), plus -- when `bench.rasterised_
     pdf_path` is set -- a SEPARATE pipeline run directly on that rasterised
     PDF's own page (predictions for `vector_to_raster`/`original_raster`/
@@ -802,10 +824,11 @@ def _process_pdf_benchmark(
     from rastervec.pipelines.legacy import run_pipeline as run_legacy
 
     is_legacy = variant.engine == "legacy"
-    doc_dir = run_dir / bench.pdf_path.stem
+    doc_name = _bench_doc_name(bench)
+    doc_dir = run_dir / doc_name
     doc_dir.mkdir(parents=True, exist_ok=True)
     detect_dir, recog_dir, fast_tile_dir = _image_dirs(doc_dir)
-    pages = _filter_valid_pages(bench.pdf_path, config.pages_for(bench.pdf_path.stem), bench.key)
+    pages = _filter_valid_pages(bench.pdf_path, config.pages_for(doc_name), bench.key)
     cfg = metrics.MetricConfig(iou_edge_min=config.iou_edge_min)
     active = _active_artifacts(config, variant)
 
@@ -882,6 +905,7 @@ def _process_pdf_benchmark(
 
     (doc_dir / "benchmark_meta.json").write_text(json.dumps({
         "key": bench.key,
+        "dir": doc_name,
         "source_pdf": str(bench.pdf_path),
         "labels": str(bench.labels_path) if bench.labels_path else None,
         "pages": pages,
@@ -892,7 +916,7 @@ def _process_pdf_benchmark(
     return {
         "key": bench.key,
         "pdf_stem": bench.pdf_path.stem,
-        "dir": bench.pdf_path.stem,
+        "dir": doc_name,
         "sources": sources,
     }
 
@@ -923,7 +947,7 @@ def main(argv: list[str] | None = None) -> int:
     ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = Path(root) / f"{ts}__{Path(args.config).stem}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    _write_hyperparams(run_dir / "config_and_hyperparameters.txt", config, variant)
+    _write_hyperparams(run_dir / "config_and_hyperparameters.txt", config, variant, Path(args.config))
 
     if config.benchmark:
         inputs = config.benchmark_inputs()
