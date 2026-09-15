@@ -21,3 +21,23 @@ BOX_MIN_SIDE_PX = 10.0
 OCR_VERSION = "PP-OCRv4"
 OCR_LANG = "en"
 OCR_DPI = 300
+
+# _cluster_render_padding (parse.py): page-space PDF-point margin added to a
+# word group's own render frame, on top of half its own max stroke width --
+# archive's original PngRenderer.render_word_group used a flat padding=5.0pt,
+# so this is that same value rather than the smaller "extra" constant
+# VectorClassification/FastIntoPaddle use for their own stroke-derived margin.
+RENDER_PADDING_EXTRA_PT = 5.0
+
+# dpi_for_cluster (paddle_engine.py): never-reduces, capped dpi bump so a
+# small word group's render still reaches a usable pixel size for PaddleOCR's
+# recognizer -- mirrors VectorClassification/config.py's own recognition-path
+# constants (not the higher detection-stage ones, since this backend has no
+# detection stage of its own).
+MIN_RENDER_SIDE_PX = 100
+MAX_RENDER_DPI = 4800
+
+# pad_image (paddle_engine.py): pixel-space white border added right before
+# recognition, sized off the render's own larger dimension -- matches
+# PADDLE_WHITE_PAD_FRACTION everywhere else in the codebase.
+RECOGNITION_PAD_FRACTION = 0.1

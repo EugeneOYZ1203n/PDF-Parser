@@ -11,12 +11,18 @@ commons.models types, selectable as a normal P3 backend.
 """
 from __future__ import annotations
 
+import numpy as np
+
 from rastervec.commons.models import Page, Text, Vector
 from rastervec.commons.renderer import render_vector_cluster
 from rastervec.commons.helpers.geometry import compute_origin, transform_direction, union_bbox
-from rastervec.P3_Vector_Parsing.LegacyRecreation.config import OCR_DPI
+from rastervec.P3_Vector_Parsing.LegacyRecreation.config import OCR_DPI, RENDER_PADDING_EXTRA_PT
 from rastervec.P3_Vector_Parsing.LegacyRecreation.filters import filter_text_vectors, ocr_rotate_for_target
-from rastervec.P3_Vector_Parsing.LegacyRecreation.paddle_engine import PaddleRecBackend
+from rastervec.P3_Vector_Parsing.LegacyRecreation.paddle_engine import (
+    PaddleRecBackend,
+    dpi_for_cluster,
+    pad_image,
+)
 from rastervec.P3_Vector_Parsing.LegacyRecreation.wordgrouping import (
     cluster_by_seqno,
     convert_vectors_to_glyphs,
@@ -27,6 +33,14 @@ STEP_NAMES = ["filter_fill", "group_words", "ocr", "drawing"]
 
 DebugLayer = "tuple[str, str, str, bytes]"
 OnDebugLayer = "Callable[[str, str, str, bytes], None]"
+
+
+def _cluster_render_padding(vectors: list[Vector]) -> float:
+    """Page-space PDF-point margin for a word group's own OCR render frame --
+    half its own max stroke width (so a stroke at the bbox edge isn't
+    clipped) plus `RENDER_PADDING_EXTRA_PT`, matching FastIntoPaddle/
+    steps.py's own `max(v.width)/2 + <extra>` convention."""
+    return max((v.width or 0.0) for v in vectors) / 2.0 + RENDER_PADDING_EXTRA_PT
 
 
 def parse(
@@ -69,13 +83,14 @@ def parse(
         group_vectors = get_vectors(wg)
         if not group_vectors:
             continue
+        padding = _cluster_render_padding(group_vectors)
+        dpi_used = dpi_for_cluster(group_vectors, OCR_DPI, padding)
         try:
-            image = render_vector_cluster(group_vectors, OCR_DPI)
+            image = render_vector_cluster(group_vectors, dpi_used, padding)
         except ValueError:
             continue
-        import numpy as np
-
         crop = np.asarray(image)
+        crop, _pad_offset = pad_image(crop)
         boxes = backend.recognize_crops([crop])
         if not boxes or not boxes[0].text:
             continue
