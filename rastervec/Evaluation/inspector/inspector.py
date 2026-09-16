@@ -60,8 +60,8 @@ if __name__ == "__main__" and __package__ is None:
 
 from rastervec.Evaluation.inspector import pdf_model
 from rastervec.Evaluation.inspector.control_panel import ControlPanel
-from rastervec.Evaluation.inspector.layers import build_layers, filter_items
-from rastervec.Evaluation.inspector.overlay_canvas import PageView
+from rastervec.Evaluation.inspector.layers import build_layers, filter_items, seqno_rainbow_colorer
+from rastervec.Evaluation.inspector.overlay_canvas import ItemColor, PageView
 
 
 REFERENCES_DIR = os.path.join(_REPO_ROOT, "references")
@@ -543,7 +543,7 @@ class InspectorApp:
 
         items_by_layer: dict[
             str,
-            tuple[str, list],
+            tuple[ItemColor, list],
         ] = {}
 
         for layer_key in active_layers:
@@ -569,10 +569,21 @@ class InspectorApp:
                     active_filters,
                 )
 
+            color: ItemColor = layer.color
+
+            if (
+                layer_key == "drawings"
+                and self.control_panel.is_seqno_rainbow_enabled()
+            ):
+                color = seqno_rainbow_colorer(
+                    items,
+                    layer.color,
+                )
+
             items_by_layer[
                 layer_key
             ] = (
-                layer.color,
+                color,
                 items,
             )
 

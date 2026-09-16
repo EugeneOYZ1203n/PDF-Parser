@@ -17,6 +17,7 @@ class ControlPanel(ttk.Frame):
         # option_vars[layer_key][subfilter_key][option_value] -> BooleanVar
         self._option_vars: dict[str, dict[str, dict[str, tk.BooleanVar]]] = {}
         self._subfilter_frames: dict[tuple[str, str], ttk.Frame] = {}
+        self._seqno_rainbow_var = tk.BooleanVar(value=False)
 
         self._build_scrollable_area()
         self._build_layer_sections()
@@ -60,8 +61,30 @@ class ControlPanel(ttk.Frame):
             )
             cb.pack(anchor="w")
 
+            if layer.key == "drawings":
+                self._build_seqno_rainbow_toggle(section)
+
             for sub in layer.subfilters:
                 self._build_subfilter_group(section, layer, sub)
+
+    def _build_seqno_rainbow_toggle(self, parent) -> None:
+        """Plain boolean toggle, not a SubFilterSpec — it changes how
+        already-visible drawings are colored, it doesn't filter which ones
+        show. Drawings-specific for now; if a second layer needs a similar
+        toggle, generalize into a dict[(layer_key, toggle_key), BooleanVar].
+        """
+        row = ttk.Frame(parent)
+        row.pack(fill="x", anchor="w", padx=(16, 0))
+
+        ttk.Checkbutton(
+            row,
+            text="Rainbow by seqno",
+            variable=self._seqno_rainbow_var,
+            command=self._notify_change,
+        ).pack(anchor="w")
+
+    def is_seqno_rainbow_enabled(self) -> bool:
+        return self._seqno_rainbow_var.get()
 
     def _build_subfilter_group(self, parent, layer: LayerSpec, sub: SubFilterSpec) -> None:
         group = ttk.Frame(parent)

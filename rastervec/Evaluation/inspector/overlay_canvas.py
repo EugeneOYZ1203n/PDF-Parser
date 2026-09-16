@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk
+from typing import Callable
 
 from PIL import ImageTk
 
 import pymupdf as fitz
 
 from rastervec.Evaluation.inspector.layers import OverlayItem
+
+ItemColor = str | Callable[[OverlayItem], str]
 
 
 class Tooltip:
@@ -367,7 +370,7 @@ class PageView(ttk.Frame):
         self,
         items_by_layer: dict[
             str,
-            tuple[str, list[OverlayItem]],
+            tuple[ItemColor, list[OverlayItem]],
         ],
         matrix: "fitz.Matrix",
     ) -> None:
@@ -424,9 +427,12 @@ class PageView(ttk.Frame):
         self,
         layer_key: str,
         item: OverlayItem,
-        color: str,
+        color: ItemColor,
         matrix: "fitz.Matrix",
     ) -> None:
+
+        if callable(color):
+            color = color(item)
 
         oid: int | None = None
 
