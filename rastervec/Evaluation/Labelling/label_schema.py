@@ -1,9 +1,12 @@
 """Sidecar JSON label format for ground-truth vector-cluster text, used by
 `scripts/label/vector_label.py` (human-entered), `scripts/label/
 native_label.py` (derived from native text, independent of any pipeline
-run), and `scripts/label/raster_label.py` (human-entered over a rasterized
-page, no backing vectors) -- and consumed by `Evaluation/Evaluate/
-evaluate.py` to score a pipeline run against these labels.
+run), `scripts/label/raster_label.py` (human-entered over a rasterized
+page, no backing vectors), and `scripts/label/CAD_font_label.py`
+(`source="cad_font"`, CAD-vector character + baseline ground truth, for
+`rastervec/Evaluation/CadFont/`'s graph-matching exploration) -- and
+consumed by `Evaluation/Evaluate/evaluate.py` to score a pipeline run
+against these labels.
 
 One `LabelEntry` per labelled region, identified by its stable `label_id`
 (not `cluster_signature`, which can go stale the moment a `vector_label`
@@ -38,7 +41,7 @@ from rastervec.commons.helpers.geometry import item_points, union_bbox
 if TYPE_CHECKING:
     from rastervec.commons.models import Vector
 
-LabelSource = Literal["native", "vector", "raster"]
+LabelSource = Literal["native", "vector", "raster", "cad_font"]
 
 
 class LabelEntry(BaseModel):
@@ -47,9 +50,10 @@ class LabelEntry(BaseModel):
     cluster_signature: str
     # Stable identity, independent of the entry's current vector set/bbox/
     # text -- lookup key for "edit this label in place". `vector_label`/
-    # `raster_label`: uuid4().hex at creation. `native_label`: reuses its
-    # existing deterministic `f"line:{page_index}:{block_no}:{line_no}"`
-    # (already stable/meaningful, no random id needed there).
+    # `raster_label`/`CAD_font_label`: uuid4().hex at creation.
+    # `native_label`: reuses its existing deterministic
+    # `f"line:{page_index}:{block_no}:{line_no}"` (already stable/
+    # meaningful, no random id needed there).
     label_id: str
     text: str
     source: LabelSource
@@ -63,6 +67,29 @@ class LabelEntry(BaseModel):
     # PDF and match each label back to its exact drawing paths. Empty for
     # `source="raster"` (no backing vectors).
     vector_signatures: list[str] = Field(default_factory=list)
+    # For `source="cad_font"` only: the owning `Baseline.baseline_id` this
+    # character was assigned to via `CAD_font_label.py`'s "Baseline" mode
+    # checklist. `None` for every other source, and also `None` for a
+    # cad_font entry not yet assigned to any baseline (a common transient
+    # state -- Label mode creates entries with no baseline_id at all, since
+    # it never reads/writes this field; assignment only happens in
+    # Baseline mode).
+    baseline_id: str | None = None
+
+
+class Baseline(BaseModel):
+    """A page-space reference line a `source="cad_font"` character label can
+    be assigned to (`LabelEntry.baseline_id`) -- a line stretching across
+    the page at the base of a run of CAD-vector text, drawn/selected by
+    `CAD_font_label.py`'s "Baseline" mode and (future) consumed by step 7's
+    baseline-confidence consensus (see `docs/cad_font_vector_recognition.
+    md`). `direction` mirrors `Text.direction`'s convention elsewhere in
+    this codebase: a unit vector, page space, not an angle."""
+
+    page_index: int
+    baseline_id: str
+    origin: tuple[float, float]
+    direction: tuple[float, float]
 
 
 class GeometryAnnotation(BaseModel):
@@ -87,11 +114,13 @@ class GeometryAnnotation(BaseModel):
 
 
 class LabelSet(BaseModel):
-    """Every labelled cluster (+ non-text geometry annotation) for one PDF."""
+    """Every labelled cluster (+ non-text geometry annotation + baseline)
+    for one PDF."""
 
     pdf_path: str
     entries: list[LabelEntry] = Field(default_factory=list)
     geometry_entries: list[GeometryAnnotation] = Field(default_factory=list)
+    baselines: list[Baseline] = Field(default_factory=list)
 
 
 def cluster_signature(cluster: "list[VectorPath]") -> str:
@@ -173,7 +202,11 @@ def split_labelset_by_source(labels: LabelSet) -> dict[str, LabelSet]:
     (`Evaluation/Evaluate/metrics.py` etc.) rather than the finer three-way
     `LabelSource` used at labelling time: `source="native"` -> "auto"
     (native-text-derived, no human involved); `source in ("vector",
-    "raster")` -> "manual" (human-entered, vector-backed or not)."""
+    "raster")` -> "manual" (human-entered, vector-backed or not).
+    `source="cad_font"` entries are intentionally excluded from both
+    buckets -- CAD-vector character/baseline ground truth is a different
+    kind of ground truth (topological-graph matching, not text-cluster-bbox
+    detection) that no current benchmark metric scores against."""
     return {
         "auto": LabelSet(
             pdf_path=labels.pdf_path,

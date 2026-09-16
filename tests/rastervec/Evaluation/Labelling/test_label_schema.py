@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from rastervec.Evaluation.Labelling.label_schema import (
+    Baseline,
     GeometryAnnotation,
     LabelEntry,
     LabelSet,
@@ -61,6 +62,47 @@ def test_save_and_load_labels_round_trip(tmp_path):
     restored = load_labels(out_path)
 
     assert restored == labels
+
+
+def test_save_and_load_labels_round_trip_with_baseline(tmp_path):
+    labels = LabelSet(
+        pdf_path="foo.pdf",
+        entries=[
+            LabelEntry(
+                page_index=0, cluster_bbox=(0, 0, 10, 10),
+                cluster_signature="1:0.0:0.0:10.0:10.0", label_id="c1", text="A",
+                source="cad_font", vector_signatures=["sig1"], baseline_id="b1",
+            ),
+        ],
+        baselines=[Baseline(page_index=0, baseline_id="b1", origin=(0.0, 0.0), direction=(1.0, 0.0))],
+    )
+    out_path = str(tmp_path / "labels.json")
+
+    save_labels(labels, out_path)
+    restored = load_labels(out_path)
+
+    assert restored == labels
+    assert restored.baselines[0].baseline_id == "b1"
+    assert restored.entries[0].baseline_id == "b1"
+
+
+def test_load_old_labelset_json_without_baselines_defaults_empty(tmp_path):
+    # Simulates a pre-existing labels.json written before the cad_font/
+    # Baseline schema extension -- no "baselines" key, entries with no
+    # "baseline_id" key at all.
+    old_json = (
+        '{"pdf_path": "foo.pdf", "entries": [{"page_index": 0, '
+        '"cluster_bbox": [0, 0, 1, 1], "cluster_signature": "s", '
+        '"label_id": "id1", "text": "x", "source": "vector"}], '
+        '"geometry_entries": []}'
+    )
+    path = tmp_path / "old.json"
+    path.write_text(old_json, encoding="utf-8")
+
+    loaded = load_labels(str(path))
+
+    assert loaded.baselines == []
+    assert loaded.entries[0].baseline_id is None
 
 
 def test_label_source_accepts_native_vector_raster(tmp_path):
