@@ -88,19 +88,3 @@ def filter_text_vectors(
     else:
         fills = filter_fill_vectors(white_filtered)
     return filter_out_boxes(fills)
-
-
-def ocr_rotate_for_target(target_rotate: int, page_rotation: int) -> int:
-    """The PDF-space rotate value that, combined with `page_rotation`,
-    produces `target_rotate` in OCR/display space -- inverse of legacy's
-    `_glyph_pdf_rotate`."""
-    def glyph_pdf_rotate(ocr_rotate: int) -> int:
-        r = (int(ocr_rotate) - int(page_rotation)) % 360
-        if int(page_rotation) % 360:
-            r = (r + 180) % 360
-        return r
-
-    for cand in (0, 90, 180, 270):
-        if glyph_pdf_rotate(cand) == int(target_rotate) % 360:
-            return cand
-    return 0

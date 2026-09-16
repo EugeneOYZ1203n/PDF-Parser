@@ -345,11 +345,15 @@ generic parallel-pool mechanics), never phase-specific business logic.
     shells out to the real unmodified archive codebase — see that bullet below). `parse.py`:
     `filters.py::filter_text_vectors` classifies filled vectors into glyph-ink candidates vs.
     everything else (drawing) → `wordgrouping.py::cluster_by_seqno` groups glyph candidates by
-    content-stream draw-order adjacency into `WordGroup`s → each group is rendered
-    (`commons.renderer.render_vector_cluster`) and OCR'd (this folder's own
-    `paddle_engine.py::PaddleRecBackend`, recognition-only). `parse.py::render_debug`
-    (`P3_RENDER_DEBUG["LegacyRecreation"]`) renders `filter_fill`/`group_words`/`ocr`/`drawing`
-    layers.
+    content-stream draw-order adjacency into `WordGroup`s → each group is rendered once
+    (`commons.renderer.render_vector_cluster`), padded, and run through this folder's own
+    detect+recognize pair (`paddle_engine.py::PaddleDetectBackend.detect` — PaddleOCR's own
+    text-detector — then `PaddleRecBackend.recognize_crops` on each detected quad's own
+    perspective-cropped region, `_rotate_crop`), so a `WordGroup` yields zero, one, or several
+    `Text`s, each positioned/rotated from its own detected quad mapped back to page space
+    (`commons.renderer.pixel_to_page_bbox`) rather than from the group's own vector geometry.
+    `parse.py::render_debug` (`P3_RENDER_DEBUG["LegacyRecreation"]`) renders
+    `filter_fill`/`group_words`/`ocr`/`drawing` layers.
 
   **Clustering/filtering always operates within one `(layer, color)` bucket, never across
   buckets**, in every P3 backend that separates by layer/color at all — two vectors in different

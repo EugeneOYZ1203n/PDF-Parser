@@ -14,12 +14,17 @@ from __future__ import annotations
 import numpy as np
 
 from rastervec.commons.models import Page, Text, Vector
-from rastervec.commons.renderer import render_vector_cluster
-from rastervec.commons.helpers.geometry import compute_origin, transform_direction, union_bbox
+from rastervec.commons.renderer import pixel_to_page_bbox, render_vector_cluster
+from rastervec.commons.helpers.geometry import compute_origin, transform_direction
 from rastervec.P3_Vector_Parsing.LegacyRecreation.config import OCR_DPI, RENDER_PADDING_EXTRA_PT
-from rastervec.P3_Vector_Parsing.LegacyRecreation.filters import filter_text_vectors, ocr_rotate_for_target
+from rastervec.P3_Vector_Parsing.LegacyRecreation.filters import filter_text_vectors
 from rastervec.P3_Vector_Parsing.LegacyRecreation.paddle_engine import (
+    PaddleDetectBackend,
     PaddleRecBackend,
+    _normalize_bgr,
+    _normalize_rotation,
+    _quad_rotation_deg,
+    _rotate_crop,
     dpi_for_cluster,
     pad_image,
 )
@@ -77,7 +82,8 @@ def parse(
     word_groups = cluster_by_seqno(glyphs, page_rotation)
     _emit(_render_group_words_layers(page_meta, word_groups))
 
-    backend = PaddleRecBackend()
+    rec_backend = PaddleRecBackend()
+    det_backend = PaddleDetectBackend()
     texts: list[Text] = []
     ocr_crops: list[tuple[np.ndarray, str]] = []
     for wg in word_groups:
@@ -90,26 +96,38 @@ def parse(
             image = render_vector_cluster(group_vectors, dpi_used, padding)
         except ValueError:
             continue
-        crop = np.asarray(image)
-        crop, _pad_offset = pad_image(crop)
-        boxes = backend.recognize_crops([crop])
-        if not boxes or not boxes[0].text:
+
+        bgr = _normalize_bgr(np.asarray(image))
+        bgr, (pad_x_px, pad_y_px) = pad_image(bgr)
+        quads = det_backend.detect(bgr)
+        if not quads:
             continue
-        box = boxes[0]
-        ocr_crops.append((crop, box.text))
-        bbox = union_bbox([v.bbox for v in group_vectors])
-        target = 90 if wg.orientation == "vertical" else 0
-        rotate_deg = ocr_rotate_for_target(target, page_rotation) + box.flip_deg
-        direction = transform_direction((1.0, 0.0), rotate_deg)
-        texts.append(Text(
-            text=box.text, bbox=bbox, direction=direction,
-            origin=compute_origin(bbox, direction),
-            font="", font_size=0.0, color=None, flags=0,
-            ascender=None, descender=None, wmode=0,
-            block_no=0, line_no=0, word_no=0,
-            page_index=page.meta.index, seqno=group_vectors[0].seqno,
-            confidence=box.confidence, source="ocr", orientation_source="ocr",
-        ))
+
+        # _rotate_crop's output is cropped straight out of `bgr`, so it's
+        # already BGR -- reverse channels back before recognize_crops, which
+        # does its own RGB->BGR flip internally (same gotcha as
+        # scripts/verify_ocr.py::_run_paddle_full; failing to reverse first
+        # double-flips the channels).
+        crops = [_rotate_crop(bgr, quad)[:, :, ::-1] for quad in quads]
+        boxes = rec_backend.recognize_crops(crops)
+
+        for quad, crop, box in zip(quads, crops, boxes):
+            if not box.text:
+                continue
+            unpadded_quad = (quad - np.array([pad_x_px, pad_y_px])).tolist()
+            bbox = pixel_to_page_bbox(group_vectors, dpi_used, unpadded_quad, padding)
+            rotate_deg = _normalize_rotation(_quad_rotation_deg(quad) + box.flip_deg)
+            direction = transform_direction((1.0, 0.0), rotate_deg)
+            ocr_crops.append((crop, box.text))
+            texts.append(Text(
+                text=box.text, bbox=bbox, direction=direction,
+                origin=compute_origin(bbox, direction),
+                font="", font_size=0.0, color=None, flags=0,
+                ascender=None, descender=None, wmode=0,
+                block_no=0, line_no=0, word_no=0,
+                page_index=page.meta.index, seqno=group_vectors[0].seqno,
+                confidence=box.confidence, source="ocr", orientation_source="ocr",
+            ))
     _emit(_render_ocr_layers(page_meta, texts))
     _emit(_render_drawing_layers(page_meta, drawing_vectors))
 
