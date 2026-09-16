@@ -26,6 +26,12 @@ def test_parse_empty_input_returns_empty_output(page_meta):
     assert texts == []
 
 
+def test_parse_debug_out_has_ocr_crops_key(page_meta):
+    debug_out: dict = {}
+    legacyrecreation.parse([], [], _page(page_meta), debug_out=debug_out)
+    assert debug_out["ocr_crops"] == []
+
+
 def test_parse_streaming_matches_batch_render_debug(page_meta):
     page = _page(page_meta)
 

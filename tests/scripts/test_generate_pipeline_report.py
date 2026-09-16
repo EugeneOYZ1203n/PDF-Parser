@@ -181,3 +181,97 @@ def test_bench_ground_truth_by_type_synthesizes_native_to_raster(tmp_path):
     assert [e.text for e in by_type["native_to_vector"].entries] == ["HELLO"]
     assert [e.text for e in by_type["native_to_raster"].entries] == ["HELLO"]
     assert by_type["native_to_raster"].entries[0].label_id.startswith("natsync:")
+
+
+# ---------------------------------------------------------------------------
+# Per-backend pre-OCR debug image dumpers -- each reads a `p3_debug`-shaped
+# dict (what `res.extra["p3_debug"]` holds for that backend), never the old
+# dead `res.*` attributes.
+# ---------------------------------------------------------------------------
+import numpy as np
+from collections import namedtuple
+
+from rastervec.commons.models import Segment
+
+_FakeText = namedtuple("FakeText", "text")
+
+
+def test_save_segment_recog_images_writes_one_png_per_segment(tmp_path):
+    segs = [Segment(vectors=[], angle=0.0, image=np.zeros((4, 4, 3), dtype=np.uint8))]
+    texts = [_FakeText(text="AB/CD")]
+    folder = tmp_path / "recog"
+    n = gpr._save_segment_recog_images(segs, texts, folder, page_index=0)
+    assert n == 1
+    files = list(folder.glob("*.png"))
+    assert len(files) == 1
+    assert "AB_CD" in files[0].name
+
+
+def test_save_segment_recog_images_empty_input_no_folder(tmp_path):
+    folder = tmp_path / "recog"
+    assert gpr._save_segment_recog_images([], [], folder, page_index=0) == 0
+    assert not folder.exists()
+
+
+def test_save_fastintopaddle_recog_images_reads_p3_debug(tmp_path):
+    segs = [Segment(vectors=[], angle=0.0, image=np.zeros((2, 2, 3), dtype=np.uint8))]
+    p3_debug = {"segments": segs, "texts": [_FakeText(text="X")]}
+    folder = tmp_path / "recog"
+    assert gpr._save_fastintopaddle_recog_images(p3_debug, folder, 0) == 1
+
+
+def test_save_vectorclassification_recog_images_reads_ocr_uniques(tmp_path):
+    segs = [Segment(vectors=[], angle=0.0, image=np.zeros((2, 2, 3), dtype=np.uint8))]
+    p3_debug = {"ocr_uniques": segs, "ocr_unique_texts": [_FakeText(text="Y")]}
+    folder = tmp_path / "recog"
+    assert gpr._save_vectorclassification_recog_images(p3_debug, folder, 0) == 1
+
+
+def test_save_legacyrecreation_ocr_images_reads_ocr_crops(tmp_path):
+    crop = np.zeros((3, 3, 3), dtype=np.uint8)
+    p3_debug = {"ocr_crops": [(crop, "HELLO")]}
+    folder = tmp_path / "ocr"
+    n = gpr._save_legacyrecreation_ocr_images(p3_debug, folder, page_index=2)
+    assert n == 1
+    files = list(folder.glob("*.png"))
+    assert len(files) == 1
+    assert "HELLO" in files[0].name
+    assert "p2_" in files[0].name
+
+
+def test_save_legacyrecreation_ocr_images_missing_key_no_crash(tmp_path):
+    folder = tmp_path / "ocr"
+    assert gpr._save_legacyrecreation_ocr_images({}, folder, 0) == 0
+    assert not folder.exists()
+
+
+def test_save_fastintopaddle_detect_images_missing_keys_no_crash(tmp_path):
+    folder = tmp_path / "detect"
+    assert gpr._save_fastintopaddle_detect_images({}, folder, 0) == 0
+    assert not folder.exists()
+
+
+def test_save_fastintopaddle_tile_images_missing_fast_no_crash(tmp_path):
+    folder = tmp_path / "tiles"
+    assert gpr._save_fastintopaddle_tile_images({}, folder, 0) == 0
+    assert not folder.exists()
+
+
+def test_save_vectorclassification_cluster_images_crops_page_image(tmp_path, vector):
+    from PIL import Image
+    from rastervec.P3_Vector_Parsing.VectorClassification.fast_filter import FastPageResult
+
+    page_image = Image.new("RGB", (200, 200), color=(255, 255, 255))
+    fast_result = FastPageResult(page_image=page_image, page_mask=None, detect_seconds=None, scores={})
+    cluster = [vector(bbox=(0.0, 0.0, 10.0, 10.0))]
+    p3_debug = {"fast_result": fast_result, "fast_passed": [cluster]}
+    folder = tmp_path / "clusters"
+    n = gpr._save_vectorclassification_cluster_images(p3_debug, folder, page_index=0)
+    assert n == 1
+    assert len(list(folder.glob("*.png"))) == 1
+
+
+def test_save_vectorclassification_cluster_images_missing_fast_no_crash(tmp_path):
+    folder = tmp_path / "clusters"
+    assert gpr._save_vectorclassification_cluster_images({}, folder, 0) == 0
+    assert not folder.exists()

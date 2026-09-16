@@ -79,6 +79,7 @@ def parse(
 
     backend = PaddleRecBackend()
     texts: list[Text] = []
+    ocr_crops: list[tuple[np.ndarray, str]] = []
     for wg in word_groups:
         group_vectors = get_vectors(wg)
         if not group_vectors:
@@ -95,6 +96,7 @@ def parse(
         if not boxes or not boxes[0].text:
             continue
         box = boxes[0]
+        ocr_crops.append((crop, box.text))
         bbox = union_bbox([v.bbox for v in group_vectors])
         target = 90 if wg.orientation == "vertical" else 0
         rotate_deg = ocr_rotate_for_target(target, page_rotation) + box.flip_deg
@@ -116,6 +118,7 @@ def parse(
         debug_out["drawing_vectors"] = drawing_vectors
         debug_out["word_groups"] = word_groups
         debug_out["texts"] = texts
+        debug_out["ocr_crops"] = ocr_crops
 
     return drawing_vectors, texts
 
