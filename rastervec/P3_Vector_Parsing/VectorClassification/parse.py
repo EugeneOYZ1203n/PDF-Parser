@@ -104,6 +104,10 @@ _C_SEGMENT = "#2563eb"
 _C_OCR = "#16a34a"
 _C_DRAWING = "#111827"
 
+# Pass-through annotation steps that never drop anything -- not worth a
+# debug layer of their own.
+_SKIP_STEP_LABELS = {"Vector signatures", "Group stats"}
+
 
 def _hex_rgb(h: str) -> tuple[float, float, float]:
     h = h.lstrip("#")
@@ -132,8 +136,18 @@ def _flatten_entries(entries: list) -> list[Vector]:
     return out
 
 
+def _entry_bbox(entry):
+    """Bbox of one group (`list[Vector]`) or one tiered cluster
+    (`list[list[Vector]]`) -- reuses `_flatten_entries`'s per-entry shape
+    dispatch by wrapping the single entry in a one-item list."""
+    from rastervec.commons.helpers.geometry import union_bbox
+
+    vectors = _flatten_entries([entry])
+    return union_bbox([v.bbox for v in vectors]) if vectors else None
+
+
 def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
-    from rastervec.commons.renderer import render_vectors_pdf
+    from rastervec.commons.renderer import render_boxes_pdf, render_vectors_pdf
 
     out: "list[DebugLayer]" = []
     if cls is None or not cls.clustering:
@@ -144,6 +158,8 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
     n_steps = len(steps_per_bucket[0])
     for i in range(n_steps):
         label = steps_per_bucket[0][i].label
+        if label in _SKIP_STEP_LABELS:
+            continue
         kept_groups: list = []
         dropped_groups: list = []
         for steps in steps_per_bucket:
@@ -160,6 +176,14 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
         )))
         out.append((stage, "dropped", _C_DROPPED, render_vectors_pdf(
             page_meta, _flatten_entries(dropped_groups), color_of=lambda _v: _hex_rgb(_C_DROPPED),
+        )))
+        kept_boxes = [b for b in (_entry_bbox(g) for g in kept_groups if g) if b is not None]
+        dropped_boxes = [b for b in (_entry_bbox(g) for g in dropped_groups if g) if b is not None]
+        out.append((stage, f"kept bbox ({len(kept_boxes)})", _C_KEPT, render_boxes_pdf(
+            page_meta, [(b, _hex_rgb(_C_KEPT)) for b in kept_boxes],
+        )))
+        out.append((stage, f"dropped bbox ({len(dropped_boxes)})", _C_DROPPED, render_boxes_pdf(
+            page_meta, [(b, _hex_rgb(_C_DROPPED)) for b in dropped_boxes],
         )))
     return out
 
