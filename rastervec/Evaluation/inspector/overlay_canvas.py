@@ -24,6 +24,12 @@ from rastervec.Evaluation.inspector.layers import OverlayItem
 
 ItemColor = str | Callable[[OverlayItem], str]
 
+SELECTION_COLOR = "#facc15"
+
+# Canvas-pixel movement below which a press/release is treated as a plain
+# click (clearing the selection) rather than a drag.
+SELECT_DRAG_THRESHOLD_PX = 4
+
 
 class Tooltip:
     """Simple mouse-following tooltip for the canvas."""
@@ -96,6 +102,7 @@ class PageView(ttk.Frame):
         master,
         on_page_change=None,
         on_zoom_change=None,
+        on_selection_change=None,
         **kwargs,
     ):
 
@@ -106,6 +113,7 @@ class PageView(ttk.Frame):
 
         self.on_page_change = on_page_change
         self.on_zoom_change = on_zoom_change
+        self.on_selection_change = on_selection_change
 
         # Kept alive so Tk doesn't garbage-collect the displayed image.
         self._photo = None
@@ -132,6 +140,13 @@ class PageView(ttk.Frame):
             1,
             1,
         )
+
+        # Rubber-band region selection (page-space; canvas-space while
+        # actively dragging).
+        self._select_start: tuple[float, float] | None = None
+        self._select_rect_id: int | None = None
+        self._selection_overlay_id: int | None = None
+        self._selection_rect: fitz.Rect | None = None
 
         self._build_nav_bar()
 
@@ -204,6 +219,21 @@ class PageView(ttk.Frame):
         self.canvas.bind(
             "<Leave>",
             self._on_mouse_leave,
+        )
+
+        self.canvas.bind(
+            "<Button-1>",
+            self._on_select_press,
+        )
+
+        self.canvas.bind(
+            "<B1-Motion>",
+            self._on_select_drag,
+        )
+
+        self.canvas.bind(
+            "<ButtonRelease-1>",
+            self._on_select_release,
         )
 
 
@@ -402,6 +432,10 @@ class PageView(ttk.Frame):
                     color,
                     matrix,
                 )
+
+        self._redraw_selection_overlay(
+            matrix
+        )
 
 
     def _register_overlay(
@@ -652,6 +686,153 @@ class PageView(ttk.Frame):
     def _hide_tooltip(self) -> None:
 
         self._tooltip.hide()
+
+
+    # ---- region selection ----------------------------------------------
+
+    def get_selection(self) -> fitz.Rect | None:
+        """Return the current selection rectangle in page-space, if any."""
+
+        return self._selection_rect
+
+    def clear_selection(self) -> None:
+        """Clear the current selection, if any, and notify the callback."""
+
+        if self._selection_overlay_id is not None:
+            self.canvas.delete(
+                self._selection_overlay_id
+            )
+            self._selection_overlay_id = None
+
+        if self._selection_rect is None:
+            return
+
+        self._selection_rect = None
+
+        if self.on_selection_change:
+            self.on_selection_change(None)
+
+    def _redraw_selection_overlay(
+        self,
+        matrix: "fitz.Matrix",
+    ) -> None:
+        """Redraw the persistent selection rectangle for the given matrix.
+
+        Called from `draw_items` so the selection stays correctly placed
+        across zoom/layer redraws, and from `_on_select_release` for
+        immediate feedback right after a drag.
+        """
+
+        if self._selection_overlay_id is not None:
+            self.canvas.delete(
+                self._selection_overlay_id
+            )
+            self._selection_overlay_id = None
+
+        if self._selection_rect is None:
+            return
+
+        rect = self._selection_rect * matrix
+
+        self._selection_overlay_id = self.canvas.create_rectangle(
+            rect.x0,
+            rect.y0,
+            rect.x1,
+            rect.y1,
+            outline=SELECTION_COLOR,
+            width=2,
+            dash=(6, 3),
+            tags=("selection",),
+        )
+
+    def _on_select_press(
+        self,
+        event: tk.Event,
+    ) -> None:
+
+        self._select_start = (
+            self.canvas.canvasx(event.x),
+            self.canvas.canvasy(event.y),
+        )
+
+    def _on_select_drag(
+        self,
+        event: tk.Event,
+    ) -> None:
+
+        if self._select_start is None:
+            return
+
+        x0, y0 = self._select_start
+
+        x1 = self.canvas.canvasx(event.x)
+        y1 = self.canvas.canvasy(event.y)
+
+        if self._select_rect_id is not None:
+            self.canvas.delete(
+                self._select_rect_id
+            )
+
+        self._select_rect_id = self.canvas.create_rectangle(
+            x0,
+            y0,
+            x1,
+            y1,
+            outline=SELECTION_COLOR,
+            width=1,
+            dash=(3, 2),
+            tags=("selrect",),
+        )
+
+    def _on_select_release(
+        self,
+        event: tk.Event,
+    ) -> None:
+
+        start = self._select_start
+        self._select_start = None
+
+        if self._select_rect_id is not None:
+            self.canvas.delete(
+                self._select_rect_id
+            )
+            self._select_rect_id = None
+
+        if start is None:
+            return
+
+        x0, y0 = start
+
+        x1 = self.canvas.canvasx(event.x)
+        y1 = self.canvas.canvasy(event.y)
+
+        if (
+            abs(x1 - x0) < SELECT_DRAG_THRESHOLD_PX
+            and abs(y1 - y0) < SELECT_DRAG_THRESHOLD_PX
+        ):
+            self.clear_selection()
+            return
+
+        inverse = ~self._page_matrix
+
+        p0 = fitz.Point(x0, y0) * inverse
+        p1 = fitz.Point(x1, y1) * inverse
+
+        self._selection_rect = fitz.Rect(
+            min(p0.x, p1.x),
+            min(p0.y, p1.y),
+            max(p0.x, p1.x),
+            max(p0.y, p1.y),
+        )
+
+        self._redraw_selection_overlay(
+            self._page_matrix
+        )
+
+        if self.on_selection_change:
+            self.on_selection_change(
+                self._selection_rect
+            )
 
 
     def _format_metadata(

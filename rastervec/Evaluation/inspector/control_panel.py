@@ -4,14 +4,29 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from rastervec.Evaluation.inspector.layers import LayerSpec, SubFilterSpec, NONE_OPTION
+from rastervec.Evaluation.inspector.layers import (
+    ITEM_KIND_OPTIONS,
+    LayerSpec,
+    SubFilterSpec,
+    NONE_OPTION,
+)
+
+ITEM_KIND_LABELS = dict(ITEM_KIND_OPTIONS)
 
 
 class ControlPanel(ttk.Frame):
-    def __init__(self, master, layers: list[LayerSpec], on_change=None, **kwargs):
+    def __init__(
+        self,
+        master,
+        layers: list[LayerSpec],
+        on_change=None,
+        on_clear_selection=None,
+        **kwargs,
+    ):
         super().__init__(master, **kwargs)
         self.layers = layers
         self.on_change = on_change
+        self.on_clear_selection = on_clear_selection
 
         self._layer_vars: dict[str, tk.BooleanVar] = {}
         # option_vars[layer_key][subfilter_key][option_value] -> BooleanVar
@@ -19,8 +34,70 @@ class ControlPanel(ttk.Frame):
         self._subfilter_frames: dict[tuple[str, str], ttk.Frame] = {}
         self._seqno_rainbow_var = tk.BooleanVar(value=False)
 
+        self._build_selection_stats_panel()
         self._build_scrollable_area()
         self._build_layer_sections()
+
+    def _build_selection_stats_panel(self) -> None:
+        panel = ttk.Frame(self)
+        panel.pack(fill="x", anchor="w", padx=4, pady=(4, 0))
+
+        header = ttk.Frame(panel)
+        header.pack(fill="x", anchor="w")
+
+        ttk.Label(header, text="Selection", font=("TkDefaultFont", 9, "bold")).pack(
+            side="left"
+        )
+
+        ttk.Button(
+            header,
+            text="Clear",
+            command=self._on_clear_selection_click,
+        ).pack(side="right")
+
+        self._selection_stats_frame = ttk.Frame(panel)
+        self._selection_stats_frame.pack(fill="x", anchor="w", pady=(2, 4))
+
+        ttk.Separator(panel, orient="horizontal").pack(fill="x", pady=(4, 0))
+
+        self.update_selection_stats(None)
+
+    def _on_clear_selection_click(self) -> None:
+        if self.on_clear_selection:
+            self.on_clear_selection()
+
+    def update_selection_stats(self, stats: dict | None) -> None:
+        """Rebuild the selection stats rows from a `layers.summarize_selection`
+        result, or show a placeholder when `stats` is None (no selection)."""
+
+        for child in self._selection_stats_frame.winfo_children():
+            child.destroy()
+
+        if stats is None:
+            ttk.Label(
+                self._selection_stats_frame,
+                text="No selection — drag on the page to select a region.",
+                foreground="#666",
+            ).pack(anchor="w")
+            return
+
+        ttk.Label(
+            self._selection_stats_frame,
+            text=f"Vectors: {stats['vector_count']}",
+        ).pack(anchor="w")
+
+        ttk.Label(
+            self._selection_stats_frame,
+            text=f"Items: {stats['item_count']}",
+        ).pack(anchor="w")
+
+        for kind, count in sorted(stats["type_counts"].items()):
+            label = ITEM_KIND_LABELS.get(kind, kind or "(unknown)")
+
+            ttk.Label(
+                self._selection_stats_frame,
+                text=f"  {label}: {count}",
+            ).pack(anchor="w")
 
     def _build_scrollable_area(self) -> None:
         outer = ttk.Frame(self)

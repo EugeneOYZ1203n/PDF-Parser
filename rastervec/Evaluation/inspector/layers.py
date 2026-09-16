@@ -33,6 +33,7 @@ available. This makes filtering, spatial indexing, and hit testing easier.
 from __future__ import annotations
 
 import colorsys
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -555,6 +556,43 @@ def filter_items(
             result.append(item)
 
     return result
+
+
+def summarize_selection(
+    items: list[OverlayItem],
+    region: "fitz.Rect",
+) -> dict[str, Any]:
+    """Vector/item/type counts for `items` intersecting `region`.
+
+    "Items" are individual OverlayItems (one per draw operation);
+    "vectors" are distinct source paths, identified by the `seqno` attr
+    shared by every item belonging to the same `get_drawings()` path.
+    Intersection is bbox-only (matches the existing rubber-band select in
+    scripts/label/vector_label.py).
+    """
+
+    hits = [
+        item
+        for item in items
+        if item.bbox.intersects(region)
+    ]
+
+    vector_ids = {
+        item.attrs["seqno"]
+        for item in hits
+        if "seqno" in item.attrs
+    }
+
+    type_counts = Counter(
+        item.attrs.get("kind", "")
+        for item in hits
+    )
+
+    return {
+        "vector_count": len(vector_ids),
+        "item_count": len(hits),
+        "type_counts": type_counts,
+    }
 
 
 _GETTERS: dict[

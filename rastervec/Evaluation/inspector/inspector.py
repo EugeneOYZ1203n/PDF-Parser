@@ -60,7 +60,12 @@ if __name__ == "__main__" and __package__ is None:
 
 from rastervec.Evaluation.inspector import pdf_model
 from rastervec.Evaluation.inspector.control_panel import ControlPanel
-from rastervec.Evaluation.inspector.layers import build_layers, filter_items, seqno_rainbow_colorer
+from rastervec.Evaluation.inspector.layers import (
+    build_layers,
+    filter_items,
+    seqno_rainbow_colorer,
+    summarize_selection,
+)
 from rastervec.Evaluation.inspector.overlay_canvas import ItemColor, PageView
 
 
@@ -203,6 +208,7 @@ class InspectorApp:
             paned,
             on_page_change=self.change_page,
             on_zoom_change=self.change_zoom,
+            on_selection_change=self.on_selection_change,
         )
 
         paned.add(
@@ -215,6 +221,7 @@ class InspectorApp:
             paned,
             self.layers,
             on_change=self.redraw,
+            on_clear_selection=self.page_view.clear_selection,
         )
 
         paned.add(
@@ -371,6 +378,8 @@ class InspectorApp:
             + os.path.basename(path)
         )
 
+        self.page_view.clear_selection()
+
         self.render_page()
 
 
@@ -393,6 +402,10 @@ class InspectorApp:
             return
 
         self.state.page_index = new_index
+
+        # The selection is page-specific; a stale rect from the old page
+        # would misreport counts (or land off-page entirely) on the new one.
+        self.page_view.clear_selection()
 
         self.render_page()
 
@@ -590,6 +603,60 @@ class InspectorApp:
         self.page_view.draw_items(
             items_by_layer,
             transform,
+        )
+
+        self._update_selection_stats()
+
+
+    def on_selection_change(
+        self,
+        region: fitz.Rect | None,
+    ) -> None:
+        """Callback fired by PageView whenever the selection rect changes."""
+
+        self._update_selection_stats()
+
+
+    def _update_selection_stats(self) -> None:
+        """Recompute drawings vector/item/type counts for the current
+        selection (if any) and push them to the sidebar.
+
+        Uses the same, currently-filtered `drawings` items `redraw()`
+        would draw, so the counts always match what's visible on screen.
+        """
+
+        region = self.page_view.get_selection()
+
+        if region is None:
+            self.control_panel.update_selection_stats(None)
+            return
+
+        items = self._get_page_items().get(
+            "drawings",
+            [],
+        )
+
+        layer = self.layers_by_key["drawings"]
+
+        if layer.subfilters:
+            active_filters = (
+                self.control_panel.get_active_filters(
+                    "drawings"
+                )
+            )
+
+            items = filter_items(
+                items,
+                active_filters,
+            )
+
+        stats = summarize_selection(
+            items,
+            region,
+        )
+
+        self.control_panel.update_selection_stats(
+            stats
         )
 
 
