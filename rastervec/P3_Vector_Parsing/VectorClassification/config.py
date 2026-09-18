@@ -53,12 +53,6 @@ OCR_LANG = "en"
 OCR_BATCH_SIZE = 128
 MIN_RENDER_SIDE_PX = 100
 MAX_RENDER_DPI = 4800
-# Unused by this variant's own ocr.py path (no per-cluster PaddleOCR
-# detector here -- that's FastIntoPaddle's job) but paddle_engine.py is a
-# full duplicate of the shared-origin module, so these stay defined.
-PADDLE_DETECT_MIN_RENDER_SIDE_PX = 200
-PADDLE_DETECT_MAX_RENDER_DPI = 4800
-PADDLE_WHITE_PAD_FRACTION = 0.1
 
 # ======================================================================
 # Radon word-segmentation (radon.py)

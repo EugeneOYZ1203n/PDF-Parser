@@ -48,18 +48,18 @@ combines this angle with PaddleOCR's cls-detected 180-degree flip) depend
 on the full-precision value; rounding it here would silently degrade every
 downstream angle to blocky 90-degree steps.
 
-**Two padding mechanisms, both decided here.** `pad_image` is the pipeline's
-pixel-space padding step: the OCR backend hands `Segment.image` to
-PaddleOCR verbatim (there is no crop-normalization pass anymore), so the
-breathing-room margin the OCR path needs comes from `segment_clusters`' two
-explicit `pad_image` calls -- one around the whole cluster render, one
-around each word crop. Separately, `render_cluster_for_radon` passes a
-small page-space `padding` into `renderer.render_vector_cluster` itself
-(sized from the cluster's own max stroke width, see
-`RADON_RENDER_PADDING_EXTRA_PT`), so a stroke sitting at the exact edge of
-the cluster's bbox isn't clipped by the render frame. Don't push either back
-into the renderer or the backend; the point of the current shape is that
-both paddings are readable at the call site.
+**Two padding mechanisms, both decided here.** `ocr_prep.pad_image_uniform`
+is the pipeline's pixel-space padding step: the OCR backend hands
+`Segment.image` to PaddleOCR verbatim (there is no crop-normalization pass
+anymore), so the breathing-room margin the OCR path needs comes from
+`segment_clusters`' two explicit `pad_image_uniform` calls -- one around the
+whole cluster render, one around each word crop. Separately,
+`render_cluster_for_radon` passes a small page-space `padding` into
+`renderer.render_vector_cluster` itself (sized from the cluster's own max
+stroke width, see `RADON_RENDER_PADDING_EXTRA_PT`), so a stroke sitting at
+the exact edge of the cluster's bbox isn't clipped by the render frame.
+Don't push either back into the renderer or the backend; the point of the
+current shape is that both paddings are readable at the call site.
 
 Pipeline use: this runs directly after FAST detection (`pipelines/
 _steps.py::detect_text_fast`) and before similarity grouping -- every
@@ -85,10 +85,7 @@ OCR'd.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Callable
-
-if TYPE_CHECKING:
-    from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import PaddleDetection
+from typing import Callable
 
 import numpy as np
 from scipy.ndimage import rotate as _nd_rotate
@@ -114,16 +111,11 @@ from rastervec.P3_Vector_Parsing.VectorClassification.config import (
     RADON_SKEW_LIMIT_DEG,
 )
 from rastervec.commons.helpers.geometry import (
-    PDF_POINTS_PER_INCH,
     bbox_intersection_area,
     union_bbox,
 )
 from rastervec.commons.models import Segment, Vector
-from rastervec.commons.renderer import (
-    page_points_to_pixel,
-    pixel_to_page_bbox,
-    render_vector_cluster,
-)
+from rastervec.commons.renderer import ocr_prep, page_points_to_pixel, pixel_to_page_bbox
 
 # A pixel darker than this counts as glyph ink (0 = black, 255 = white).
 INK_LEVEL = 250
@@ -621,48 +613,17 @@ def render_cluster_for_radon(
     `MIN_RENDER_SIDE_PX` -- "don't hand PaddleOCR a tiny crop" -- and
     capped at `MAX_RENDER_DPI`, since the render frame is the bare bbox
     and a degenerate sub-point cluster would otherwise demand an unbounded
-    dpi to reach that minimum. Returns `(gray, dpi_used)`. `padding` (PDF
-    points, 0 by default) is forwarded to `renderer.render_vector_cluster`,
-    expanding the render frame on every side -- `segment_clusters` sizes it
-    from the cluster's own max stroke width so a thick stroke at the bbox
-    edge isn't clipped; `segment_clusters` separately adds its own margin
-    in pixel space afterward, via `pad_image`."""
-    x0, y0, x1, y1 = union_bbox([v.bbox for v in vectors])
-    min_side_pt = min(x1 - x0, y1 - y0) + 2 * padding
-    if min_side_pt > 0:
-        needed_dpi = math.ceil(MIN_RENDER_SIDE_PX * PDF_POINTS_PER_INCH / min_side_pt)
-        dpi = min(max(dpi, needed_dpi), MAX_RENDER_DPI)
-    image = render_vector_cluster(vectors, dpi, padding)
-    return to_gray(image), dpi
-
-
-def pad_image(
-    img: np.ndarray, fraction: float = RADON_PAD_FRACTION,
-) -> tuple[np.ndarray, tuple[int, int]]:
-    """Surround `img` with a white border of `fraction * width` px left and
-    right and `fraction * height` px top and bottom, returning
-    `(padded, (pad_x_px, pad_y_px))`.
-
-    **This is the pipeline's only padding step.** Nothing upstream adds a
-    margin -- `renderer.render_vector_cluster` renders a cluster's bare
-    `union_bbox`, and PaddleOCR is handed `Segment.image` as-is -- so both
-    the room Radon's deskew/line-band pass needs at the frame edge and the
-    breathing room the recognizer wants around a word come from here. It is
-    called twice in `segment_clusters` (whole cluster render, then each
-    word crop) precisely so both are visible at the call site.
-
-    `pad_x_px`/`pad_y_px` are what a caller must subtract to get back into
-    the *unpadded* render's pixel space -- which is what
-    `renderer.pixel_to_page_bbox` inverts. A zero-area image is returned
-    unchanged with a `(0, 0)` offset."""
-    if img.size == 0:
-        return img, (0, 0)
-    pad_y = int(round(img.shape[0] * fraction))
-    pad_x = int(round(img.shape[1] * fraction))
-    padded = np.pad(
-        img, ((pad_y, pad_y), (pad_x, pad_x)), mode="constant", constant_values=255,
+    dpi to reach that minimum (`ocr_prep.render_cluster_with_dynamic_dpi`).
+    Returns `(gray, dpi_used)`. `padding` (PDF points, 0 by default) is
+    forwarded to `renderer.render_vector_cluster`, expanding the render
+    frame on every side -- `segment_clusters` sizes it from the cluster's
+    own max stroke width so a thick stroke at the bbox edge isn't clipped;
+    `segment_clusters` separately adds its own margin in pixel space
+    afterward, via `ocr_prep.pad_image_uniform`."""
+    image, dpi_used = ocr_prep.render_cluster_with_dynamic_dpi(
+        vectors, dpi, MIN_RENDER_SIDE_PX, MAX_RENDER_DPI, padding,
     )
-    return padded, (pad_x, pad_y)
+    return to_gray(image), dpi_used
 
 
 # --------------------------------------------------------------------------
@@ -730,10 +691,11 @@ def segment_clusters(
     own **padded** deskewed pixel crop (so OCR never has to re-render from
     vectors, and needs no normalization pass of its own).
 
-    The two `pad_image` calls are the pipeline's pixel-space padding -- see
-    that function's docstring. Both are inline here rather than hidden in
-    the renderer or the OCR backend so the margins are visible where they
-    happen; the price is the `- pad_x_px / - pad_y_px` correction on the
+    The two `ocr_prep.pad_image_uniform` calls are the pipeline's
+    pixel-space padding -- see that function's docstring. Both are inline
+    here rather than hidden in the renderer or the OCR backend so the
+    margins are visible where they happen; the price is the
+    `- pad_x_px / - pad_y_px` correction on the
     way back out to page space (and its `+ pad_x_px / + pad_y_px` inverse
     on the way back in for the grown-box crop). Vector assignment
     (`assign_vectors_to_segments`) always runs on the *tight* boxes, so
@@ -761,7 +723,7 @@ def segment_clusters(
         # `line_bands`' band padding have room at the frame edge. Every
         # pixel coordinate below is in this padded space until it's mapped
         # back out by subtracting (pad_x_px, pad_y_px).
-        gray, (pad_x_px, pad_y_px) = pad_image(gray)
+        gray, (pad_x_px, pad_y_px) = ocr_prep.pad_image_uniform(gray, RADON_PAD_FRACTION)
 
         skew = estimate_skew_from_mask(_downscale_ink_for_radon(gray))
         out_shape, forward, inverse = rotation_transform(gray.shape, skew)
@@ -868,7 +830,9 @@ def segment_clusters(
             ggy1 = min(height, int(math.ceil(float(deskewed_px[:, 1].max()))))
             # Pad 2 of 2: this segment's own crop, handed to PaddleOCR
             # verbatim as `Segment.image`.
-            crop, _offset = pad_image(deskewed[ggy0:ggy1, gx0:gx1])
+            crop, _offset = ocr_prep.pad_image_uniform(
+                deskewed[ggy0:ggy1, gx0:gx1], RADON_PAD_FRACTION,
+            )
 
             segments.append(Segment(vectors=seg_vectors, angle=float(skew), image=crop))
             if dbg is not None:
@@ -894,7 +858,7 @@ def segment_paddle_detections(
     cluster_vectors: list[Vector],
     cluster_image: np.ndarray,
     cluster_dpi: int,
-    detections: "list[PaddleDetection]",
+    detections: "list",
     assigned_vectors: list[list[Vector]],
     *,
     padding: float = 0.0,
@@ -977,7 +941,9 @@ def segment_paddle_detections(
             ggy1 = min(height, int(math.ceil(float(corners_rotated[:, 1].max()))))
             if ggx1 <= ggx0 or ggy1 <= ggy0:
                 continue
-            crop, _offset = pad_image(rotated[ggy0:ggy1, ggx0:ggx1])
+            crop, _offset = ocr_prep.pad_image_uniform(
+                rotated[ggy0:ggy1, ggx0:ggx1], RADON_PAD_FRACTION,
+            )
             segments.append(
                 Segment(vectors=seg_vectors, angle=detection.rotation_deg, image=crop)
             )

@@ -47,19 +47,14 @@ from rastervec.P3_Vector_Parsing.FastIntoPaddle.config import (
     PADDLE_DETECT_MIN_RENDER_SIDE_PX,
     PADDLE_WHITE_PAD_FRACTION,
 )
-from rastervec.commons.helpers.geometry import (
-    PDF_POINTS_PER_INCH,
-    compute_origin,
-    transform_direction,
-    union_bbox,
-)
+from rastervec.commons.helpers.geometry import compute_origin, transform_direction, union_bbox
 from rastervec.commons.logging_setup import get_logger
 from rastervec.commons.models import Segment, Text, Vector
 from rastervec.commons.renderer import (
+    ocr_prep,
     page_points_to_pixel,
     pixel_to_page_bbox,
     pixel_to_page_points,
-    render_vector_cluster,
 )
 
 _LOG = get_logger("ocr.backend")
@@ -102,8 +97,8 @@ class PaddleDetection:
 class ClusterDetection:
     """`PaddleDetectBackend.detect_on_cluster`'s full result for one
     cluster: the cluster's own **one** render (BGR, the exact image the
-    detector saw, already white-padded via `pad_image` -- see `pad_x_px`/
-    `pad_y_px`) plus the dpi it was rendered at, and every detected
+    detector saw, already white-padded via `ocr_prep.pad_image_uniform` --
+    see `pad_x_px`/`pad_y_px`) plus the dpi it was rendered at, and every detected
     `PaddleDetection` (page space). `pipelines/_steps.py::
     rotate_paddle_detections` crops each detection's own region directly out
     of `image` -- via `dpi`/`pad_x_px`/`pad_y_px`/the cluster's own vectors
@@ -218,10 +213,10 @@ class PaddleDetectBackend:
     def detect_on_cluster(
         self, vectors: "list[Vector]", *, dpi: int = 300, padding: float = 0.0,
     ) -> "ClusterDetection | None":
-        """Renders `vectors` **once** (`renderer.render_vector_cluster`,
-        dynamically dpi-bumped by `dpi_for_cluster` so a small cluster is
-        never handed to the detector at a few dozen px), adds a white
-        pixel-space margin (`pad_image`, `PADDLE_WHITE_PAD_FRACTION`) so
+        """Renders `vectors` **once** (`ocr_prep.render_cluster_with_dynamic_dpi`,
+        dynamically dpi-bumped so a small cluster is never handed to the
+        detector at a few dozen px), adds a white pixel-space margin
+        (`ocr_prep.pad_image_uniform`, `PADDLE_WHITE_PAD_FRACTION`) so
         text sitting at the cluster's own bbox edge isn't clipped/missed by
         the detector, then runs PaddleOCR's own detector on that padded
         render, and for each returned quad derives a rotation approximation
@@ -251,10 +246,11 @@ class PaddleDetectBackend:
         `vectors`."""
         if not vectors:
             return None
-        dpi_used = dpi_for_cluster(vectors, dpi, padding)
-        image = render_vector_cluster(vectors, dpi_used, padding)
+        image, dpi_used = ocr_prep.render_cluster_with_dynamic_dpi(
+            vectors, dpi, PADDLE_DETECT_MIN_RENDER_SIDE_PX, PADDLE_DETECT_MAX_RENDER_DPI, padding,
+        )
         bgr = _normalize_bgr(np.asarray(image))
-        bgr, (pad_x_px, pad_y_px) = pad_image(bgr, PADDLE_WHITE_PAD_FRACTION)
+        bgr, (pad_x_px, pad_y_px) = ocr_prep.pad_image_uniform(bgr, PADDLE_WHITE_PAD_FRACTION)
 
         engine = self._engine()
         dt_boxes, _elapse = engine.text_detector(bgr)
@@ -278,29 +274,6 @@ class PaddleDetectBackend:
             image=bgr, dpi=dpi_used, detections=detections,
             pad_x_px=pad_x_px, pad_y_px=pad_y_px,
         )
-
-
-def pad_image(
-    img: np.ndarray, fraction: float = PADDLE_WHITE_PAD_FRACTION,
-) -> "tuple[np.ndarray, tuple[int, int]]":
-    """Surround `img` (2D grayscale or 3D H,W,C) with a white border of
-    `fraction * max(width, height)` px on every side -- both axes padded
-    off the *larger* dimension, so a wide/short or narrow/tall crop gets
-    equal breathing room on all four sides instead of a border that scales
-    independently per axis. Used for exactly two things in this pipeline:
-    the cluster render before PaddleOCR's own detector sees it
-    (`PaddleDetectBackend.detect_on_cluster`), and each detection's final
-    crop before recognition (`crop_rotated_detection`) -- nothing else pads
-    or rasterizes (`OCR/radon.py` is pure vector geometry). `pad_x_px`/
-    `pad_y_px` are what a caller must subtract to get back into the
-    *unpadded* image's pixel space. A zero-area image is returned unchanged
-    with a `(0, 0)` offset."""
-    if img.size == 0:
-        return img, (0, 0)
-    pad = int(round(max(img.shape[0], img.shape[1]) * fraction))
-    pad_width = ((pad, pad), (pad, pad)) + ((0, 0),) * (img.ndim - 2)
-    padded = np.pad(img, pad_width, mode="constant", constant_values=255)
-    return padded, (pad, pad)
 
 
 def rotation_transform(shape_hw: "tuple[int, int]", angle_deg: float):
@@ -345,7 +318,7 @@ def crop_rotated_detection(
     """Rotates the (already white-padded) `cluster_image` upright by
     `theta_deg` about its own centre, crops to `detection_vectors`'s union
     bbox mapped into that rotated pixel frame, then applies a fresh white
-    pad (`pad_image`) -- the recognition-side margin. No word/character
+    pad (`ocr_prep.pad_image_uniform`) -- the recognition-side margin. No word/character
     splitting: the whole detection's assigned vectors become one crop.
     `render_pad` is `cluster_image`'s own `(pad_x_px, pad_y_px)` (from
     `ClusterDetection`) -- page-space points must be shifted by it before
@@ -383,21 +356,8 @@ def crop_rotated_detection(
         )
     if rx1 <= rx0 or ry1 <= ry0:
         return None
-    crop, _offset = pad_image(rotated[ry0:ry1, rx0:rx1], PADDLE_WHITE_PAD_FRACTION)
+    crop, _offset = ocr_prep.pad_image_uniform(rotated[ry0:ry1, rx0:rx1], PADDLE_WHITE_PAD_FRACTION)
     return crop
-
-
-def dpi_for_cluster(vectors: "list[Vector]", dpi: int, padding: float) -> int:
-    """Dynamic dpi-bump rule (never down, capped), scoped to this
-    backend's own `PADDLE_DETECT_MIN_RENDER_SIDE_PX`/
-    `PADDLE_DETECT_MAX_RENDER_DPI` constants -- PaddleOCR's detector reads a
-    tiny crop poorly."""
-    x0, y0, x1, y1 = union_bbox([v.bbox for v in vectors])
-    min_side_pt = min(x1 - x0, y1 - y0) + 2 * padding
-    if min_side_pt <= 0:
-        return dpi
-    needed_dpi = math.ceil(PADDLE_DETECT_MIN_RENDER_SIDE_PX * PDF_POINTS_PER_INCH / min_side_pt)
-    return min(max(dpi, needed_dpi), PADDLE_DETECT_MAX_RENDER_DPI)
 
 
 def _normalize_rotation(angle_deg: float) -> float:
@@ -441,9 +401,10 @@ def _rotate_crop(bgr: np.ndarray, quad: np.ndarray) -> np.ndarray:
 def _normalize_bgr(crop: np.ndarray) -> np.ndarray:
     """A `Segment.image` -> a 3-channel BGR array (paddleocr 2.x's
     TextClassifier/TextRecognizer are cv2/BGR). Nothing else happens here:
-    the crop already carries its white margin from `OCR/radon.py::pad_image`,
-    and `text_recognizer` resizes to its own `rec_image_shape` internally,
-    so there is no separate crop-normalization pass to run."""
+    the crop already carries its white margin from
+    `commons.renderer.ocr_prep.pad_image_uniform`, and `text_recognizer`
+    resizes to its own `rec_image_shape` internally, so there is no
+    separate crop-normalization pass to run."""
     arr = np.asarray(crop, dtype=np.uint8)
     if arr.ndim == 2:  # grayscale -- gray RGB and gray BGR are identical
         return np.ascontiguousarray(np.repeat(arr[:, :, None], 3, axis=2))

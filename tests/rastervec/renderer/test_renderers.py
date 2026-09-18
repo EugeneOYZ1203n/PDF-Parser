@@ -22,9 +22,12 @@ from rastervec.commons.models import PageMeta, Text, Vector
 from rastervec.P1_Reading_Native.native_text import extract_native_text
 from rastervec.P1_Reading_Native.reader import Reader
 from rastervec.commons.renderer import (
+    dpi_for_cluster,
     page_points_to_pixel,
+    pad_image_uniform,
     pixel_to_page_bbox,
     render_boxes_pdf,
+    render_cluster_with_dynamic_dpi,
     render_page_svg,
     render_reconstructed_page,
     render_reconstructed_pdf,
@@ -501,8 +504,9 @@ def test_page_points_to_pixel_inverts_pixel_to_page_bbox(vector):
 
 
 def test_render_vector_cluster_canvas_is_exactly_the_union_bbox(vector):
-    """No border of any kind: all padding lives in OCR/radon.py::pad_image,
-    and pixel_to_page_bbox depends on the bbox *being* the frame."""
+    """No border of any kind: all padding lives in
+    commons.renderer.ocr_prep.pad_image_uniform, and pixel_to_page_bbox
+    depends on the bbox *being* the frame."""
     v = vector(kind="re", bbox=(5, 5, 25, 15), fill=(0, 0, 0))
     image = render_vector_cluster([v], dpi=144)  # zoom 2.0
 
@@ -517,6 +521,78 @@ def test_render_vector_cluster_degenerate_flat_cluster_still_renders(vector):
     image = render_vector_cluster([v], dpi=144)
 
     assert image.width > 0 and image.height > 0
+
+
+# --------------------------------------------------------------------------
+# ocr_prep -- padding + dynamic-dpi rendering shared by the P3 backends'
+# own paddle_engine.py/radon.py (moved out of per-backend duplicates)
+# --------------------------------------------------------------------------
+def test_pad_image_uniform_adds_border_sized_from_larger_dimension():
+    img = np.zeros((10, 20, 3), dtype=np.uint8)
+    padded, (pad_x, pad_y) = pad_image_uniform(img, fraction=0.1)
+    assert pad_x == pad_y == 2
+    assert padded.shape == (14, 24, 3)
+    assert (padded[0, 0] == 255).all()
+
+
+def test_pad_image_uniform_empty_input_returns_unchanged():
+    img = np.zeros((0, 0, 3), dtype=np.uint8)
+    padded, offset = pad_image_uniform(img)
+    assert padded is img
+    assert offset == (0, 0)
+
+
+def test_pad_image_uniform_handles_grayscale_and_color_the_same_way():
+    gray = np.zeros((10, 20), dtype=np.uint8)
+    color = np.zeros((10, 20, 3), dtype=np.uint8)
+
+    gray_padded, gray_offset = pad_image_uniform(gray, fraction=0.1)
+    color_padded, color_offset = pad_image_uniform(color, fraction=0.1)
+
+    assert gray_offset == color_offset == (2, 2)
+    assert gray_padded.shape == (14, 24)
+    assert color_padded.shape == (14, 24, 3)
+
+
+def test_dpi_for_cluster_bumps_small_cluster_up(vector):
+    v = vector(bbox=(0.0, 0.0, 1.0, 1.0))
+    assert dpi_for_cluster([v], dpi=72, padding=0.0, min_render_side_px=200, max_render_dpi=4800) > 72
+
+
+def test_dpi_for_cluster_never_reduces_dpi(vector):
+    v = vector(bbox=(0.0, 0.0, 1000.0, 1000.0))
+    assert dpi_for_cluster(
+        [v], dpi=300, padding=0.0, min_render_side_px=200, max_render_dpi=4800,
+    ) == 300
+
+
+def test_dpi_for_cluster_accounts_for_padding(vector):
+    v = vector(bbox=(0.0, 0.0, 50.0, 50.0))
+    kwargs = dict(dpi=72, min_render_side_px=200, max_render_dpi=4800)
+    assert dpi_for_cluster([v], padding=0.0, **kwargs) >= dpi_for_cluster([v], padding=50.0, **kwargs)
+
+
+def test_dpi_for_cluster_caps_at_max_render_dpi(vector):
+    v = vector(bbox=(0.0, 0.0, 0.1, 0.1))
+    assert dpi_for_cluster(
+        [v], dpi=72, padding=0.0, min_render_side_px=200, max_render_dpi=600,
+    ) == 600
+
+
+def test_render_cluster_with_dynamic_dpi_matches_manual_composition(vector):
+    v = vector(kind="re", bbox=(0.0, 0.0, 1.0, 1.0), fill=(0, 0, 0))
+
+    image, dpi_used = render_cluster_with_dynamic_dpi(
+        [v], base_dpi=72, min_render_side_px=200, max_render_dpi=4800,
+    )
+
+    expected_dpi = dpi_for_cluster(
+        [v], dpi=72, padding=0.0, min_render_side_px=200, max_render_dpi=4800,
+    )
+    assert dpi_used == expected_dpi
+    assert dpi_used > 72
+    expected_image = render_vector_cluster([v], dpi_used)
+    assert image.size == expected_image.size
 
 
 # --------------------------------------------------------------------------

@@ -14,9 +14,15 @@ from __future__ import annotations
 import numpy as np
 
 from rastervec.commons.models import Page, Text, Vector
-from rastervec.commons.renderer import pixel_to_page_bbox, render_vector_cluster
+from rastervec.commons.renderer import ocr_prep, pixel_to_page_bbox
 from rastervec.commons.helpers.geometry import compute_origin, transform_direction
-from rastervec.P3_Vector_Parsing.LegacyRecreation.config import OCR_DPI, RENDER_PADDING_EXTRA_PT
+from rastervec.P3_Vector_Parsing.LegacyRecreation.config import (
+    MAX_RENDER_DPI,
+    MIN_RENDER_SIDE_PX,
+    OCR_DPI,
+    RECOGNITION_PAD_FRACTION,
+    RENDER_PADDING_EXTRA_PT,
+)
 from rastervec.P3_Vector_Parsing.LegacyRecreation.filters import filter_text_vectors
 from rastervec.P3_Vector_Parsing.LegacyRecreation.paddle_engine import (
     PaddleDetectBackend,
@@ -25,8 +31,6 @@ from rastervec.P3_Vector_Parsing.LegacyRecreation.paddle_engine import (
     _normalize_rotation,
     _quad_rotation_deg,
     _rotate_crop,
-    dpi_for_cluster,
-    pad_image,
 )
 from rastervec.P3_Vector_Parsing.LegacyRecreation.wordgrouping import (
     cluster_by_seqno,
@@ -91,14 +95,15 @@ def parse(
         if not group_vectors:
             continue
         padding = _cluster_render_padding(group_vectors)
-        dpi_used = dpi_for_cluster(group_vectors, OCR_DPI, padding)
         try:
-            image = render_vector_cluster(group_vectors, dpi_used, padding)
+            image, dpi_used = ocr_prep.render_cluster_with_dynamic_dpi(
+                group_vectors, OCR_DPI, MIN_RENDER_SIDE_PX, MAX_RENDER_DPI, padding,
+            )
         except ValueError:
             continue
 
         bgr = _normalize_bgr(np.asarray(image))
-        bgr, (pad_x_px, pad_y_px) = pad_image(bgr)
+        bgr, (pad_x_px, pad_y_px) = ocr_prep.pad_image_uniform(bgr, RECOGNITION_PAD_FRACTION)
         quads = det_backend.detect(bgr)
         if not quads:
             continue

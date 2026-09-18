@@ -29,18 +29,19 @@ OCR_DPI = 300
 # VectorClassification/FastIntoPaddle use for their own stroke-derived margin.
 RENDER_PADDING_EXTRA_PT = 5.0
 
-# dpi_for_cluster (paddle_engine.py): never-reduces, capped dpi bump so a
-# small word group's render still reaches a usable pixel size for PaddleOCR's
-# own detector to find text in -- own duplicated copy of FastIntoPaddle's
-# PADDLE_DETECT_MIN_RENDER_SIDE_PX value. Unlike FastIntoPaddle, this backend
-# has only one render per word group (it feeds both detection and
-# recognition, no lower-resolution post-detection crop stage), so one
-# constant at the detection-appropriate resolution is correct here.
+# ocr_prep.dpi_for_cluster (parse.py, via commons.renderer.ocr_prep): never-
+# reduces, capped dpi bump so a small word group's render still reaches a
+# usable pixel size for PaddleOCR's own detector to find text in -- same
+# value as FastIntoPaddle's own PADDLE_DETECT_MIN_RENDER_SIDE_PX. Unlike
+# FastIntoPaddle, this backend has only one render per word group (it feeds
+# both detection and recognition, no lower-resolution post-detection crop
+# stage), so one constant at the detection-appropriate resolution is correct
+# here.
 MIN_RENDER_SIDE_PX = 200
 MAX_RENDER_DPI = 4800
 
-# pad_image (paddle_engine.py): pixel-space white border added to a word
-# group's render before PaddleOCR's detector sees it, sized off the render's
-# own larger dimension -- matches PADDLE_WHITE_PAD_FRACTION everywhere else
-# in the codebase.
+# ocr_prep.pad_image_uniform (parse.py, via commons.renderer.ocr_prep):
+# pixel-space white border added to a word group's render before PaddleOCR's
+# detector sees it, sized off the render's own larger dimension -- matches
+# PADDLE_WHITE_PAD_FRACTION everywhere else in the codebase.
 RECOGNITION_PAD_FRACTION = 0.1

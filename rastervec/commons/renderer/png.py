@@ -15,13 +15,14 @@ exactly the members' `union_bbox` -- nothing added on any side, unless a
 caller passes a nonzero `padding`. `render_vector_cluster`,
 `pixel_to_page_bbox` and `page_points_to_pixel` all take an optional
 `padding` (PDF points, expanding the frame equally on every side) that must
-agree for a given render -- see `OCR/radon.py::render_cluster_for_radon`,
-which sizes it from a cluster's own max stroke width so a thick stroke at
-the bbox edge doesn't get clipped by the frame. This is a render-time,
-page-space margin, distinct from `OCR/radon.py::pad_image`'s pixel-space
-post-render white border (breathing room around glyphs, clipping slack for
-deskew/word-split), which is applied by `segment_clusters` after this
-render on top of whatever padding was used here.
+agree for a given render -- see `VectorClassification/radon.py::
+render_cluster_for_radon`, which sizes it from a cluster's own max stroke
+width so a thick stroke at the bbox edge doesn't get clipped by the frame.
+This is a render-time, page-space margin, distinct from
+`ocr_prep.py::pad_image_uniform`'s pixel-space post-render white border
+(breathing room around glyphs, clipping slack for deskew/word-split), which
+is applied by `segment_clusters` after this render on top of whatever
+padding was used here.
 
 Coordinate space: everything here stays in unrotated MediaBox space, like
 every other rastervec stage -- no page rotation is applied (see
@@ -120,9 +121,9 @@ def pixel_to_page_bbox(
     bbox origin minus `padding` -- pass the same `padding` used for that
     render (0 if none).
 
-    A caller working in a *padded* copy of that render (`OCR/radon.py::
-    segment_clusters`) must subtract `pad_image`'s own returned pixel
-    offset before calling this."""
+    A caller working in a *padded* copy of that render (`VectorClassification/
+    radon.py::segment_clusters`) must subtract `ocr_prep.pad_image_uniform`'s
+    own returned pixel offset before calling this."""
     x0, y0, _x1, _y1 = union_bbox([v.bbox for v in vectors])
     x0, y0 = x0 - padding, y0 - padding
     zoom = dpi / PDF_POINTS_PER_INCH

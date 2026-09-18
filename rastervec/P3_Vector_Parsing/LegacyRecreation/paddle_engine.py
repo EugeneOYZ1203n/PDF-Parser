@@ -14,15 +14,7 @@ from dataclasses import dataclass
 import numpy as np
 from skimage.transform import ProjectiveTransform, warp
 
-from rastervec.commons.helpers.geometry import PDF_POINTS_PER_INCH, union_bbox
-from rastervec.commons.models import Vector
-from rastervec.P3_Vector_Parsing.LegacyRecreation.config import (
-    MAX_RENDER_DPI,
-    MIN_RENDER_SIDE_PX,
-    OCR_LANG,
-    OCR_VERSION,
-    RECOGNITION_PAD_FRACTION,
-)
+from rastervec.P3_Vector_Parsing.LegacyRecreation.config import OCR_LANG, OCR_VERSION
 
 # PaddleOCR's own DB detector's det_limit_side_len -- a per-word-group render
 # is rarely anywhere near this, so it's a generous ceiling rather than a
@@ -162,38 +154,3 @@ def _normalize_bgr(crop: np.ndarray) -> np.ndarray:
     if arr.ndim == 2:
         return np.ascontiguousarray(np.repeat(arr[:, :, None], 3, axis=2))
     return np.ascontiguousarray(arr[:, :, :3][:, :, ::-1])
-
-
-def dpi_for_cluster(vectors: list[Vector], dpi: int, padding: float) -> int:
-    """Dynamic dpi-bump rule (never down, capped) -- own duplicated copy of
-    VectorClassification/FastIntoPaddle's `paddle_engine.py::dpi_for_cluster`,
-    scoped to this backend's own `MIN_RENDER_SIDE_PX`/`MAX_RENDER_DPI`: a
-    small word group's render should still reach a usable pixel size for
-    PaddleOCR's detector to find text in (and its recognizer to read it)
-    rather than being handed a few dozen px."""
-    x0, y0, x1, y1 = union_bbox([v.bbox for v in vectors])
-    min_side_pt = min(x1 - x0, y1 - y0) + 2 * padding
-    if min_side_pt <= 0:
-        return dpi
-    needed_dpi = math.ceil(MIN_RENDER_SIDE_PX * PDF_POINTS_PER_INCH / min_side_pt)
-    return min(max(dpi, needed_dpi), MAX_RENDER_DPI)
-
-
-def pad_image(
-    img: np.ndarray, fraction: float = RECOGNITION_PAD_FRACTION,
-) -> "tuple[np.ndarray, tuple[int, int]]":
-    """Surrounds `img` with a white border of `fraction * max(width, height)`
-    px on every side -- own duplicated copy of VectorClassification/
-    FastIntoPaddle's `paddle_engine.py::pad_image`, applied here to a word
-    group's render right before PaddleOCR's detector sees it. Returns
-    `(padded, (pad, pad))`; `parse.py` subtracts this offset from each
-    detected quad before mapping it back into page space (the offset is
-    relative to the *unpadded* render `pixel_to_page_bbox`/
-    `pixel_to_page_points` invert). A zero-area image is returned unchanged
-    with a `(0, 0)` offset."""
-    if img.size == 0:
-        return img, (0, 0)
-    pad = int(round(max(img.shape[0], img.shape[1]) * fraction))
-    pad_width = ((pad, pad), (pad, pad)) + ((0, 0),) * (img.ndim - 2)
-    padded = np.pad(img, pad_width, mode="constant", constant_values=255)
-    return padded, (pad, pad)
