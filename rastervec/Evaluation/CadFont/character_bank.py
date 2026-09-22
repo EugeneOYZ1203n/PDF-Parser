@@ -58,11 +58,34 @@ class CharacterTemplate:
     anchor_node_indices: tuple[int, ...]
 
 
+# Curve-sampling spacing and the simplification area threshold both scale
+# with each character's own baseline-relative bounding-box height, rather
+# than being fixed absolute constants -- keeps behaviour consistent across
+# mixed font sizes in the same drawing. Starting defaults, tune empirically
+# via `notebooks/cad_font_char_graph_lab.ipynb`.
+CURVE_SPACING_FRACTION = 0.03
+AREA_TOL_FRACTION = 0.0005
+MIN_SCALE = 1e-6
+
+
+def _character_scale(vectors) -> float:
+    """A per-character size reference (its own baseline-relative bbox
+    height) used to derive dynamic curve-sampling spacing and the
+    simplification area threshold -- floored so a degenerate zero-height
+    character (e.g. a single horizontal hyphen stroke) never produces a
+    zero/negative spacing or threshold."""
+    ys = [p[1] for v in vectors for item in v.items for p in item_points(item)]
+    height = (max(ys) - min(ys)) if ys else 0.0
+    return max(height, MIN_SCALE)
+
+
 def build_character_bank(
     label_set: LabelSet,
     vectors_by_page: dict[int, list],
-    *, angle_tol_deg: float = 2.0, perp_tol: float = 0.75, gap_tol: float = 1.0,
-    point_merge_tol: float = 0.5,
+    *,
+    point_merge_tol: float = 1e-3,
+    curve_spacing_fraction: float = CURVE_SPACING_FRACTION,
+    area_tol_fraction: float = AREA_TOL_FRACTION,
 ) -> list[CharacterTemplate]:
     """For every `source="cad_font"` `LabelEntry` in `label_set`: resolve
     its backing `Vector`s via `path_signature` against
@@ -111,10 +134,12 @@ def build_character_bank(
             continue
 
         transformed = to_baseline_relative_vectors(resolved, baseline.origin, baseline.direction)
-        segments = vectors_to_segments(transformed)
+        scale = _character_scale(transformed)
+        curve_spacing = scale * curve_spacing_fraction
+        area_tol = (scale ** 2) * area_tol_fraction
+        segments, original_vertices = vectors_to_segments(transformed, curve_spacing=curve_spacing)
         graph = build_char_graph(
-            segments, angle_tol_deg=angle_tol_deg, perp_tol=perp_tol, gap_tol=gap_tol,
-            point_merge_tol=point_merge_tol,
+            segments, original_vertices, point_merge_tol=point_merge_tol, area_tol=area_tol,
         )
         templates.append(CharacterTemplate(
             label_id=entry.label_id,

@@ -10,7 +10,6 @@ from rastervec.Evaluation.CadFont.geometry import (
     Point,
     Segment,
     merge_close_points,
-    merge_colinear_segments,
     split_at_intersections,
 )
 
@@ -51,19 +50,175 @@ class CharGraph:
 
 def build_char_graph(
     segments: list[Segment],
-    *, angle_tol_deg: float = 2.0, perp_tol: float = 0.75, gap_tol: float = 1.0,
-    point_merge_tol: float = 0.5,
+    original_vertices: set[Point],
+    *, point_merge_tol: float = 1e-3, area_tol: float,
 ) -> CharGraph:
-    """Orchestrates `geometry.py`'s pipeline: `merge_colinear_segments` ->
-    `split_at_intersections` -> `merge_close_points` -> `CharGraph(nodes,
+    """Orchestrates `geometry.py`'s pipeline -- `split_at_intersections` ->
+    `merge_close_points` (coincidence dedup only) -> protected-node
+    computation -> degree-aware area simplification -> `CharGraph(nodes,
     edges)`. The single entry point `character_bank.py` and the notebook
-    both call."""
-    merged = merge_colinear_segments(
-        segments, angle_tol_deg=angle_tol_deg, perp_tol=perp_tol, gap_tol=gap_tol,
-    )
-    split = split_at_intersections(merged)
-    nodes, edges = merge_close_points(split, point_merge_tol=point_merge_tol)
-    return CharGraph(nodes=nodes, edges=edges)
+    both call.
+
+    `segments` is already-flattened, adaptively-sampled geometry (see
+    `geometry.flatten_item_to_segments`); `original_vertices` is that same
+    flatten pass's set of true data-defined points (never synthetic
+    curve-interior samples) -- a node built from one of these is always
+    protected from simplification, alongside any node with graph degree > 2
+    (a real junction/crossing). `area_tol` has no default: callers must
+    derive it from their own scale (see `character_bank.build_character_bank`
+    for the per-character dynamic derivation this was designed for)."""
+    split = split_at_intersections(segments)
+    nodes, edges, point_to_node = merge_close_points(split, point_merge_tol=point_merge_tol)
+    protected = _compute_protected_nodes(edges, len(nodes), original_vertices, point_to_node)
+    simplified_nodes, simplified_edges = _simplify_graph(nodes, edges, protected, area_tol)
+    return CharGraph(nodes=simplified_nodes, edges=simplified_edges)
+
+
+def _compute_protected_nodes(
+    edges: list[tuple[int, int]],
+    num_nodes: int,
+    original_vertices: set[Point],
+    point_to_node: dict[Point, int],
+) -> set[int]:
+    """A node is protected from the simplification pass if it's a real
+    graph junction (degree > 2) or if it's the canonical node of at least
+    one original (non-synthetic) data vertex. Every degree-1 node is
+    necessarily an original vertex too (nothing else could have produced a
+    dead end), so this rule alone also naturally protects every chain's
+    true endpoints -- no separate degree-1 special case needed."""
+    deg = [0] * num_nodes
+    for a, b in edges:
+        deg[a] += 1
+        deg[b] += 1
+    protected = {i for i, d in enumerate(deg) if d > 2}
+    for p in original_vertices:
+        node_idx = point_to_node.get(p)
+        if node_idx is not None:
+            protected.add(node_idx)
+    return protected
+
+
+def _edge_key(a: int, b: int) -> tuple[int, int]:
+    return (a, b) if a < b else (b, a)
+
+
+def _build_adjacency(num_nodes: int, edges: list[tuple[int, int]]) -> list[list[int]]:
+    adj: list[list[int]] = [[] for _ in range(num_nodes)]
+    for a, b in edges:
+        adj[a].append(b)
+        adj[b].append(a)
+    return adj
+
+
+def _find_chains(
+    num_nodes: int, edges: list[tuple[int, int]], protected: set[int],
+) -> list[list[int]]:
+    """Walks the graph's adjacency structure, yielding one ordered
+    node-index chain per maximal run of non-protected (degree-2, synthetic)
+    nodes between two protected nodes, inclusive of both protected ends.
+    Every non-protected node has exactly one unvisited neighbor to advance
+    through by construction (see `_compute_protected_nodes`), so each walk
+    is a straight-line follow with no branching decision to make.
+
+    A chain that loops back to its own single protected anchor (a closed
+    curve/loop with no other junction, e.g. a single-item "O") is handled
+    by the same walk -- it simply ends when the walk returns to a
+    protected node, which may be its own start. The trailing defensive
+    pass over any still-unvisited edges only matters if a chain had zero
+    protected nodes at all, which the protection rule above should never
+    actually produce."""
+    adj = _build_adjacency(num_nodes, edges)
+    visited: set[tuple[int, int]] = set()
+
+    def walk(start: int, first: int) -> list[int]:
+        chain = [start]
+        prev, cur = start, first
+        while True:
+            visited.add(_edge_key(prev, cur))
+            chain.append(cur)
+            if cur in protected:
+                break
+            nxts = [n for n in adj[cur] if n != prev]
+            if not nxts:
+                break
+            prev, cur = cur, nxts[0]
+        return chain
+
+    chains: list[list[int]] = []
+    for start in sorted(protected):
+        for nxt in adj[start]:
+            if _edge_key(start, nxt) in visited:
+                continue
+            chains.append(walk(start, nxt))
+
+    for a, b in edges:
+        if _edge_key(a, b) in visited:
+            continue
+        chains.append(walk(a, b))
+
+    return chains
+
+
+def _triangle_area(a: Point, b: Point, c: Point) -> float:
+    return abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2.0
+
+
+def _simplify_chain(nodes: list[Point], chain: list[int], area_tol: float) -> list[int]:
+    """Cascading-anchor area sweep (Visvalingam-Whyte-style) over one
+    chain of node indices. Both ends of the chain are always kept
+    (protected by construction -- see `_find_chains`); an interior point
+    `b` between the current anchor `a` and its successor `c` is dropped
+    (anchor unchanged) when `triangle(a, b, c)`'s area is below
+    `area_tol`, otherwise kept and promoted to the new anchor -- so several
+    consecutive points can collapse against one anchor in a single pass."""
+    if len(chain) <= 2:
+        return list(chain)
+    anchor = chain[0]
+    kept = [anchor]
+    for i in range(1, len(chain) - 1):
+        b, c = chain[i], chain[i + 1]
+        if _triangle_area(nodes[anchor], nodes[b], nodes[c]) < area_tol:
+            continue
+        kept.append(b)
+        anchor = b
+    kept.append(chain[-1])
+    return kept
+
+
+def _simplify_graph(
+    nodes: list[Point], edges: list[tuple[int, int]], protected: set[int], area_tol: float,
+) -> tuple[list[Point], list[tuple[int, int]]]:
+    """Runs `_simplify_chain` over every chain from `_find_chains`, then
+    re-indexes the surviving node indices into a compact final node/edge
+    list."""
+    chains = _find_chains(len(nodes), edges, protected)
+
+    kept_old_indices: set[int] = set()
+    raw_new_edges: list[tuple[int, int]] = []
+    for chain in chains:
+        simplified = _simplify_chain(nodes, chain, area_tol)
+        kept_old_indices.update(simplified)
+        raw_new_edges.extend(zip(simplified, simplified[1:]))
+
+    old_to_new: dict[int, int] = {}
+    new_nodes: list[Point] = []
+    for old_idx in sorted(kept_old_indices):
+        old_to_new[old_idx] = len(new_nodes)
+        new_nodes.append(nodes[old_idx])
+
+    seen: set[tuple[int, int]] = set()
+    new_edges: list[tuple[int, int]] = []
+    for a, b in raw_new_edges:
+        na, nb = old_to_new[a], old_to_new[b]
+        if na == nb:
+            continue
+        key = (na, nb) if na < nb else (nb, na)
+        if key in seen:
+            continue
+        seen.add(key)
+        new_edges.append(key)
+
+    return new_nodes, new_edges
 
 
 def complexity(graph: CharGraph) -> float:

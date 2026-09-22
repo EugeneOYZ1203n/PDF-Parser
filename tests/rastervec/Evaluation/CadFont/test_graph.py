@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from rastervec.Evaluation.CadFont.geometry import flatten_item_to_segments
 from rastervec.Evaluation.CadFont.graph import (
     CharGraph,
     build_char_graph,
@@ -62,10 +63,69 @@ def test_select_anchor_points_fully_collinear_graph_caps_at_two():
 
 
 def test_build_char_graph_plus_sign_end_to_end():
+    # Both segments are "l"-equivalent -- all 4 raw endpoints are original
+    # vertices, so together with the degree-4 crossing every resulting node
+    # is protected and nothing is eligible for simplification, regardless
+    # of area_tol.
     segments = [((-5.0, 0.0), (5.0, 0.0)), ((0.0, -5.0), (0.0, 5.0))]
-    g = build_char_graph(segments)
+    original_vertices = {(-5.0, 0.0), (5.0, 0.0), (0.0, -5.0), (0.0, 5.0)}
+    g = build_char_graph(segments, original_vertices, area_tol=1.0)
 
     assert g.num_nodes() == 5
     assert g.num_edges() == 4
     assert sorted(g.degrees()) == [1, 1, 1, 1, 4]
     assert g.max_degree() == 4
+
+
+def test_build_char_graph_simplifies_nearly_straight_curve_to_its_endpoints():
+    # A slightly wiggly polyline between two original endpoints, with no
+    # real junction anywhere -- every interior point should collapse away
+    # under a generous area_tol, leaving just the two protected endpoints.
+    points = [(0.0, 0.0), (1.0, 0.001), (2.0, -0.001), (3.0, 0.002), (4.0, 0.0)]
+    segments = list(zip(points, points[1:]))
+    original_vertices = {points[0], points[-1]}
+
+    g = build_char_graph(segments, original_vertices, area_tol=0.5)
+
+    assert g.num_nodes() == 2
+    assert g.num_edges() == 1
+    assert set(g.nodes) == {(0.0, 0.0), (4.0, 0.0)}
+
+
+def test_build_char_graph_preserves_junction_while_simplifying_its_arms():
+    # A near-straight horizontal run from (0,0) to (10,0) with a vertical
+    # branch grafted on at (5,0) -- a real degree-3 junction. Both
+    # horizontal arms have small wiggle that should simplify away, but the
+    # junction itself (and the trivial 2-point vertical arm) must survive
+    # untouched.
+    horizontal = [(0.0, 0.0), (2.0, 0.0), (4.0, 0.0001), (5.0, 0.0),
+                  (6.0, -0.0001), (8.0, 0.0), (10.0, 0.0)]
+    segments = list(zip(horizontal, horizontal[1:]))
+    segments.append(((5.0, 0.0), (5.0, 5.0)))
+    original_vertices = {(0.0, 0.0), (10.0, 0.0), (5.0, 0.0), (5.0, 5.0)}
+
+    g = build_char_graph(segments, original_vertices, area_tol=0.01)
+
+    assert g.num_nodes() == 4
+    assert set(g.nodes) == {(0.0, 0.0), (5.0, 0.0), (10.0, 0.0), (5.0, 5.0)}
+    assert g.num_edges() == 3
+    assert g.max_degree() == 3
+    junction_idx = g.nodes.index((5.0, 0.0))
+    assert g.degree(junction_idx) == 3
+
+
+def test_build_char_graph_closed_loop_curve_with_no_junction_stays_a_single_cycle():
+    # A single "c" item whose start and end coincide (p0 == p3) -- a pure
+    # cycle with no real junction anywhere. Its own single start/end point
+    # is still an original vertex, so it anchors the simplification walk
+    # without any special-case loop handling.
+    item = ("c", (0.0, 0.0), (10.0, 10.0), (-10.0, 10.0), (0.0, 0.0))
+    segments, original_vertices = flatten_item_to_segments(item, curve_spacing=1.0)
+    assert original_vertices == {(0.0, 0.0)}
+
+    g = build_char_graph(segments, original_vertices, area_tol=1.0)
+
+    assert (0.0, 0.0) in g.nodes
+    assert g.num_edges() == g.num_nodes()  # a single closed cycle, no self-loop
+    assert g.max_degree() == 2
+    assert 3 <= g.num_nodes() < len(segments)  # simplified, but still a real polygon
