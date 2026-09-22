@@ -40,9 +40,13 @@ def _short_slug(text: str, max_len: int = 16) -> str:
 def _crop_to_png(pdf_path: Path, bbox, out_path: Path, *, dpi: float = 150.0) -> bool:
     """Crops `bbox` (page-space, unrotated MediaBox) out of `pdf_path`'s
     page 0 -- every `converted_p<N>.pdf` this benchmark scores against is a
-    single-page vectorised render. Known accepted limitation: this does not
-    apply the page's own rotation matrix, so it may crop the wrong region
-    on a rotated page -- correct for the common rotation-0 case."""
+    single-page vectorised render. `get_pixmap()` always bakes the page's own
+    `/Rotate` into what it renders (same gotcha `P1_Reading_Native/
+    image_extract.py`'s whole-page raster counter-rotates for), and empirically
+    `clip=` is interpreted in that same rotated display space regardless of
+    whether an explicit `matrix=` is also passed -- so `bbox` must be mapped
+    into display space via `page.rotation_matrix` before clipping, or the crop
+    silently lands on the wrong region of a rotated page."""
     try:
         doc = fitz.open(str(pdf_path))
         try:
@@ -50,6 +54,12 @@ def _crop_to_png(pdf_path: Path, bbox, out_path: Path, *, dpi: float = 150.0) ->
             rect = fitz.Rect(*bbox)
             if rect.is_empty or rect.is_infinite:
                 return False
+            if page.rotation:
+                rect = fitz.Rect(
+                    fitz.Point(rect.x0, rect.y0) * page.rotation_matrix,
+                    fitz.Point(rect.x1, rect.y1) * page.rotation_matrix,
+                )
+                rect.normalize()
             pix = page.get_pixmap(clip=rect, dpi=int(dpi))
             out_path.parent.mkdir(parents=True, exist_ok=True)
             pix.save(str(out_path))
