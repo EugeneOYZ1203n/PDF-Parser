@@ -27,14 +27,16 @@ timestamped run folder:
                                        *recognizer* saw, recognised text in
                                        the filename)
                 fast_tile_images/      (one PNG per FAST detector tile)
-              p3=VectorClassification (no detect stage -- pure
-              recognition-only OCR over Radon-segmented words):
-                fast_tile_images/      (one PNG per FAST-passed cluster,
-                                       cropped from the whole-page FAST
-                                       render -- not a literal tile grid)
-                paddle_recog_images/   (one PNG per deduped representative
-                                       segment actually sent to recognition)
-              p3=LegacyRecreation (no detect, no FAST stage):
+              p3=VectorClassification (classify+FAST filter clusters, then
+              merge across every layer/color bucket, seqno-cluster, and run
+              PaddleOCR's full detect+recognize per cluster):
+                fast_tile_images/      (one PNG per FAST detector tile)
+                paddle_detect_images/  (one PNG per seqno-cluster's own
+                                       rendered+padded image, every detected
+                                       quad drawn on top)
+                paddle_recog_images/   (one PNG per detected quad's own
+                                       crop, recognised text in the filename)
+              p3=LegacyRecreation (no FAST stage):
                 paddle_ocr_images/     (one PNG per word group's own padded/
                                        DPI-boosted render, recognised text
                                        in the filename)
@@ -100,13 +102,15 @@ from rastervec.commons.paths import output_dir
 from scripts.debug_image_savers import (  # noqa: F401 -- re-exported for callers/tests
     _draw_boxes,
     _safe_slug,
+    _save_crop_text_images,
     _save_fastintopaddle_detect_images,
     _save_fastintopaddle_recog_images,
     _save_fastintopaddle_tile_images,
     _save_legacyrecreation_ocr_images,
     _save_segment_recog_images,
-    _save_vectorclassification_cluster_images,
+    _save_vectorclassification_detect_images,
     _save_vectorclassification_recog_images,
+    _save_vectorclassification_tile_images,
 )
 from scripts.report_artifacts import (  # noqa: F401 -- re-exported for callers/tests
     _ARTIFACTS,

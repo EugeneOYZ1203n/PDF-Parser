@@ -1,5 +1,17 @@
 # The `VectorClassification` P3 backend, end to end
 
+**STALE (2026-09): this document describes the `classify → fast → segment → similarity → ocr →
+restore → drawing` chain as it existed before `VectorClassification` was reworked to merge every
+FAST-surviving cluster across `(layer,color)` buckets, cluster by content-stream draw order
+(`wordgrouping.py::cluster_by_seqno`), and run PaddleOCR's full detect+recognize pass per
+resulting word group (`paddle_engine.py::PaddleDetectBackend`/`PaddleRecBackend`) instead of
+Radon word-segmentation + whole-page similarity dedup + recognition-only OCR — `radon.py` and
+`ocr.py` no longer exist in this folder. The sections below (Segment/segment/similarity/ocr/
+restore) no longer match `parse.py`; read `P3_Vector_Parsing/VectorClassification/parse.py` and
+`wordgrouping.py` directly instead of trusting this file's step-by-step narrative. The
+classification chain description (steps 1-12, `classify_vectors.py`) and the FAST step
+(`fast_filter.py::detect_text_fast`) are still accurate.**
+
 **This document describes one P3 backend's algorithm, not the whole pipeline.** `rastervec/`
 today is two pluggable phases sandwiched between two always-the-same phases, behind
 `core.pipeline.run_pipeline(pdf_path, page_index, *, p2, p3, ...)` (see `CLAUDE.md`'s architecture

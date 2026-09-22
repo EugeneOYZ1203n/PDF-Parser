@@ -25,8 +25,9 @@ from scripts.debug_image_savers import (
     _save_fastintopaddle_recog_images,
     _save_fastintopaddle_tile_images,
     _save_legacyrecreation_ocr_images,
-    _save_vectorclassification_cluster_images,
+    _save_vectorclassification_detect_images,
     _save_vectorclassification_recog_images,
+    _save_vectorclassification_tile_images,
 )
 from scripts.report_config import NEW_STEP_NAMES, _layer_slug
 
@@ -206,7 +207,8 @@ def _accumulate_page(
         _save_fastintopaddle_detect_images(p3_debug, detect_dir, page_index)
         _save_fastintopaddle_recog_images(p3_debug, recog_dir, page_index)
     elif p3 == "VectorClassification":
-        _save_vectorclassification_cluster_images(p3_debug, fast_tile_dir, page_index)
+        _save_vectorclassification_tile_images(p3_debug, fast_tile_dir, page_index)
+        _save_vectorclassification_detect_images(p3_debug, detect_dir, page_index)
         _save_vectorclassification_recog_images(p3_debug, recog_dir, page_index)
     elif p3 == "LegacyRecreation":
         _save_legacyrecreation_ocr_images(p3_debug, ocr_dir, page_index)

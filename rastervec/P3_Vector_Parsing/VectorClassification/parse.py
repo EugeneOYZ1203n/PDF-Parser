@@ -1,26 +1,57 @@
-"""VectorClassification's Phase3Backend entrypoint -- the restored 12-step
-Vector_Classification chain + Radon word-segmentation + PaddleOCR
-recognition-only OCR, exactly as it ran before being retired in favor of
-FastIntoPaddle. Fully self-contained (own fast_detect.py/paddle_engine.py/
-layer_color_separation.py/radon.py/config.py) -- imports nothing from
-P3_Vector_Parsing/FastIntoPaddle or P2_Raster_To_Vec.
+"""VectorClassification's Phase3Backend entrypoint -- the 12-step
+Vector_Classification chain + FAST filtering, then a merge-across-buckets +
+seqno-clustering + full PaddleOCR detect/recognize pass, matching
+archive/raster_parser/scripts/type2_dump_extraction_pipeline.py::
+run_ocr_extraction's pattern (own `wordgrouping.py::cluster_by_seqno` +
+`paddle_engine.py::PaddleDetectBackend`/`PaddleRecBackend`, the same
+detect-then-recognize pair `P3_Vector_Parsing/LegacyRecreation/parse.py`
+already ports independently). Fully self-contained (own fast_detect.py/
+paddle_engine.py/layer_color_separation.py/wordgrouping.py/config.py) --
+imports nothing from P3_Vector_Parsing/FastIntoPaddle,
+P3_Vector_Parsing/LegacyRecreation, or P2_Raster_To_Vec.
 """
 from __future__ import annotations
 
-from rastervec.commons.models import Page, Vector, Text
-from rastervec.P3_Vector_Parsing.VectorClassification.classify_vectors import classify_vectors
-from rastervec.P3_Vector_Parsing.VectorClassification.fast_filter import (
-    detect_text_fast,
-    elect_unique_segments,
-    group_similar_segments,
-)
-from rastervec.P3_Vector_Parsing.VectorClassification.ocr import recognize_unique_words, restore_word_texts
-from rastervec.P3_Vector_Parsing.VectorClassification.radon import segment_clusters
+import numpy as np
 
-STEP_NAMES = ["classify", "fast", "segment", "similarity", "ocr", "restore", "drawing"]
+from rastervec.commons.helpers.geometry import compute_origin, transform_direction
+from rastervec.commons.models import Page, Vector, Text
+from rastervec.commons.renderer import ocr_prep, pixel_to_page_bbox
+from rastervec.P3_Vector_Parsing.VectorClassification.classify_vectors import classify_vectors
+from rastervec.P3_Vector_Parsing.VectorClassification.config import (
+    MAX_RENDER_DPI,
+    MIN_RENDER_SIDE_PX,
+    OCR_DPI,
+    RECOGNITION_PAD_FRACTION,
+    RENDER_PADDING_EXTRA_PT,
+)
+from rastervec.P3_Vector_Parsing.VectorClassification.fast_filter import detect_text_fast
+from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import (
+    PaddleDetectBackend,
+    PaddleRecBackend,
+    _normalize_bgr,
+    _normalize_rotation,
+    _quad_rotation_deg,
+    _rotate_crop,
+)
+from rastervec.P3_Vector_Parsing.VectorClassification.wordgrouping import (
+    cluster_by_seqno,
+    convert_vectors_to_glyphs,
+    get_vectors,
+)
+
+STEP_NAMES = ["classify", "fast", "group_words", "ocr", "drawing"]
 
 DebugLayer = "tuple[str, str, str, bytes]"
 OnDebugLayer = "Callable[[str, str, str, bytes], None]"
+
+
+def _cluster_render_padding(vectors: list[Vector]) -> float:
+    """Page-space PDF-point margin for a seqno-cluster's own OCR render
+    frame -- half its own max stroke width (so a stroke at the bbox edge
+    isn't clipped) plus `RENDER_PADDING_EXTRA_PT`, matching
+    `LegacyRecreation/parse.py`'s own identical helper."""
+    return max((v.width or 0.0) for v in vectors) / 2.0 + RENDER_PADDING_EXTRA_PT
 
 
 def parse(
@@ -29,10 +60,12 @@ def parse(
     debug_out: "dict | None" = None, on_debug_layer: "OnDebugLayer | None" = None,
 ) -> tuple[list[Vector], list[Text]]:
     """Combines Phase 1's raw native vectors and Phase 2's raster-derived
-    vectors into one flat pool, then runs the old chain: classify -> FAST
-    filter -> Radon word-segmentation -> similarity dedup -> OCR recognize
-    -> restore each word occurrence's text -> merge every dropped Vector as
-    drawing content.
+    vectors into one flat pool, then: classify (12-step chain, per
+    `(layer,color)` bucket) -> FAST filter (still per classification
+    cluster) -> merge every FAST-surviving cluster's vectors across every
+    bucket into one flat pool -> cluster by content-stream draw order
+    (`cluster_by_seqno`) -> per seqno-cluster, render + PaddleOCR's full
+    detect+recognize pass -> merge every dropped Vector as drawing content.
 
     Two independent, optional debug outlets (see `FastIntoPaddle/parse.py`
     for the shared convention): `debug_out` stashes every stage's own
@@ -41,8 +74,8 @@ def parse(
     layers immediately, right after that stage runs. The 12-step
     classification chain itself (`classify_vectors`) is one atomic call
     either way -- its own per-step kept/dropped breakdown is rendered as
-    soon as it returns, still well before the later (heavier) fast/segment/
-    ocr stages run."""
+    soon as it returns, still well before the later (heavier) fast/ocr
+    stages run."""
     all_vectors = list(vectors_p1) + list(vectors_p2)
     page_meta = page.meta
 
@@ -63,15 +96,61 @@ def parse(
     )
     _emit(_render_fast_layers(page_meta, fast.passed, fast.dropped_vectors))
 
-    word_segments = segment_clusters(fast.passed)
-    _emit(_render_segment_layers(page_meta, word_segments))
+    merged_vectors = [v for cluster in fast.passed for v in cluster]
+    page_rotation = int(page_meta.rotation or 0)
+    glyphs = convert_vectors_to_glyphs(merged_vectors)
+    word_groups = cluster_by_seqno(glyphs, page_rotation)
+    _emit(_render_group_words_layers(page_meta, word_groups))
 
-    groups = group_similar_segments(word_segments)
-    uniques, metas = elect_unique_segments(word_segments, groups)
+    rec_backend = PaddleRecBackend()
+    det_backend = PaddleDetectBackend()
+    texts: list[Text] = []
+    ocr_crops: list[tuple[np.ndarray, str]] = []
+    cluster_detections: list[tuple[np.ndarray, list]] = []
+    for wg in word_groups:
+        group_vectors = get_vectors(wg)
+        if not group_vectors:
+            continue
+        padding = _cluster_render_padding(group_vectors)
+        try:
+            image, dpi_used = ocr_prep.render_cluster_with_dynamic_dpi(
+                group_vectors, OCR_DPI, MIN_RENDER_SIDE_PX, MAX_RENDER_DPI, padding,
+            )
+        except ValueError:
+            continue
 
-    unique_texts = recognize_unique_words(uniques, compute=compute, progress_counter=progress_counter)
-    restored = restore_word_texts(unique_texts, metas)
-    _emit(_render_ocr_layers(page_meta, restored))
+        bgr = _normalize_bgr(np.asarray(image))
+        bgr, (pad_x_px, pad_y_px) = ocr_prep.pad_image_uniform(bgr, RECOGNITION_PAD_FRACTION)
+        quads = det_backend.detect(bgr)
+        cluster_detections.append((bgr, quads))
+        if not quads:
+            continue
+
+        # _rotate_crop's output is cropped straight out of `bgr`, so it's
+        # already BGR -- reverse channels back before recognize_crops, which
+        # does its own RGB->BGR flip internally (same gotcha LegacyRecreation's
+        # own identical loop works around).
+        crops = [_rotate_crop(bgr, quad)[:, :, ::-1] for quad in quads]
+        boxes = rec_backend.recognize_crops(crops)
+
+        for quad, crop, box in zip(quads, crops, boxes):
+            if not box.text:
+                continue
+            unpadded_quad = (quad - np.array([pad_x_px, pad_y_px])).tolist()
+            bbox = pixel_to_page_bbox(group_vectors, dpi_used, unpadded_quad, padding)
+            rotate_deg = _normalize_rotation(_quad_rotation_deg(quad) + box.flip_deg)
+            direction = transform_direction((1.0, 0.0), rotate_deg)
+            ocr_crops.append((crop, box.text))
+            texts.append(Text(
+                text=box.text, bbox=bbox, direction=direction,
+                origin=compute_origin(bbox, direction),
+                font="", font_size=0.0, color=None, flags=0,
+                ascender=None, descender=None, wmode=0,
+                block_no=0, line_no=0, word_no=0,
+                page_index=page_meta.index, seqno=group_vectors[0].seqno,
+                confidence=box.confidence, source="ocr", orientation_source="ocr",
+            ))
+    _emit(_render_ocr_layers(page_meta, texts))
 
     drawing = list(cls.drawing_vectors) + list(fast.dropped_vectors)
     _emit(_render_drawing_layers(page_meta, drawing))
@@ -81,13 +160,13 @@ def parse(
         debug_out["fast_passed"] = fast.passed
         debug_out["fast_dropped"] = fast.dropped_vectors
         debug_out["fast_result"] = fast.page_result
-        debug_out["word_segments"] = word_segments
-        debug_out["ocr_uniques"] = uniques
-        debug_out["ocr_unique_texts"] = unique_texts
-        debug_out["restored"] = restored
+        debug_out["word_groups"] = word_groups
+        debug_out["texts"] = texts
+        debug_out["ocr_crops"] = ocr_crops
+        debug_out["cluster_detections"] = cluster_detections
         debug_out["drawing"] = drawing
 
-    return drawing, restored
+    return drawing, texts
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +182,7 @@ _C_KEPT = "#059669"
 _C_DROPPED = "#dc2626"
 _C_FAST_PASS = "#059669"
 _C_FAST_DROP = "#dc2626"
-_C_SEGMENT = "#2563eb"
+_C_GROUP = "#7c3aed"
 _C_OCR = "#16a34a"
 _C_DRAWING = "#111827"
 
@@ -207,22 +286,20 @@ def _render_fast_layers(page_meta, fast_passed, fast_dropped) -> "list[DebugLaye
     ]
 
 
-def _render_segment_layers(page_meta, word_segments) -> "list[DebugLayer]":
-    from rastervec.commons.helpers.geometry import union_bbox
+def _render_group_words_layers(page_meta, word_groups) -> "list[DebugLayer]":
     from rastervec.commons.renderer import render_boxes_pdf
 
-    segs = word_segments or []
-    seg_boxes = [union_bbox([v.bbox for v in s.vectors]) for s in segs if s.vectors]
-    return [("segment", "word boxes", _C_SEGMENT, render_boxes_pdf(
-        page_meta, [(b, _hex_rgb(_C_SEGMENT)) for b in seg_boxes],
+    group_boxes = [wg.bbox for wg in (word_groups or [])]
+    return [("group_words", "word group bbox", _C_GROUP, render_boxes_pdf(
+        page_meta, [(b, _hex_rgb(_C_GROUP)) for b in group_boxes],
     ))]
 
 
-def _render_ocr_layers(page_meta, restored) -> "list[DebugLayer]":
+def _render_ocr_layers(page_meta, texts) -> "list[DebugLayer]":
     from rastervec.commons.renderer import render_text_pdf
 
     return [("ocr", "recognized text", _C_OCR, render_text_pdf(
-        page_meta, restored or [], color_of=lambda _t: _hex_rgb(_C_OCR),
+        page_meta, texts or [], color_of=lambda _t: _hex_rgb(_C_OCR),
     ))]
 
 
@@ -245,7 +322,7 @@ def render_debug(debug_out: "dict | None", page_meta) -> "list[DebugLayer]":
     out: "list[DebugLayer]" = []
     out += _render_classification_layers(page_meta, debug_out.get("classification"))
     out += _render_fast_layers(page_meta, debug_out.get("fast_passed"), debug_out.get("fast_dropped"))
-    out += _render_segment_layers(page_meta, debug_out.get("word_segments"))
-    out += _render_ocr_layers(page_meta, debug_out.get("restored"))
+    out += _render_group_words_layers(page_meta, debug_out.get("word_groups"))
+    out += _render_ocr_layers(page_meta, debug_out.get("texts"))
     out += _render_drawing_layers(page_meta, debug_out.get("drawing"))
     return out

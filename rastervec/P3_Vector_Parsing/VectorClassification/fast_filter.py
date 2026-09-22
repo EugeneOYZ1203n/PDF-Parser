@@ -1,10 +1,6 @@
-"""Archived (2026-09) -- the old Vector_Classification+pixel-Radon
-`current` pipeline's own step functions, cut out of the live
-`rastervec/pipelines/_steps.py` when that pipeline was retired in favor of
-the FAST-filter/PaddleOCR-detect pipeline (see `archive/rastervec/
-pipelines/_common.py`, which called these). Frozen storage -- not
-maintained, not guaranteed to still import cleanly against the live
-`rastervec` tree (e.g. `FastPageResult` may have moved).
+"""FAST-based text filtering: scores every classification cluster (at its
+real page position) against a whole-page FAST mask, keeping only clusters
+that look like text.
 """
 from __future__ import annotations
 
@@ -13,28 +9,30 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from rastervec.P3_Vector_Parsing.VectorClassification.config import FAST_COMBINED_KEEP_THRESHOLD, FAST_PAGE_RENDER_DPI, UNIQUE_CLUSTER_TOLERANCE
-from rastervec.commons.helpers.geometry import (
-    PDF_POINTS_PER_INCH,
-    item_points,
-    max_dimension,
-    transform_point,
-    transform_vector,
-    union_bbox,
-)
-from rastervec.commons.models import Segment, SegmentMeta, Vector
+from rastervec.P3_Vector_Parsing.VectorClassification.config import FAST_COMBINED_KEEP_THRESHOLD, FAST_PAGE_RENDER_DPI
+from rastervec.commons.helpers.geometry import PDF_POINTS_PER_INCH, union_bbox
+from rastervec.commons.models import Vector
 from rastervec.commons.renderer import render_page_paths
 
 
 @dataclass
 class FastPageResult:
     """`detect_text_fast`'s whole-page result. `scores` is keyed by a
-    cluster's own index into that step's `clusters` input list."""
+    cluster's own index into that step's `clusters` input list. `all_tiles`/
+    `skipped_tiles`/`tile_count`/`tile_seconds` are the real per-tile FAST
+    detector geometry (`verbose`-only), mirroring `FastIntoPaddle/
+    steps.py::FastPageResult` -- used by `scripts/debug_image_savers.py`'s
+    `fast_tile_images` dumper to crop the actual detector tile grid instead
+    of falling back to cluster bboxes."""
 
     page_image: object
     page_mask: "np.ndarray | None"
     detect_seconds: float | None
     scores: dict
+    skipped_tiles: list | None = None
+    all_tiles: list | None = None
+    tile_count: int | None = None
+    tile_seconds: list | None = None
 
 
 def _candidate_tile_bboxes(
@@ -132,95 +130,21 @@ def detect_text_fast(
         else:
             dropped_vectors.extend(cluster)
 
+    skipped_tiles = all_tiles = tile_count = tile_seconds = None
+    if verbose and all_vectors:
+        def _to_page(rect_scaled):
+            x0, y0, x1, y1 = rect_scaled
+            return (x0 / zoom, y0 / zoom, x1 / zoom, y1 / zoom)
+
+        tile_count = len(tile_report)
+        all_tiles = [_to_page(e["rect_scaled"]) for e in tile_report]
+        skipped_tiles = [_to_page(e["rect_scaled"]) for e in tile_report if not e["detected"]]
+        tile_seconds = [e["seconds"] for e in tile_report if e.get("seconds") is not None]
+
     result = FastPageResult(
         page_image if verbose else None, page_mask if verbose else None,
         detect_seconds, scores_by_cluster,
+        skipped_tiles=skipped_tiles, all_tiles=all_tiles,
+        tile_count=tile_count, tile_seconds=tile_seconds,
     )
     return FastStepResult(passed, dropped_vectors, result)
-
-
-# --------------------------------------------------------------------------
-# similarity grouping + representative election -- ran on Radon's own
-# word-level `Segment`s (`archive/rastervec/OCR/radon.py::segment_clusters`).
-# --------------------------------------------------------------------------
-def _normalize_segment(seg: Segment) -> tuple[list[Vector], tuple[float, float]]:
-    rotated = [transform_vector(v, offset=(0.0, 0.0), rotation_deg=-seg.angle) for v in seg.vectors]
-    ox, oy, _x1, _y1 = union_bbox([v.bbox for v in rotated])
-    canonical = [transform_vector(v, offset=(-ox, -oy), rotation_deg=0.0) for v in rotated]
-    return canonical, (ox, oy)
-
-
-def _segment_signature(seg: Segment) -> tuple:
-    return tuple(sorted(item[0] for v in seg.vectors for item in v.items))
-
-
-def _point_cloud(vectors: list[Vector]) -> list[tuple[float, float]]:
-    return sorted(pt for v in vectors for item in v.items for pt in item_points(item))
-
-
-def _clouds_close(a, b, tolerance: float) -> bool:
-    return len(a) == len(b) and all(
-        ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5 <= tolerance
-        for (ax, ay), (bx, by) in zip(a, b)
-    )
-
-
-def _segments_similar(a: Segment, b: Segment, canon_a, canon_b, tolerance: float) -> bool:
-    if _segment_signature(a) != _segment_signature(b):
-        return False
-    vecs_a, _ = canon_a
-    vecs_b, _ = canon_b
-    pts_a, pts_b = _point_cloud(vecs_a), _point_cloud(vecs_b)
-    if len(pts_a) != len(pts_b):
-        return False
-    scale_a = max(max_dimension(union_bbox([v.bbox for v in vecs_a])), 1e-6)
-    scale_b = max(max_dimension(union_bbox([v.bbox for v in vecs_b])), 1e-6)
-    tol = tolerance * max(scale_a, scale_b)
-    if _clouds_close(pts_a, pts_b, tol):
-        return True
-    flipped_b = sorted((-x, -y) for x, y in pts_b)
-    return _clouds_close(pts_a, flipped_b, tol)
-
-
-def group_similar_segments(
-    segments: list[Segment], tolerance: float = UNIQUE_CLUSTER_TOLERANCE,
-) -> list[list[int]]:
-    canon = [_normalize_segment(seg) for seg in segments]
-    groups: list[list[int]] = []
-    reps: list[int] = []
-    for i, seg in enumerate(segments):
-        matched = False
-        for gi, rep_i in enumerate(reps):
-            if _segments_similar(seg, segments[rep_i], canon[i], canon[rep_i], tolerance):
-                groups[gi].append(i)
-                matched = True
-                break
-        if not matched:
-            groups.append([i])
-            reps.append(i)
-    return groups
-
-
-def _segment_meta(seg: Segment, unique_index: int, origin_after_rotation) -> SegmentMeta:
-    offset = transform_point(origin_after_rotation, offset=(0.0, 0.0), rotation_deg=seg.angle)
-    first = seg.vectors[0]
-    return SegmentMeta(
-        unique_index=unique_index, offset=offset, rotation=seg.angle,
-        page_index=first.page_index, seqno=first.seqno,
-    )
-
-
-def elect_unique_segments(
-    segments: list[Segment], groups: list[list[int]],
-) -> tuple[list[Segment], list[SegmentMeta]]:
-    canon = [_normalize_segment(seg) for seg in segments]
-    uniques: list[Segment] = []
-    metas: list[SegmentMeta] = []
-    for group in groups:
-        rep_i = group[0]
-        rep_vectors, _ = canon[rep_i]
-        idx = len(uniques)
-        uniques.append(Segment(vectors=rep_vectors, angle=0.0, image=segments[rep_i].image))
-        for i in group:
-            metas.append(_segment_meta(segments[i], idx, canon[i][1]))
-    return uniques, metas

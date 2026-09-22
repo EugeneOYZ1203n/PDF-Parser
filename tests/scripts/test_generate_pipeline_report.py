@@ -220,9 +220,9 @@ def test_save_fastintopaddle_recog_images_reads_p3_debug(tmp_path):
     assert gpr._save_fastintopaddle_recog_images(p3_debug, folder, 0) == 1
 
 
-def test_save_vectorclassification_recog_images_reads_ocr_uniques(tmp_path):
-    segs = [Segment(vectors=[], angle=0.0, image=np.zeros((2, 2, 3), dtype=np.uint8))]
-    p3_debug = {"ocr_uniques": segs, "ocr_unique_texts": [_FakeText(text="Y")]}
+def test_save_vectorclassification_recog_images_reads_ocr_crops(tmp_path):
+    crop = np.zeros((2, 2, 3), dtype=np.uint8)
+    p3_debug = {"ocr_crops": [(crop, "Y")]}
     folder = tmp_path / "recog"
     assert gpr._save_vectorclassification_recog_images(p3_debug, folder, 0) == 1
 
@@ -257,21 +257,39 @@ def test_save_fastintopaddle_tile_images_missing_fast_no_crash(tmp_path):
     assert not folder.exists()
 
 
-def test_save_vectorclassification_cluster_images_crops_page_image(tmp_path, vector):
+def test_save_vectorclassification_tile_images_crops_page_image(tmp_path):
     from PIL import Image
     from rastervec.P3_Vector_Parsing.VectorClassification.fast_filter import FastPageResult
 
     page_image = Image.new("RGB", (200, 200), color=(255, 255, 255))
-    fast_result = FastPageResult(page_image=page_image, page_mask=None, detect_seconds=None, scores={})
-    cluster = [vector(bbox=(0.0, 0.0, 10.0, 10.0))]
-    p3_debug = {"fast_result": fast_result, "fast_passed": [cluster]}
-    folder = tmp_path / "clusters"
-    n = gpr._save_vectorclassification_cluster_images(p3_debug, folder, page_index=0)
+    fast_result = FastPageResult(
+        page_image=page_image, page_mask=None, detect_seconds=None, scores={},
+        all_tiles=[(0.0, 0.0, 10.0, 10.0)],
+    )
+    p3_debug = {"fast_result": fast_result}
+    folder = tmp_path / "tiles"
+    n = gpr._save_vectorclassification_tile_images(p3_debug, folder, page_index=0)
     assert n == 1
     assert len(list(folder.glob("*.png"))) == 1
 
 
-def test_save_vectorclassification_cluster_images_missing_fast_no_crash(tmp_path):
-    folder = tmp_path / "clusters"
-    assert gpr._save_vectorclassification_cluster_images({}, folder, 0) == 0
+def test_save_vectorclassification_tile_images_missing_fast_no_crash(tmp_path):
+    folder = tmp_path / "tiles"
+    assert gpr._save_vectorclassification_tile_images({}, folder, 0) == 0
+    assert not folder.exists()
+
+
+def test_save_vectorclassification_detect_images_draws_quads(tmp_path):
+    bgr = np.zeros((20, 20, 3), dtype=np.uint8)
+    quads = [np.array([(1, 1), (10, 1), (10, 10), (1, 10)], dtype=np.float64)]
+    p3_debug = {"cluster_detections": [(bgr, quads)]}
+    folder = tmp_path / "detect"
+    n = gpr._save_vectorclassification_detect_images(p3_debug, folder, page_index=0)
+    assert n == 1
+    assert len(list(folder.glob("*.png"))) == 1
+
+
+def test_save_vectorclassification_detect_images_missing_key_no_crash(tmp_path):
+    folder = tmp_path / "detect"
+    assert gpr._save_vectorclassification_detect_images({}, folder, 0) == 0
     assert not folder.exists()

@@ -8,9 +8,7 @@ these as top-level attributes (`spatial_clusters`/`cluster_detections`/
 attributes off `res` (as this used to) always returns `None`/`[]` and
 silently writes empty folders. Each backend gets its own distinct folder
 set (see `generate_pipeline_report.py`'s module docstring) since their
-internal pipelines genuinely differ -- VectorClassification has no
-PaddleOCR *detect* stage at all, LegacyRecreation has neither a detect nor
-a FAST stage.
+internal pipelines genuinely differ -- LegacyRecreation has no FAST stage.
 """
 from __future__ import annotations
 
@@ -105,15 +103,52 @@ def _save_fastintopaddle_recog_images(p3_debug: dict, folder: Path, page_index: 
     )
 
 
+def _save_crop_text_images(crops: list, folder: Path, page_index: int) -> int:
+    """Shared body for LegacyRecreation's/VectorClassification's own
+    recog-image dumpers -- both hand PaddleOCR recognition a list of
+    `(crop, text)` pairs (one per PaddleOCR-detected quad within a
+    rendered cluster/word-group), reads `p3_debug["ocr_crops"]`."""
+    if not crops:
+        return 0
+    folder.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for i, (crop, rec) in enumerate(crops):
+        img = Image.fromarray(np.asarray(crop))
+        img.save(folder / f"p{page_index}_word_{i:03d}__{_safe_slug(rec)}.png")
+        n += 1
+    return n
+
+
 def _save_vectorclassification_recog_images(p3_debug: dict, folder: Path, page_index: int) -> int:
-    """One PNG per *deduped* representative segment -- exactly what
-    PaddleOCR's recognizer saw for this backend (after
-    `elect_unique_segments`'s dedup, not the pre-dedup `word_segments`),
-    recognised text in the filename. Reads `p3_debug["ocr_uniques"]` +
-    `p3_debug["ocr_unique_texts"]`."""
-    return _save_segment_recog_images(
-        p3_debug.get("ocr_uniques") or [], p3_debug.get("ocr_unique_texts") or [], folder, page_index,
-    )
+    """One PNG per PaddleOCR-recognised crop -- exactly what the recognizer
+    saw, recognised text in the filename. Reads `p3_debug["ocr_crops"]`
+    (`list[tuple[np.ndarray, str]]`)."""
+    return _save_crop_text_images(p3_debug.get("ocr_crops") or [], folder, page_index)
+
+
+def _save_vectorclassification_detect_images(p3_debug: dict, folder: Path, page_index: int) -> int:
+    """One PNG per seqno-cluster's own rendered+padded image, with every
+    detected quad drawn on top -- exactly what `PaddleDetectBackend.detect`
+    saw. Quads are already in that image's own pixel space (no page-space
+    round-trip needed, unlike FastIntoPaddle's detect-image saver, since
+    `parse.py` renders/pads each cluster itself and hands the detector that
+    same array). Reads `p3_debug["cluster_detections"]`
+    (`list[tuple[np.ndarray, list[np.ndarray]]]`, each a `(bgr, quads)`
+    pair)."""
+    entries = p3_debug.get("cluster_detections") or []
+    if not entries:
+        return 0
+    folder.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for i, (bgr, quads) in enumerate(entries):
+        img = Image.fromarray(np.asarray(bgr)[..., ::-1])  # BGR -> RGB
+        draw = ImageDraw.Draw(img)
+        for quad in quads or []:
+            pts = [(float(x), float(y)) for x, y in quad]
+            draw.polygon(pts, outline=(220, 30, 30), width=2)
+        img.save(folder / f"p{page_index}_cluster_{i:03d}.png")
+        n += 1
+    return n
 
 
 def _save_fastintopaddle_tile_images(p3_debug: dict, folder: Path, page_index: int) -> int:
@@ -141,32 +176,25 @@ def _save_fastintopaddle_tile_images(p3_debug: dict, folder: Path, page_index: i
     return n
 
 
-def _save_vectorclassification_cluster_images(p3_debug: dict, folder: Path, page_index: int) -> int:
-    """VectorClassification has no per-tile FAST detector -- one whole-page
-    mask is scored per surviving classification cluster instead (see
-    `VectorClassification/fast_filter.py::detect_text_fast`). One PNG per
-    *passed* cluster, cropped from that same whole-page render
-    (`FastPageResult.page_image`) at the cluster's own bbox -- not a
-    literal detector tile grid, but the closest equivalent: exactly the
-    pixels that cluster's FAST score was sampled from. Reads
-    `p3_debug["fast_result"]` + `p3_debug["fast_passed"]`."""
+def _save_vectorclassification_tile_images(p3_debug: dict, folder: Path, page_index: int) -> int:
+    """One PNG per FAST detector tile -- the exact crop of the whole-page
+    FAST render (`FastPageResult.page_image`) matching that tile's
+    page-space rect (`all_tiles`), same pattern as
+    `_save_fastintopaddle_tile_images`. Reads `p3_debug["fast_result"]`."""
     fr = p3_debug.get("fast_result")
-    clusters = p3_debug.get("fast_passed") or []
-    if fr is None or fr.page_image is None or not clusters:
+    tiles = getattr(fr, "all_tiles", None) if fr is not None else None
+    if fr is None or fr.page_image is None or not tiles:
         return 0
     from rastervec.P3_Vector_Parsing.VectorClassification.config import FAST_PAGE_RENDER_DPI, FAST_TILE_SCALE_FACTOR
-    from rastervec.commons.helpers.geometry import PDF_POINTS_PER_INCH, union_bbox
+    from rastervec.commons.helpers.geometry import PDF_POINTS_PER_INCH
 
     zoom = (FAST_PAGE_RENDER_DPI * FAST_TILE_SCALE_FACTOR) / PDF_POINTS_PER_INCH
     folder.mkdir(parents=True, exist_ok=True)
     n = 0
-    for i, cluster in enumerate(clusters):
-        if not cluster:
-            continue
-        x0, y0, x1, y1 = union_bbox([v.bbox for v in cluster])
-        px0, py0, px1, py1 = x0 * zoom, y0 * zoom, x1 * zoom, y1 * zoom
-        crop = fr.page_image.crop((int(px0), int(py0), int(px1) + 1, int(py1) + 1))
-        crop.save(folder / f"p{page_index}_cluster_{i:03d}.png")
+    for i, rect in enumerate(tiles):
+        x0, y0, x1, y1 = (c * zoom for c in rect)
+        crop = fr.page_image.crop((int(x0), int(y0), int(x1), int(y1)))
+        crop.save(folder / f"p{page_index}_tile_{i:03d}.png")
         n += 1
     return n
 

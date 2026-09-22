@@ -14,12 +14,14 @@ def test_parse_empty_input_returns_empty_output(page_meta):
     assert texts == []
 
 
-def test_parse_debug_out_has_fast_result_and_ocr_unique_keys(page_meta):
+def test_parse_debug_out_has_fast_result_and_word_group_keys(page_meta):
     debug_out: dict = {}
     vectorclassification.parse([], [], _page(page_meta), verbose=True, debug_out=debug_out)
     assert debug_out["fast_result"] is not None
-    assert debug_out["ocr_uniques"] == []
-    assert debug_out["ocr_unique_texts"] == []
+    assert debug_out["word_groups"] == []
+    assert debug_out["texts"] == []
+    assert debug_out["ocr_crops"] == []
+    assert debug_out["cluster_detections"] == []
 
 
 def test_parse_streaming_matches_batch_render_debug(page_meta):
