@@ -328,9 +328,12 @@ random seed, so regeneration is byte-identical. No arguments.
 
 Run the pluggable Phase1 -> P2_REGISTRY[p2] -> P3_REGISTRY[p3] pipeline on
 one page; prints texts/vectors counts + per-phase wall-clock
-(`step_durations`). This is the primary CLI now -- the old
-`rastervec.pipelines.current` module still exists but is dead code, not
-called by any live script.
+(`step_durations`). This is the primary CLI now -- new code should always
+use it. The old `rastervec.pipelines.current` module (with its own `python
+-m rastervec.pipelines.current` CLI) still exists and is genuinely called by
+a few tools (the labelling GUIs, the benchmark CLI's step-name comparison --
+see `CLAUDE.md`'s top-of-file note), so it isn't dead code, just deprecated;
+don't build new scripts on it.
 
 ```
 .venv/Scripts/python.exe -m rastervec.core.pipeline \

@@ -5,9 +5,9 @@ spatial clustering -> per-cluster PaddleOCR detect -> overlap reassignment
 with VectorClassification's own config.py, per the phase-isolation rule."""
 from __future__ import annotations
 
-# Vector_Similarity/similarity.py -- two normalized point clouds count as
-# "the same shape" if their mean squared corresponding-point distance is at
-# or under this.
+# similarity.py (this backend's own copy) -- two normalized point clouds
+# count as "the same shape" if their mean squared corresponding-point
+# distance is at or under this.
 SIMILARITY_MSE_THRESHOLD = 0.01
 
 # reclassify_by_similarity: if under this fraction of a group's members

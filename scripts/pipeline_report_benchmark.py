@@ -31,6 +31,14 @@ command. Output (timestamped folder under `outputs/pipeline_report_benchmark/`):
     charts/                 <key>__aggregate__*.png, aggregate__*.png
     examples/                <key>__<run>__<type>__<category>__<n>.png crops
 
+This module's own run-loading + scoring (`RunEntry`/`_merge_gt`/`_load_run`/
+`_score_text`/`_score_vectors`) lives in `benchmark_run_loading.py`, the
+illustrated-example collection (`_collect_examples`/`_crop_to_png`) in
+`benchmark_examples.py`, and the HTML section builders
+(`_add_text_sections`/`_add_vector_sections`) in
+`benchmark_report_sections.py` -- all re-exported here since some names are
+imported directly from this module's own path.
+
     .venv/Scripts/python.exe scripts/pipeline_report_benchmark.py \
         --run outputs/pipeline_report/<ts1>__benchmark \
         --run outputs/pipeline_report/<ts2>__benchmark_legacy
@@ -42,502 +50,53 @@ import datetime as _dt
 import json
 import sys
 from pathlib import Path
-from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import pymupdf as fitz
-
-from rastervec.Evaluation import dump_io
-from rastervec.Evaluation.Evaluate import adapters, charts, vector_metrics
+from rastervec.Evaluation.Evaluate import charts
 from rastervec.Evaluation.Evaluate.benchmark import (
-    _fmt_ratio,
     format_aggregate_comparison,
     format_confusion_table,
     format_vector_aggregate_comparison,
 )
-from rastervec.Evaluation.Evaluate.confusion_metrics import align_chars, closest_pred_word
-from rastervec.Evaluation.Evaluate.html_report import ExampleCard, ReportBuilder
+from rastervec.Evaluation.Evaluate.html_report import ReportBuilder
 from rastervec.Evaluation.Evaluate.metrics import (
     TEXT_TYPES,
     MetricConfig,
-    OverlapGraph,
-    Prediction,
     TextMetricSuiteResult,
     aggregate_text_metrics,
-    build_overlap_graphs_by_type,
-    combine_text_metrics_by_type,
-    evaluate_text_metrics,
 )
-from rastervec.Evaluation.Evaluate.text_metrics import word_tokens
 from rastervec.Evaluation.Evaluate.vector_metrics import (
-    VECTOR_TYPES,
     VectorMetricConfig,
     VectorMetricSuiteResult,
     aggregate_vector_metrics,
 )
-from rastervec.Evaluation.Labelling.label_schema import LabelSet, load_labels
 from rastervec.commons.logging_setup import configure_logging, get_logger
 from rastervec.commons.paths import output_dir
+
+from scripts.benchmark_examples import (  # noqa: F401 -- re-exported for callers/tests
+    _EXAMPLE_CAP,
+    _collect_examples,
+    _crop_to_png,
+    _short_slug,
+    _slug,
+)
+from scripts.benchmark_report_sections import (  # noqa: F401 -- re-exported for callers/tests
+    _add_text_sections,
+    _add_vector_sections,
+    _fmt_property_rows,
+)
+from scripts.benchmark_run_loading import (  # noqa: F401 -- re-exported for callers/tests
+    RunEntry,
+    _load_run,
+    _merge_gt,
+    _score_text,
+    _score_vectors,
+)
 
 _LOG = get_logger("pipeline_report_benchmark")
 
 _VENV_PY = ".venv/Scripts/python.exe"
-_EXAMPLE_CAP = 5
-
-
-class RunEntry(NamedTuple):
-    run_name: str
-    run_dir: Path
-    key: str
-    pdf_stem: str
-    doc_dir: Path
-    dump_path: Path
-    gt: LabelSet  # merged native/vector/raster labels for this input
-
-
-def _merge_gt(doc: Path) -> LabelSet:
-    """Merges whichever `ground_truth_*.json` files this run wrote (every
-    name in `TEXT_TYPES`, falling back to the pre-rework `auto`/`manual`
-    names for an older report folder) into one `LabelSet`."""
-    entries = []
-    geometry_entries = []
-    pdf_path = ""
-    for name in (*TEXT_TYPES, "auto", "manual"):
-        p = doc / f"ground_truth_{name}.json"
-        if p.is_file():
-            ls = load_labels(str(p))
-            pdf_path = pdf_path or ls.pdf_path
-            entries.extend(ls.entries)
-            geometry_entries.extend(ls.geometry_entries)
-    return LabelSet(pdf_path=pdf_path, entries=entries, geometry_entries=geometry_entries)
-
-
-def _load_run(run_dir: Path, parser: argparse.ArgumentParser) -> dict[str, RunEntry]:
-    marker = run_dir / "benchmark.json"
-    if not marker.is_file():
-        parser.error(f"{run_dir} has no benchmark.json (not a benchmark run)")
-    meta = json.loads(marker.read_text(encoding="utf-8"))
-    if not meta.get("benchmark"):
-        parser.error(f"{run_dir}: benchmark.json does not mark this as a benchmark run")
-
-    entries: dict[str, RunEntry] = {}
-    for e in meta.get("entries", []):
-        doc = run_dir / e["dir"]
-        entries[e["key"]] = RunEntry(
-            run_name=run_dir.name,
-            run_dir=run_dir.resolve(),
-            key=e["key"],
-            pdf_stem=e["pdf_stem"],
-            doc_dir=doc,
-            dump_path=doc / "dump.json",
-            gt=_merge_gt(doc),
-        )
-    return entries
-
-
-# native_to_vector/original_vector are scored from the vectorised-PDF run's
-# own OCR predictions; vector_to_raster/original_raster/native_to_raster are
-# scored from the SEPARATE rasterised-PDF run's own OCR predictions -- never
-# each other's. Mirrors `generate_pipeline_report.py`'s `RASTER_TEXT_TYPES`.
-_VECTORISED_TEXT_TYPES = ("native_to_vector", "original_vector")
-_RASTER_TEXT_TYPES = ("vector_to_raster", "original_raster", "native_to_raster")
-
-
-def _score_text(
-    entry: RunEntry, cfg: MetricConfig,
-) -> "tuple[list[tuple[int, TextMetricSuiteResult, dict[str, OverlapGraph]]], TextMetricSuiteResult | None]":
-    dump = dump_io.load_dump(entry.dump_path)
-    gt_by_type_all = adapters.gt_regions_by_text_type(entry.gt)
-    entries_by_type_all = adapters.entries_by_text_type(entry.gt)
-    per_page: "list[tuple[int, TextMetricSuiteResult, dict[str, OverlapGraph]]]" = []
-    for page in dump.pages:
-        pi = page.page_meta.index
-        page_area = page.page_meta.width * page.page_meta.height
-        gt_by_type = {t: [g for g in gt_by_type_all[t] if g.page_index == pi] for t in TEXT_TYPES}
-
-        def _restricted(types, src=gt_by_type):
-            return {t: (src[t] if t in types else []) for t in TEXT_TYPES}
-
-        vec_preds = adapters.predictions_from_texts([t for t in page.texts if t.source == "ocr"])
-        vec_gt = _restricted(_VECTORISED_TEXT_TYPES)
-        vec_entries = _restricted(_VECTORISED_TEXT_TYPES, entries_by_type_all)
-        res_vec = evaluate_text_metrics(vec_gt, vec_entries, vec_preds, cfg=cfg, page_area=page_area)
-        vec_graphs = build_overlap_graphs_by_type(vec_gt, vec_preds, cfg)
-
-        raster_preds = adapters.predictions_from_texts(
-            [t for t in page.raster_texts if t.source == "ocr"]
-        )
-        raster_gt = _restricted(_RASTER_TEXT_TYPES)
-        raster_entries = _restricted(_RASTER_TEXT_TYPES, entries_by_type_all)
-        res_raster = evaluate_text_metrics(raster_gt, raster_entries, raster_preds, cfg=cfg, page_area=page_area)
-        raster_graphs = build_overlap_graphs_by_type(raster_gt, raster_preds, cfg)
-
-        res = combine_text_metrics_by_type({
-            **{t: res_vec for t in _VECTORISED_TEXT_TYPES},
-            **{t: res_raster for t in _RASTER_TEXT_TYPES},
-        })
-        graphs_by_type = {
-            **{t: vec_graphs[t] for t in _VECTORISED_TEXT_TYPES},
-            **{t: raster_graphs[t] for t in _RASTER_TEXT_TYPES},
-        }
-        per_page.append((pi, res, graphs_by_type))
-    return per_page, aggregate_text_metrics([r for _pi, r, _g in per_page])
-
-
-def _score_vectors(
-    entry: RunEntry, cfg: VectorMetricConfig,
-) -> "tuple[list[tuple[int, VectorMetricSuiteResult]], VectorMetricSuiteResult | None]":
-    """Vector metrics from the run's own ground-truth labels alone --
-    `vector_to_raster`/`original_raster` only (`original_vector` is a
-    text-provenance type, not scored at the vector-geometry level; see
-    `adapters.build_vector_eval_inputs`). Neither has a prediction
-    population (no raster-tracing pipeline stage exists), so this reports
-    GT-only stats."""
-    dump = dump_io.load_dump(entry.dump_path)
-    per_page: "list[tuple[int, VectorMetricSuiteResult]]" = []
-
-    for page in dump.pages:
-        pi = page.page_meta.index
-        page_gt = LabelSet(
-            pdf_path=entry.gt.pdf_path,
-            entries=[e for e in entry.gt.entries if e.page_index == pi],
-            geometry_entries=[g for g in entry.gt.geometry_entries if g.page_index == pi],
-        )
-        inputs = adapters.build_vector_eval_inputs(page_gt)
-        res = vector_metrics.evaluate_vector_metrics(
-            inputs.gt_by_type, inputs.preds_by_type, inputs.label_counts, cfg=cfg,
-        )
-        per_page.append((pi, res))
-    return per_page, aggregate_vector_metrics([r for _pi, r in per_page])
-
-
-def _slug(text: str) -> str:
-    return "".join(c if c.isalnum() else "_" for c in text).strip("_") or "key"
-
-
-def _short_slug(text: str, max_len: int = 16) -> str:
-    """A filename-safe slug capped to `max_len` chars (+ a short hash
-    suffix for uniqueness) -- unlike `_slug`, safe to compose several of
-    into one path component without hitting Windows' ~260-char MAX_PATH."""
-    import hashlib
-
-    full = _slug(text)
-    if len(full) <= max_len:
-        return full
-    h = hashlib.sha1(text.encode()).hexdigest()[:8]
-    return f"{full[:max_len]}_{h}"
-
-
-def _crop_to_png(pdf_path: Path, bbox, out_path: Path, *, dpi: float = 150.0) -> bool:
-    """Crops `bbox` (page-space, unrotated MediaBox) out of `pdf_path`'s
-    page 0 -- every `converted_p<N>.pdf` this benchmark scores against is a
-    single-page vectorised render. Known accepted limitation: this does not
-    apply the page's own rotation matrix, so it may crop the wrong region
-    on a rotated page -- correct for the common rotation-0 case."""
-    try:
-        doc = fitz.open(str(pdf_path))
-        try:
-            page = doc[0]
-            rect = fitz.Rect(*bbox)
-            if rect.is_empty or rect.is_infinite:
-                return False
-            pix = page.get_pixmap(clip=rect, dpi=int(dpi))
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            pix.save(str(out_path))
-            return True
-        finally:
-            doc.close()
-    except Exception as exc:  # noqa: BLE001
-        _LOG.warning("crop failed for %s %s: %s", pdf_path, bbox, exc)
-        return False
-
-
-def _collect_examples(
-    entry: RunEntry,
-    per_page: "list[tuple[int, TextMetricSuiteResult, dict[str, OverlapGraph]]]",
-    examples_dir: Path, kslug: str,
-) -> "dict[tuple[str, str], list[ExampleCard]]":
-    """Up to `_EXAMPLE_CAP` examples per (text_type, category) across all of
-    this key/run's pages -- extra predictions (no GT overlap at all), missed
-    GT (no prediction reached it), confusion misreads (GT word vs. its
-    closest overlapping predicted word)."""
-    out: "dict[tuple[str, str], list[ExampleCard]]" = {}
-    rslug = _short_slug(entry.run_name)
-    for text_type in TEXT_TYPES:
-        extra: "list[ExampleCard]" = []
-        missed: "list[ExampleCard]" = []
-        confusion: "list[ExampleCard]" = []
-        for pi, _res, graphs_by_type in per_page:
-            graph = graphs_by_type[text_type]
-            conv_pdf = entry.doc_dir / (
-                f"rasterised_p{pi}.pdf" if text_type in _RASTER_TEXT_TYPES
-                else f"converted_p{pi}.pdf"
-            )
-
-            if len(extra) < _EXAMPLE_CAP:
-                for pj, p in enumerate(graph.preds):
-                    if len(extra) >= _EXAMPLE_CAP:
-                        break
-                    if graph.edges_by_pred[pj]:
-                        continue
-                    n = len(extra)
-                    img = examples_dir / f"{kslug}__{rslug}__{text_type}__extra_prediction__{n}.png"
-                    ok = _crop_to_png(conv_pdf, p.bbox, img)
-                    extra.append(ExampleCard(
-                        caption=f"p{pi} pred={p.text!r}",
-                        image_path=(Path("examples") / img.name) if ok else None,
-                        run=entry.run_name, text_type=text_type,
-                    ))
-
-            if len(missed) < _EXAMPLE_CAP:
-                for gi in graph.missed_gt_idxs:
-                    if len(missed) >= _EXAMPLE_CAP:
-                        break
-                    g = graph.gt[gi]
-                    n = len(missed)
-                    img = examples_dir / f"{kslug}__{rslug}__{text_type}__missed_gt__{n}.png"
-                    ok = _crop_to_png(conv_pdf, g.bbox, img)
-                    missed.append(ExampleCard(
-                        caption=f"p{pi} gt={g.text!r}",
-                        image_path=(Path("examples") / img.name) if ok else None,
-                        run=entry.run_name, text_type=text_type,
-                    ))
-
-            if len(confusion) < _EXAMPLE_CAP:
-                for gi, g in enumerate(graph.gt):
-                    if len(confusion) >= _EXAMPLE_CAP:
-                        break
-                    overlapping = graph.overlapping_preds_by_gt[gi]
-                    if not overlapping:
-                        continue
-                    pred_words_all: "list[str]" = []
-                    for pj in overlapping:
-                        pred_words_all.extend(word_tokens(graph.preds[pj].text))
-                    pred_word_set = set(pred_words_all)
-                    for gt_word in word_tokens(g.text):
-                        if gt_word in pred_word_set:
-                            continue
-                        closest = closest_pred_word(gt_word, pred_words_all)
-                        if closest is None or closest == gt_word:
-                            continue
-                        n = len(confusion)
-                        img = examples_dir / f"{kslug}__{rslug}__{text_type}__confusion__{n}.png"
-                        ok = _crop_to_png(conv_pdf, g.bbox, img)
-                        confusion.append(ExampleCard(
-                            caption=f"p{pi} gt={gt_word!r} pred={closest!r}",
-                            image_path=(Path("examples") / img.name) if ok else None,
-                            run=entry.run_name, text_type=text_type,
-                        ))
-                        break  # one example per gt region
-
-        out[(text_type, "extra_prediction")] = extra
-        out[(text_type, "missed_gt")] = missed
-        out[(text_type, "confusion")] = confusion
-    return out
-
-
-def _fmt_property_rows(agg_by_run: "dict[str, VectorMetricSuiteResult | None]") -> "tuple[list[str], list[list[str]]]":
-    headers = ["vector_type", "property"] + list(agg_by_run)
-    rows: "list[list[str]]" = []
-    for t in VECTOR_TYPES:
-        names: "list[str]" = []
-        for res in agg_by_run.values():
-            if res is not None:
-                names = [r.property_name for r in res.by_type[t].property_rows]
-                break
-        for name in names:
-            row = [t, name]
-            for res in agg_by_run.values():
-                if res is None:
-                    row.append("n/a")
-                    continue
-                r = next((rr for rr in res.by_type[t].property_rows if rr.property_name == name), None)
-                if r is None or not r.applicable:
-                    row.append("n/a")
-                else:
-                    row.append(f"{r.kind}={r.metric_value:.3f} (n={r.n_applicable})")
-            rows.append(row)
-    return headers, rows
-
-
-def _add_text_sections(builder: ReportBuilder, agg_by_run: "dict[str, TextMetricSuiteResult | None]") -> None:
-    builder.add_group_header("Text")
-
-    headers = ["text_type"] + list(agg_by_run)
-    rows = []
-    for t in TEXT_TYPES:
-        row = [t]
-        for res in agg_by_run.values():
-            if res is None:
-                row.append("n/a")
-                continue
-            ls = res.by_type[t].label_stats
-            row.append(f"{ls.label_count} labels | {ls.char_count} chars | {ls.word_count} words | {ls.vector_count} vectors")
-        rows.append(row)
-    builder.add_text_subsection("Label description", headers, rows)
-
-    for field, name in (("char_overlap", "Char overlap"), ("word_overlap", "Word overlap")):
-        rows = []
-        for t in TEXT_TYPES:
-            row = [t]
-            for res in agg_by_run.values():
-                if res is None:
-                    row.append("n/a")
-                    continue
-                co = getattr(res.by_type[t], field)
-                row.append(
-                    f"matched {co.matched}/{co.total_gt} | unclassified {co.unclassified} | "
-                    f"missing {co.missing} | P {_fmt_ratio(co.precision)} | R {_fmt_ratio(co.recall)}"
-                )
-            rows.append(row)
-        builder.add_text_subsection(name, headers, rows)
-
-    rows = []
-    for t in TEXT_TYPES:
-        row = [t]
-        for res in agg_by_run.values():
-            if res is None:
-                row.append("n/a")
-                continue
-            ba = res.by_type[t].bbox_accuracy
-            row.append(f"mean IoU {_fmt_ratio(ba.mean_iou)} (n_gt={ba.n_gt} n_localized={ba.n_localized})")
-        rows.append(row)
-    row = ["unclassified"]
-    for res in agg_by_run.values():
-        if res is None:
-            row.append("n/a")
-            continue
-        bu = res.bbox_unclassified
-        row.append(f"spurious preds {bu.spurious_pred_count} (area frac {bu.spurious_pred_area_frac})")
-    rows.append(row)
-    builder.add_text_subsection("Bbox accuracy", headers, rows)
-
-    rows = []
-    for t in TEXT_TYPES:
-        row = [t]
-        for res in agg_by_run.values():
-            if res is None:
-                row.append("n/a")
-                continue
-            rot = res.by_type[t].rotation
-            row.append(
-                f"correct={rot.buckets.correct} off90={rot.buckets.off_90} off180={rot.buckets.off_180} "
-                f"(n={rot.n_localized}) | mean_err={rot.mean_error_deg:.1f} | rmse={rot.rmse_deg:.1f}"
-            )
-        rows.append(row)
-    builder.add_text_subsection("Rotation accuracy", headers, rows)
-
-    rows = []
-    for t in ("native_to_vector", "original_vector"):
-        row = [t]
-        for res in agg_by_run.values():
-            if res is None:
-                row.append("n/a")
-                continue
-            f_ = res.by_type[t].funnel
-            row.append(f"{f_.n_survived}/{f_.n_gt_vectors} ({_fmt_ratio(f_.survival_rate)})" if f_ else "n/a")
-        rows.append(row)
-    builder.add_text_subsection("Vector classification funnel", ["text_type"] + list(agg_by_run), rows)
-
-    rows = []
-    for t in TEXT_TYPES:
-        row = [t]
-        for res in agg_by_run.values():
-            if res is None:
-                row.append("n/a")
-                continue
-            ro = res.by_type[t].reading_order
-            row.append(
-                f"in_order {ro.n_in_order}/{ro.n_with_overlap} ({_fmt_ratio(ro.in_order_rate)}) | "
-                f"edit min/max/mean/median {ro.edit_distance_min}/{ro.edit_distance_max}/"
-                f"{ro.edit_distance_mean}/{ro.edit_distance_median}"
-            )
-        rows.append(row)
-    builder.add_text_subsection("Reading order accuracy", headers, rows)
-
-    for t in TEXT_TYPES:
-        chars: set = set()
-        for res in agg_by_run.values():
-            if res is not None:
-                chars.update(res.by_type[t].confusion.keys())
-        c_rows = []
-        for ch in sorted(chars):
-            row = [repr(ch)]
-            for res in agg_by_run.values():
-                if res is None or ch not in res.by_type[t].confusion:
-                    row.append("")
-                    continue
-                counter = res.by_type[t].confusion[ch]
-                total = sum(counter.values())
-                top = counter.most_common(5)
-                row.append(", ".join(
-                    f"{repr(r) if r else '(none)'}: {c} ({100 * c / total:.0f}%)" for r, c in top
-                ))
-            c_rows.append(row)
-        builder.add_text_subsection(f"OCR confusion characters -- {t}", ["gt_char"] + list(agg_by_run), c_rows)
-
-    chars = set()
-    for res in agg_by_run.values():
-        if res is not None:
-            chars.update(res.extra_chars.keys())
-    ec_rows = []
-    for ch in sorted(chars):
-        row = [repr(ch)]
-        for res in agg_by_run.values():
-            if res is None:
-                row.append("")
-                continue
-            c = res.extra_chars.get(ch, 0)
-            total = sum(res.extra_chars.values()) or 1
-            row.append(f"{c} ({100 * c / total:.0f}%)" if c else "")
-        ec_rows.append(row)
-    builder.add_text_subsection("Extra predicted characters (no GT overlap at all)", ["char"] + list(agg_by_run), ec_rows)
-
-
-def _add_vector_sections(builder: ReportBuilder, agg_by_run: "dict[str, VectorMetricSuiteResult | None]") -> None:
-    if not any(v is not None for v in agg_by_run.values()):
-        return
-    builder.add_group_header("Vector")
-
-    headers = ["vector_type"] + list(agg_by_run)
-    rows = []
-    for t in VECTOR_TYPES:
-        row = [t]
-        for res in agg_by_run.values():
-            row.append(str(res.by_type[t].label_stats.count) if res else "n/a")
-        rows.append(row)
-    builder.add_vector_subsection("Label description", headers, rows)
-
-    rows = []
-    for t in VECTOR_TYPES:
-        row = [t]
-        for res in agg_by_run.values():
-            if res is None:
-                row.append("n/a")
-                continue
-            cs = res.by_type[t].count_stats
-            row.append(
-                f"paired={cs.n_paired} missed={cs.n_missed} spurious={cs.n_spurious} | "
-                f"P {_fmt_ratio(cs.precision)} | R {_fmt_ratio(cs.recall)}"
-            )
-        rows.append(row)
-    builder.add_vector_subsection("Count accuracy", headers, rows)
-
-    rows = []
-    for t in VECTOR_TYPES:
-        row = [t]
-        for res in agg_by_run.values():
-            if res is None:
-                row.append("n/a")
-                continue
-            es = res.by_type[t].endpoint_stats
-            row.append(f"RMSE {es.rmse} (n_paired={es.n_paired})")
-        rows.append(row)
-    builder.add_vector_subsection("Endpoint accuracy", headers, rows)
-
-    p_headers, p_rows = _fmt_property_rows(agg_by_run)
-    builder.add_vector_subsection("Property accuracy", p_headers, p_rows)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

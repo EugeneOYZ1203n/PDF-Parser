@@ -30,8 +30,12 @@
                                                                        # no similarity/dedup stage
     drawing_vectors = build_drawing_output(reassignment.drawing, reclass.dropped)
 
-See `_steps.py` / `Vector_Similarity/similarity.py` / `Vector/layer_color_separation.py` /
-`OCR/Paddle_OCR/ocr_backend.py` / `OCR/radon.py` for each call.
+See `_steps.py` (including `similarity_group`, which lives here now -- the old
+`Vector_Similarity/similarity.py` it once came from no longer exists) /
+`Vector/layer_color_separation.py` / `OCR/Paddle_OCR/ocr_backend.py` / `OCR/radon.py` for each
+call. This whole module is deprecated but still live -- see `CLAUDE.md`'s top-of-file note and
+`docs/old_pipeline_migration.md`; new code should call `rastervec.core.pipeline.run_pipeline`
+instead.
 
 CLI: `python -m rastervec.pipelines.current --pdf PATH --page N [-v] [--no-fast]`
 """

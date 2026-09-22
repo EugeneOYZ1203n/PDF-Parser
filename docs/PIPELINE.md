@@ -10,8 +10,10 @@ every phase's output into the final `(texts, vectors)` and guards the unrotated-
 coordinate contract). This document's
 `classify → fast → segment → similarity → ocr → restore → drawing` sequence is
 `P3_Vector_Parsing/VectorClassification/`'s own algorithm (`parse.py` -- what used to be
-`rastervec.pipelines.current`'s only algorithm, before the phase split; that module is now dead
-code). It's selected via `p3="VectorClassification"`; the *default* P3 backend today is
+`rastervec.pipelines.current`'s only algorithm, before the phase split; that old module is
+deprecated but still genuinely live today, not dead -- see `CLAUDE.md`'s top-of-file note and
+`docs/old_pipeline_migration.md`). It's selected via `p3="VectorClassification"`; the *default*
+P3 backend today is
 `FastIntoPaddle`, a materially different algorithm (similarity grouping → FAST filter →
 reclassify → layer/color/width separation → spatial clustering → per-cluster PaddleOCR detect →
 overlap reassignment → rotation refine → PaddleOCR recognize) not documented step-by-step here --
@@ -136,7 +138,9 @@ one of them rotated 90 degrees.
 ## Debug/verbose output
 
 This backend doesn't populate the old per-stage named-Optional `PipelineResult` fields the table
-below once described -- that dataclass (`rastervec/pipelines/result.py`) is dead code. Instead,
+below once described -- that dataclass (`rastervec/pipelines/result.py`) belongs to the older,
+deprecated-but-still-live `pipelines.current` pipeline (see `CLAUDE.md`'s top-of-file note),
+which this backend has no relationship to. Instead,
 `parse(..., debug_out=some_dict)` stashes its own intermediate step objects verbatim into the
 dict it's given (`classification` -- the `ClassificationResult`; `fast_passed`/`fast_dropped`;
 `word_segments`; `restored`; `drawing`), and this module's own `render_debug(debug_out,

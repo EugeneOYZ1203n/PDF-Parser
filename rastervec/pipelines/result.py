@@ -24,8 +24,8 @@ if TYPE_CHECKING:
 
     from rastervec.commons.models import Page, Segment, Text, Vector
     from rastervec.OCR.Paddle_OCR.ocr_backend import ClusterDetection
+    from rastervec.P3_Vector_Parsing.FastIntoPaddle.similarity import SimilarityGroup
     from rastervec.pipelines._steps import ReclassifyResult
-    from rastervec.Vector_Similarity.similarity import SimilarityGroup
 
 # (layer, color, width) -- one pipeline separation bucket.
 SeparationKey = "tuple[str, tuple | None, float | None]"

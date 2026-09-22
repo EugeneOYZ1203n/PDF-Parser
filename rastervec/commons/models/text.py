@@ -7,10 +7,12 @@ from an axis-aligned bbox + direction, so nothing new is invented). There is
 no `rotation_used` field: an OCR result's final orientation is a word's
 own Radon residual skew angle combined with PaddleOCR's cls-detected
 180-degree correction, folded into `direction` once, before the `Text` is
-built (see `OCR/Paddle_OCR/ocr_backend.py::recognize_segments`); an elected
-representative's own canonicalizing rotation is layered on top of that
-afterward when restoring onto each real word occurrence (see
-`pipelines/sub_pipelines/ocr.py::restore_word_texts`).
+built; an elected representative's own canonicalizing rotation is layered on
+top of that afterward when restoring onto each real word occurrence. (Each
+P3 backend's own OCR-recognition + word-restoration step does this itself --
+see the current P3 backend's `paddle_engine.py`/`ocr.py`, e.g.
+`P3_Vector_Parsing/VectorClassification/{paddle_engine,ocr}.py` -- this
+dataclass has no dependency on any one backend's implementation.)
 
 `origin` is a baseline leading-edge point for both native and OCR text
 (`helpers.geometry.compute_origin`), so the field means the same thing
@@ -22,9 +24,9 @@ regardless of `source`. Native text passes the matched span's real
 line `dir`), `"fallback"` (no span matched -> horizontal), or `"ocr"`.
 
 `from_pymupdf`/`to_pymupdf` are the fitz boundary for *native* text (an
-OCR `Text` is hand-built by `OCR/Paddle_OCR/ocr_backend.py` /
-`pipelines/sub_pipelines/ocr.py::restore_word_texts` instead, never via
-`from_pymupdf`). `raw_span`, note, is not the bare `get_text("dict")` span
+OCR `Text` is hand-built by the active P3 backend's own OCR-recognition
+code instead, never via `from_pymupdf`). `raw_span`, note, is not the bare
+`get_text("dict")` span
 dict -- `direction`/`wmode` live on that span's *line*, one level up, not
 on the span itself, so `native_text.py::_extract_spans` merges the line's
 `dir`/`wmode` into the stored span dict so `raw_span` alone is enough to

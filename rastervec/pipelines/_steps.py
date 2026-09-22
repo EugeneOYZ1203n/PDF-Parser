@@ -190,9 +190,11 @@ def filter_vectors_fast(
 
 
 # --------------------------------------------------------------------------
-# Vector-level similarity grouping (Vector_Similarity.similarity), run
-# before FAST -- every raw extracted Vector, independently, groups into a
-# shape-similarity bucket regardless of FAST's own per-vector verdict.
+# Vector-level similarity grouping (P3_Vector_Parsing.FastIntoPaddle.similarity,
+# imported above -- the old Vector_Similarity.similarity module this used to
+# live in no longer exists), run before FAST -- every raw extracted Vector,
+# independently, groups into a shape-similarity bucket regardless of FAST's
+# own per-vector verdict.
 # --------------------------------------------------------------------------
 def similarity_group(vectors: list[Vector]) -> list[SimilarityGroup]:
     return vector_similarity_group(vectors)

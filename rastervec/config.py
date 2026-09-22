@@ -134,10 +134,13 @@ FAST_TILE_OVERLAP_FRAC = 0.15
 # chain is retired, preserved untouched under archive/rastervec/.
 # ======================================================================
 
-# Vector_Similarity/similarity.py -- vector_similarity_group's step 5: two
-# normalized (PCA-aligned, unit-boxed, origin-anchored) point clouds count
-# as "the same shape" if their mean squared corresponding-point distance is
-# at or under this.
+# Legacy constant -- the old pipeline's own similarity step no longer calls
+# anything that reads this; only `notebooks/vector_similarity_lab.ipynb`
+# falls back to it. Two normalized (PCA-aligned, unit-boxed, origin-anchored)
+# point clouds count as "the same shape" if their mean squared
+# corresponding-point distance is at or under this. The real, live constant
+# for the current pipeline is `P3_Vector_Parsing/FastIntoPaddle/config.py`'s
+# own `SIMILARITY_MSE_THRESHOLD`, used by that backend's `similarity.py`.
 SIMILARITY_MSE_THRESHOLD = 0.01
 
 # pipelines/_steps.py::reclassify_by_similarity -- after FAST scores every

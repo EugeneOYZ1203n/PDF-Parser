@@ -32,13 +32,44 @@ entirely (see the `variants.py`/`legacy_adapter.py` bullets below). `P3_Vector_P
 LegacyRecreation/` is a *different* thing: a genuine from-scratch port of that same old
 algorithm onto `commons.models` types, selectable as a normal P3 backend.
 
-Several top-level `rastervec/` folders from before this phase split still exist but are now dead
-code, not imported by anything live: `rastervec/OCR/`, `rastervec/Vector/`,
-`rastervec/Vector_Similarity/`, `rastervec/Reader/` (superseded by `P1_Reading_Native/reader.py`
-+ `core/parallel/`), and `rastervec/pipelines/current.py`/`_steps.py`/`_common.py` (superseded by
-`core/pipeline.py` + the P3 backends' own `parse.py`/`steps.py`). `rastervec/pipelines/legacy.py`
-is the one live exception in that folder — it's what `pipeline: "legacy"` actually calls. These
-dead folders haven't been deleted yet; don't build on them.
+Several top-level `rastervec/` folders/files from before this phase split are genuinely gone —
+`rastervec/Reader/` (superseded by `P1_Reading_Native/reader.py` + `core/parallel/`) and
+`rastervec/pipelines/_common.py`/`sub_pipelines/` (superseded by `core/pipeline.py` + the P3
+backends' own `parse.py`/`steps.py`) no longer exist on disk. `rastervec/Vector_Similarity/` is
+also gone — its one module moved to `P3_Vector_Parsing/FastIntoPaddle/similarity.py` — but a
+handful of comments/type-only imports still cite the old `Vector_Similarity/similarity.py` path
+(`rastervec/pipelines/{current.py,result.py}`, `rastervec/config.py`,
+`P3_Vector_Parsing/FastIntoPaddle/config.py`); don't be misled by those hits, the folder isn't
+there to import from.
+
+**`rastervec/OCR/`, `rastervec/Vector/`, and `rastervec/pipelines/{current.py,_steps.py,
+result.py,_cli.py}` are NOT dead — they're deprecated but still genuinely live**, an important
+distinction from the folders above. `pipelines/current.py`+`_steps.py`+`result.py` form a
+second, still-functioning pipeline implementation that predates `core/pipeline.py`, with its
+own `PipelineResult` (`pipelines/result.py` — different shape from `core/result.py`'s: an
+`engine` field and many per-stage Optional fields, no `extra` bucket) and its own
+`run_pipeline`. Real current dependents, as of this writing: `scripts/label/vector_label.py`
+and `scripts/label/label_viewer.py` (`pipelines._steps.extract_vectors`,
+`pipelines.current.separate_by_layer_color_width`); `Evaluation/Evaluate/benchmark.py`
+(`pipelines.current.STEP_NAMES`); `Evaluation/Evaluate/adapters.py`,
+`commons/renderer/stages.py`, `commons/renderer/notebook.py` (all type-import
+`pipelines.result.PipelineResult`); `core/parallel/pool.py::warmup()` (imports
+`OCR/fast_detect.FastDetector` + `OCR/Paddle_OCR/ocr_backend.PaddleRecBackend` to warm model
+caches); `P2_Raster_To_Vec/Junction/junction_test/pipeline.py` (imports
+`OCR/Paddle_OCR/render_ocr.RenderOCR`, behind the `run_ocr=False`-by-default branch);
+`P1_Reading_Native/vector_extract.py` (re-exports `Vector/layer_color_separation.py` "for
+callers"); plus `pipelines/current.py`/`_steps.py` use both `OCR/` and `Vector/` directly. Its
+own test suite: `tests/rastervec/pipelines/{test_current,test_steps,test_partial_run}.py`.
+**New code should always call `core.pipeline.run_pipeline`, never `pipelines.current.
+run_pipeline`** — `scripts/label/CAD_font_label.py` (a newer labelling tool) already treats
+`rastervec.pipelines.current` as explicitly "off-limits" in its own docstring for exactly this
+reason. A future migration to fully retire `OCR/`, `Vector/`, and the old `pipelines/` modules
+is proposed (not yet executed) in `docs/old_pipeline_migration.md` — read that before assuming
+any of the above is safe to delete.
+
+`rastervec/pipelines/legacy.py` is unrelated to the current/core split above — it's the one
+live file in `pipelines/` that isn't part of the old pipeline chain, and it's what
+`pipeline: "legacy"` actually calls (see the `legacy` engine paragraph above).
 
 The `Evaluation/` package holds a benchmarking suite (`Conversion/` — native text → vector-text
 PDF; `Labelling/` — manual + automatic ground-truth labelling; `Evaluate/` — accuracy metrics
@@ -66,6 +97,7 @@ its own copy of the classical pipeline instead).
 .venv/Scripts/python.exe scripts/label/raster_label.py PDF [--out ...]              # manual embedded-image line/curve/text labelling (GUI)
 .venv/Scripts/python.exe scripts/label/view_native_labels.py PDF --page N [--out ...]  # view native_label output in the vector_label editor
 .venv/Scripts/python.exe scripts/label/label_viewer.py PDF_OR_LABEL_FOLDER          # read-only viewer over a master_label.py folder's three label sets
+.venv/Scripts/python.exe scripts/label/CAD_font_label.py PDF --page N               # CAD-font character + baseline labelling (GUI), standalone from master_label.py
 ```
 
 venv is **Python 3.10** (`.venv/pyvenv.cfg` → 3.10.11):
@@ -88,21 +120,30 @@ OCR is PaddleOCR-only — `TesseractOcrBackend` was removed (along with `pytesse
 `scripts/setup_tesseract.*` install scripts) since a single backend was simpler to maintain and
 Tesseract wasn't in active use.
 
-**Package layout note:** every folder under `rastervec/` is a PEP 420 namespace package
-(no `__init__.py`) except `renderer/`, `Reader/Parallel/`, `pipelines/` and
-`pipelines/sub_pipelines/`, which keep a docstring-only `__init__.py`. `tests/` keeps its full
-`__init__.py` tree (pytest `importmode=prepend` + shared basenames).
+**Package layout note:** most folders under `rastervec/` now carry a docstring-only
+`__init__.py` (`rastervec/`, `pipelines/`, `core/` + `core/parallel/`, `commons/` +
+`commons/models/`/`commons/renderer/`, `P1_Reading_Native/`, `P2_Raster_To_Vec/` + each of its
+backend subfolders, `P3_Vector_Parsing/` + each of its backend subfolders,
+`P4_Output_Organization/`) rather than being a bare PEP 420 namespace package — this list has
+grown over time and isn't policed, so don't treat it as exhaustive or rely on any one folder's
+current state; `rastervec/Evaluation/` is a notable holdout with no `__init__.py` anywhere in
+it. `tests/` keeps its full `__init__.py` tree (pytest `importmode=prepend` + shared basenames).
 
-**Pipelines:** the pipeline is defined in `rastervec/pipelines/` as flat, readable block
-sequences (`native = extract_native_text(page)` etc.) — see the `pipelines/` bullet below.
-`pipeline.py` (the old `PipelineContext` + `STAGES` + `_run_stages` machinery) is gone; the
-new rule is **new capability = one more named call in a `pipelines/` file**. Deskew + line/word
+**Pipelines (the old, deprecated-but-live implementation):** this paragraph describes
+`rastervec/pipelines/current.py` — the older of the two pipeline systems described in the
+top-of-file "not dead" note above, **not** `core/pipeline.py` (the current orchestrator new
+code should use). It's defined as flat, readable block sequences (`native =
+extract_native_text(page)` etc.) — see the `pipelines/` bullet below. `pipeline.py` (the old
+`PipelineContext` + `STAGES` + `_run_stages` machinery) is gone; this system's own rule was
+**new capability = one more named call in a `pipelines/` file**. Deskew + line/word
 segmentation before OCR is a Radon transform (`skimage.transform.radon`) in `OCR/radon.py`
 (an OCR-preprocessing concern, not a pipeline-orchestration `sub_pipelines/*.py` module),
-replacing the old `OCR/Paddle_OCR/ink_segment.py`. There is one OCR backend now
+replacing the old `OCR/Paddle_OCR/ink_segment.py`. There is one OCR backend in this old system
 (`PaddleRecBackend`, recognition-only over Radon-segmented word crops — paddleocr 2.x's
 `PaddleOCR(...).text_recognizer` batch call, PP-OCRv4); the old light/heavy split and
-`PaddleOcrBackend` full-detection path are gone.
+`PaddleOcrBackend` full-detection path are gone. Each P3 backend under `P3_Vector_Parsing/` now
+has its own independent, duplicated copy of the FAST/Radon/OCR machinery this paragraph
+describes (see that section) — this paragraph is about the original, shared `OCR/` copy only.
 
 ## `rastervec/Evaluation/inspector/` architecture
 
@@ -111,7 +152,10 @@ images, annotations, vector drawings, as toggleable overlays) — predates `rast
 extraction pipeline and shares no imports with it; it was built as step 0, to visually validate
 what PyMuPDF extracts before writing real extraction logic elsewhere in `rastervec`. It now lives
 inside `rastervec/` (under `Evaluation/`, alongside the not-yet-built benchmarking suite) since it
-remains a useful dev-facing inspection tool, but its own five modules are otherwise unchanged:
+remains a useful dev-facing inspection tool, but its own five top-level modules' *responsibilities*
+are otherwise unchanged, even though several are now internally split into smaller sibling files
+(each re-exported through the original module's own path, so nothing importing e.g. `layers.X`
+or `pdf_model.X` needs to change):
 
 - **`layers.py`** — the extensibility core. `OverlayItem` is the normalized shape every extractor
   returns (bbox always in PDF page coordinates; `quad`/`points` optionally for non-axis-aligned
@@ -122,12 +166,22 @@ remains a useful dev-facing inspection tool, but its own five modules are otherw
   filtering function all layers use (AND across sub-filter groups, OR within a group, empty
   selection = no restriction). Adding a new layer means adding one `LayerSpec` + one extractor
   function — nothing in `inspector.py`, `overlay_canvas.py`, or `control_panel.py` needs to change.
+  `OverlayItem`/`LayerSpec`/`SubFilterSpec` themselves live in `layer_types.py`, and the seqno-rainbow
+  color utilities in `layer_colors.py`; `layers.py` keeps `filter_items`/`summarize_selection`/
+  `build_layers`.
 - **`pdf_model.py`** — the only module that calls into `fitz` for extraction. `PdfDocument` wraps
   the open document; `extract_text_items`/`extract_image_items`/`extract_annot_items`/
   `extract_drawing_items` each return `list[OverlayItem]` for one page; `collect_drawing_colors`
-  scans a page's `get_drawings()` once to populate the dynamic stroke/fill color sub-filters.
+  scans a page's `get_drawings()` once to populate the dynamic stroke/fill color sub-filters. Split
+  into `pdf_model_core.py` (`PdfDocument` + shared geometry/matrix/color helpers),
+  `pdf_model_text.py` (`extract_text_items`), `pdf_model_image.py` (`extract_image_items`),
+  `pdf_model_drawing.py` (`extract_annot_items`/`extract_drawing_items`/`collect_drawing_colors`) —
+  one file per independent fitz-extraction concern.
 - **`overlay_canvas.py`** — `PageView`: the left-pane Tk `Canvas` showing the rendered page pixmap
-  with overlay shapes drawn on top, plus page nav/zoom controls and a hover tooltip.
+  with overlay shapes drawn on top, plus page nav/zoom controls and a hover tooltip. The tooltip
+  widget itself lives in `overlay_tooltip.py`, and the pure hover-metadata text formatting in
+  `overlay_metadata_format.py`; `overlay_canvas.py` keeps `PageView`'s nav/draw/selection state,
+  which are genuinely one cohesive widget.
 - **`control_panel.py`** — `ControlPanel`: the right-pane checkbox tree built from the `LAYERS`
   registry, with collapsible sub-filter groups (checkboxes or color swatches).
 - **`inspector.py`** (the package's entry point, `python -m rastervec.Evaluation.inspector.inspector
@@ -135,6 +189,10 @@ remains a useful dev-facing inspection tool, but its own five modules are otherw
   panels together, owns `AppState` (current page/zoom, per-page extraction and color caches), and
   drives the redraw cycle. `REFERENCES_DIR` resolves to the repo-root `references/` folder (three
   levels above the `inspector/` package: `inspector` → `Evaluation` → `rastervec` → repo root).
+  CLI arg-parsing/PDF-path-resolution (`parse_args`/`pick_initial_pdf`/`pick_pdf_with_dialog`/
+  `resolve_pdf_path`/`main`) lives in `inspector_cli.py`, imported by `inspector.py`'s own
+  `if __name__ == "__main__":` block only (avoids a module-load cycle, since `inspector_cli.py`
+  itself imports `InspectorApp`/`REFERENCES_DIR` back from `inspector.py`).
 
 ### Coordinate spaces — read this before touching geometry, anywhere in `rastervec/`
 
@@ -373,11 +431,15 @@ generic parallel-pool mechanics), never phase-specific business logic.
   module) — this phase exists to catch a future regression like that one at the seam instead of
   letting it silently reach final output.
 - **`rastervec/OCR/`** (top-level: `fast_detect.py`, `radon.py`, `Paddle_OCR/ocr_backend.py` +
-  `render_ocr.py`) — **dead code**, superseded by each P3 backend's own duplicated copy
-  (`P3_Vector_Parsing/VectorClassification/{fast_detect,radon,paddle_engine,ocr}.py` and
-  `P3_Vector_Parsing/FastIntoPaddle/{fast_detect,radon,paddle_engine,steps}.py` — see the
-  `P3_Vector_Parsing/` bullet above for what each backend actually does now). Not deleted yet;
-  don't build on it.
+  `render_ocr.py`) — **deprecated, but not dead**: each P3 backend under `P3_Vector_Parsing/`
+  now has its own duplicated copy (`P3_Vector_Parsing/VectorClassification/{fast_detect,radon,
+  paddle_engine,ocr}.py` and `P3_Vector_Parsing/FastIntoPaddle/{fast_detect,radon,paddle_engine,
+  steps}.py` — see the `P3_Vector_Parsing/` bullet above for what each backend actually does
+  now), so no *new* P3 backend should import this folder. But it's still genuinely imported by
+  `core/parallel/pool.py::warmup()`, `commons/renderer/stages.py`, the Junction P2 backend, and
+  the old `pipelines/current.py`+`_steps.py` — see the top-of-file "not dead" note and
+  `docs/old_pipeline_migration.md` for the full live-dependent list and the proposed cleanup.
+  Don't build *new* code on it, but don't delete it either without finishing that migration.
 - **`Evaluation/conversion.py`** *(implemented)*: three functions, each re-expressing a
   page's content as vector paths (`get_drawings()`) for a Vector_Classification known-answer test —
   **none ever rewrites pre-existing vector-path geometry** (an earlier version SVG-round-tripped the
@@ -498,6 +560,21 @@ generic parallel-pool mechanics), never phase-specific business logic.
     for `source="auto"` vs solid for hand-traced), Raster text (bbox, dashed for a
     `"vecsync:"`-prefixed `label_id` vs solid for genuine manual entries). No editing, no save —
     page nav + zoom + hover tooltips only.
+  - **`scripts/label/CAD_font_label.py`** (`CadFontLabelApp`) — CAD-font character + baseline
+    labelling, step 1 of `docs/cad_font_vector_recognition.md`; a separate, standalone workflow
+    from the `master_label.py` chain above. Two independent Tk modes: **Baseline** (drag out a
+    new baseline — a line with a direction, `Baseline(origin, direction)` — or click an existing
+    one to make it active; a side panel lists every `cad_font` label on the page, checked iff
+    assigned to the active baseline via `LabelEntry.baseline_id`); **Label** (identical flow to
+    `vector_label.py` — flat vector pool, click/ctrl-click/drag-select, inline text+rotation
+    label bar, click-a-labelled-vector edits in place — entries get `source="cad_font"`, never
+    reads/writes `baseline_id`). Per this feature's "commons-only" import constraint,
+    `extract_vectors` comes from `P1_Reading_Native.vector_extract` (not the deprecated
+    `pipelines._steps`, which `vector_label.py` still uses), and there is no layer/color/width
+    bucket-filter side panel since its backing `separate_by_layer_color_width` lives in the
+    equally off-limits `pipelines.current` — `self.vectors` is always the full, unfiltered pool.
+    Not unit-testable (a real Tk event loop); smoke-test manually via
+    `.venv/Scripts/python.exe scripts/label/CAD_font_label.py path/to.pdf --page 0`.
 - **`Evaluation/Evaluate/metrics.py` — `evaluate_metrics`** *(implemented, the current scorer)*: an
   **independent** metric suite — each metric is a separate reduction over one shared many-to-many
   `OverlapGraph` between ground-truth `GtRegion`s and `Prediction`s (per (gt, pred) edge: intersection
@@ -523,6 +600,26 @@ generic parallel-pool mechanics), never phase-specific business logic.
   data-only helpers (no rendering) returning `(bbox, rgb[, dashes])` for the benchmark's `boxes.pdf`
   pred-vs-GT overlay. **`docs/EVAL_METRICS.md`** documents every metric's formula, both normalisation
   rules (text + aggregation), and the ~36-metric catalogue not yet built.
+
+  **Note:** this bullet's own function/type names (`evaluate_metrics`, `MetricSuiteResult`,
+  `METRIC_GROUPS`, the `gt_miss_attributed_to_*` fields) have drifted from the current source,
+  which exposes `evaluate_text_metrics`/`TextMetricSuiteResult` over 5 `TEXT_TYPES` instead —
+  treat this whole bullet as describing the metric suite's *design*, not its exact current API,
+  and read the source directly for real signatures. What's still accurate: `metrics.py` is split
+  by concern across `metrics_core.py` (`OverlapGraph`/`Ratio`/`GtRegion`/`Prediction`/
+  `build_overlap_graph(s)`), `metrics_text_overlap.py` (categories 1-3: label description, char/word
+  overlap), `metrics_distributions.py` (font-size distribution, category 4 bbox accuracy, category 5
+  rotation accuracy), and `metrics_suite.py` (category 6 funnel stats, the box-overlay data, and the
+  top-level `evaluate_text_metrics`/`aggregate_text_metrics` orchestration) — `metrics.py` itself is
+  now a re-export surface, since many callers import specific names straight from its path.
+- **`Evaluation/Evaluate/vector_metrics.py`** *(implemented)*: the vector-provenance counterpart to
+  `metrics.py`'s text metrics — vector pairing, vector count accuracy, endpoint accuracy, and
+  per-property accuracy, scored over `GeometryEntry` (a `dataclass` unifying GT
+  `GeometryAnnotation`s and pipeline `Vector` predictions into one comparable shape, with
+  `VECTOR_TYPES = ("vector_to_raster", "original_raster")`). Pure — no pipeline/`label_schema`
+  import; `adapters.py` builds `GeometryEntry` lists from real `Vector`/`GeometryAnnotation`
+  objects via `geometry_entries_from_vector`/`geometry_entries_from_annotations` (duck-typed, not
+  imported here).
 - **`Evaluation/Evaluate/adapters.py`** *(implemented)*: the only `Evaluation/Evaluate/` module that
   imports `rastervec.pipeline`. `gt_regions_from_labelset` / `predictions_from_cluster_ocr` /
   `text_candidate_boxes` (union bbox per `ctx.regrouped_clusters` cluster, blank OCR included; falls
@@ -783,10 +880,14 @@ generic parallel-pool mechanics), never phase-specific business logic.
   `render_reconstructed_page` and `pdf.render_reconstructed_pdf(...) -> bytes` (the PDF-bytes
   variant, for a selectable-text comparison file — used by the benchmark notebook) share one
   private `_build_reconstructed_doc`.
-- **`rastervec/pipelines/`** — mostly **dead code** now, superseded by `core/pipeline.py` +
-  `P3_Vector_Parsing/*/parse.py` (see the `core/` and `P3_Vector_Parsing/` bullets above):
-  `current.py`, `_steps.py`, `_common.py`, `sub_pipelines/` are unused by anything live. The one
-  live exception is **`pipelines/legacy.py`** — `run_pipeline(pdf_path, page_index, *,
+- **`rastervec/pipelines/`** — superseded in *intent* by `core/pipeline.py` +
+  `P3_Vector_Parsing/*/parse.py` (see the `core/` and `P3_Vector_Parsing/` bullets above), but
+  **not dead in practice**: `_common.py` and `sub_pipelines/` no longer exist, but `current.py`,
+  `_steps.py`, and `result.py` are still actively imported by several tools — see the
+  top-of-file "not dead" note for the full list and `docs/old_pipeline_migration.md` for the
+  proposed retirement plan. New code should use `core.pipeline.run_pipeline` instead.
+  `pipelines/legacy.py` is a separate, unrelated live file in this folder —
+  `run_pipeline(pdf_path, page_index, *,
   enable_raster_pass=False, verbose=False) -> PipelineResult` (the old, pre-split
   `pipelines/result.py::PipelineResult` shape — `page`, `texts`, `vectors=[]` always, since
   archive's own `TextDTO` has no geometry back-reference — plus that dataclass's many
@@ -855,6 +956,22 @@ generic parallel-pool mechanics), never phase-specific business logic.
   in panel order — so a layer from folder A and a layer from folder B show together;
   zoom/pan/page-flip. `pipeline_report_benchmark.py` emits ready-to-paste invocations in
   `viewer_commands.txt`.
+
+  Both scripts are split by concern across several sibling files (each with a thin
+  re-export back through the main script's own path, so `from scripts.generate_pipeline_report
+  import X` / `from scripts.pipeline_report_benchmark import X` keep working regardless of which
+  file `X` actually lives in): `generate_pipeline_report.py` keeps only orchestration
+  (`_process_pdf`/`_process_pdf_benchmark`/`build_arg_parser`/`main`) plus its own
+  `_bench_ground_truth_by_type`/`_filter_valid_pages`/`_bench_doc_name`/`_image_dirs`;
+  `scripts/report_config.py` holds its `ReportConfig`/`BenchInput` schema; `scripts/
+  debug_image_savers.py` holds the seven per-P3-backend pre-OCR debug-image dumpers;
+  `scripts/report_artifacts.py` holds the artifact-writing machinery (`_LayerWriter`/
+  `_accumulate_page`/`_active_artifacts`/`_finalize_doc_dir`/`_write_label_overlays`/...).
+  `pipeline_report_benchmark.py` keeps only its `main`/`build_arg_parser` orchestration;
+  `scripts/benchmark_run_loading.py` holds `RunEntry`/`_load_run`/`_merge_gt`/`_score_text`/
+  `_score_vectors`; `scripts/benchmark_examples.py` holds the illustrated-error-example
+  collection (`_collect_examples`/`_crop_to_png`); `scripts/benchmark_report_sections.py` holds
+  the HTML section builders (`_add_text_sections`/`_add_vector_sections`).
 
 `scripts/rasterize_pdf.py` (outside `rastervec/`, a one-off utility not a pipeline stage): flattens
 every page of a PDF to an image and rebuilds a pure-raster PDF from those images — not currently
