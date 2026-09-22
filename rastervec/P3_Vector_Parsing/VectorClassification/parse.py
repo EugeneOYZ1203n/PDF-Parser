@@ -1,14 +1,16 @@
-"""VectorClassification's Phase3Backend entrypoint -- the 12-step
-Vector_Classification chain + FAST filtering, then a merge-across-buckets +
-seqno-clustering + full PaddleOCR detect/recognize pass, matching
+"""VectorClassification's Phase3Backend entrypoint -- the reduced 2-step
+Vector_Classification chain (seqno-overlap merge + spatial clustering) +
+FAST filtering, then full PaddleOCR detect/recognize directly over each
+FAST-surviving cluster (no re-clustering step in between -- a cluster
+already *is* a `list[Vector]`, matching
 archive/raster_parser/scripts/type2_dump_extraction_pipeline.py::
-run_ocr_extraction's pattern (own `wordgrouping.py::cluster_by_seqno` +
-`paddle_engine.py::PaddleDetectBackend`/`PaddleRecBackend`, the same
-detect-then-recognize pair `P3_Vector_Parsing/LegacyRecreation/parse.py`
-already ports independently). Fully self-contained (own fast_detect.py/
-paddle_engine.py/layer_color_separation.py/wordgrouping.py/config.py) --
-imports nothing from P3_Vector_Parsing/FastIntoPaddle,
-P3_Vector_Parsing/LegacyRecreation, or P2_Raster_To_Vec.
+run_ocr_extraction's `paddle_engine.py::PaddleDetectBackend`/
+`PaddleRecBackend` detect-then-recognize pair, the same pair
+`P3_Vector_Parsing/LegacyRecreation/parse.py` already ports independently).
+Fully self-contained (own fast_detect.py/paddle_engine.py/
+layer_color_separation.py/config.py) -- imports nothing from
+P3_Vector_Parsing/FastIntoPaddle, P3_Vector_Parsing/LegacyRecreation, or
+P2_Raster_To_Vec.
 """
 from __future__ import annotations
 
@@ -22,7 +24,6 @@ from rastervec.P3_Vector_Parsing.VectorClassification.config import (
     MAX_RENDER_DPI,
     MIN_RENDER_SIDE_PX,
     OCR_DPI,
-    RECOGNITION_PAD_FRACTION,
     RENDER_PADDING_EXTRA_PT,
 )
 from rastervec.P3_Vector_Parsing.VectorClassification.fast_filter import detect_text_fast
@@ -34,13 +35,8 @@ from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import (
     _quad_rotation_deg,
     _rotate_crop,
 )
-from rastervec.P3_Vector_Parsing.VectorClassification.wordgrouping import (
-    cluster_by_seqno,
-    convert_vectors_to_glyphs,
-    get_vectors,
-)
 
-STEP_NAMES = ["classify", "fast", "group_words", "ocr", "drawing"]
+STEP_NAMES = ["classify", "fast", "ocr", "drawing"]
 
 DebugLayer = "tuple[str, str, str, bytes]"
 OnDebugLayer = "Callable[[str, str, str, bytes], None]"
@@ -60,22 +56,22 @@ def parse(
     debug_out: "dict | None" = None, on_debug_layer: "OnDebugLayer | None" = None,
 ) -> tuple[list[Vector], list[Text]]:
     """Combines Phase 1's raw native vectors and Phase 2's raster-derived
-    vectors into one flat pool, then: classify (12-step chain, per
+    vectors into one flat pool, then: classify (reduced 2-step chain, per
     `(layer,color)` bucket) -> FAST filter (still per classification
-    cluster) -> merge every FAST-surviving cluster's vectors across every
-    bucket into one flat pool -> cluster by content-stream draw order
-    (`cluster_by_seqno`) -> per seqno-cluster, render + PaddleOCR's full
-    detect+recognize pass -> merge every dropped Vector as drawing content.
+    cluster) -> per FAST-surviving cluster (a plain `list[Vector]`, no
+    re-clustering step in between), render + PaddleOCR's full
+    detect+recognize pass -> merge every dropped Vector as drawing content
+    (classify's own drops, always empty now that neither remaining step
+    drops anything, plus FAST's drops).
 
     Two independent, optional debug outlets (see `FastIntoPaddle/parse.py`
     for the shared convention): `debug_out` stashes every stage's own
     intermediate object verbatim for `render_debug` to render as a
     post-hoc batch later; `on_debug_layer` renders and emits each stage's
-    layers immediately, right after that stage runs. The 12-step
-    classification chain itself (`classify_vectors`) is one atomic call
-    either way -- its own per-step kept/dropped breakdown is rendered as
-    soon as it returns, still well before the later (heavier) fast/ocr
-    stages run."""
+    layers immediately, right after that stage runs. The classification
+    chain itself (`classify_vectors`) is one atomic call either way -- its
+    own per-step kept/dropped breakdown is rendered as soon as it returns,
+    still well before the later (heavier) fast/ocr stages run."""
     all_vectors = list(vectors_p1) + list(vectors_p2)
     page_meta = page.meta
 
@@ -94,21 +90,16 @@ def parse(
         flat_clusters, page, enable_fast=enable_fast, verbose=verbose,
         compute=compute, progress_counter=progress_counter,
     )
-    _emit(_render_fast_layers(page_meta, fast.passed, fast.dropped_vectors))
-
-    merged_vectors = [v for cluster in fast.passed for v in cluster]
-    page_rotation = int(page_meta.rotation or 0)
-    glyphs = convert_vectors_to_glyphs(merged_vectors)
-    word_groups = cluster_by_seqno(glyphs, page_rotation)
-    _emit(_render_group_words_layers(page_meta, word_groups))
+    _emit(_render_fast_layers(
+        page_meta, fast.passed, fast.dropped_vectors, fast.page_result.page_mask,
+    ))
 
     rec_backend = PaddleRecBackend()
     det_backend = PaddleDetectBackend()
     texts: list[Text] = []
     ocr_crops: list[tuple[np.ndarray, str]] = []
     cluster_detections: list[tuple[np.ndarray, list]] = []
-    for wg in word_groups:
-        group_vectors = get_vectors(wg)
+    for group_vectors in fast.passed:
         if not group_vectors:
             continue
         padding = _cluster_render_padding(group_vectors)
@@ -120,7 +111,6 @@ def parse(
             continue
 
         bgr = _normalize_bgr(np.asarray(image))
-        bgr, (pad_x_px, pad_y_px) = ocr_prep.pad_image_uniform(bgr, RECOGNITION_PAD_FRACTION)
         quads = det_backend.detect(bgr)
         cluster_detections.append((bgr, quads))
         if not quads:
@@ -136,8 +126,7 @@ def parse(
         for quad, crop, box in zip(quads, crops, boxes):
             if not box.text:
                 continue
-            unpadded_quad = (quad - np.array([pad_x_px, pad_y_px])).tolist()
-            bbox = pixel_to_page_bbox(group_vectors, dpi_used, unpadded_quad, padding)
+            bbox = pixel_to_page_bbox(group_vectors, dpi_used, quad.tolist(), padding)
             rotate_deg = _normalize_rotation(_quad_rotation_deg(quad) + box.flip_deg)
             direction = transform_direction((1.0, 0.0), rotate_deg)
             ocr_crops.append((crop, box.text))
@@ -147,7 +136,7 @@ def parse(
                 font="", font_size=0.0, color=None, flags=0,
                 ascender=None, descender=None, wmode=0,
                 block_no=0, line_no=0, word_no=0,
-                page_index=page_meta.index, seqno=group_vectors[0].seqno,
+                page_index=page_meta.index, seqno=min(v.seqno for v in group_vectors),
                 confidence=box.confidence, source="ocr", orientation_source="ocr",
             ))
     _emit(_render_ocr_layers(page_meta, texts))
@@ -160,7 +149,6 @@ def parse(
         debug_out["fast_passed"] = fast.passed
         debug_out["fast_dropped"] = fast.dropped_vectors
         debug_out["fast_result"] = fast.page_result
-        debug_out["word_groups"] = word_groups
         debug_out["texts"] = texts
         debug_out["ocr_crops"] = ocr_crops
         debug_out["cluster_detections"] = cluster_detections
@@ -182,13 +170,9 @@ _C_KEPT = "#059669"
 _C_DROPPED = "#dc2626"
 _C_FAST_PASS = "#059669"
 _C_FAST_DROP = "#dc2626"
-_C_GROUP = "#7c3aed"
+_C_FAST_HEATMAP = "#f97316"
 _C_OCR = "#16a34a"
 _C_DRAWING = "#111827"
-
-# Pass-through annotation steps that never drop anything -- not worth a
-# debug layer of their own.
-_SKIP_STEP_LABELS = {"Vector signatures", "Group stats"}
 
 
 def _hex_rgb(h: str) -> tuple[float, float, float]:
@@ -204,10 +188,10 @@ def _slug(label: str) -> str:
 
 
 def _flatten_entries(entries: list) -> list[Vector]:
-    """A step category's `groups` is `list[list[Vector]]` (steps 1-5) or
-    `list[list[list[Vector]]]` (steps 6-12, tiered clusters) -- flatten
-    either down to a plain `list[Vector]` (same pattern as
-    `classify_vectors._collect_dropped`)."""
+    """A step category's `groups` is `list[list[Vector]]` ("Seq overlap
+    merge") or `list[list[list[Vector]]]` ("Spatial cluster", tiered
+    clusters) -- flatten either down to a plain `list[Vector]` (same
+    pattern as `classify_vectors._collect_dropped`)."""
     out: list[Vector] = []
     for entry in entries:
         if entry and isinstance(entry[0], list):
@@ -240,8 +224,6 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
     n_steps = len(steps_per_bucket[0])
     for i in range(n_steps):
         label = steps_per_bucket[0][i].label
-        if label in _SKIP_STEP_LABELS:
-            continue
         kept_groups: list = []
         dropped_groups: list = []
         for steps in steps_per_bucket:
@@ -270,13 +252,47 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
     return out
 
 
-def _render_fast_layers(page_meta, fast_passed, fast_dropped) -> "list[DebugLayer]":
+def _render_fast_heatmap_pdf(page_meta, mask: "np.ndarray") -> bytes:
+    """Full-page raster of FAST's stitched text-probability mask (the same
+    array `fast_filter.FastPageResult.page_mask` samples per-cluster) as a
+    white(0)->red(1) heat ramp, embedded as one full-page image -- lets a
+    viewer see exactly what FAST scored across the page, not just which
+    clusters passed/failed. Mirrors the `insert_image` pattern
+    `commons/renderer/stages.py::_compose` already uses to embed a raster
+    onto a page-sized PDF."""
+    import io
+
+    import pymupdf as fitz
+    from PIL import Image
+
+    clipped = np.clip(mask, 0.0, 1.0)
+    rgb = np.empty((*clipped.shape, 3), dtype=np.uint8)
+    rgb[..., 0] = 255
+    rgb[..., 1] = ((1.0 - clipped) * 255).astype(np.uint8)
+    rgb[..., 2] = rgb[..., 1]
+    buf = io.BytesIO()
+    Image.fromarray(rgb, mode="RGB").save(buf, format="PNG")
+
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=page_meta.width, height=page_meta.height)
+        page.set_rotation(page_meta.rotation)
+        page.insert_image(
+            fitz.Rect(0, 0, page_meta.width, page_meta.height),
+            stream=buf.getvalue(), keep_proportion=False,
+        )
+        return doc.tobytes()
+    finally:
+        doc.close()
+
+
+def _render_fast_layers(page_meta, fast_passed, fast_dropped, page_mask=None) -> "list[DebugLayer]":
     from rastervec.commons.helpers.geometry import union_bbox
     from rastervec.commons.renderer import render_boxes_pdf
 
     passed_boxes = [union_bbox([v.bbox for v in c]) for c in (fast_passed or []) if c]
     dropped_boxes = [v.bbox for v in (fast_dropped or [])]
-    return [
+    layers: "list[DebugLayer]" = [
         ("fast", "passed", _C_FAST_PASS, render_boxes_pdf(
             page_meta, [(b, _hex_rgb(_C_FAST_PASS)) for b in passed_boxes],
         )),
@@ -284,15 +300,10 @@ def _render_fast_layers(page_meta, fast_passed, fast_dropped) -> "list[DebugLaye
             page_meta, [(b, _hex_rgb(_C_FAST_DROP)) for b in dropped_boxes],
         )),
     ]
-
-
-def _render_group_words_layers(page_meta, word_groups) -> "list[DebugLayer]":
-    from rastervec.commons.renderer import render_boxes_pdf
-
-    group_boxes = [wg.bbox for wg in (word_groups or [])]
-    return [("group_words", "word group bbox", _C_GROUP, render_boxes_pdf(
-        page_meta, [(b, _hex_rgb(_C_GROUP)) for b in group_boxes],
-    ))]
+    if page_mask is not None:
+        layers.append(("fast", "heatmap", _C_FAST_HEATMAP,
+                        _render_fast_heatmap_pdf(page_meta, page_mask)))
+    return layers
 
 
 def _render_ocr_layers(page_meta, texts) -> "list[DebugLayer]":
@@ -319,10 +330,13 @@ def render_debug(debug_out: "dict | None", page_meta) -> "list[DebugLayer]":
     `on_debug_layer` callback."""
     if not debug_out:
         return []
+    fast_result = debug_out.get("fast_result")
     out: "list[DebugLayer]" = []
     out += _render_classification_layers(page_meta, debug_out.get("classification"))
-    out += _render_fast_layers(page_meta, debug_out.get("fast_passed"), debug_out.get("fast_dropped"))
-    out += _render_group_words_layers(page_meta, debug_out.get("word_groups"))
+    out += _render_fast_layers(
+        page_meta, debug_out.get("fast_passed"), debug_out.get("fast_dropped"),
+        fast_result.page_mask if fast_result is not None else None,
+    )
     out += _render_ocr_layers(page_meta, debug_out.get("texts"))
     out += _render_drawing_layers(page_meta, debug_out.get("drawing"))
     return out

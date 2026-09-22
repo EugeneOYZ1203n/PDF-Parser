@@ -1,27 +1,21 @@
-"""Vector Classification: a single fixed, non-configurable 12-step
-pipeline that classifies extracted Vectors into text candidates vs.
-drawing content, run in order by `cluster()`. Each step
-is implemented as a plain function in this package's items/groups/
-clusters submodules (see each submodule's own docstring for its steps'
-descriptions):
+"""Vector Classification: a reduced, non-configurable 2-step pipeline that
+groups extracted Vectors into text-candidate clusters, run in order by
+`_classify_bucket()` (see `classify_vectors.py`). Only two steps remain
+of the original 12-step chain -- everything else was removed as part of
+an experiment to isolate the effect of seqno-overlap merge + spatial
+clustering alone:
 
-  items/item_filters.py    -- steps 1-2 (filter_large_items, compute_vector_signatures)
-  groups/group_filters.py  -- steps 3-5, 8 (seq dedupe/merge, tiny/large groups, group stats)
-  clusters/cluster_filters.py -- steps 6-7, 9-12 (spatial cluster, mixed fill-rule,
-                                 perimeter/density/constant-spacing/low-variety)
+  group_filters.py    -- seqno-overlap merge (`combine_overlapping_seq`)
+  cluster_filters.py  -- constrained spatial clustering (`cluster_spatial_groups`)
 
 See docs/Glossary.md for standardized group/cluster/global-group/similarity-group
 terminology.
 
 A `Vector` is never decomposed into standalone items anywhere in this chain
--- items stay nested inside their parent Vector and are only inspected
-internally by filters that need item-level granularity (perimeter/density/
-constant-spacing). Step 6's spatial merge produces real nested structure
-(`list[list[Vector]]` per cluster, one entry per member group) instead of a
-flattened cluster plus a side `id()`-keyed lineage dict -- every cluster-level
-filter step from here on keeps that tiering, partitioning/appending the same
-cluster object so `id(cluster)` stays a stable key for `group_stats` across
-steps.
+-- items stay nested inside their parent Vector. The spatial-clustering
+step produces real nested structure (`list[list[Vector]]` per cluster, one
+entry per member group) instead of a flattened cluster plus a side
+`id()`-keyed lineage dict.
 
 Whole-page similarity grouping of text-candidate clusters (formerly
 `group_similar_clusters`, run right after this chain) has moved downstream
@@ -34,12 +28,11 @@ editing them there, not at runtime. Each step's result is wrapped into a
 `StepResult` holding one or more named `CategoryResult`s -- exactly one
 per step has `role="kept"` and feeds the next step; every other category
 is a side-channel for the debug UI (a `role="dropped"` category is folded
-into the final `vectors` output, same as every other drop). Every Vector
-that survives the whole chain (the last step's `"kept"` category) is a
-text candidate handed downstream (Radon segmentation, similarity grouping,
-FAST, OCR) -- there's no separate drawing-vs-text heuristic; everything
-any filter step drops along the way is drawing content, and OCR success/
-failure itself is the signal for whether a given cluster was actually text.
+into the final `vectors` output, same as every other drop). Neither
+remaining step ever drops anything, so every input Vector reaches the
+last step's `"kept"` category and is handed downstream (FAST, OCR) as a
+text candidate -- FAST and OCR success/failure are now the only signal
+for whether a given cluster was actually text.
 """
 from __future__ import annotations
 
@@ -76,16 +69,10 @@ class CategoryResult:
 class StepResult:
     """One pipeline step's full result: a display label plus every named
     category it produced (`"kept"` always present, plus any number of
-    side categories for the debug UI). `signature_counts`, if set (only on
-    step 2's result), is the per-`VectorSignature` occurrence count built
-    by `compute_vector_signatures`. `group_stats`, if set, is the
-    per-cluster `GroupStats` built by `compute_group_stats`, keyed by
-    `id(cluster)`."""
+    side categories for the debug UI)."""
 
     label: str
     categories: dict[str, CategoryResult]
-    signature_counts: dict[itf.VectorSignature, int] | None = None
-    group_stats: dict[int, grf.GroupStats] | None = None
 
 
 def cluster(vectors: list[Vector], page: Page) -> list[StepResult]:

@@ -4,11 +4,13 @@ nothing dropped silently, nothing duplicated. Checked by `id()` identity
 (not `==`) since `Vector` is a plain dataclass and two distinct instances
 could compare equal.
 
-Every filter-step-level unit test that used to live here targeted the
-deleted `VectorPath`/`id()`-keyed-lineage internals; the fixed 12-step
-chain itself is exercised end-to-end here instead, and each individual
-filter function has its own direct unit tests in `cluster_filters.py`/
-`group_filters.py`/`item_filters.py`'s own test modules.
+The classification chain itself is now reduced to two steps (seqno-overlap
+merge + spatial clustering, see `classify_vectors.py`) and never drops
+anything on its own -- the scenarios below (an oversized vector, a
+duplicate-run of tick marks, a perimeter-only ring) all now simply survive
+into `text_clusters` instead of being dropped at the step their comment
+names, but the conservation property itself is step-agnostic and holds
+regardless of which vectors end up on which side.
 """
 from __future__ import annotations
 
@@ -64,15 +66,17 @@ def test_conserves_a_single_small_vector(vector):
     _assert_conserved([lone], _Page())
 
 
-def test_conserves_an_oversized_vector_dropped_at_step_1(vector):
-    # max dimension 40 = 20% of the 200x200 page's smaller side -- exceeds
-    # MAX_DIMENSION_FRACTION (10%), dropped at the very first filter step.
+def test_conserves_an_oversized_vector(vector):
+    # No size-based filter remains in the reduced chain, so this survives
+    # into text_clusters now -- conservation still holds either way.
     oversized = vector(kind="l", bbox=(0, 0, 40, 40), color=(0, 0, 0))
     small = vector(kind="l", bbox=(150, 150, 152, 152), color=(0, 0, 0), seqno=50)
     _assert_conserved([oversized, small], _Page())
 
 
-def test_conserves_a_duplicate_run_dropped_at_seq_dedupe(vector):
+def test_conserves_a_duplicate_run(vector):
+    # remove_duplicate_runs no longer runs in the reduced chain, so this
+    # survives into text_clusters now -- conservation still holds either way.
     duplicates = [
         vector(kind="re", bbox=(i * 20, 0, i * 20 + 3, 6), fill=(0, 0, 0), seqno=i)
         for i in range(5)

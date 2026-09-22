@@ -1,11 +1,11 @@
 """Vector Classification sub-pipeline: turn raw vectors into text
 candidates + drawing content.
 
-Read `_classify_bucket` to see the fixed 12-step chain as one named call
-per step. `classify_vectors` wraps it with the per-`(layer, color)`-bucket
-loop and the drop collection. Whole-page similarity grouping no longer
-happens here -- it runs later, on post-Radon `Segment`s (see
-`OCR/radon.py` / `pipelines/_steps.py`).
+Read `_classify_bucket` to see the reduced 2-step chain (seqno-overlap
+merge + spatial clustering) as one named call per step. `classify_vectors`
+wraps it with the per-`(layer, color)`-bucket loop and the drop collection.
+Whole-page similarity grouping no longer happens here -- it runs later, on
+post-Radon `Segment`s (see `OCR/radon.py` / `pipelines/_steps.py`).
 
 New capability = one more named call + `steps.append` in `_classify_bucket`,
 or one more line in `classify_vectors`. No registry, no dispatch table.
@@ -15,23 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from rastervec.P3_Vector_Parsing.VectorClassification.config import (
-    DENSITY_DEFAULT_GRID_SIZE,
-    DENSITY_MAX_CELL_PX,
-    DENSITY_MAX_EMPTY_FRACTION,
-    DENSITY_MIN_CELL_PX,
-    DUPLICATE_RUN_MIN_LENGTH,
-    LOW_VARIETY_MAX_MEMBER_COUNT,
-    LOW_VARIETY_MAX_REQUIRED,
-    LOW_VARIETY_MIN_MEMBER_COUNT,
-    LOW_VARIETY_MIN_REQUIRED,
-    MAX_DIMENSION_FRACTION,
-    MIN_GROUP_SIZE_PX,
-    PATTERN_FRACTION_THRESHOLD,
-    PATTERN_MIN_REPEAT_COUNT,
-    PATTERN_SPACING_TOLERANCE,
-    PERIMETER_MARGIN_FRACTION,
     SEQ_OVERLAP_TOLERANCE_PX,
-    SIGNATURE_ROUND_PX,
     SPATIAL_CLUSTER_THRESHOLD,
     SPATIAL_SIZE_TOLERANCE,
 )
@@ -39,7 +23,6 @@ from rastervec.commons.models import Page, Vector
 from rastervec.P3_Vector_Parsing.VectorClassification.layer_color_separation import separate_by_color, separate_by_layer
 from rastervec.P3_Vector_Parsing.VectorClassification import cluster_filters as clf
 from rastervec.P3_Vector_Parsing.VectorClassification import group_filters as grf
-from rastervec.P3_Vector_Parsing.VectorClassification import item_filters as itf
 from rastervec.P3_Vector_Parsing.VectorClassification.classification import CategoryResult, StepResult
 
 
@@ -69,45 +52,19 @@ class ClassificationResult:
 
 
 def _classify_bucket(vectors: list[Vector], page: Page) -> list[StepResult]:
-    """The fixed classification chain for one (layer, color) bucket -- one
-    named step-module call per step, each wrapped into a `StepResult`. The
-    previous step's `"kept"` category feeds the next. Steps 1-5 operate on
-    `list[list[Vector]]` groups; step 6 onward operate on tiered
-    `list[list[list[Vector]]]` clusters."""
+    """The reduced classification chain for one (layer, color) bucket: only
+    the seqno-overlap merge and the constrained spatial clustering step
+    remain (every other filter from the original 12-step chain has been
+    removed -- see git history for the full chain if it's ever needed
+    again). Neither remaining step drops anything, so `drawing_vectors`
+    downstream is populated entirely by the later FAST stage, not this
+    one."""
     groups: list[list[Vector]] = [[v] for v in vectors]
     steps: list[StepResult] = []
 
-    groups, dropped = itf.filter_large_items(groups, page, MAX_DIMENSION_FRACTION)
-    steps.append(StepResult("Large items", {
-        "kept": CategoryResult(groups, "kept"),
-        "dropped_oversized": CategoryResult(dropped, "dropped"),
-    }))
-
-    groups, signature_counts = itf.compute_vector_signatures(groups, SIGNATURE_ROUND_PX)
-    steps.append(StepResult(
-        "Vector signatures", {"kept": CategoryResult(groups, "kept")},
-        signature_counts=signature_counts,
-    ))
-
-    groups, duplicate_runs = grf.remove_duplicate_runs(
-        groups, SIGNATURE_ROUND_PX, DUPLICATE_RUN_MIN_LENGTH
-    )
     groups, _ = grf.combine_overlapping_seq(groups, SEQ_OVERLAP_TOLERANCE_PX)
-    steps.append(StepResult("Seq dedupe + overlap merge", {
+    steps.append(StepResult("Seq overlap merge", {
         "kept": CategoryResult(groups, "kept"),
-        "duplicate_runs": CategoryResult(duplicate_runs, "dropped"),
-    }))
-
-    groups, dropped = grf.filter_tiny_groups(groups, MIN_GROUP_SIZE_PX)
-    steps.append(StepResult("Tiny groups", {
-        "kept": CategoryResult(groups, "kept"),
-        "dropped_tiny": CategoryResult(dropped, "dropped"),
-    }))
-
-    groups, dropped = grf.filter_large_groups(groups, page, MAX_DIMENSION_FRACTION)
-    steps.append(StepResult("Large groups", {
-        "kept": CategoryResult(groups, "kept"),
-        "dropped_oversized": CategoryResult(dropped, "dropped"),
     }))
 
     clusters, debug_unconstrained, debug_no_parallel = clf.cluster_spatial_groups(
@@ -117,54 +74,6 @@ def _classify_bucket(vectors: list[Vector], page: Page) -> list[StepResult]:
         "kept": CategoryResult(clusters, "kept"),
         "debug_unconstrained": CategoryResult(debug_unconstrained, "info"),
         "debug_no_parallel": CategoryResult(debug_no_parallel, "info"),
-    }))
-
-    clusters, dropped = clf.filter_mixed_fill_rule_clusters(clusters)
-    steps.append(StepResult("Mixed fill-rule clusters", {
-        "kept": CategoryResult(clusters, "kept"),
-        "dropped_mixed_fill_rule": CategoryResult(dropped, "dropped"),
-    }))
-
-    clusters, group_stats = grf.compute_group_stats(clusters, SIGNATURE_ROUND_PX)
-    steps.append(StepResult(
-        "Group stats", {"kept": CategoryResult(clusters, "kept")},
-        group_stats=group_stats,
-    ))
-
-    clusters, dropped = clf.filter_perimeter_only_clusters(
-        clusters, group_stats, PERIMETER_MARGIN_FRACTION
-    )
-    steps.append(StepResult("Perimeter-only clusters", {
-        "kept": CategoryResult(clusters, "kept"),
-        "dropped_perimeter": CategoryResult(dropped, "dropped"),
-    }))
-
-    clusters, dropped = clf.filter_density_clusters(
-        clusters, group_stats, DENSITY_DEFAULT_GRID_SIZE, DENSITY_MIN_CELL_PX,
-        DENSITY_MAX_CELL_PX, DENSITY_MAX_EMPTY_FRACTION,
-    )
-    steps.append(StepResult("Density clusters", {
-        "kept": CategoryResult(clusters, "kept"),
-        "dropped_low_density": CategoryResult(dropped, "dropped"),
-    }))
-
-    clusters, dropped = clf.filter_constant_spacing_clusters(
-        clusters, SIGNATURE_ROUND_PX, PATTERN_SPACING_TOLERANCE,
-        PATTERN_MIN_REPEAT_COUNT, PATTERN_FRACTION_THRESHOLD,
-    )
-    steps.append(StepResult("Constant-spacing clusters", {
-        "kept": CategoryResult(clusters, "kept"),
-        "dropped_constant_spacing": CategoryResult(dropped, "dropped"),
-    }))
-
-    clusters, dropped = clf.filter_low_variety_clusters(
-        clusters, group_stats,
-        LOW_VARIETY_MIN_MEMBER_COUNT, LOW_VARIETY_MIN_REQUIRED,
-        LOW_VARIETY_MAX_MEMBER_COUNT, LOW_VARIETY_MAX_REQUIRED,
-    )
-    steps.append(StepResult("Low-variety clusters", {
-        "kept": CategoryResult(clusters, "kept"),
-        "dropped_low_variety": CategoryResult(dropped, "dropped"),
     }))
 
     return steps
