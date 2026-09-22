@@ -50,6 +50,7 @@ def test_parse_keeps_ocr_crop_for_blank_recognition(page_meta, vector, monkeypat
     assert texts == []  # a blank recognition never becomes a real Text
     assert len(debug_out["ocr_crops"]) == 1  # but its crop is still captured for debugging
     assert debug_out["ocr_crops"][0][1] == ""
+    assert len(debug_out["ocr_blank_boxes"]) == 1  # and its page-space bbox is recorded for debug rendering
 
 
 def test_parse_streaming_matches_batch_render_debug(page_meta):

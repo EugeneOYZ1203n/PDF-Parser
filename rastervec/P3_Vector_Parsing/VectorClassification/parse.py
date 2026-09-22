@@ -99,6 +99,7 @@ def parse(
     texts: list[Text] = []
     ocr_crops: list[tuple[np.ndarray, str]] = []
     cluster_detections: list[tuple[np.ndarray, list]] = []
+    blank_boxes: list[tuple] = []
     for group_vectors in fast.passed:
         if not group_vectors:
             continue
@@ -125,9 +126,10 @@ def parse(
 
         for quad, crop, box in zip(quads, crops, boxes):
             ocr_crops.append((crop, box.text))
-            if not box.text:
-                continue
             bbox = pixel_to_page_bbox(group_vectors, dpi_used, quad.tolist(), padding)
+            if not box.text:
+                blank_boxes.append(bbox)
+                continue
             rotate_deg = _normalize_rotation(_quad_rotation_deg(quad) + box.flip_deg)
             direction = transform_direction((1.0, 0.0), rotate_deg)
             texts.append(Text(
@@ -139,7 +141,7 @@ def parse(
                 page_index=page_meta.index, seqno=min(v.seqno for v in group_vectors),
                 confidence=box.confidence, source="ocr", orientation_source="ocr",
             ))
-    _emit(_render_ocr_layers(page_meta, texts))
+    _emit(_render_ocr_layers(page_meta, texts, blank_boxes))
 
     drawing = list(cls.drawing_vectors) + list(fast.dropped_vectors)
     _emit(_render_drawing_layers(page_meta, drawing))
@@ -152,6 +154,7 @@ def parse(
         debug_out["texts"] = texts
         debug_out["ocr_crops"] = ocr_crops
         debug_out["cluster_detections"] = cluster_detections
+        debug_out["ocr_blank_boxes"] = blank_boxes
         debug_out["drawing"] = drawing
 
     return drawing, texts
@@ -172,6 +175,7 @@ _C_FAST_PASS = "#059669"
 _C_FAST_DROP = "#dc2626"
 _C_FAST_HEATMAP = "#f97316"
 _C_OCR = "#16a34a"
+_C_OCR_BLANK = "#9333ea"
 _C_DRAWING = "#111827"
 
 
@@ -306,12 +310,17 @@ def _render_fast_layers(page_meta, fast_passed, fast_dropped, page_mask=None) ->
     return layers
 
 
-def _render_ocr_layers(page_meta, texts) -> "list[DebugLayer]":
-    from rastervec.commons.renderer import render_text_pdf
+def _render_ocr_layers(page_meta, texts, blank_boxes=None) -> "list[DebugLayer]":
+    from rastervec.commons.renderer import render_boxes_pdf, render_text_pdf
 
-    return [("ocr", "recognized text", _C_OCR, render_text_pdf(
-        page_meta, texts or [], color_of=lambda _t: _hex_rgb(_C_OCR),
-    ))]
+    return [
+        ("ocr", "recognized text", _C_OCR, render_text_pdf(
+            page_meta, texts or [], color_of=lambda _t: _hex_rgb(_C_OCR),
+        )),
+        ("ocr", f"blank text ({len(blank_boxes or [])})", _C_OCR_BLANK, render_boxes_pdf(
+            page_meta, [(b, _hex_rgb(_C_OCR_BLANK)) for b in (blank_boxes or [])],
+        )),
+    ]
 
 
 def _render_drawing_layers(page_meta, drawing) -> "list[DebugLayer]":
@@ -337,6 +346,6 @@ def render_debug(debug_out: "dict | None", page_meta) -> "list[DebugLayer]":
         page_meta, debug_out.get("fast_passed"), debug_out.get("fast_dropped"),
         fast_result.page_mask if fast_result is not None else None,
     )
-    out += _render_ocr_layers(page_meta, debug_out.get("texts"))
+    out += _render_ocr_layers(page_meta, debug_out.get("texts"), debug_out.get("ocr_blank_boxes"))
     out += _render_drawing_layers(page_meta, debug_out.get("drawing"))
     return out
