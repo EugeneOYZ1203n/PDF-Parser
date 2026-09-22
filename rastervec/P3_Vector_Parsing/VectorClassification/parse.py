@@ -124,12 +124,12 @@ def parse(
         boxes = rec_backend.recognize_crops(crops)
 
         for quad, crop, box in zip(quads, crops, boxes):
+            ocr_crops.append((crop, box.text))
             if not box.text:
                 continue
             bbox = pixel_to_page_bbox(group_vectors, dpi_used, quad.tolist(), padding)
             rotate_deg = _normalize_rotation(_quad_rotation_deg(quad) + box.flip_deg)
             direction = transform_direction((1.0, 0.0), rotate_deg)
-            ocr_crops.append((crop, box.text))
             texts.append(Text(
                 text=box.text, bbox=bbox, direction=direction,
                 origin=compute_origin(bbox, direction),
