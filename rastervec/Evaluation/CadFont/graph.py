@@ -20,10 +20,19 @@ class CharGraph:
     vectors, in baseline-relative frame (see
     `character_bank.to_baseline_relative_vectors`): `nodes[i]` is an
     `(x, y)` point, `edges` is a list of `(node_i, node_j)` index pairs
-    (`node_i < node_j`, deduped)."""
+    (`node_i < node_j`, deduped).
+
+    `original_vertex_indices` and `synthetic_anchor_indices` both default
+    to empty so every hand-built graph (e.g. in tests) that doesn't set
+    them keeps `select_anchor_points`'s original, unrestricted behavior --
+    only a graph produced by `build_char_graph` populates
+    `original_vertex_indices`, and only `select_anchor_points` itself ever
+    populates `synthetic_anchor_indices`."""
 
     nodes: list[Point]
     edges: list[tuple[int, int]]
+    original_vertex_indices: frozenset[int] = frozenset()
+    synthetic_anchor_indices: frozenset[int] = frozenset()
 
     def degrees(self) -> list[int]:
         """Degree of every node, index-aligned with `self.nodes` -- one
@@ -50,28 +59,47 @@ class CharGraph:
 
 def build_char_graph(
     segments: list[Segment],
-    original_vertices: set[Point],
+    vertex_groups: list[frozenset[Point]],
     *, point_merge_tol: float = 1e-3, area_tol: float,
 ) -> CharGraph:
     """Orchestrates `geometry.py`'s pipeline -- `split_at_intersections` ->
-    `merge_close_points` (coincidence dedup only) -> protected-node
+    `merge_close_points` (coincidence dedup, protecting each `"l"`/`"c"`
+    item's own 2 vertices from merging with each other) -> protected-node
     computation -> degree-aware area simplification -> `CharGraph(nodes,
     edges)`. The single entry point `character_bank.py` and the notebook
     both call.
 
     `segments` is already-flattened, adaptively-sampled geometry (see
-    `geometry.flatten_item_to_segments`); `original_vertices` is that same
-    flatten pass's set of true data-defined points (never synthetic
-    curve-interior samples) -- a node built from one of these is always
-    protected from simplification, alongside any node with graph degree > 2
-    (a real junction/crossing). `area_tol` has no default: callers must
-    derive it from their own scale (see `character_bank.build_character_bank`
-    for the per-character dynamic derivation this was designed for)."""
+    `geometry.flatten_item_to_segments`); `vertex_groups` is that same
+    flatten pass's per-item groups of true data-defined points (never
+    synthetic curve-interior samples) -- a node built from one of these is
+    always protected from simplification, alongside any node with graph
+    degree > 2 (a real junction/crossing), and the resulting `CharGraph`'s
+    `original_vertex_indices` records exactly which final nodes they are
+    (consumed by `select_anchor_points`). `area_tol` has no default:
+    callers must derive it from their own scale (see
+    `character_bank.build_character_bank` for the per-character dynamic
+    derivation this was designed for)."""
+    original_vertices: set[Point] = set()
+    for group in vertex_groups:
+        original_vertices.update(group)
+
     split = split_at_intersections(segments)
-    nodes, edges, point_to_node = merge_close_points(split, point_merge_tol=point_merge_tol)
+    nodes, edges, point_to_node = merge_close_points(
+        split, point_merge_tol=point_merge_tol, forbidden_groups=vertex_groups,
+    )
+    original_vertex_node_indices = {
+        point_to_node[p] for p in original_vertices if p in point_to_node
+    }
     protected = _compute_protected_nodes(edges, len(nodes), original_vertices, point_to_node)
-    simplified_nodes, simplified_edges = _simplify_graph(nodes, edges, protected, area_tol)
-    return CharGraph(nodes=simplified_nodes, edges=simplified_edges)
+    simplified_nodes, simplified_edges, final_original_vertex_indices = _simplify_graph(
+        nodes, edges, protected, area_tol, original_vertex_node_indices,
+    )
+    return CharGraph(
+        nodes=simplified_nodes,
+        edges=simplified_edges,
+        original_vertex_indices=final_original_vertex_indices,
+    )
 
 
 def _compute_protected_nodes(
@@ -186,11 +214,18 @@ def _simplify_chain(nodes: list[Point], chain: list[int], area_tol: float) -> li
 
 
 def _simplify_graph(
-    nodes: list[Point], edges: list[tuple[int, int]], protected: set[int], area_tol: float,
-) -> tuple[list[Point], list[tuple[int, int]]]:
+    nodes: list[Point],
+    edges: list[tuple[int, int]],
+    protected: set[int],
+    area_tol: float,
+    original_vertex_node_indices: set[int],
+) -> tuple[list[Point], list[tuple[int, int]], frozenset[int]]:
     """Runs `_simplify_chain` over every chain from `_find_chains`, then
     re-indexes the surviving node indices into a compact final node/edge
-    list."""
+    list. `original_vertex_node_indices` is remapped through that same
+    re-indexing and returned alongside -- every original vertex is
+    protected (see `_compute_protected_nodes`), so it always survives;
+    this only ever renumbers it."""
     chains = _find_chains(len(nodes), edges, protected)
 
     kept_old_indices: set[int] = set()
@@ -218,7 +253,10 @@ def _simplify_graph(
         seen.add(key)
         new_edges.append(key)
 
-    return new_nodes, new_edges
+    new_original_vertex_indices = frozenset(
+        old_to_new[i] for i in original_vertex_node_indices if i in old_to_new
+    )
+    return new_nodes, new_edges, new_original_vertex_indices
 
 
 def complexity(graph: CharGraph) -> float:
@@ -245,16 +283,102 @@ def _collinear(p: Point, q: Point, r: Point, tol: float = 1e-6) -> bool:
     return abs(cross) / scale <= tol
 
 
-def select_anchor_points(graph: CharGraph, max_anchors: int = 3) -> tuple[int, ...]:
-    """Greedy anchor selection: sort node indices by degree descending
-    (stable tie-break by original index). The first 2 picked nodes are
-    always anchors (any 2 points are trivially non-collinear); a 3rd
-    candidate is added only if it is NOT collinear with the 2
-    already-chosen anchors. Stops at `max_anchors` or when nodes are
-    exhausted -- 2 anchors when the graph has fewer than 3 non-collinear
-    nodes total (including a plain 2-node graph)."""
+def _signed_area2(a: Point, b: Point, c: Point) -> float:
+    """Twice the signed area of triangle `a, b, c` -- positive when the
+    ordered triple turns counter-clockwise. Same cross-product core as
+    `_triangle_area`, just without the `abs()`/halving, since only the
+    sign matters here."""
+    return (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])
+
+
+def _synthesize_baseline_anchor(anchor0: Point, anchor1: Point) -> Point | None:
+    """One deterministic point on the baseline (`y = 0`) to serve as a 3rd
+    anchor when only 2 real (eligible) anchors were found.
+
+    Candidates are every real on-baseline point whose distance to *at
+    least one* of `anchor0`/`anchor1` equals `dist(anchor0, anchor1)`
+    (solving `(x - ref_x)**2 + ref_y**2 = d**2` for each reference anchor,
+    up to 2 real roots per reference). Among all such candidates, the one
+    minimizing total distance to *both* anchors wins; a tie (rare, exact
+    equality) is broken deterministically by picking whichever candidate
+    makes the ordered triple `(anchor0, anchor1, candidate)` turn
+    counter-clockwise (positive signed area). Candidates that coincide with
+    `anchor0`/`anchor1` themselves are excluded first -- minimizing total
+    distance to both anchors would otherwise degenerate to picking a point
+    exactly on top of one of them whenever both anchors already lie on the
+    baseline (e.g. a straight horizontal stroke), since that trivially
+    achieves the smallest possible total distance. Returns `None` if
+    neither anchor admits any real, non-coincident solution at all (an
+    anchor's own distance from the baseline already exceeds `d`) --
+    callers should then just keep the 2 real anchors rather than force an
+    approximate point."""
+    d = math.hypot(anchor1[0] - anchor0[0], anchor1[1] - anchor0[1])
+
+    def _is_anchor(p: Point) -> bool:
+        return math.hypot(p[0] - anchor0[0], p[1] - anchor0[1]) < 1e-9 or (
+            math.hypot(p[0] - anchor1[0], p[1] - anchor1[1]) < 1e-9
+        )
+
+    candidates: set[Point] = set()
+    for ref in (anchor0, anchor1):
+        rx, ry = ref
+        under_sqrt = d * d - ry * ry
+        if under_sqrt < 0:
+            continue
+        s = math.sqrt(under_sqrt)
+        for p in ((rx + s, 0.0), (rx - s, 0.0)):
+            if not _is_anchor(p):
+                candidates.add(p)
+    if not candidates:
+        return None
+
+    def total_dist(p: Point) -> float:
+        return (
+            math.hypot(p[0] - anchor0[0], p[1] - anchor0[1])
+            + math.hypot(p[0] - anchor1[0], p[1] - anchor1[1])
+        )
+
+    best = min(total_dist(p) for p in candidates)
+    tied = [p for p in candidates if abs(total_dist(p) - best) < 1e-9]
+    if len(tied) == 1:
+        return tied[0]
+    ccw = [p for p in tied if _signed_area2(anchor0, anchor1, p) > 0]
+    return ccw[0] if ccw else sorted(tied)[0]
+
+
+def select_anchor_points(graph: CharGraph, max_anchors: int = 3) -> tuple[CharGraph, tuple[int, ...]]:
+    """Greedy anchor selection: sort *eligible* node indices by degree
+    descending (stable tie-break by original index). The first 2 picked
+    nodes are always anchors (any 2 points are trivially non-collinear); a
+    3rd candidate is added only if it is NOT collinear with the 2
+    already-chosen anchors. Stops at `max_anchors` or when eligible nodes
+    are exhausted.
+
+    Eligible = `graph.original_vertex_indices | {degree > 2 nodes}` -- a
+    real original vertex or a genuine junction/crossing, never a synthetic
+    curve-interior point that merely survived simplification. When
+    `graph.original_vertex_indices` is empty (a hand-built graph with no
+    such info, e.g. in tests), every node is eligible -- today's original,
+    unrestricted behavior.
+
+    In restricted mode (`graph.original_vertex_indices` non-empty), when
+    exactly 2 eligible anchors are found and a 3rd is wanted, one synthetic
+    point is added via `_synthesize_baseline_anchor` and returned as part
+    of a new `CharGraph` (same nodes/edges plus the new point, flagged in
+    `synthetic_anchor_indices`) -- callers must use the returned graph,
+    not their original one, since the 3rd anchor index may not exist in
+    it. Fewer than 2 eligible anchors is out of scope for synthesis
+    (returns however many are found). In unrestricted mode, no synthesis
+    ever happens and the input graph is returned unchanged -- an exact
+    match for this function's pre-restriction behavior."""
+    if graph.original_vertex_indices:
+        eligible = set(graph.original_vertex_indices)
+        eligible.update(i for i, d in enumerate(graph.degrees()) if d > 2)
+    else:
+        eligible = set(range(len(graph.nodes)))
+
     degrees = graph.degrees()
-    order = sorted(range(len(graph.nodes)), key=lambda i: (-degrees[i], i))
+    order = sorted(eligible, key=lambda i: (-degrees[i], i))
 
     anchors: list[int] = []
     for idx in order:
@@ -264,4 +388,17 @@ def select_anchor_points(graph: CharGraph, max_anchors: int = 3) -> tuple[int, .
             anchors.append(idx)
         if len(anchors) >= max_anchors:
             break
-    return tuple(anchors)
+
+    if graph.original_vertex_indices and len(anchors) == 2 and max_anchors > 2:
+        new_point = _synthesize_baseline_anchor(graph.nodes[anchors[0]], graph.nodes[anchors[1]])
+        if new_point is not None:
+            new_idx = len(graph.nodes)
+            graph = CharGraph(
+                nodes=[*graph.nodes, new_point],
+                edges=list(graph.edges),
+                original_vertex_indices=graph.original_vertex_indices,
+                synthetic_anchor_indices=graph.synthetic_anchor_indices | {new_idx},
+            )
+            anchors.append(new_idx)
+
+    return graph, tuple(anchors)

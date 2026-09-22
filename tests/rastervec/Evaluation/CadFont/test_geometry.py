@@ -144,3 +144,36 @@ def test_merge_close_points_default_tolerance_is_small():
     segs = [((0.0, 0.0), (5.0, 5.0)), ((5.1, 5.05), (10.0, 0.0))]
     nodes, edges, _ = merge_close_points(segs)
     assert len(nodes) == 4
+
+
+def test_merge_close_points_forbidden_2_member_group_never_merges():
+    # Two points that are both original vertices of the same "l"/"c" item
+    # (a 2-member group) must never collapse into one node, even when
+    # within point_merge_tol -- without forbidden_groups, they would.
+    p0, p1 = (0.0, 0.0), (0.001, 0.0)
+    segs = [(p0, p1)]
+
+    nodes_unprotected, _, _ = merge_close_points(segs, point_merge_tol=0.01)
+    assert len(nodes_unprotected) == 1  # would merge without protection
+
+    nodes_protected, edges_protected, point_to_node = merge_close_points(
+        segs, point_merge_tol=0.01, forbidden_groups=[frozenset({p0, p1})],
+    )
+    assert len(nodes_protected) == 2
+    assert len(edges_protected) == 1
+    assert point_to_node[p0] != point_to_node[p1]
+
+
+def test_merge_close_points_forbidden_group_ignores_4_member_groups():
+    # A "re"/"qu"-style 4-member group gets no such protection -- its
+    # corners still merge normally when close enough, even with
+    # forbidden_groups passed.
+    p0, p1 = (0.0, 0.0), (0.001, 0.0)
+    p2, p3 = (0.0, 5.0), (5.0, 5.0)
+    segs = [(p0, p1), (p1, p2), (p2, p3), (p3, p0)]
+
+    nodes, edges, point_to_node = merge_close_points(
+        segs, point_merge_tol=0.01, forbidden_groups=[frozenset({p0, p1, p2, p3})],
+    )
+    assert point_to_node[p0] == point_to_node[p1]
+    assert len(nodes) == 3

@@ -91,28 +91,37 @@ def flatten_item_to_segments(
     return [], set()
 
 
-def vector_to_segments(v, curve_spacing: float = 1.0) -> tuple[list[Segment], set[Point]]:
+def vector_to_segments(v, curve_spacing: float = 1.0) -> tuple[list[Segment], list[frozenset[Point]]]:
     """Every item of one `Vector`, flattened and concatenated in item
-    order; original vertices unioned across every item."""
+    order, alongside `vertex_groups`: one `frozenset[Point]` per item
+    holding *that item's own* original vertices -- kept as separate,
+    per-item groups (rather than flattened into one set) so a caller can
+    tell "these 2 (or 4) points came from the same item" from "these came
+    from different items", which `merge_close_points`'s `forbidden_groups`
+    and `graph.build_char_graph`'s protected-node computation both need."""
     segments: list[Segment] = []
-    vertices: set[Point] = set()
+    vertex_groups: list[frozenset[Point]] = []
     for item in v.items:
         segs, verts = flatten_item_to_segments(item, curve_spacing=curve_spacing)
         segments.extend(segs)
-        vertices.update(verts)
-    return segments, vertices
+        if verts:
+            vertex_groups.append(frozenset(verts))
+    return segments, vertex_groups
 
 
-def vectors_to_segments(vectors, curve_spacing: float = 1.0) -> tuple[list[Segment], set[Point]]:
+def vectors_to_segments(
+    vectors, curve_spacing: float = 1.0,
+) -> tuple[list[Segment], list[frozenset[Point]]]:
     """`vector_to_segments` over every vector, concatenated in order;
-    original vertices unioned across every vector."""
+    `vertex_groups` extended (not unioned) across every vector, so
+    per-item grouping survives across vectors too."""
     out: list[Segment] = []
-    vertices: set[Point] = set()
+    vertex_groups: list[frozenset[Point]] = []
     for v in vectors:
-        segs, verts = vector_to_segments(v, curve_spacing=curve_spacing)
+        segs, groups = vector_to_segments(v, curve_spacing=curve_spacing)
         out.extend(segs)
-        vertices.update(verts)
-    return out, vertices
+        vertex_groups.extend(groups)
+    return out, vertex_groups
 
 
 def _segment_intersection(a: Segment, b: Segment, tol: float = 0.5) -> Point | None:
@@ -193,7 +202,9 @@ def split_at_intersections(segments: list[Segment], *, point_tol: float = 0.5) -
 
 
 def merge_close_points(
-    segments: list[Segment], *, point_merge_tol: float = 1e-3,
+    segments: list[Segment],
+    *, point_merge_tol: float = 1e-3,
+    forbidden_groups: list[frozenset[Point]] | None = None,
 ) -> tuple[list[Point], list[tuple[int, int]], dict[Point, int]]:
     """Reduces every segment endpoint to a canonical node index, merging
     coincident points (within `point_merge_tol`) into one node.
@@ -202,6 +213,18 @@ def merge_close_points(
     step -- the default tolerance is small on purpose. (Visual point
     reduction is `graph.py`'s degree-aware simplification pass, which runs
     after this.)
+
+    `forbidden_groups`, when given, is `vectors_to_segments`'s per-item
+    vertex groups -- used only to protect the **2-member** groups (a
+    single `"l"`/`"c"` item's own 2 original vertices): two points that
+    are both members of the same 2-member group are never allowed to
+    merge directly, even within `point_merge_tol`, so a single non-closed
+    item's own endpoints can never collapse to fewer than 2 distinct
+    nodes. 4-member groups (`"re"`/`"qu"` corners) get no such protection
+    and may still merge normally. This is single-linkage clustering, so a
+    third, unrelated nearby point could in principle still transitively
+    bridge two forbidden points into one cluster -- a known, accepted,
+    low-probability edge case, not solved here.
 
     Reuses `commons.helpers.clustering.cluster_spatial` over every segment
     endpoint, each treated as a zero-size bbox, rather than writing a
@@ -216,10 +239,27 @@ def merge_close_points(
     if not all_points:
         return [], [], {}
 
+    extra_close = None
+    if forbidden_groups:
+        point_group_ids: dict[Point, list[int]] = {}
+        for gid, group in enumerate(forbidden_groups):
+            if len(group) != 2:
+                continue
+            for p in group:
+                point_group_ids.setdefault(p, []).append(gid)
+        if point_group_ids:
+            def extra_close(p: Point, q: Point) -> bool:
+                gids_p = point_group_ids.get(p)
+                gids_q = point_group_ids.get(q)
+                if not gids_p or not gids_q:
+                    return True
+                return not (set(gids_p) & set(gids_q))
+
     clusters = cluster_spatial(
         all_points,
         get_bbox=lambda p: (p[0], p[1], p[0], p[1]),
         threshold=point_merge_tol,
+        extra_close=extra_close,
     )
 
     nodes: list[Point] = []

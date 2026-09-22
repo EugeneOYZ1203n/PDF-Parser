@@ -137,17 +137,19 @@ def build_character_bank(
         scale = _character_scale(transformed)
         curve_spacing = scale * curve_spacing_fraction
         area_tol = (scale ** 2) * area_tol_fraction
-        segments, original_vertices = vectors_to_segments(transformed, curve_spacing=curve_spacing)
+        segments, vertex_groups = vectors_to_segments(transformed, curve_spacing=curve_spacing)
         graph = build_char_graph(
-            segments, original_vertices, point_merge_tol=point_merge_tol, area_tol=area_tol,
+            segments, vertex_groups, point_merge_tol=point_merge_tol, area_tol=area_tol,
         )
+        char_complexity = complexity(graph)  # before any anchor-synthesis augmentation
+        graph, anchor_indices = select_anchor_points(graph)
         templates.append(CharacterTemplate(
             label_id=entry.label_id,
             text=entry.text,
             baseline_id=entry.baseline_id,
             graph=graph,
-            complexity=complexity(graph),
-            anchor_node_indices=select_anchor_points(graph),
+            complexity=char_complexity,
+            anchor_node_indices=anchor_indices,
         ))
 
     templates.sort(key=lambda t: t.complexity, reverse=True)
