@@ -53,6 +53,35 @@ def test_parse_keeps_ocr_crop_for_blank_recognition(page_meta, vector, monkeypat
     assert len(debug_out["ocr_blank_boxes"]) == 1  # and its page-space bbox is recorded for debug rendering
 
 
+def test_parse_ocr_crop_reflects_post_flip_rotation(page_meta, vector, monkeypatch):
+    """`ocr_crops` must store the crop PaddleOCR actually recognised from --
+    when the angle classifier decides a crop is upside-down (`flip_deg=180`),
+    recognition itself runs on the rotated pixels, so the stashed debug crop
+    should be rotated the same way, not the raw pre-flip crop."""
+    v = vector(kind="l", bbox=(10.0, 10.0, 20.0, 20.0), color=(0.0, 0.0, 0.0), seqno=1)
+
+    quad = np.array([[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]])
+    monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: [quad])
+
+    raw_crop = np.zeros((4, 4, 3), dtype=np.uint8)
+    raw_crop[0, 0] = [255, 0, 0]  # marker pixel in one corner, to detect rotation
+    monkeypatch.setattr(vectorclassification, "_rotate_crop", lambda bgr, quad: raw_crop)
+    monkeypatch.setattr(
+        PaddleRecBackend, "recognize_crops",
+        lambda self, crops: [OcrBox(text="X", confidence=1.0, flip_deg=180) for _ in crops],
+    )
+
+    debug_out: dict = {}
+    vectorclassification.parse(
+        [v], [], _page(page_meta), enable_fast=False, debug_out=debug_out,
+    )
+
+    stored_crop = debug_out["ocr_crops"][0][0]
+    pre_flip_crop = raw_crop[:, :, ::-1]  # parse.py's own BGR->RGB reversal
+    assert np.array_equal(stored_crop, np.rot90(pre_flip_crop, 2))
+    assert not np.array_equal(stored_crop, pre_flip_crop)  # sanity: rotation actually happened
+
+
 def test_parse_streaming_matches_batch_render_debug(page_meta):
     page = _page(page_meta)
 

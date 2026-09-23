@@ -125,7 +125,12 @@ def parse(
         boxes = rec_backend.recognize_crops(crops)
 
         for quad, crop, box in zip(quads, crops, boxes):
-            ocr_crops.append((crop, box.text))
+            # box.flip_deg is the 0/180 decision recognize_crops' own angle
+            # classifier made for this crop -- recognition actually ran on
+            # the rotated (upright) pixels, not `crop` as-is, so mirror that
+            # same rotation here for the stashed debug image too.
+            recog_crop = np.rot90(crop, 2) if box.flip_deg else crop
+            ocr_crops.append((recog_crop, box.text))
             bbox = pixel_to_page_bbox(group_vectors, dpi_used, quad.tolist(), padding)
             if not box.text:
                 blank_boxes.append(bbox)
