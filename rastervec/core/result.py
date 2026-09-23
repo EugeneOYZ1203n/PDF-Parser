@@ -40,6 +40,11 @@ class PipelineResult:
     # backend-specific, see that backend's own module for what it puts here.
     extra: dict = field(default_factory=dict)
     step_outputs: dict | None = None
+    # The P3 backend's own named sub-step wall-clock seconds (only for a
+    # backend that accepts `step_durations`; `{}` otherwise). Kept separate
+    # from `step_durations` (phase-level only) so summing that stays a
+    # correct per-page total.
+    substep_durations: dict = field(default_factory=dict)
 
     @contextmanager
     def open_page(self) -> "Iterator[Page]":

@@ -1,9 +1,12 @@
-"""Builds the Text/Vector sections of `pipeline_report_benchmark.py`'s HTML
-report from a `{run_name: aggregate_result}` mapping."""
+"""Builds the Text/Vector/Timing sections of `pipeline_report_benchmark.py`'s
+HTML report from a `{run_name: aggregate_result}` mapping."""
 from __future__ import annotations
 
 import math
 
+from pathlib import Path
+
+from rastervec.Evaluation.Evaluate import timing
 from rastervec.Evaluation.Evaluate.benchmark import _fmt_ratio
 from rastervec.Evaluation.Evaluate.html_report import ReportBuilder
 from rastervec.Evaluation.Evaluate.metrics import TEXT_TYPES, TextMetricSuiteResult
@@ -260,3 +263,59 @@ def _add_vector_sections(builder: ReportBuilder, agg_by_run: "dict[str, VectorMe
 
     p_headers, p_rows = _fmt_property_rows(agg_by_run)
     builder.add_vector_subsection("Property accuracy", p_headers, p_rows)
+
+
+def _timing_label(row: str) -> str:
+    if row.startswith(timing.SUBSTEP_PARENT + "."):
+        return f"{timing.SUBSTEP_PARENT} › {row.split('.', 1)[1]}"
+    return row
+
+
+def _add_timing_sections(
+    builder: ReportBuilder, timings_by_run: "dict[str, dict[str, dict]]",
+    chart_paths: "dict[str, Path] | None" = None,
+) -> None:
+    """One table per run kind (`timing.RUN_KINDS`) that any run recorded:
+    a row per timing step (phases, phase3 sub-steps, `total`), a column per
+    run -- median / mean / min / max seconds per page plus the summed
+    seconds over every page -- and a median delta column vs the first run
+    for every later run. `timings_by_run` = `{run: {kind: timing.
+    summarize_timings(...)}}`; `chart_paths` = `{kind: report-relative
+    chart PNG}`."""
+    builder.add_group_header("Timing")
+    runs = list(timings_by_run)
+    any_table = False
+    for kind in timing.RUN_KINDS:
+        summaries = {run: timing_by_kind.get(kind, {}) for run, timing_by_kind in timings_by_run.items()}
+        if not any(summaries.values()):
+            continue
+        any_table = True
+        rows_order = timing.row_order([s for s in summaries.values()])
+        headers = ["step"] + runs + [f"Δ median vs {runs[0]}: {r}" for r in runs[1:]]
+        rows = []
+        for key in rows_order:
+            row = [_timing_label(key)]
+            for run in runs:
+                st = summaries[run].get(key)
+                row.append("" if not st else (
+                    f"median {timing.fmt_seconds(st['median'])} | mean {timing.fmt_seconds(st['mean'])} | "
+                    f"min {timing.fmt_seconds(st['min'])} | max {timing.fmt_seconds(st['max'])} | "
+                    f"Σ {timing.fmt_seconds(st['sum'])} (n={st['n']})"
+                ))
+            base = summaries[runs[0]].get(key)
+            for run in runs[1:]:
+                st = summaries[run].get(key)
+                if not st or not base:
+                    row.append("")
+                else:
+                    delta = st["median"] - base["median"]
+                    pct = f" ({100 * delta / base['median']:+.0f}%)" if base["median"] else ""
+                    row.append(f"{delta:+.3f}s{pct}")
+            rows.append(row)
+        chart = (chart_paths or {}).get(kind)
+        builder.add_text_subsection(
+            f"Wall-clock per page -- {kind} run (debug rendering sits in phase3 › other)",
+            headers, rows, chart_paths=[chart] if chart else [],
+        )
+    if not any_table:
+        builder.add_raw_html('<p class="empty">(no timing recorded in these runs)</p>')

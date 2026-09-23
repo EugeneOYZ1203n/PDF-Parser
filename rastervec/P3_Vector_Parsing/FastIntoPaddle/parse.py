@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Callable
 
 from rastervec.commons.models import Page, Text, Vector
+from rastervec.commons.step_timing import StepClock
 from rastervec.P3_Vector_Parsing.FastIntoPaddle.config import FAST_PADDLE_SEQ_MERGE_TOLERANCE
 from rastervec.P3_Vector_Parsing.FastIntoPaddle.paddle_engine import recognize_segments
 from rastervec.P3_Vector_Parsing.FastIntoPaddle.steps import (
@@ -36,6 +37,7 @@ def parse(
     vectors_p1: list[Vector], vectors_p2: list[Vector], page: Page,
     *, enable_fast: bool = True, verbose: bool = False, compute=None, progress_counter=None,
     debug_out: "dict | None" = None, on_debug_layer: "OnDebugLayer | None" = None,
+    step_durations: "dict | None" = None,
 ) -> tuple[list[Vector], list[Text]]:
     """Combines Phase 1's raw native vectors and Phase 2's raster-derived
     vectors into one flat pool, then runs the FastIntoPaddle chain.
@@ -49,38 +51,50 @@ def parse(
       callback one at a time -- so a caller (e.g. the report generator)
       never has to hold this backend's heavier step-local data (crop
       images, PaddleOCR detection renders) any longer than that one step's
-      own rendering needs it."""
+      own rendering needs it.
+
+    `step_durations`, when given, receives each named step's wall-clock
+    seconds (`commons.step_timing.StepClock`; debug rendering excluded)."""
     vectors = list(vectors_p1) + list(vectors_p2)
     page_meta = page.meta
+    clock = StepClock(step_durations)
 
     def _emit(layers: "list[DebugLayer]") -> None:
         if on_debug_layer is not None:
             for layer in layers:
                 on_debug_layer(*layer)
 
-    groups = similarity_group(vectors)
+    with clock("similarity"):
+        groups = similarity_group(vectors)
     _emit(_render_similarity_layers(page_meta, groups))
 
-    fast = filter_vectors_fast(
-        vectors, page, enable_fast=enable_fast, verbose=verbose,
-        compute=compute, progress_counter=progress_counter,
-    )
+    with clock("fast"):
+        fast = filter_vectors_fast(
+            vectors, page, enable_fast=enable_fast, verbose=verbose,
+            compute=compute, progress_counter=progress_counter,
+        )
     _emit(_render_fast_layers(page_meta, fast))
 
-    reclass = reclassify_by_similarity(fast.passed, fast.dropped, groups)
+    with clock("reclassify"):
+        reclass = reclassify_by_similarity(fast.passed, fast.dropped, groups)
     _emit(_render_reclassify_layers(page_meta, reclass))
 
-    buckets = separate_by_layer_color_width(reclass.passed)
-    clusters = cluster_buckets(buckets, FAST_PADDLE_SEQ_MERGE_TOLERANCE)
+    with clock("separation"):
+        buckets = separate_by_layer_color_width(reclass.passed)
+    with clock("clusters"):
+        clusters = cluster_buckets(buckets, FAST_PADDLE_SEQ_MERGE_TOLERANCE)
     _emit(_render_clusters_layers(page_meta, clusters))
 
-    cluster_detections = detect_text_paddle_per_cluster(clusters)
+    with clock("paddle_detect"):
+        cluster_detections = detect_text_paddle_per_cluster(clusters)
     _emit(_render_paddle_detect_layers(page_meta, clusters, cluster_detections))
 
-    reassignment = reassign_by_overlap(clusters, cluster_detections)
+    with clock("assignment"):
+        reassignment = reassign_by_overlap(clusters, cluster_detections)
     _emit(_render_assignment_layers(page_meta, reassignment))
 
-    segments = rotate_paddle_detections(clusters, cluster_detections, reassignment.text)
+    with clock("rotate"):
+        segments = rotate_paddle_detections(clusters, cluster_detections, reassignment.text)
     _emit(_render_rotate_layers(page_meta, segments))
 
     recognize_fn = None
@@ -88,10 +102,12 @@ def parse(
         from rastervec.P3_Vector_Parsing.FastIntoPaddle.paddle_engine import _recognize_crops_job
 
         recognize_fn = lambda crops: compute.apply(_recognize_crops_job, (crops,))  # noqa: E731
-    texts = recognize_segments(segments, recognize_fn=recognize_fn)
+    with clock("ocr"):
+        texts = recognize_segments(segments, recognize_fn=recognize_fn)
     _emit(_render_ocr_layers(page_meta, texts))
 
-    drawing = build_drawing_output(reassignment.drawing, reclass.dropped)
+    with clock("drawing"):
+        drawing = build_drawing_output(reassignment.drawing, reclass.dropped)
     _emit(_render_drawing_layers(page_meta, drawing))
 
     if debug_out is not None:

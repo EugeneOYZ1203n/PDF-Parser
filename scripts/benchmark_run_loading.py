@@ -1,6 +1,7 @@
 """Loading a `generate_pipeline_report.py --benchmark` run folder
-(`RunEntry`/`_merge_gt`/`_load_run`) and scoring one shared input's text
-(`_score_text`) / vector (`_score_vectors`) metrics against it."""
+(`RunEntry`/`_merge_gt`/`_load_run`), scoring one shared input's text
+(`_score_text`) / vector (`_score_vectors`) metrics against it, and reading
+its recorded per-page wall-clock timings (`_load_timings`)."""
 from __future__ import annotations
 
 import json
@@ -8,7 +9,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from rastervec.Evaluation import dump_io
-from rastervec.Evaluation.Evaluate import adapters, vector_metrics
+from rastervec.Evaluation.Evaluate import adapters, timing, vector_metrics
 from rastervec.Evaluation.Evaluate.metrics import (
     TEXT_TYPES,
     MetricConfig,
@@ -151,3 +152,22 @@ def _score_vectors(
         )
         per_page.append((pi, res))
     return per_page, aggregate_vector_metrics([r for _pi, r in per_page])
+
+
+def _load_timings(entry: RunEntry) -> "dict[str, list[dict]]":
+    """`{run_kind: [flattened per-page timing row]}` from this entry's
+    `dump.json` (`timing.flatten_page_timing`) -- `vectorised` for the main
+    run, `rasterised` for the separate rasterised-PDF run. A page that
+    recorded nothing for a kind (no rasterised run, or a pre-timing dump)
+    contributes no row."""
+    dump = dump_io.load_dump(entry.dump_path)
+    out: "dict[str, list[dict]]" = {kind: [] for kind in timing.RUN_KINDS}
+    for page in dump.pages:
+        for kind, steps, subs in (
+            ("vectorised", page.step_durations, page.substep_durations),
+            ("rasterised", page.raster_step_durations, page.raster_substep_durations),
+        ):
+            row = timing.flatten_page_timing(steps, subs)
+            if row:
+                out[kind].append(row)
+    return out

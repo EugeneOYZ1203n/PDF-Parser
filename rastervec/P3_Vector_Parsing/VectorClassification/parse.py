@@ -19,6 +19,7 @@ import numpy as np
 from rastervec.commons.helpers.geometry import compute_origin, transform_direction
 from rastervec.commons.models import Page, Vector, Text
 from rastervec.commons.renderer import ocr_prep, pixel_to_page_bbox
+from rastervec.commons.step_timing import StepClock
 from rastervec.P3_Vector_Parsing.VectorClassification.classify_vectors import classify_vectors
 from rastervec.P3_Vector_Parsing.VectorClassification.config import (
     MAX_RENDER_DPI,
@@ -54,6 +55,7 @@ def parse(
     vectors_p1: list[Vector], vectors_p2: list[Vector], page: Page,
     *, enable_fast: bool = True, verbose: bool = False, compute=None, progress_counter=None,
     debug_out: "dict | None" = None, on_debug_layer: "OnDebugLayer | None" = None,
+    step_durations: "dict | None" = None,
 ) -> tuple[list[Vector], list[Text]]:
     """Combines Phase 1's raw native vectors and Phase 2's raster-derived
     vectors into one flat pool, then: classify (reduced 2-step chain, per
@@ -71,25 +73,34 @@ def parse(
     layers immediately, right after that stage runs. The classification
     chain itself (`classify_vectors`) is one atomic call either way -- its
     own per-step kept/dropped breakdown is rendered as soon as it returns,
-    still well before the later (heavier) fast/ocr stages run."""
+    still well before the later (heavier) fast/ocr stages run.
+
+    `step_durations`, when given, receives wall-clock seconds per step
+    (`commons.step_timing.StepClock`; debug rendering excluded) --
+    `classify`, `fast`, then the per-cluster OCR loop split into
+    `ocr_render`/`ocr_detect`/`ocr_recognize` (summed over clusters), and
+    `drawing`."""
     all_vectors = list(vectors_p1) + list(vectors_p2)
     page_meta = page.meta
+    clock = StepClock(step_durations)
 
     def _emit(layers: "list[DebugLayer]") -> None:
         if on_debug_layer is not None:
             for layer in layers:
                 on_debug_layer(*layer)
 
-    cls = classify_vectors(all_vectors, page, verbose=verbose)
+    with clock("classify"):
+        cls = classify_vectors(all_vectors, page, verbose=verbose)
     _emit(_render_classification_layers(page_meta, cls))
 
-    flat_clusters = [
-        [v for group in cluster for v in group] for cluster in cls.text_clusters
-    ]
-    fast = detect_text_fast(
-        flat_clusters, page, enable_fast=enable_fast, verbose=verbose,
-        compute=compute, progress_counter=progress_counter,
-    )
+    with clock("fast"):
+        flat_clusters = [
+            [v for group in cluster for v in group] for cluster in cls.text_clusters
+        ]
+        fast = detect_text_fast(
+            flat_clusters, page, enable_fast=enable_fast, verbose=verbose,
+            compute=compute, progress_counter=progress_counter,
+        )
     _emit(_render_fast_layers(
         page_meta, fast.passed, fast.dropped_vectors, fast.page_result.page_mask,
     ))
@@ -106,14 +117,17 @@ def parse(
             continue
         padding = _cluster_render_padding(group_vectors)
         try:
-            image, dpi_used = ocr_prep.render_cluster_with_dynamic_dpi(
-                group_vectors, OCR_DPI, MIN_RENDER_SIDE_PX, MAX_RENDER_DPI, padding,
-            )
+            with clock("ocr_render"):
+                image, dpi_used = ocr_prep.render_cluster_with_dynamic_dpi(
+                    group_vectors, OCR_DPI, MIN_RENDER_SIDE_PX, MAX_RENDER_DPI, padding,
+                )
         except ValueError:
             continue
 
-        bgr = _normalize_bgr(np.asarray(image))
-        quads = det_backend.detect(bgr)
+        with clock("ocr_render"):
+            bgr = _normalize_bgr(np.asarray(image))
+        with clock("ocr_detect"):
+            quads = det_backend.detect(bgr)
         cluster_detections.append((bgr, quads))
         detect_boxes.extend(
             pixel_to_page_bbox(group_vectors, dpi_used, quad.tolist(), padding) for quad in quads
@@ -125,8 +139,9 @@ def parse(
         # already BGR -- reverse channels back before recognize_crops, which
         # does its own RGB->BGR flip internally (same gotcha LegacyRecreation's
         # own identical loop works around).
-        crops = [_rotate_crop(bgr, quad)[:, :, ::-1] for quad in quads]
-        boxes = rec_backend.recognize_crops(crops)
+        with clock("ocr_recognize"):
+            crops = [_rotate_crop(bgr, quad)[:, :, ::-1] for quad in quads]
+            boxes = rec_backend.recognize_crops(crops)
 
         for quad, crop, box in zip(quads, crops, boxes):
             # box.flip_deg is the 0/180 decision recognize_crops' own angle
@@ -152,7 +167,8 @@ def parse(
             ))
     _emit(_render_ocr_layers(page_meta, texts, blank_boxes, detect_boxes))
 
-    drawing = list(cls.drawing_vectors) + list(fast.dropped_vectors)
+    with clock("drawing"):
+        drawing = list(cls.drawing_vectors) + list(fast.dropped_vectors)
     _emit(_render_drawing_layers(page_meta, drawing))
 
     if debug_out is not None:

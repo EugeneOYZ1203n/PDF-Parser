@@ -17,8 +17,9 @@ exists; `original_vector` is scored as a text-provenance type only, not
 at the vector-geometry level), and writes one
 self-contained `report.html` -- one section per shared key, broken into
 Text (Char/Word/Font size/Rotation/Bbox/Vector classification/Reading
-order/Confusion) and Vector (Count/Endpoint/Property) subsections, each
-with linked chart PNGs, a per-character OCR accuracy table per text type
+order/Confusion), Vector (Count/Endpoint/Property) and Timing (per-page
+wall-clock per phase + P3 sub-step, vectorised and rasterised runs, with a
+stacked-bar chart) subsections, each with linked chart PNGs, a per-character OCR accuracy table per text type
 (detected / dropped / unreached / misclassified / inserted, with a gallery of
 up to 2 word crops per char per error kind beneath it), illustrated
 error-example galleries (extra predictions / missed GT / confusion misreads /
@@ -58,10 +59,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from rastervec.Evaluation.Evaluate import charts
+from rastervec.Evaluation.Evaluate import charts, timing
 from rastervec.Evaluation.Evaluate.benchmark import (
     format_aggregate_comparison,
     format_confusion_table,
+    format_variant_timing_comparison,
     format_vector_aggregate_comparison,
 )
 from rastervec.Evaluation.Evaluate.html_report import ReportBuilder
@@ -89,12 +91,14 @@ from scripts.benchmark_examples import (  # noqa: F401 -- re-exported for caller
 )
 from scripts.benchmark_report_sections import (  # noqa: F401 -- re-exported for callers/tests
     _add_text_sections,
+    _add_timing_sections,
     _add_vector_sections,
     _fmt_property_rows,
 )
 from scripts.benchmark_run_loading import (  # noqa: F401 -- re-exported for callers/tests
     RunEntry,
     _load_run,
+    _load_timings,
     _merge_gt,
     _score_text,
     _score_vectors,
@@ -143,6 +147,33 @@ def main(argv: list[str] | None = None) -> int:
     blocks: list[str] = []
     grand_text: "dict[str, list[TextMetricSuiteResult]]" = {}
     grand_vector: "dict[str, list[VectorMetricSuiteResult]]" = {}
+    # {run: {kind: [flattened per-page timing row]}} over every shared key
+    grand_timing: "dict[str, dict[str, list[dict]]]" = {}
+
+    def _timing_block(
+        rows_by_run: "dict[str, dict[str, list[dict]]]", label: str, cslug: str,
+    ) -> None:
+        """Summarise, chart, add the HTML Timing section, and append the
+        benchmark.txt timing tables for one key (or the grand aggregate)."""
+        summaries = {
+            run: {kind: timing.summarize_timings(rows) for kind, rows in by_kind.items()}
+            for run, by_kind in rows_by_run.items()
+        }
+        chart_paths: "dict[str, Path]" = {}
+        for kind in timing.RUN_KINDS:
+            per_run = {run: s_.get(kind, {}) for run, s_ in summaries.items()}
+            if not any(per_run.values()):
+                continue
+            path = charts_dir / f"{cslug}__timing__{kind}.png"
+            charts.timing_chart(per_run, title=f"{label} {kind} run: mean s/page", path=path)
+            chart_paths[kind] = path.relative_to(out_dir)
+            for run, summary in per_run.items():
+                blocks.append(timing.format_timing_table(
+                    summary, title=f"[{label} / {run}] {kind} run wall-clock per page (seconds)"))
+            if len(per_run) > 1:
+                blocks.append(format_variant_timing_comparison(
+                    per_run, title=f"[{label}] {kind} run median seconds per page by run"))
+        _add_timing_sections(builder, summaries, chart_paths)
 
     for key in sorted(shared_keys):
         kslug = _short_slug(key)
@@ -167,6 +198,11 @@ def main(argv: list[str] | None = None) -> int:
         builder.add_key_section(key)
         _add_text_sections(builder, text_by_run, char_examples_by_run)
         _add_vector_sections(builder, vector_by_run)
+        timing_rows = {r[key].run_name: _load_timings(r[key]) for r in runs}
+        _timing_block(timing_rows, key, kslug)
+        for name, by_kind in timing_rows.items():
+            for kind, rows in by_kind.items():
+                grand_timing.setdefault(name, {}).setdefault(kind, []).extend(rows)
 
         charts.label_description_chart(
             text_by_run, title=f"{key} aggregate labels", path=charts_dir / f"{kslug}__aggregate__labels.png")
@@ -328,6 +364,11 @@ def main(argv: list[str] | None = None) -> int:
                     ) + "</div>"
                 )
         builder.add_raw_html("".join(grand_font_size_html))
+
+    if grand_timing:
+        if not grand_text_agg:
+            builder.add_key_section("(grand aggregate over every shared input)")
+        _timing_block(grand_timing, "(all inputs)", "aggregate")
 
     header = "compared runs:\n" + "\n".join(f"  {Path(d).name}" for d in args.run)
     (out_dir / "benchmark.txt").write_text(

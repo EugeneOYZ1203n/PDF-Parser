@@ -196,6 +196,42 @@ def extra_chars_table_image(
     plt.close(fig)
 
 
+def timing_chart(summaries_by_run: "dict[str, dict]", *, title: str, path: Path) -> None:
+    """One stacked bar per run: mean seconds per page for each leaf timing
+    row (`timing.leaf_rows` -- phase3 split into its sub-steps when the
+    backend recorded any). Means, not medians, so the segments add up to the
+    bar's mean total. `summaries_by_run` values are `timing.
+    summarize_timings` results (`{}` -> an empty bar)."""
+    from rastervec.Evaluation.Evaluate.timing import leaf_rows
+
+    runs = list(summaries_by_run)
+    rows: "list[str]" = []
+    for summary in summaries_by_run.values():
+        for r in leaf_rows(summary):
+            if r not in rows:
+                rows.append(r)
+
+    fig, ax = plt.subplots(figsize=(max(5, 1.6 * len(runs) + 3), 4.5))
+    cmap = plt.get_cmap("tab20")
+    bottoms = [0.0] * len(runs)
+    for ri, row in enumerate(rows):
+        heights = [summaries_by_run[run].get(row, {}).get("mean", 0.0) for run in runs]
+        ax.bar(range(len(runs)), heights, bottom=bottoms, width=0.6, label=row, color=cmap(ri % 20))
+        bottoms = [b + h for b, h in zip(bottoms, heights)]
+    for i, total in enumerate(bottoms):
+        ax.text(i, total, f"{total:.2f}s", ha="center", va="bottom", fontsize=7)
+    ax.set_xticks(range(len(runs)))
+    ax.set_xticklabels(runs, rotation=15, ha="right", fontsize=8)
+    ax.set_ylabel("mean seconds / page", fontsize=8)
+    ax.set_title(title, fontsize=9)
+    if rows:
+        ax.legend(fontsize=6, loc="upper left", bbox_to_anchor=(1.01, 1.0))
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
 def vector_count_chart(
     results_by_run: "dict[str, VectorMetricSuiteResult | None]", *, title: str, path: Path,
 ) -> None:

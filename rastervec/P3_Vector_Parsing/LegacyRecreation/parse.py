@@ -15,6 +15,7 @@ import numpy as np
 
 from rastervec.commons.models import Page, Text, Vector
 from rastervec.commons.renderer import ocr_prep, pixel_to_page_bbox
+from rastervec.commons.step_timing import StepClock
 from rastervec.commons.helpers.geometry import compute_origin, transform_direction
 from rastervec.P3_Vector_Parsing.LegacyRecreation.config import (
     MAX_RENDER_DPI,
@@ -56,6 +57,7 @@ def parse(
     vectors_p1: list[Vector], vectors_p2: list[Vector], page: Page,
     *, verbose: bool = False, compute=None, progress_counter=None,
     debug_out: "dict | None" = None, on_debug_layer: "OnDebugLayer | None" = None,
+    step_durations: "dict | None" = None,
 ) -> tuple[list[Vector], list[Text]]:
     """Combines Phase 1's raw native vectors and Phase 2's raster-derived
     vectors, classifies them into Type-2 glyph-ink candidates vs everything
@@ -67,23 +69,31 @@ def parse(
     for the shared convention): `debug_out` stashes every stage's own
     intermediate object verbatim for `render_debug` to render as a
     post-hoc batch later; `on_debug_layer` renders and emits each stage's
-    layers immediately, right after that stage runs."""
+    layers immediately, right after that stage runs.
+
+    `step_durations`, when given, receives wall-clock seconds per step
+    (`commons.step_timing.StepClock`; debug rendering excluded) --
+    `filter_fill`, `group_words`, then the per-group OCR loop split into
+    `ocr_render`/`ocr_detect`/`ocr_recognize` (summed over groups)."""
     all_vectors = list(vectors_p1) + list(vectors_p2)
     page_meta = page.meta
+    clock = StepClock(step_durations)
 
     def _emit(layers: "list[DebugLayer]") -> None:
         if on_debug_layer is not None:
             for layer in layers:
                 on_debug_layer(*layer)
 
-    fill_vectors = filter_text_vectors(all_vectors)
-    fill_ids = {id(v) for v in fill_vectors}
-    drawing_vectors = [v for v in all_vectors if id(v) not in fill_ids]
+    with clock("filter_fill"):
+        fill_vectors = filter_text_vectors(all_vectors)
+        fill_ids = {id(v) for v in fill_vectors}
+        drawing_vectors = [v for v in all_vectors if id(v) not in fill_ids]
     _emit(_render_filter_fill_layers(page_meta, fill_vectors))
 
-    page_rotation = int(page.meta.rotation or 0)
-    glyphs = convert_vectors_to_glyphs(fill_vectors)
-    word_groups = cluster_by_seqno(glyphs, page_rotation)
+    with clock("group_words"):
+        page_rotation = int(page.meta.rotation or 0)
+        glyphs = convert_vectors_to_glyphs(fill_vectors)
+        word_groups = cluster_by_seqno(glyphs, page_rotation)
     _emit(_render_group_words_layers(page_meta, word_groups))
 
     rec_backend = PaddleRecBackend()
@@ -96,15 +106,18 @@ def parse(
             continue
         padding = _cluster_render_padding(group_vectors)
         try:
-            image, dpi_used = ocr_prep.render_cluster_with_dynamic_dpi(
-                group_vectors, OCR_DPI, MIN_RENDER_SIDE_PX, MAX_RENDER_DPI, padding,
-            )
+            with clock("ocr_render"):
+                image, dpi_used = ocr_prep.render_cluster_with_dynamic_dpi(
+                    group_vectors, OCR_DPI, MIN_RENDER_SIDE_PX, MAX_RENDER_DPI, padding,
+                )
         except ValueError:
             continue
 
-        bgr = _normalize_bgr(np.asarray(image))
-        bgr, (pad_x_px, pad_y_px) = ocr_prep.pad_image_uniform(bgr, RECOGNITION_PAD_FRACTION)
-        quads = det_backend.detect(bgr)
+        with clock("ocr_render"):
+            bgr = _normalize_bgr(np.asarray(image))
+            bgr, (pad_x_px, pad_y_px) = ocr_prep.pad_image_uniform(bgr, RECOGNITION_PAD_FRACTION)
+        with clock("ocr_detect"):
+            quads = det_backend.detect(bgr)
         if not quads:
             continue
 
@@ -113,8 +126,9 @@ def parse(
         # does its own RGB->BGR flip internally (same gotcha as
         # scripts/verify_ocr.py::_run_paddle_full; failing to reverse first
         # double-flips the channels).
-        crops = [_rotate_crop(bgr, quad)[:, :, ::-1] for quad in quads]
-        boxes = rec_backend.recognize_crops(crops)
+        with clock("ocr_recognize"):
+            crops = [_rotate_crop(bgr, quad)[:, :, ::-1] for quad in quads]
+            boxes = rec_backend.recognize_crops(crops)
 
         for quad, crop, box in zip(quads, crops, boxes):
             ocr_crops.append((crop, box.text))

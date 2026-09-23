@@ -39,3 +39,27 @@ def test_write_load_dump(tmp_path, text, vector, page_meta):
     assert got.vectors == pd.vectors
     assert got.engine == "current"
     assert got.step_durations == {"read": 0.1, "native": 0.2}
+
+
+def test_dump_timing_fields_roundtrip_and_default(tmp_path, page_meta):
+    pd = dump_io.PageDump(
+        page_meta=page_meta(), texts=[], vectors=[], engine="current",
+        step_durations={"phase3": 2.0}, substep_durations={"ocr": 1.5},
+        raster_step_durations={"phase3": 1.0}, raster_substep_durations={"ocr": 0.5},
+    )
+    path = tmp_path / "dump.json"
+    dump_io.write_dump(path, "x.pdf", [pd])
+    got = dump_io.load_dump(path).pages[0]
+    assert got.substep_durations == {"ocr": 1.5}
+    assert got.raster_step_durations == {"phase3": 1.0}
+    assert got.raster_substep_durations == {"ocr": 0.5}
+
+    # an older dump without the timing fields still loads
+    import json
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    for page in raw["pages"]:
+        for k in ("substep_durations", "raster_step_durations", "raster_substep_durations"):
+            page.pop(k)
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    old = dump_io.load_dump(path).pages[0]
+    assert old.substep_durations == {} and old.raster_step_durations == {}

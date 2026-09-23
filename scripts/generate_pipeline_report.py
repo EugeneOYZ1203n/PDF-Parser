@@ -229,6 +229,7 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
             page_meta=res.page.meta, texts=list(res.texts or []),
             vectors=list(res.vectors or []), engine=variant.engine,
             step_durations=dict(res.step_durations or {}),
+            substep_durations=_substeps(res),
         ))
 
     _finalize_doc_dir(doc_dir, pdf_path, pages, config, variant, active,
@@ -330,6 +331,13 @@ def _bench_ground_truth_by_type(bench: BenchInput, pages: list[int]) -> "dict[st
     return by_type
 
 
+def _substeps(res) -> dict:
+    """The P3 backend's own sub-step seconds (`core.result.PipelineResult.
+    substep_durations`); `{}` for the legacy engine's older result shape,
+    which has no such field."""
+    return dict(getattr(res, "substep_durations", None) or {})
+
+
 def _extract_single_page(src_pdf: Path, page_index: int, out_path: Path) -> None:
     doc = fitz.open(str(src_pdf))
     try:
@@ -391,6 +399,8 @@ def _process_pdf_benchmark(
                          is_legacy=is_legacy, p3=variant.p3)
 
         raster_texts = []
+        raster_steps: dict = {}
+        raster_substeps: dict = {}
         if bench.rasterised_pdf_path is not None:
             raster_page_path = doc_dir / f"rasterised_p{p}.pdf"
             try:
@@ -404,6 +414,8 @@ def _process_pdf_benchmark(
                     )
                 _restamp_page(res_raster, p)
                 raster_texts = list(res_raster.texts or [])
+                raster_steps = dict(res_raster.step_durations or {})
+                raster_substeps = _substeps(res_raster)
             except Exception as exc:  # noqa: BLE001
                 _LOG.warning(
                     "%s: rasterised-PDF run failed for page %d: %s", bench.key, p, exc,
@@ -414,6 +426,9 @@ def _process_pdf_benchmark(
             vectors=list(res.vectors or []), engine=variant.engine,
             step_durations=dict(res.step_durations or {}),
             raster_texts=raster_texts,
+            substep_durations=_substeps(res),
+            raster_step_durations=raster_steps,
+            raster_substep_durations=raster_substeps,
         ))
 
     sources: list[str] = []

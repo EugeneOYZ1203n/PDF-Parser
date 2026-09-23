@@ -90,6 +90,7 @@ def run_pipeline(
 
     p2_debug: dict = {}
     p3_debug: dict = {}
+    p3_substeps: dict = {}
 
     with timer("phase1"):
         phase1 = read_and_extract(pdf_path, page_index)
@@ -117,6 +118,8 @@ def run_pipeline(
             p3_kwargs["debug_out"] = p3_debug
         if on_debug_layer is not None and "on_debug_layer" in sig.parameters:
             p3_kwargs["on_debug_layer"] = on_debug_layer
+        if "step_durations" in sig.parameters:
+            p3_kwargs["step_durations"] = p3_substeps
         p3_vectors, p3_texts = p3_fn(phase1.vectors, p2_vectors, phase1.page, **p3_kwargs)
 
     with timer("phase4"):
@@ -140,6 +143,7 @@ def run_pipeline(
         p3=p3,
         extra=extra,
         step_outputs=(timer.outcomes if verbose else None),
+        substep_durations=p3_substeps,
     )
 
 
@@ -163,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"p2={result.p2} p3={result.p3} texts={len(result.texts)} vectors={len(result.vectors)}")
     print("step durations:", result.step_durations)
+    print("phase3 sub-step durations:", result.substep_durations)
     return 0
 
 

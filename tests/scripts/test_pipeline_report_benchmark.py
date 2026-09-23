@@ -39,7 +39,12 @@ def _write_doc(doc: Path, *, ocr_text: str, manual: bool) -> None:
     doc.mkdir(parents=True, exist_ok=True)
     dump_io.write_dump(
         doc / "dump.json", "x.pdf",
-        [dump_io.PageDump(_meta(), [_text(ocr_text, (0, 0, 50, 12))], [], "current", {})],
+        [dump_io.PageDump(
+            _meta(), [_text(ocr_text, (0, 0, 50, 12))], [], "current",
+            {"phase1": 0.1, "phase2": 0.0, "phase3": 2.0, "phase4": 0.05},
+            substep_durations={"fast": 0.5, "ocr": 1.2},
+            raster_step_durations={"phase1": 0.2, "phase3": 1.0},
+        )],
     )
     save_labels(
         LabelSet(pdf_path="x.pdf", entries=[_label("HELLO WORLD", (0, 0, 50, 12), "native")]),
@@ -90,6 +95,8 @@ def test_two_runs_shared_key_report_html_and_viewer_cmds(tmp_path):
     assert "pdf:A" in text
     assert "labels:C" in text
     assert "OCR confusion characters" in text
+    assert "vectorised run wall-clock per page (seconds)" in text
+    assert "median seconds per page by run" in text
     assert "labels:B" not in text  # labels:B vs pdf:B not shared
 
     html = (run_out / "report.html").read_text(encoding="utf-8")
@@ -103,9 +110,17 @@ def test_two_runs_shared_key_report_html_and_viewer_cmds(tmp_path):
     assert "Per-character examples [run2] -- native_to_vector" in html
     assert "Vector classification funnel" in html
     assert "Font size distribution" in html
+    assert "Wall-clock per page -- vectorised run" in html
+    assert "Wall-clock per page -- rasterised run" in html
+    assert "phase3 › ocr" in html
+    assert "Δ median vs run1: run2" in html
+    assert 'src="charts/aggregate__timing__vectorised.png"' in html  # grand aggregate
 
     charts = sorted(p.name for p in (run_out / "charts").glob("*.png"))
     assert "labels_C__aggregate__labels.png" in charts
+    assert "labels_C__timing__vectorised.png" in charts
+    assert "aggregate__timing__rasterised.png" in charts
+    assert 'src="charts/labels_C__timing__vectorised.png"' in html
     assert "aggregate__labels.png" in charts
     # per-page charts are no longer generated
     assert not any("__p0__" in c for c in charts)

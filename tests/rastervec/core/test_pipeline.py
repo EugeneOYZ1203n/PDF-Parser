@@ -94,3 +94,30 @@ def test_run_pipeline_streams_on_debug_layer_independent_of_verbose(
         ("phase2", "fake", "#000000", b"%PDF-fake-p2"),
         ("phase3", "fake", "#ffffff", b"%PDF-fake-p3"),
     ]
+
+
+def test_run_pipeline_collects_p3_substep_durations(
+    synthetic_pdf_factory, tmp_pdf_path, monkeypatch,
+):
+    def _timed_p3(vectors_p1, vectors_p2, page, *, step_durations=None):
+        step_durations["fake_step"] = 0.25
+        return [], []
+
+    monkeypatch.setitem(registry.P2_REGISTRY, "FakeP2", _fake_p2)
+    monkeypatch.setitem(registry.P3_REGISTRY, "TimedP3", _timed_p3)
+    monkeypatch.setitem(registry.P3_REGISTRY, "FakeP3", _fake_p3)
+    path = _synthetic_pdf_path(synthetic_pdf_factory, tmp_pdf_path)
+
+    timed = run_pipeline(path, 0, p2="FakeP2", p3="TimedP3")
+    assert timed.substep_durations == {"fake_step": 0.25}
+    assert set(timed.step_durations) == {"phase1", "phase2", "phase3", "phase4"}
+
+    untimed = run_pipeline(path, 0, p2="FakeP2", p3="FakeP3")
+    assert untimed.substep_durations == {}
+
+
+def test_every_p3_backend_accepts_step_durations():
+    import inspect
+
+    for name, fn in registry.P3_REGISTRY.items():
+        assert "step_durations" in inspect.signature(fn).parameters, name
