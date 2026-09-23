@@ -37,6 +37,13 @@ from rastervec.P3_Vector_Parsing.VectorClassification.config import (
 # own copies).
 _DETECT_LIMIT_SIDE_LEN = 4000
 
+# _rotate_crop's own crop-shaping knobs: how much larger than the raw
+# detected quad to crop (scaled about the quad's own centroid, so a tight
+# detection still keeps full glyph strokes/ascenders/descenders), and the
+# flat white border added around the result.
+_CROP_EXPAND_FRACTION = 0.05
+_CROP_BORDER_PX = 5
+
 
 @dataclass
 class OcrBox:
@@ -177,18 +184,34 @@ def _quad_rotation_deg(quad: np.ndarray) -> float:
 
 def _rotate_crop(bgr: np.ndarray, quad: np.ndarray) -> np.ndarray:
     """Perspective-correct crop of `quad` (4 `(x, y)` pixel points,
-    PaddleOCR's own corner order) out of `bgr`, warped onto an axis-aligned
-    rectangle sized to the quad's own edge lengths -- the standard PaddleOCR
-    "get_rotate_crop_image" step, reimplemented with `skimage` (no cv2, per
-    this project's convention). Own duplicated copy of `FastIntoPaddle`/
-    `LegacyRecreation`'s `paddle_engine.py::_rotate_crop`."""
+    PaddleOCR's own corner order), expanded `_CROP_EXPAND_FRACTION` larger
+    about its own centroid before cropping (so a tight detection still keeps
+    full glyph strokes/ascenders/descenders rather than clipping them) and
+    warped onto an axis-aligned rectangle sized to that expanded quad's own
+    edge lengths -- the standard PaddleOCR "get_rotate_crop_image" step,
+    reimplemented with `skimage` (no cv2, per this project's convention) --
+    plus a flat `_CROP_BORDER_PX` white border added around the result.
+    `warp`'s own `cval=255.0` already fills white for any part of the
+    expanded quad that samples outside `bgr` (e.g. a detection near the
+    render's own edge), so no separate bounds clamping is needed. Was
+    previously an unexpanded, unbordered, byte-identical copy of
+    `FastIntoPaddle`/`LegacyRecreation`'s `paddle_engine.py::_rotate_crop`;
+    those two still crop tight with no border -- this is now
+    VectorClassification's own divergent copy."""
+    centroid = quad.mean(axis=0)
+    quad = centroid + (quad - centroid) * (1.0 + _CROP_EXPAND_FRACTION)
     width = max(1, int(round(max(np.hypot(*(quad[1] - quad[0])), np.hypot(*(quad[2] - quad[3]))))))
     height = max(1, int(round(max(np.hypot(*(quad[3] - quad[0])), np.hypot(*(quad[2] - quad[1]))))))
     rect = np.array([(0, 0), (width, 0), (width, height), (0, height)], dtype=np.float64)
     tf = ProjectiveTransform()
     tf.estimate(rect, quad)
     warped = warp(bgr, tf, output_shape=(height, width), cval=255.0, preserve_range=True)
-    return np.clip(warped, 0, 255).astype(np.uint8)
+    cropped = np.clip(warped, 0, 255).astype(np.uint8)
+    return np.pad(
+        cropped,
+        ((_CROP_BORDER_PX, _CROP_BORDER_PX), (_CROP_BORDER_PX, _CROP_BORDER_PX), (0, 0)),
+        mode="constant", constant_values=255,
+    )
 
 
 def _normalize_bgr(crop: np.ndarray) -> np.ndarray:
