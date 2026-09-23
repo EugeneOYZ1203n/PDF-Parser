@@ -6,6 +6,7 @@ from rastervec.Evaluation.Evaluate.label_overlays import (
     WORD_PARTIAL_COLOR,
     WORD_WRONG_COLOR,
     gt_bbox_overlay,
+    gt_word_bboxes,
     gt_word_overlay,
 )
 from rastervec.Evaluation.Evaluate.metrics import (
@@ -56,3 +57,14 @@ def test_gt_word_overlay_slices_span_bbox():
     assert abs(words[-1][1][2] - 110) < 1e-6
     # wider word gets the wider slice
     assert (words[1][1][2] - words[1][1][0]) > (words[0][1][2] - words[0][1][0])
+
+
+def test_gt_word_bboxes_follow_reading_direction():
+    # "AB CD": two equal-length words; the first must sit where reading starts.
+    def first(rot):
+        return gt_word_bboxes(GtRegion(0, (0, 0, 40, 40), "ab cd", rot))[0]
+
+    assert first(0) == ("AB", (0, 0, 20.0, 40))      # left half
+    assert first(180) == ("AB", (20.0, 0, 40, 40))   # right half (right-to-left)
+    assert first(90) == ("AB", (0, 0, 40, 20.0))     # top half (downward)
+    assert first(270) == ("AB", (0, 20.0, 40, 40))   # bottom half (upward)

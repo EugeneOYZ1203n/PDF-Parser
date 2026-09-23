@@ -17,6 +17,7 @@ from rastervec.Evaluation.Evaluate.metrics import (
     aggregate_text_metrics,
     font_size_distribution,
     overlay_boxes_by_type,
+    rotation_outcome,
     rotation_stats,
     text_label_stats,
     word_overlap_stats,
@@ -249,3 +250,29 @@ def test_overlay_boxes_by_type_dashes_and_colors():
     boxes = overlay_boxes_by_type(graphs)
     assert boxes  # at least the matched gt + pred box
     assert any(dashes == "[4 3] 0" for _bbox, _rgb, dashes in boxes)
+
+
+def test_rotation_outcome_matches_rotation_stats():
+    gts = [_gt("A", bbox=(0, 0, 10, 10), rot=0), _gt("B", bbox=(20, 0, 30, 10), rot=90)]
+    preds = [_pred("A", bbox=(0, 0, 10, 10), rot=180), _pred("B", bbox=(20, 0, 30, 10), rot=90)]
+    graph = build_overlap_graph(gts, preds)
+    assert rotation_outcome(graph, 0) == (180, 180, "off_180")
+    assert rotation_outcome(graph, 1) == (90, 0, "correct")
+    stats = rotation_stats(graph, "native_to_vector")
+    assert (stats.buckets.correct, stats.buckets.off_90, stats.buckets.off_180) == (1, 0, 1)
+
+
+def test_aggregate_text_metrics_merges_char_stats():
+    entries_by_type = {t: [] for t in TEXT_TYPES}
+    gt1 = {t: [] for t in TEXT_TYPES}
+    gt1["native_to_vector"] = [_gt("HELLO")]
+    gt2 = {t: [] for t in TEXT_TYPES}
+    gt2["native_to_vector"] = [_gt("HELP")]
+    r1 = evaluate_text_metrics(gt1, entries_by_type, [_pred("HELLO")])
+    r2 = evaluate_text_metrics(gt2, entries_by_type, [_pred("HEAP")])
+    agg = aggregate_text_metrics([r1, r2])
+    cs = agg.by_type["native_to_vector"].char_stats
+    assert cs["L"].total == 3
+    assert cs["L"].detected == 2
+    assert cs["L"].misclassified == 1
+    assert cs["L"].replacements == {"A": 1}

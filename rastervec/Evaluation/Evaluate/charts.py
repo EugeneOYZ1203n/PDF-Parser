@@ -196,36 +196,6 @@ def extra_chars_table_image(
     plt.close(fig)
 
 
-def confusion_char_table_image(
-    result: "TextMetricSuiteResult | None", text_type: str, *, title: str, path: Path, top_n: int = 5,
-) -> None:
-    """One table image (not a bar chart) of the top-`top_n` OCR
-    replacements per ground-truth character, for one text type."""
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.axis("off")
-    if result is None or not result.by_type[text_type].confusion:
-        ax.text(0.5, 0.5, "(no confusion data)", ha="center", va="center")
-    else:
-        confusion = result.by_type[text_type].confusion
-        rows = sorted(confusion.items(), key=lambda kv: -sum(kv[1].values()))[:30]
-        cell_text = []
-        for ch, counter in rows:
-            total = sum(counter.values())
-            top = counter.most_common(top_n)
-            cells = [ch] + [
-                f"{r or '(none)'}: {c} ({100 * c / total:.0f}%)" for r, c in top
-            ]
-            cells += [""] * (1 + top_n - len(cells))
-            cell_text.append(cells)
-        columns = ["char"] + [f"#{i+1}" for i in range(top_n)]
-        ax.table(cellText=cell_text, colLabels=columns, loc="center", cellLoc="left")
-    ax.set_title(title, fontsize=9)
-    fig.tight_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-
-
 def vector_count_chart(
     results_by_run: "dict[str, VectorMetricSuiteResult | None]", *, title: str, path: Path,
 ) -> None:

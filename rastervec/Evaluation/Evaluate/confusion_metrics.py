@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 from rastervec.Evaluation.Evaluate.metrics import Bbox, OverlapGraph, Ratio
@@ -125,13 +126,12 @@ def closest_pred_word(gt_word: str, pred_words: list[str]) -> "str | None":
     return min(pred_words, key=lambda w: levenshtein(gt_word, w))
 
 
-def align_chars(gt_word: str, pred_word: str) -> list[tuple[str, str]]:
-    """Levenshtein DP + backtrace: one `(gt_char, replacement)` pair per
-    `gt_word` character. `replacement` is the aligned predicted char on a
-    match/substitution, `""` on a deletion (a gt char with no predicted
-    counterpart). An insertion (a predicted char with no gt counterpart)
-    consumes no gt char and is dropped from this table -- a known, accepted
-    limitation (there is no gt character to attribute it to)."""
+def align_ops(gt_word: str, pred_word: str) -> list[tuple[str, str]]:
+    """Levenshtein DP + backtrace over `gt_word` vs `pred_word`, in reading
+    order. Each step is one pair: `(gt_char, pred_char)` on a
+    match/substitution, `(gt_char, "")` on a deletion (a gt char with no
+    predicted counterpart), `("", pred_char)` on an insertion (a predicted
+    char with no gt counterpart)."""
     n, m = len(gt_word), len(pred_word)
     # dp[i][j] = edit distance between gt_word[:i] and pred_word[:j]
     dp = [[0] * (m + 1) for _ in range(n + 1)]
@@ -159,10 +159,19 @@ def align_chars(gt_word: str, pred_word: str) -> list[tuple[str, str]]:
             pairs.append((gt_word[i - 1], ""))
             i -= 1
         else:
-            # insertion -- consumes a pred char, no gt char; drop it.
+            pairs.append(("", pred_word[j - 1]))
             j -= 1
     pairs.reverse()
     return pairs
+
+
+def align_chars(gt_word: str, pred_word: str) -> list[tuple[str, str]]:
+    """`align_ops` minus insertions: one `(gt_char, replacement)` pair per
+    `gt_word` character. `replacement` is the aligned predicted char on a
+    match/substitution, `""` on a deletion. An insertion consumes no gt char
+    and is dropped from this view (see `char_events` for the insertion-aware
+    accounting)."""
+    return [(g, p) for g, p in align_ops(gt_word, pred_word) if g]
 
 
 def confusion_table(graph: OverlapGraph) -> "dict[str, Counter[str]]":
@@ -195,6 +204,127 @@ def confusion_table(graph: OverlapGraph) -> "dict[str, Counter[str]]":
                     continue
                 table.setdefault(gt_char, Counter())[replacement] += 1
     return table
+
+
+CHAR_EVENT_KINDS = ("detected", "dropped", "unreached", "misclassified", "inserted")
+# Kinds that make up a gt char's `CharStats.total` (insertions have no gt char).
+CHAR_GT_KINDS = ("detected", "dropped", "unreached", "misclassified")
+
+
+@dataclass(frozen=True)
+class CharEvent:
+    """One per-character outcome of `char_events`. `char` is the gt char,
+    except for `kind == "inserted"`, where it is the inserted predicted
+    char. `replacement` is the predicted char a gt char was misread as
+    (`misclassified` only; `""` otherwise). `word_idx` indexes
+    `word_tokens(graph.gt[gt_idx].text)`."""
+    gt_idx: int
+    word_idx: int
+    gt_word: str
+    pred_word: "str | None"
+    kind: str
+    char: str
+    replacement: str = ""
+
+
+def char_events(graph: OverlapGraph) -> "Iterator[CharEvent]":
+    """Every gt char's outcome (plus every inserted predicted char), region
+    by region, word by word -- the single walk both `char_stats_table` and
+    the benchmark report's per-char example picker use:
+
+    - region with no overlapping prediction -> every char `unreached`;
+    - gt word verbatim among the region's overlapping predicted words ->
+      every char `detected`;
+    - no predicted words at all (overlapping preds with no tokens) -> every
+      char `dropped`;
+    - otherwise `align_ops` against the closest predicted word: equal ->
+      `detected`, deleted -> `dropped`, substituted -> `misclassified`,
+      extra predicted char -> `inserted`.
+    """
+    for gi, g in enumerate(graph.gt):
+        gt_words = word_tokens(g.text)
+        overlapping = graph.overlapping_preds_by_gt[gi]
+        if not overlapping:
+            for wi, gt_word in enumerate(gt_words):
+                for ch in gt_word:
+                    yield CharEvent(gi, wi, gt_word, None, "unreached", ch)
+            continue
+        pred_words_all: list[str] = []
+        for pj in overlapping:
+            pred_words_all.extend(word_tokens(graph.preds[pj].text))
+        pred_word_set = set(pred_words_all)
+        for wi, gt_word in enumerate(gt_words):
+            if gt_word in pred_word_set:
+                for ch in gt_word:
+                    yield CharEvent(gi, wi, gt_word, gt_word, "detected", ch)
+                continue
+            closest = closest_pred_word(gt_word, pred_words_all)
+            if closest is None:
+                for ch in gt_word:
+                    yield CharEvent(gi, wi, gt_word, None, "dropped", ch)
+                continue
+            for gt_char, pred_char in align_ops(gt_word, closest):
+                if not gt_char:
+                    yield CharEvent(gi, wi, gt_word, closest, "inserted", pred_char)
+                elif not pred_char:
+                    yield CharEvent(gi, wi, gt_word, closest, "dropped", gt_char)
+                elif gt_char == pred_char:
+                    yield CharEvent(gi, wi, gt_word, closest, "detected", gt_char)
+                else:
+                    yield CharEvent(gi, wi, gt_word, closest, "misclassified", gt_char, pred_char)
+
+
+@dataclass
+class CharStats:
+    """Per-character outcome counts. `total` (every gt occurrence) =
+    detected + dropped + unreached + misclassified; `inserted` counts
+    predicted occurrences with no gt counterpart and sits outside that
+    split. `replacements` breaks `misclassified` down by predicted char."""
+    detected: int = 0
+    dropped: int = 0
+    unreached: int = 0
+    misclassified: int = 0
+    inserted: int = 0
+    replacements: "Counter[str]" = field(default_factory=Counter)
+
+    @property
+    def total(self) -> int:
+        return self.detected + self.dropped + self.unreached + self.misclassified
+
+    @property
+    def error_rate(self) -> float:
+        """(dropped + unreached + misclassified) / total; `nan` if total=0."""
+        total = self.total
+        if not total:
+            return math.nan
+        return (self.dropped + self.unreached + self.misclassified) / total
+
+    def merge(self, other: "CharStats") -> None:
+        self.detected += other.detected
+        self.dropped += other.dropped
+        self.unreached += other.unreached
+        self.misclassified += other.misclassified
+        self.inserted += other.inserted
+        self.replacements.update(other.replacements)
+
+
+def char_stats_table(graph: OverlapGraph) -> "dict[str, CharStats]":
+    """`{char: CharStats}` folded from `char_events`."""
+    table: "dict[str, CharStats]" = {}
+    for ev in char_events(graph):
+        stats = table.setdefault(ev.char, CharStats())
+        setattr(stats, ev.kind, getattr(stats, ev.kind) + 1)
+        if ev.kind == "misclassified":
+            stats.replacements[ev.replacement] += 1
+    return table
+
+
+def merge_char_stats(tables: "list[dict[str, CharStats]]") -> "dict[str, CharStats]":
+    merged: "dict[str, CharStats]" = {}
+    for table in tables:
+        for ch, stats in table.items():
+            merged.setdefault(ch, CharStats()).merge(stats)
+    return merged
 
 
 def extra_predicted_chars(graph: OverlapGraph) -> "Counter[str]":

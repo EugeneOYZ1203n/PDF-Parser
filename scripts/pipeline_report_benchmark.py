@@ -18,8 +18,11 @@ at the vector-geometry level), and writes one
 self-contained `report.html` -- one section per shared key, broken into
 Text (Char/Word/Font size/Rotation/Bbox/Vector classification/Reading
 order/Confusion) and Vector (Count/Endpoint/Property) subsections, each
-with linked chart PNGs, illustrated error-example galleries (extra
-predictions / missed GT / confusion misreads, cropped from the run's own
+with linked chart PNGs, a per-character OCR accuracy table per text type
+(detected / dropped / unreached / misclassified / inserted, with a gallery of
+up to 2 word crops per char per error kind beneath it), illustrated
+error-example galleries (extra predictions / missed GT / confusion misreads /
+rotation off by 90 or 180 deg, cropped from the run's own
 `converted_p<N>.pdf`), the run's own diagnostic image galleries
 (`*_images/` folders), and a ready-to-paste `pipeline_report_viewer.py`
 command. Output (timestamped folder under `outputs/pipeline_report_benchmark/`):
@@ -29,11 +32,13 @@ command. Output (timestamped folder under `outputs/pipeline_report_benchmark/`):
     runs.json               the compared folders + threshold
     viewer_commands.txt     a viewer CLI line per shared input
     charts/                 <key>__aggregate__*.png, aggregate__*.png
-    examples/                <key>__<run>__<type>__<category>__<n>.png crops
+    examples/                <key>__<run>__<type>__<category>__<n>.png crops,
+                            <key>__<run>__charword__<n>.png per-char word crops
 
 This module's own run-loading + scoring (`RunEntry`/`_merge_gt`/`_load_run`/
 `_score_text`/`_score_vectors`) lives in `benchmark_run_loading.py`, the
-illustrated-example collection (`_collect_examples`/`_crop_to_png`) in
+illustrated-example collection (`_collect_examples`/`_collect_char_examples`/
+`_crop_to_png`) in
 `benchmark_examples.py`, and the HTML section builders
 (`_add_text_sections`/`_add_vector_sections`) in
 `benchmark_report_sections.py` -- all re-exported here since some names are
@@ -76,6 +81,7 @@ from rastervec.commons.paths import output_dir
 
 from scripts.benchmark_examples import (  # noqa: F401 -- re-exported for callers/tests
     _EXAMPLE_CAP,
+    _collect_char_examples,
     _collect_examples,
     _crop_to_png,
     _short_slug,
@@ -151,8 +157,15 @@ def main(argv: list[str] | None = None) -> int:
                 blocks.append(f"[{key} / {name}] " + format_confusion_table(agg))
         blocks.append(format_vector_aggregate_comparison(vector_by_run, title=f"{key} -- vectors"))
 
+        char_examples_by_run = {
+            r[key].run_name: _collect_char_examples(
+                r[key], text_scored[r[key].run_name][0], examples_dir, kslug,
+            )
+            for r in runs
+        }
+
         builder.add_key_section(key)
-        _add_text_sections(builder, text_by_run)
+        _add_text_sections(builder, text_by_run, char_examples_by_run)
         _add_vector_sections(builder, vector_by_run)
 
         charts.label_description_chart(
@@ -239,6 +252,8 @@ def main(argv: list[str] | None = None) -> int:
                     ("extra_prediction", "Extra predictions"),
                     ("missed_gt", "Missed GT"),
                     ("confusion", "Confusion misreads"),
+                    ("rotation_off90", "Rotation off by 90°"),
+                    ("rotation_off180", "Rotation off by 180°"),
                 ):
                     cards = examples.get((text_type, category), [])
                     if cards:

@@ -98,6 +98,9 @@ def test_two_runs_shared_key_report_html_and_viewer_cmds(tmp_path):
     assert "Label description" in html
     assert "Char overlap" in html
     assert "Rotation accuracy" in html
+    assert "Per-character OCR accuracy -- native_to_vector" in html
+    assert "detected 1 (100.0%)" in html  # run1 reads HELLO WORLD exactly
+    assert "Per-character examples [run2] -- native_to_vector" in html
     assert "Vector classification funnel" in html
     assert "Font size distribution" in html
 
@@ -177,3 +180,45 @@ def test_merge_gt_supports_legacy_auto_manual_filenames(tmp_path):
     )
     merged = prb._merge_gt(doc)
     assert {e.text for e in merged.entries} == {"HELLO", "WORLD"}
+
+
+def test_char_examples_capped(tmp_path):
+    from types import SimpleNamespace
+
+    from rastervec.Evaluation.Evaluate.metrics import GtRegion, Prediction, build_overlap_graph
+    from scripts.benchmark_examples import _CHAR_EXAMPLE_CAP, _collect_char_examples
+
+    gt = [GtRegion(0, (0, 0, 40, 10), "OOO OOO OOO", 0, "native_to_vector")]
+    preds = [Prediction("000 000 000", (0, 0, 40, 10), 0)]
+    empty = build_overlap_graph([], [])
+    graphs = {t: empty for t in prb.TEXT_TYPES}
+    graphs["native_to_vector"] = build_overlap_graph(gt, preds)
+
+    entry = SimpleNamespace(run_name="r", doc_dir=tmp_path)  # the only RunEntry fields read
+    out = _collect_char_examples(entry, [(0, None, graphs)], tmp_path / "examples", "k")
+    cards = out["native_to_vector"]["O"]["misclassified"]
+    assert len(cards) == _CHAR_EXAMPLE_CAP
+    assert "(O\u21920)" in cards[0].caption
+    assert cards[0].image_path is None  # no converted_p0.pdf in tmp_path -> no crop
+
+
+def test_char_order_sorts_by_error_rate():
+    from rastervec.Evaluation.Evaluate.confusion_metrics import CharStats
+    from scripts.benchmark_report_sections import char_order
+
+    class _PT:
+        def __init__(self, cs):
+            self.char_stats = cs
+
+    class _Res:
+        def __init__(self, cs):
+            self.by_type = {t: _PT({}) for t in prb.TEXT_TYPES}
+            self.by_type["native_to_vector"] = _PT(cs)
+
+    res = _Res({
+        "A": CharStats(detected=9, dropped=1),
+        "B": CharStats(detected=1, misclassified=1),
+        "X": CharStats(inserted=4),
+        "C": CharStats(detected=5),
+    })
+    assert char_order({"r": res, "none": None}, "native_to_vector") == ["B", "A", "C", "X"]

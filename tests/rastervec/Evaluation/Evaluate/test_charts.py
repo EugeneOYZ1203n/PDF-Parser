@@ -71,11 +71,6 @@ def test_extra_chars_table_image(tmp_path):
     _assert_png(tmp_path / "ec.png")
 
 
-def test_confusion_char_table_image(tmp_path):
-    charts.confusion_char_table_image(_text_result(), "native_to_vector", title="t", path=tmp_path / "g.png")
-    _assert_png(tmp_path / "g.png")
-
-
 def test_vector_count_chart(tmp_path):
     charts.vector_count_chart({"current": _vector_result()}, title="t", path=tmp_path / "h.png")
     _assert_png(tmp_path / "h.png")

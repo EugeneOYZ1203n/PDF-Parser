@@ -141,6 +141,9 @@ class PerTypeTextResult:
     confusion: "dict[str, Counter[str]]"
     font_size: FontSizeDistribution
     funnel: "ClassificationFunnelStats | None" = None
+    # {char: confusion_metrics.CharStats} -- detected/dropped/unreached/
+    # misclassified/inserted counts per character.
+    char_stats: "dict[str, object]" = field(default_factory=dict)
 
 
 @dataclass
@@ -211,6 +214,7 @@ def evaluate_text_metrics(
     # import cycle (confusion_metrics imports OverlapGraph/GtRegion from
     # metrics.py, which re-exports from metrics_core.py -- not from here).
     from rastervec.Evaluation.Evaluate.confusion_metrics import (
+        char_stats_table,
         confusion_table,
         extra_predicted_chars_for_indices,
         reading_order_stats,
@@ -240,6 +244,7 @@ def evaluate_text_metrics(
             confusion=confusion_table(graph),
             font_size=font_size_distribution(graph, text_type, dpi=dpi),
             funnel=funnel,
+            char_stats=char_stats_table(graph),
         )
 
     extra_chars = extra_predicted_chars_for_indices(
@@ -336,6 +341,7 @@ def aggregate_text_metrics(results: list[TextMetricSuiteResult]) -> "TextMetricS
 
         from rastervec.Evaluation.Evaluate.confusion_metrics import (
             aggregate_reading_order_stats,
+            merge_char_stats,
         )
         reading_order = aggregate_reading_order_stats([p.reading_order for p in per_type])
 
@@ -366,6 +372,7 @@ def aggregate_text_metrics(results: list[TextMetricSuiteResult]) -> "TextMetricS
             label_stats=label_stats, char_overlap=char_overlap, word_overlap=word_overlap,
             bbox_accuracy=bbox_accuracy, rotation=rotation, reading_order=reading_order,
             confusion=merged, font_size=font_size, funnel=funnel,
+            char_stats=merge_char_stats([p.char_stats for p in per_type]),
         )
 
     _area_fracs = [

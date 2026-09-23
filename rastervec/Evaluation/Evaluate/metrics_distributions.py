@@ -158,18 +158,29 @@ def _circular_rotation_diff(a: int, b: int) -> float:
     return raw if raw <= 180 else 360 - raw
 
 
+_ROTATION_BUCKETS = {0: "correct", 90: "off_90", 180: "off_180"}
+
+
+def rotation_outcome(graph: OverlapGraph, gi: int) -> "tuple[int, float, str]":
+    """`(predicted_rotation, circular_diff_deg, bucket)` for localized gt
+    region `gi` -- `bucket` is one of `correct`/`off_90`/`off_180` (the diff
+    rounded to the nearest quarter turn)."""
+    predicted = _rotation_vote(graph, gi)
+    diff = _circular_rotation_diff(predicted, graph.gt[gi].expected_rotation)
+    return predicted, diff, _ROTATION_BUCKETS[round(diff / 90) * 90]
+
+
 def rotation_stats(graph: OverlapGraph, text_type: str) -> RotationStats:
     localized = graph.localized_gt_idxs
     if not localized:
         return RotationStats(text_type=text_type)
-    diffs = []
-    for gi in localized:
-        predicted = _rotation_vote(graph, gi)
-        diffs.append(_circular_rotation_diff(predicted, graph.gt[gi].expected_rotation))
+    outcomes = [rotation_outcome(graph, gi) for gi in localized]
+    diffs = [d for _p, d, _b in outcomes]
+    bucket_counts = Counter(b for _p, _d, b in outcomes)
     buckets = RotationBucketCounts(
-        correct=sum(1 for d in diffs if round(d / 90) * 90 == 0),
-        off_90=sum(1 for d in diffs if round(d / 90) * 90 == 90),
-        off_180=sum(1 for d in diffs if round(d / 90) * 90 == 180),
+        correct=bucket_counts["correct"],
+        off_90=bucket_counts["off_90"],
+        off_180=bucket_counts["off_180"],
     )
     mean_error = sum(diffs) / len(diffs)
     rmse = math.sqrt(sum(d * d for d in diffs) / len(diffs))

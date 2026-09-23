@@ -2,6 +2,8 @@
 report from a `{run_name: aggregate_result}` mapping."""
 from __future__ import annotations
 
+import math
+
 from rastervec.Evaluation.Evaluate.benchmark import _fmt_ratio
 from rastervec.Evaluation.Evaluate.html_report import ReportBuilder
 from rastervec.Evaluation.Evaluate.metrics import TEXT_TYPES, TextMetricSuiteResult
@@ -32,7 +34,65 @@ def _fmt_property_rows(agg_by_run: "dict[str, VectorMetricSuiteResult | None]") 
     return headers, rows
 
 
-def _add_text_sections(builder: ReportBuilder, agg_by_run: "dict[str, TextMetricSuiteResult | None]") -> None:
+def _pct(n: int, total: int) -> str:
+    return f"{100 * n / total:.1f}%" if total else "n/a"
+
+
+def _fmt_rotation(rot) -> str:
+    b, n = rot.buckets, rot.n_localized
+    return (
+        f"correct {b.correct} ({_pct(b.correct, n)}) | off90 {b.off_90} ({_pct(b.off_90, n)}) | "
+        f"off180 {b.off_180} ({_pct(b.off_180, n)}) | error {_pct(b.off_90 + b.off_180, n)} "
+        f"(n={n}) | mean_err={rot.mean_error_deg:.1f} | rmse={rot.rmse_deg:.1f}"
+    )
+
+
+def _fmt_char_stats(cs, *, top_n: int = 5) -> str:
+    """One per-char table cell: every gt-char outcome as `n (x% of total)`,
+    the top-`top_n` misread replacements, and the raw inserted count."""
+    t = cs.total
+    if not t:
+        return f"total 0 | inserted {cs.inserted}"
+    top = ", ".join(f"{r!r}: {c}" for r, c in cs.replacements.most_common(top_n))
+    return (
+        f"total {t} | detected {cs.detected} ({_pct(cs.detected, t)}) | "
+        f"dropped {cs.dropped} ({_pct(cs.dropped, t)}) | "
+        f"unreached {cs.unreached} ({_pct(cs.unreached, t)}) | "
+        f"misclassified {cs.misclassified} ({_pct(cs.misclassified, t)})"
+        + (f" → {top}" if top else "")
+        + f" | inserted {cs.inserted}"
+    )
+
+
+def char_order(agg_by_run: "dict[str, TextMetricSuiteResult | None]", text_type: str) -> "list[str]":
+    """Every char in any run's `char_stats` for `text_type`, worst error rate
+    first (ties: more gt occurrences first). A char is ranked by the first
+    run that has gt occurrences of it; chars with none anywhere
+    (insertion-only) go last."""
+    stats_by_char: dict = {}
+    for res in agg_by_run.values():
+        if res is None:
+            continue
+        for ch, cs in res.by_type[text_type].char_stats.items():
+            prev = stats_by_char.get(ch)
+            if prev is None or (not prev.total and cs.total):
+                stats_by_char[ch] = cs
+
+    def key(ch: str):
+        cs = stats_by_char[ch]
+        rate = cs.error_rate
+        return (math.isnan(rate), -(0.0 if math.isnan(rate) else rate), -cs.total, ch)
+
+    return sorted(stats_by_char, key=key)
+
+
+def _add_text_sections(
+    builder: ReportBuilder, agg_by_run: "dict[str, TextMetricSuiteResult | None]",
+    char_examples_by_run: "dict[str, dict] | None" = None,
+) -> None:
+    """`char_examples_by_run` (`{run: benchmark_examples._collect_char_examples
+    output}`) adds a per-character example gallery under each text type's
+    per-char table, in the table's own row order."""
     builder.add_group_header("Text")
 
     headers = ["text_type"] + list(agg_by_run)
@@ -91,11 +151,7 @@ def _add_text_sections(builder: ReportBuilder, agg_by_run: "dict[str, TextMetric
             if res is None:
                 row.append("n/a")
                 continue
-            rot = res.by_type[t].rotation
-            row.append(
-                f"correct={rot.buckets.correct} off90={rot.buckets.off_90} off180={rot.buckets.off_180} "
-                f"(n={rot.n_localized}) | mean_err={rot.mean_error_deg:.1f} | rmse={rot.rmse_deg:.1f}"
-            )
+            row.append(_fmt_rotation(res.by_type[t].rotation))
         rows.append(row)
     builder.add_text_subsection("Rotation accuracy", headers, rows)
 
@@ -128,25 +184,20 @@ def _add_text_sections(builder: ReportBuilder, agg_by_run: "dict[str, TextMetric
     builder.add_text_subsection("Reading order accuracy", headers, rows)
 
     for t in TEXT_TYPES:
-        chars: set = set()
-        for res in agg_by_run.values():
-            if res is not None:
-                chars.update(res.by_type[t].confusion.keys())
+        order = char_order(agg_by_run, t)
         c_rows = []
-        for ch in sorted(chars):
+        for ch in order:
             row = [repr(ch)]
             for res in agg_by_run.values():
-                if res is None or ch not in res.by_type[t].confusion:
-                    row.append("")
-                    continue
-                counter = res.by_type[t].confusion[ch]
-                total = sum(counter.values())
-                top = counter.most_common(5)
-                row.append(", ".join(
-                    f"{repr(r) if r else '(none)'}: {c} ({100 * c / total:.0f}%)" for r, c in top
-                ))
+                cs = None if res is None else res.by_type[t].char_stats.get(ch)
+                row.append("" if cs is None else _fmt_char_stats(cs))
             c_rows.append(row)
-        builder.add_text_subsection(f"OCR confusion characters -- {t}", ["gt_char"] + list(agg_by_run), c_rows)
+        builder.add_text_subsection(
+            f"Per-character OCR accuracy -- {t}", ["gt_char"] + list(agg_by_run), c_rows,
+        )
+        for run, examples in (char_examples_by_run or {}).items():
+            by_char = examples.get(t, {})
+            builder.add_char_examples(run, t, [(ch, by_char.get(ch, {})) for ch in order])
 
     chars = set()
     for res in agg_by_run.values():

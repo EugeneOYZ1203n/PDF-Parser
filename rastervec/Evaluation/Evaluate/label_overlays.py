@@ -20,6 +20,7 @@ from rastervec.Evaluation.Evaluate.metrics import (
     MATCH_BOX_COLOR,
     MISSED_GT_BOX_COLOR,
     Bbox,
+    GtRegion,
     OverlapGraph,
     _region_concat_hyp,
 )
@@ -89,26 +90,36 @@ def _split_bbox(bbox: Bbox, weights: list[float], vertical: bool) -> list[Bbox]:
     return out
 
 
+def gt_word_bboxes(g: GtRegion) -> list[tuple[str, Bbox]]:
+    """`(word, sub_bbox)` for every `word_tokens(g.text)` word, in reading
+    order: the region bbox split along the reading axis inferred from
+    `expected_rotation`, each slice proportional to its word's char length.
+    180 deg (right-to-left) and 270 deg (bottom-to-top) read against the
+    axis, so their slices are reversed to keep word i on slice i."""
+    words = word_tokens(g.text)
+    if not words:
+        return []
+    slices = _split_bbox(g.bbox, [float(len(w)) for w in words], _is_vertical(g.expected_rotation))
+    if g.expected_rotation % 360 in (180, 270):
+        slices.reverse()
+    return list(zip(words, slices))
+
+
 def gt_word_overlay(
     graph: OverlapGraph,
 ) -> list[tuple[str, Bbox, float, Rgb]]:
     """`(word, sub_bbox, rotation_deg, rgb)` for every word of every GT
-    region. The region bbox is split into per-word slices (proportional to
-    each word's normalised char length) along the reading axis inferred from
-    `expected_rotation`; each word is coloured by `_word_color` against the
-    tokens of that region's overlapping predictions, concatenated in reading
-    order (`metrics._region_concat_hyp`)."""
+    region (`gt_word_bboxes`); each word is coloured by `_word_color`
+    against the tokens of that region's overlapping predictions,
+    concatenated in reading order (`metrics._region_concat_hyp`)."""
     out: list[tuple[str, Bbox, float, Rgb]] = []
     for gi, g in enumerate(graph.gt):
-        words = normalize_text(g.text).split(" ")
-        words = [w for w in words if w]
-        if not words:
+        word_boxes = gt_word_bboxes(g)
+        if not word_boxes:
             continue
         hyp_tokens = word_tokens(
             _region_concat_hyp(graph, graph.overlapping_preds_by_gt[gi])
         )
-        vertical = _is_vertical(g.expected_rotation)
-        slices = _split_bbox(g.bbox, [float(len(w)) for w in words], vertical)
-        for word, sub in zip(words, slices):
+        for word, sub in word_boxes:
             out.append((word, sub, float(g.expected_rotation), _word_color(word, hyp_tokens)))
     return out

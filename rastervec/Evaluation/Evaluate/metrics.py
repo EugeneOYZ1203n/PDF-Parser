@@ -81,6 +81,7 @@ from rastervec.Evaluation.Evaluate.metrics_distributions import (  # noqa: F401
     bbox_accuracy_unclassified,
     font_size_distribution,
     per_gt_union_pred_iou_mean,
+    rotation_outcome,
     rotation_stats,
     truly_unclassified_pred_indices,
 )
