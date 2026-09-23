@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
+from scipy.spatial import cKDTree
+from tqdm import tqdm
 
 from rastervec.commons.helpers.geometry import transform_point
 from rastervec.Evaluation.CadFont.character_bank import (
@@ -170,20 +172,27 @@ def enumerate_anchor_correspondences(
     return results
 
 
-def _nearest_candidate_node(point: Point, candidate_nodes: list[Point]) -> int:
-    """Plain O(n) nearest-neighbor scan -- candidate graphs here are small
-    (tens of nodes), no spatial index needed. No distance cutoff: a
-    template node always matches to *something*."""
-    best_idx, best_dist = 0, math.inf
-    for i, cp in enumerate(candidate_nodes):
-        d = (point[0] - cp[0]) ** 2 + (point[1] - cp[1]) ** 2
-        if d < best_dist:
-            best_idx, best_dist = i, d
-    return best_idx
+def build_candidate_tree(candidate_graph: CharGraph) -> "cKDTree | None":
+    """A `scipy.spatial.cKDTree` over `candidate_graph.nodes`, built once so
+    `map_template_nodes_to_candidate` can look up a nearest neighbor in
+    `O(log m)` instead of a brute-force `O(m)` scan. `None` for an empty
+    node list (nothing to index).
+
+    Exposed as its own function (not inlined into
+    `map_template_nodes_to_candidate`) so a future multi-template caller
+    (steps 6.1/6.2/8, still out of scope for this module) can build one
+    tree per candidate graph and reuse it across every template it tests
+    against that same candidate, rather than rebuilding it per call."""
+    if not candidate_graph.nodes:
+        return None
+    return cKDTree(np.asarray(candidate_graph.nodes, dtype=float))
 
 
 def map_template_nodes_to_candidate(
-    template_graph: CharGraph, transform: SimilarityTransform, candidate_graph: CharGraph,
+    template_graph: CharGraph,
+    transform: SimilarityTransform,
+    candidate_graph: CharGraph,
+    candidate_tree: "cKDTree | None" = None,
 ) -> dict[int, int]:
     """Every template node, mapped through `transform` into candidate/page
     space, matched to its nearest candidate-graph node -- searched over
@@ -193,16 +202,26 @@ def map_template_nodes_to_candidate(
     critical-point status on the template side never restricts which
     candidate points are valid match targets). No distance cutoff.
 
+    `candidate_tree`, if given, must be `build_candidate_tree(candidate_graph)`
+    (or `None`) -- passed in by a caller (e.g. `match_template_against_candidate`)
+    that builds it once and reuses it across many transforms tested against
+    the same candidate graph, rather than rebuilding it here every call.
+    When omitted, one is built on the fly (keeps every direct caller/test
+    working unchanged, just without that reuse).
+
     Computed once and reused both for the rendered "matched subgraph"
     (every template node's match) and, restricted by the caller to just
     the template's own critical-point indices, for `score_match`'s step
     6.5 correspondence -- deliberately a single nearest-neighbor pass,
     not a second critical-point-restricted one."""
+    if candidate_tree is None:
+        candidate_tree = build_candidate_tree(candidate_graph)
+    if candidate_tree is None:
+        return {}
     transformed = transform.apply_many(template_graph.nodes)
-    return {
-        i: _nearest_candidate_node(p, candidate_graph.nodes)
-        for i, p in enumerate(transformed)
-    }
+    _, indices = candidate_tree.query(np.asarray(transformed, dtype=float))
+    indices = np.atleast_1d(indices)
+    return {i: int(idx) for i, idx in enumerate(indices)}
 
 
 DEFAULT_MSE_WEIGHT = 1.0
@@ -303,6 +322,26 @@ class CandidateMatch:
     score: MatchScore
 
 
+def passes_size_prefilter(template_graph: CharGraph, candidate_graph: CharGraph) -> bool:
+    """Step 6.2: "only test vector group graphs whose max degree is >=
+    character graph max degree and num end points >= character graph num
+    endpoints and num edges >= character graph num edges (a match would
+    not be possible otherwise)". "Num endpoints" uses this package's own
+    established reading of that phrase -- `graph.py::complexity`'s
+    `num_nodes()` (every node, not just degree-1 leaves), the same
+    interpretation `docs/cad_font_vector_recognition.md`'s "Open design
+    notes" section calls out for reuse here.
+
+    A correctness-preserving prune -- it can never reject a candidate that
+    could actually match this template, so callers apply it unconditionally
+    rather than behind a toggle."""
+    return (
+        candidate_graph.max_degree() >= template_graph.max_degree()
+        and candidate_graph.num_nodes() >= template_graph.num_nodes()
+        and candidate_graph.num_edges() >= template_graph.num_edges()
+    )
+
+
 def match_template_against_candidate(
     template: CharacterTemplate,
     candidate_graph: CharGraph,
@@ -310,35 +349,71 @@ def match_template_against_candidate(
     mse_weight: float = DEFAULT_MSE_WEIGHT,
     edge_weight: float = DEFAULT_EDGE_WEIGHT,
     edge_degree_blend: float = DEFAULT_EDGE_DEGREE_BLEND,
+    candidate_tree: "cKDTree | None" = None,
 ) -> list[CandidateMatch]:
-    """Step 6 (6.3-6.5), scoped to one template vs one candidate graph.
-    Every valid anchor correspondence from `enumerate_anchor_correspondences`
-    is fit (`fit_similarity_transform`, skipped only if the fit degenerates
-    to `None`) and scored -- one `CandidateMatch` per tested correspondence,
-    completely unfiltered (no top-K, no similarity threshold; a caller
-    decides sort order and what to render)."""
+    """Step 6 (6.2-6.5), scoped to one template vs one candidate graph.
+
+    Bails out immediately (`[]`, no search at all) if `passes_size_prefilter`
+    (step 6.2) fails -- the cheapest possible rejection for a candidate that
+    structurally cannot match this template.
+
+    Otherwise: a similarity transform (scale + rotation + translation, no
+    shear) is fully determined by exactly 2 point correspondences --
+    `fit_similarity_transform` handles N == 2 exactly -- so only the
+    template's *first 2* anchors (`template.anchor_node_indices[:2]`) are
+    searched combinatorially via `enumerate_anchor_correspondences`
+    (`O(n^2)` hypotheses, `n` = candidate critical-point count, down from
+    `O(n^3)` for all 3 slots). Any 3rd anchor is never searched -- it falls
+    out for free from `map_template_nodes_to_candidate`'s full node mapping,
+    which every hypothesis needs anyway, and is read back into
+    `CandidateMatch.correspondence` so a 3-anchor template still reports a
+    full 3-element correspondence. `enumerate_anchor_correspondences` itself
+    is untouched and remains usable directly with all 3 slots by a caller
+    that wants the old, fully exhaustive (and up to N=3 exact, not
+    least-squares) search.
+
+    A single `build_candidate_tree(candidate_graph)` is built once (or
+    reused, if `candidate_tree` is passed in by a caller iterating several
+    templates against the same candidate) and shared by every hypothesis's
+    `map_template_nodes_to_candidate` call -- `O(t*log m)` per hypothesis
+    instead of `O(t*m)` (`t` = template node count, `m` = candidate node
+    count). Overall: `O(n^2 * t * log m)`, down from `O(n^3 * t * m)`.
+
+    Every valid correspondence is fit and scored -- one `CandidateMatch`
+    per tested hypothesis, completely unfiltered beyond the 6.2 prefilter
+    (no top-K, no similarity threshold; a caller decides sort order and
+    what to render)."""
     template_graph = template.graph
+    if not passes_size_prefilter(template_graph, candidate_graph):
+        return []
+
     anchor_indices = template.anchor_node_indices
+    search_anchor_indices = anchor_indices[:2]
     candidate_critical = critical_point_indices(candidate_graph)
     correspondences = enumerate_anchor_correspondences(
-        template_graph, anchor_indices, candidate_graph, candidate_critical,
+        template_graph, search_anchor_indices, candidate_graph, candidate_critical,
     )
     template_critical = critical_point_indices(template_graph) | template_graph.synthetic_anchor_indices
+    if candidate_tree is None:
+        candidate_tree = build_candidate_tree(candidate_graph)
 
     results: list[CandidateMatch] = []
-    for corr in correspondences:
-        src = [template_graph.nodes[a] for a in anchor_indices]
+    for corr in tqdm(correspondences, desc=f"matching {template.text!r}"):
+        src = [template_graph.nodes[a] for a in search_anchor_indices]
         dst = [candidate_graph.nodes[c] for c in corr]
         transform = fit_similarity_transform(src, dst)
         if transform is None:
             continue
-        node_map = map_template_nodes_to_candidate(template_graph, transform, candidate_graph)
+        node_map = map_template_nodes_to_candidate(
+            template_graph, transform, candidate_graph, candidate_tree=candidate_tree,
+        )
         score = score_match(
             template_graph, template_critical, transform, candidate_graph, node_map,
             mse_weight=mse_weight, edge_weight=edge_weight, edge_degree_blend=edge_degree_blend,
         )
+        full_correspondence = tuple(node_map[a] for a in anchor_indices)
         results.append(CandidateMatch(
-            correspondence=corr, anchor_indices=anchor_indices,
+            correspondence=full_correspondence, anchor_indices=anchor_indices,
             transform=transform, node_map=node_map, score=score,
         ))
     return results

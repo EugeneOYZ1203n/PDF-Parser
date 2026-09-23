@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from rastervec.Evaluation.CadFont.character_bank import CharacterTemplate
 from rastervec.Evaluation.CadFont.graph import CharGraph
 from rastervec.Evaluation.CadFont.matching import (
@@ -8,6 +10,7 @@ from rastervec.Evaluation.CadFont.matching import (
     fit_similarity_transform,
     map_template_nodes_to_candidate,
     match_template_against_candidate,
+    passes_size_prefilter,
     score_match,
 )
 
@@ -247,10 +250,96 @@ def test_match_template_against_candidate_finds_best_at_translated_copy():
 
     matches = match_template_against_candidate(template, candidate_graph)
 
-    assert len(matches) == 6  # 1 (slot0) * 3 (slot1) * 2 (slot2 remaining)
+    # Only the first 2 anchors (indices 1, 0 -- degrees 3, 1) are searched
+    # combinatorially now; the 3rd (index 3) is derived from the full node
+    # mapping instead. slot0 (degree>=3): 1 candidate; slot1 (degree>=1):
+    # 3 remaining candidates -> 1 * 3 = 3 hypotheses (down from the old
+    # 3-slot search's 6).
+    assert len(matches) == 3
     best = min(matches, key=lambda m: m.score.total)
     assert best.score.total < 1e-6
     assert abs(best.transform.scale - 1.0) < 1e-6
     assert abs(best.transform.rotation_deg) < 1e-6
     assert abs(best.transform.translation[0] - 100.0) < 1e-6
     assert abs(best.transform.translation[1] - 100.0) < 1e-6
+    # the 3rd anchor's derived correspondence is still correctly recovered
+    assert best.correspondence == (1, 0, 3)
+
+
+def test_match_template_against_candidate_correspondence_count_scales_quadratically():
+    # A template with 5 equally-eligible, equal-degree critical points (a
+    # 5-pointed star's hub-free rim, all degree 2) against a candidate with
+    # the same structure -- every node qualifies for both search slots, so
+    # the correspondence count should be exactly n*(n-1) = 5*4 = 20, not
+    # n*(n-1)*(n-2) = 60 (the old 3-slot count) or n**3 = 125.
+    def _ring_graph(offset=0.0):
+        n = 5
+        nodes = [(math.cos(2 * math.pi * i / n), math.sin(2 * math.pi * i / n) + offset) for i in range(n)]
+        edges = [(i, (i + 1) % n) for i in range(n)]
+        return CharGraph(nodes=nodes, edges=edges, original_vertex_indices=frozenset(range(n)))
+
+    template_graph = _ring_graph()
+    assert template_graph.degrees() == [2, 2, 2, 2, 2]
+    template = CharacterTemplate(
+        label_id="ring", text="O", baseline_id="b1",
+        graph=template_graph, complexity=1.0, anchor_node_indices=(0, 1, 2),
+    )
+    candidate_graph = _ring_graph(offset=10.0)
+
+    matches = match_template_against_candidate(template, candidate_graph)
+
+    assert len(matches) == 20
+
+
+# ---------------------------------------------------------------------------
+# passes_size_prefilter
+# ---------------------------------------------------------------------------
+
+
+def _t_shape_template_graph():
+    return CharGraph(
+        nodes=[(0.0, 0.0), (5.0, 0.0), (10.0, 0.0), (5.0, 5.0)],
+        edges=[(0, 1), (1, 2), (1, 3)],
+        original_vertex_indices=frozenset({0, 1, 2, 3}),
+    )
+
+
+def test_passes_size_prefilter_true_when_candidate_meets_all_three():
+    template_graph = _t_shape_template_graph()
+    candidate_graph = CharGraph(nodes=list(template_graph.nodes), edges=list(template_graph.edges))
+    assert passes_size_prefilter(template_graph, candidate_graph) is True
+
+
+def test_passes_size_prefilter_false_on_insufficient_max_degree():
+    template_graph = _t_shape_template_graph()  # max_degree 3
+    candidate_graph = CharGraph(
+        nodes=[(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0), (4.0, 0.0)],
+        edges=[(0, 1), (1, 2), (2, 3), (3, 4)],  # a plain chain, max_degree 2
+    )
+    assert passes_size_prefilter(template_graph, candidate_graph) is False
+
+
+def test_passes_size_prefilter_false_on_insufficient_num_nodes():
+    template_graph = _t_shape_template_graph()  # 4 nodes
+    candidate_graph = CharGraph(nodes=[(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)], edges=[(0, 1), (1, 2)])
+    assert passes_size_prefilter(template_graph, candidate_graph) is False
+
+
+def test_passes_size_prefilter_false_on_insufficient_num_edges():
+    template_graph = _t_shape_template_graph()  # 3 edges
+    candidate_graph = CharGraph(
+        nodes=[(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
+        edges=[(0, 1), (1, 2)],  # only 2 edges, though node/degree counts pass
+    )
+    assert passes_size_prefilter(template_graph, candidate_graph) is False
+
+
+def test_match_template_against_candidate_short_circuits_on_prefilter_failure():
+    template_graph = _t_shape_template_graph()
+    template = CharacterTemplate(
+        label_id="t1", text="T", baseline_id="b1",
+        graph=template_graph, complexity=1.0, anchor_node_indices=(1, 0, 3),
+    )
+    too_small_candidate = CharGraph(nodes=[(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)], edges=[(0, 1), (1, 2)])
+
+    assert match_template_against_candidate(template, too_small_candidate) == []
