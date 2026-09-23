@@ -346,20 +346,58 @@ def _synthesize_baseline_anchor(anchor0: Point, anchor1: Point) -> Point | None:
     return ccw[0] if ccw else sorted(tied)[0]
 
 
-def select_anchor_points(graph: CharGraph, max_anchors: int = 3) -> tuple[CharGraph, tuple[int, ...]]:
-    """Greedy anchor selection: sort *eligible* node indices by degree
-    descending (stable tie-break by original index). The first 2 picked
-    nodes are always anchors (any 2 points are trivially non-collinear); a
-    3rd candidate is added only if it is NOT collinear with the 2
-    already-chosen anchors. Stops at `max_anchors` or when eligible nodes
-    are exhausted.
+def critical_point_indices(graph: CharGraph) -> frozenset[int]:
+    """A graph's "critical points" -- `original_vertex_indices | {degree >
+    2 nodes}` (a real original vertex or a genuine junction/crossing, never
+    a synthetic curve-interior point that merely survived simplification).
+    When `graph.original_vertex_indices` is empty (a hand-built graph with
+    no such info, e.g. many unit tests), every node counts as critical --
+    the same fallback `select_anchor_points` has always used.
 
-    Eligible = `graph.original_vertex_indices | {degree > 2 nodes}` -- a
-    real original vertex or a genuine junction/crossing, never a synthetic
-    curve-interior point that merely survived simplification. When
-    `graph.original_vertex_indices` is empty (a hand-built graph with no
-    such info, e.g. in tests), every node is eligible -- today's original,
-    unrestricted behavior.
+    Shared by `select_anchor_points` (the template-side anchor search pool,
+    below) and `Evaluation/CadFont/matching.py` (the candidate-side
+    critical-point set -- a candidate graph never goes through anchor
+    selection at all, only this). A graph's own synthesized anchor, if any
+    (`graph.synthetic_anchor_indices`), is deliberately NOT included here
+    -- it isn't an "eligible" node by the rule above, it's a point
+    `select_anchor_points` added itself; a caller wanting the full
+    critical-point set of a template graph should union this with
+    `graph.synthetic_anchor_indices`."""
+    if graph.original_vertex_indices:
+        eligible = set(graph.original_vertex_indices)
+        eligible.update(i for i, d in enumerate(graph.degrees()) if d > 2)
+        return frozenset(eligible)
+    return frozenset(range(len(graph.nodes)))
+
+
+def _centroid(nodes: list[Point], indices: set[int]) -> Point:
+    cx = sum(nodes[i][0] for i in indices) / len(indices)
+    cy = sum(nodes[i][1] for i in indices) / len(indices)
+    return (cx, cy)
+
+
+def select_anchor_points(graph: CharGraph, max_anchors: int = 3) -> tuple[CharGraph, tuple[int, ...]]:
+    """Template-only anchor selection -- candidate graphs never call this
+    (see `matching.py`'s module docstring: a candidate graph has no
+    anchors at all, only critical points, via `critical_point_indices`
+    directly). Greedy, 3-stage, over `critical_point_indices(graph)`:
+
+    Anchor 1: the eligible node with max degree; ties broken by distance
+    from the eligible/critical point set's own centroid (farther wins --
+    a point far from the crowd is a more useful geometric reference);
+    remaining ties broken deterministically by node index.
+
+    Anchor 2: from the remaining eligible nodes, whichever is farthest
+    from anchor 1 -- degree is no longer a factor once anchor 1 is picked.
+
+    Anchor 3: from the remaining eligible nodes, whichever maximizes the
+    triangle area of (anchor1, anchor2, candidate). This replaces the old
+    separate collinearity rejection check: the argmax-area candidate is
+    only ever degenerate (collinear with anchor1/anchor2) when *every*
+    remaining eligible point is collinear with them, in which case no 3rd
+    anchor is added here and control falls through to the existing
+    synthetic-baseline-anchor fallback below, exactly as when only 2
+    eligible anchors exist.
 
     In restricted mode (`graph.original_vertex_indices` non-empty), when
     exactly 2 eligible anchors are found and a 3rd is wanted, one synthetic
@@ -371,23 +409,35 @@ def select_anchor_points(graph: CharGraph, max_anchors: int = 3) -> tuple[CharGr
     (returns however many are found). In unrestricted mode, no synthesis
     ever happens and the input graph is returned unchanged -- an exact
     match for this function's pre-restriction behavior."""
-    if graph.original_vertex_indices:
-        eligible = set(graph.original_vertex_indices)
-        eligible.update(i for i, d in enumerate(graph.degrees()) if d > 2)
-    else:
-        eligible = set(range(len(graph.nodes)))
+    eligible = set(critical_point_indices(graph))
+    if not eligible or max_anchors < 1:
+        return graph, ()
 
     degrees = graph.degrees()
-    order = sorted(eligible, key=lambda i: (-degrees[i], i))
+    cx, cy = _centroid(graph.nodes, eligible)
 
-    anchors: list[int] = []
-    for idx in order:
-        if len(anchors) < 2:
-            anchors.append(idx)
-        elif not _collinear(graph.nodes[anchors[0]], graph.nodes[anchors[1]], graph.nodes[idx]):
-            anchors.append(idx)
-        if len(anchors) >= max_anchors:
-            break
+    def dist_from_centroid(i: int) -> float:
+        return math.hypot(graph.nodes[i][0] - cx, graph.nodes[i][1] - cy)
+
+    anchor1 = min(eligible, key=lambda i: (-degrees[i], -dist_from_centroid(i), i))
+    anchors = [anchor1]
+    remaining = eligible - {anchor1}
+
+    if remaining and max_anchors > 1:
+        p1 = graph.nodes[anchor1]
+
+        def dist_to_p1(i: int) -> float:
+            return math.hypot(graph.nodes[i][0] - p1[0], graph.nodes[i][1] - p1[1])
+
+        anchor2 = min(remaining, key=lambda i: (-dist_to_p1(i), i))
+        anchors.append(anchor2)
+        remaining = remaining - {anchor2}
+
+    if len(anchors) == 2 and remaining and max_anchors > 2:
+        p1, p2 = graph.nodes[anchors[0]], graph.nodes[anchors[1]]
+        anchor3 = min(remaining, key=lambda i: (-_triangle_area(p1, p2, graph.nodes[i]), i))
+        if not _collinear(p1, p2, graph.nodes[anchor3]):
+            anchors.append(anchor3)
 
     if graph.original_vertex_indices and len(anchors) == 2 and max_anchors > 2:
         new_point = _synthesize_baseline_anchor(graph.nodes[anchors[0]], graph.nodes[anchors[1]])

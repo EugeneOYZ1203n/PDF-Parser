@@ -153,6 +153,37 @@ def bbox_iou(a: BBox, b: BBox) -> float:
     return intersection / union if union > 0 else 0.0
 
 
+def clip_line_to_bbox(origin: Point, direction: Point, bbox: BBox) -> tuple[Point, Point] | None:
+    """Clips the infinite line `origin + t * direction` to `bbox`
+    (Liang-Barsky per-axis t-narrowing, no `[0, 1]` clamp since the line is
+    infinite) -- returns the line's two boundary intersection points, or
+    `None` if it misses `bbox` entirely (parallel to and outside one axis,
+    or the narrowed t-range is empty).
+
+    A fitz-free port of `scripts/label/CAD_font_label.py`'s own private
+    `_clip_line_to_page_bbox` (same algorithm, same use: drawing a
+    baseline/direction line across a bbox's full extent) -- pulled in here
+    so a commons-only package (e.g. `Evaluation/CadFont`) can draw a
+    full-extent line without importing a Tkinter labelling-tool module.
+    """
+    ox, oy = origin
+    dx, dy = direction
+    x0, y0, x1, y1 = bbox
+    t_min, t_max = -1e9, 1e9
+    for d, o, lo, hi in ((dx, ox, x0, x1), (dy, oy, y0, y1)):
+        if abs(d) < 1e-9:
+            if not (lo <= o <= hi):
+                return None
+            continue
+        t_lo, t_hi = (lo - o) / d, (hi - o) / d
+        if t_lo > t_hi:
+            t_lo, t_hi = t_hi, t_lo
+        t_min, t_max = max(t_min, t_lo), min(t_max, t_hi)
+    if t_min > t_max:
+        return None
+    return (ox + dx * t_min, oy + dy * t_min), (ox + dx * t_max, oy + dy * t_max)
+
+
 def make_oriented_quad(bbox: BBox, dx: float, dy: float) -> Quad:
     """Build a quad around `bbox`, oriented along the text direction
     `(dx, dy)`, returned as ``(ul, ur, lr, ll)`` `(x, y)` tuples.

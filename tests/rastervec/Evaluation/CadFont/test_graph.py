@@ -5,6 +5,7 @@ from rastervec.Evaluation.CadFont.graph import (
     CharGraph,
     build_char_graph,
     complexity,
+    critical_point_indices,
     select_anchor_points,
 )
 
@@ -35,10 +36,12 @@ def test_h_shape_complexity_is_nodes_times_edges_times_max_degree():
 
 
 def test_select_anchor_points_worked_example_matches_spec():
-    # degrees [4, 2, 2, 1, 1] -- node0 highest degree; node2 sits collinear
-    # with node0/node1 (all three on the x-axis) so it must be rejected as
-    # the 3rd anchor in favor of node3 (off-axis), reproducing the spec's
-    # own worked example: "1st, 2nd and 4th points" selected as anchors.
+    # degrees [4, 2, 2, 1, 1] -- node0 is the unique max-degree node, so it
+    # wins anchor 1 outright. Anchor 2 is then chosen purely by distance
+    # from anchor 1 (degree no longer matters): node3 (5,5) is farthest
+    # (~7.07) vs node1 (1.0), node2 (2.0), node4 (3.0). Anchor 3 maximizes
+    # triangle area with (node0, node3) among the remaining {1, 2, 4}:
+    # node4 (3,0) gives area 7.5, beating node2's 5.0 and node1's 2.5.
     # No original_vertex_indices set -> unrestricted (today's) behavior.
     nodes = [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (5.0, 5.0), (3.0, 0.0)]
     edges = [(0, 1), (0, 2), (0, 3), (0, 4), (1, 2)]
@@ -47,7 +50,70 @@ def test_select_anchor_points_worked_example_matches_spec():
 
     _, anchors = select_anchor_points(g)
 
-    assert anchors == (0, 1, 3)
+    assert anchors == (0, 3, 4)
+
+
+def test_select_anchor_points_anchor1_tiebreak_by_centroid_distance():
+    # Two nodes tie for max degree (3 each); node2 is farther from the
+    # eligible-set centroid than node1, so it must win anchor 1.
+    nodes = [(0.0, 0.0), (0.0, 1.0), (100.0, 1.0), (0.0, -1.0), (1.0, 1.0), (-1.0, -1.0)]
+    edges = [(1, 0), (1, 4), (1, 5), (2, 0), (2, 3), (2, 5)]
+    g = CharGraph(nodes=nodes, edges=edges)
+    assert g.degree(1) == 3
+    assert g.degree(2) == 3
+
+    _, anchors = select_anchor_points(g, max_anchors=1)
+
+    assert anchors == (2,)
+
+
+def test_select_anchor_points_anchor2_ignores_degree_prefers_distance():
+    # node0 is the unique max-degree node (3) -> anchor 1. Among the
+    # remaining nodes, node1 and node3 both have higher degree (2) than
+    # node2 (1), but node2 is by far the farthest from anchor1 -- anchor 2
+    # must be chosen by pure distance, ignoring degree entirely.
+    nodes = [(0.0, 0.0), (1.0, 0.0), (0.0, 50.0), (2.0, 0.0)]
+    edges = [(0, 1), (0, 2), (0, 3), (1, 3)]
+    g = CharGraph(nodes=nodes, edges=edges)
+    assert g.degree(0) == 3
+    assert g.degree(1) == 2 and g.degree(3) == 2
+    assert g.degree(2) == 1
+
+    _, anchors = select_anchor_points(g, max_anchors=2)
+
+    assert anchors[0] == 0
+    assert anchors[1] == 2
+
+
+def test_select_anchor_points_anchor3_maximizes_triangle_area():
+    # anchor1=node0 (unique max degree 3), anchor2=node1 (farthest from
+    # node0, at distance 10 vs ~5.02/~7.07 for nodes 2/3). Among the
+    # remaining candidates for anchor 3, node2 sits nearly on the 0-1 line
+    # (small triangle area 2.5) while node3 is well off-axis (area 25) --
+    # node3 must win even though it has lower degree (1) than node2 (2).
+    nodes = [(0.0, 0.0), (10.0, 0.0), (5.0, 0.5), (5.0, 5.0)]
+    edges = [(0, 1), (0, 2), (0, 3), (1, 2)]
+    g = CharGraph(nodes=nodes, edges=edges)
+    assert g.degree(0) == 3
+    assert g.degree(2) == 2 and g.degree(3) == 1
+
+    _, anchors = select_anchor_points(g, max_anchors=3)
+
+    assert anchors[:2] == (0, 1)
+    assert anchors[2] == 3
+
+
+def test_critical_point_indices_restricted_mode():
+    nodes = [(0.0, 0.0), (10.0, 0.0), (5.0, 0.5), (5.0, 5.0)]
+    edges = [(0, 2), (1, 2), (2, 3)]
+    g = CharGraph(nodes=nodes, edges=edges, original_vertex_indices=frozenset({0, 1, 3}))
+    assert g.degree(2) == 3
+    assert critical_point_indices(g) == frozenset({0, 1, 2, 3})
+
+
+def test_critical_point_indices_unrestricted_mode_is_every_node():
+    g = CharGraph(nodes=[(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)], edges=[(0, 1), (1, 2)])
+    assert critical_point_indices(g) == frozenset({0, 1, 2})
 
 
 def test_select_anchor_points_two_node_graph_returns_two_anchors():
