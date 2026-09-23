@@ -23,11 +23,9 @@ from rastervec.commons.renderer import render_boxes_pdf, render_reconstructed_pd
 from scripts.debug_image_savers import (
     _save_fastintopaddle_detect_images,
     _save_fastintopaddle_recog_images,
-    _save_fastintopaddle_tile_images,
     _save_legacyrecreation_ocr_images,
     _save_vectorclassification_detect_images,
     _save_vectorclassification_recog_images,
-    _save_vectorclassification_tile_images,
 )
 from scripts.report_config import NEW_STEP_NAMES, _layer_slug
 
@@ -58,14 +56,16 @@ _ARTIFACTS: list[tuple[str, str, str | None, str]] = [
 ]
 
 # The new `core.pipeline` engine's artifact set -- deliberately small and
-# generic (see `commons/renderer/stages.py`'s "phase1"/"phase2"/"final"
-# branches): no per-backend stats files (stats_key=None throughout), no
-# partial-run support (the new orchestrator always runs phase1->p2->p3 in
-# full; `final_stage` here only trims which of these 4 rows get rendered).
+# generic (see `commons/renderer/stages.py`'s "phase2" branch): no
+# per-backend stats files (stats_key=None throughout), no partial-run
+# support (the new orchestrator always runs phase1->p2->p3 in full;
+# `final_stage` here only trims which of these rows get rendered).
+# `phase1` (native words + raw vectors) is left out -- the inspector shows
+# exactly that for the same input PDF -- and so is `final` (final vectors =
+# the P3 backend's own `drawing` debug layer, final text = native + that
+# backend's own `ocr` layer).
 _NEW_ARTIFACTS: list[tuple[str, str, str | None, str]] = [
-    ("phase1", "phase1", None, "phase1"),
     ("phase2", "phase2", None, "phase2"),
-    ("final", "final", None, "phase3"),
     ("reconstructed", "reconstructed", None, "phase3"),
 ]
 
@@ -106,10 +106,15 @@ class _LayerWriter:
     each backend's own `on_debug_layer` streaming (see `core/registry.py`),
     a debug layer's underlying heavy source data (render crops, masks) is
     never held any longer than that one page/step's own rendering needs
-    it."""
+    it.
+
+    A layer whose every page came out blank (no content stream at all --
+    e.g. `phase2` under the `Stub` P2 backend, or a `_blank` fallback) is
+    never written and never listed in `filenames()`."""
 
     def __init__(self) -> None:
         self._docs: dict[str, "fitz.Document"] = {}
+        self._has_content: set[str] = set()
         self.meta: dict[str, dict] = {}
 
     def add(self, fname: str, meta: dict, pdf_bytes: bytes) -> None:
@@ -119,19 +124,30 @@ class _LayerWriter:
             self._docs[fname] = doc
         src = fitz.open("pdf", pdf_bytes)
         try:
+            if fname not in self._has_content and _has_content(src):
+                self._has_content.add(fname)
             doc.insert_pdf(src)
         finally:
             src.close()
         self.meta.setdefault(fname, meta)
 
     def filenames(self) -> list[str]:
-        return list(self._docs)
+        return [f for f in self._docs if f in self._has_content]
 
     def finalize(self, doc_dir: Path) -> None:
         for fname, doc in self._docs.items():
-            doc.save(str(doc_dir / fname))
+            if fname in self._has_content:
+                doc.save(str(doc_dir / fname))
             doc.close()
         self._docs.clear()
+
+
+def _has_content(doc: "fitz.Document") -> bool:
+    """True if any page draws anything (a non-empty content stream)."""
+    return any(
+        any((doc.xref_stream(x) or b"").strip() for x in page.get_contents())
+        for page in doc
+    )
 
 
 def _write_hyperparams(path: Path, config: "ReportConfig", variant, config_path: Path) -> None:
@@ -172,15 +188,16 @@ def _accumulate_page(
     res, page_index: int, active: list[tuple],
     writer: _LayerWriter,
     stats_pages: dict[str, list[tuple[int, dict]]],
-    detect_dir: Path, recog_dir: Path, fast_tile_dir: Path, ocr_dir: Path,
-    *, is_legacy: bool = False, p3: str = "",
+    detect_dir: Path, recog_dir: Path, ocr_dir: Path,
+    *, is_legacy: bool = False, p3: str = "", debug_images: bool = True,
 ) -> None:
-    """Render every active stage's fixed layer PDFs (phase1/phase2/final/
-    reconstructed -- these need the whole, finished `res`, so they're
+    """Render every active stage's fixed layer PDFs (phase2/reconstructed
+    -- these need the whole, finished `res`, so they're
     necessarily rendered post-hoc rather than streamed) + numeric stats for
-    one page, writing each layer into `writer` immediately; also dump each
+    one page, writing each layer into `writer` immediately; also (unless
+    `debug_images` is False -- `ReportConfig.debug_images`) dump each
     backend's own pre-OCR debug images (what PaddleOCR's own text detector /
-    recognizer / FAST saw), reading them from `res.extra["p3_debug"]` --
+    recognizer saw), reading them from `res.extra["p3_debug"]` --
     each P3 backend's own folder set differs, see
     `generate_pipeline_report.py`'s module docstring.
     Per-backend debug *layers* (the heavier, genuinely streamable PDF
@@ -199,15 +216,13 @@ def _accumulate_page(
             stats_pages[stem].append(
                 (page_index, stage_stats.stats_for_stage(res, stats_key))
             )
-    if is_legacy:
+    if is_legacy or not debug_images:
         return
     p3_debug = (res.extra or {}).get("p3_debug") or {}
     if p3 == "FastIntoPaddle":
-        _save_fastintopaddle_tile_images(p3_debug, fast_tile_dir, page_index)
         _save_fastintopaddle_detect_images(p3_debug, detect_dir, page_index)
         _save_fastintopaddle_recog_images(p3_debug, recog_dir, page_index)
     elif p3 == "VectorClassification":
-        _save_vectorclassification_tile_images(p3_debug, fast_tile_dir, page_index)
         _save_vectorclassification_detect_images(p3_debug, detect_dir, page_index)
         _save_vectorclassification_recog_images(p3_debug, recog_dir, page_index)
     elif p3 == "LegacyRecreation":

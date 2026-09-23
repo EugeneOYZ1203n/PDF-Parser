@@ -21,9 +21,7 @@ class FastPageResult:
     cluster's own index into that step's `clusters` input list. `all_tiles`/
     `skipped_tiles`/`tile_count`/`tile_seconds` are the real per-tile FAST
     detector geometry (`verbose`-only), mirroring `FastIntoPaddle/
-    steps.py::FastPageResult` -- used by `scripts/debug_image_savers.py`'s
-    `fast_tile_images` dumper to crop the actual detector tile grid instead
-    of falling back to cluster bboxes."""
+    steps.py::FastPageResult`."""
 
     page_image: object
     page_mask: "np.ndarray | None"

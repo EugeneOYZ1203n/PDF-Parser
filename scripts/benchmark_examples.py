@@ -27,7 +27,7 @@ from scripts.benchmark_run_loading import _RASTER_TEXT_TYPES, RunEntry
 
 _LOG = get_logger("pipeline_report_benchmark")
 
-_EXAMPLE_CAP = 5
+_EXAMPLE_CAP = 3
 _CHAR_EXAMPLE_CAP = 2
 # Per-char error kinds that get example crops (`detected`/`inserted` don't).
 CHAR_EXAMPLE_KINDS = ("dropped", "unreached", "misclassified")

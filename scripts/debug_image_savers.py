@@ -151,54 +151,6 @@ def _save_vectorclassification_detect_images(p3_debug: dict, folder: Path, page_
     return n
 
 
-def _save_fastintopaddle_tile_images(p3_debug: dict, folder: Path, page_index: int) -> int:
-    """One PNG per FAST tile -- the exact crop of the whole-page FAST render
-    (`FastPageResult.page_image`, which is `debug_image_scale`-downsampled
-    from the full-res image `FastDetector.detect`/`_detect_job` actually
-    saw for that tile) matching that tile's page-space rect (`all_tiles`).
-    Reads `p3_debug["fast"]`."""
-    fr = p3_debug.get("fast")
-    tiles = getattr(fr, "all_tiles", None) if fr is not None else None
-    if fr is None or fr.page_image is None or not tiles:
-        return 0
-    from rastervec.P3_Vector_Parsing.FastIntoPaddle.config import FAST_PAGE_RENDER_DPI, FAST_TILE_SCALE_FACTOR
-    from rastervec.commons.helpers.geometry import PDF_POINTS_PER_INCH
-
-    debug_scale = getattr(fr, "debug_image_scale", 1.0)
-    zoom = (FAST_PAGE_RENDER_DPI * FAST_TILE_SCALE_FACTOR) / PDF_POINTS_PER_INCH * debug_scale
-    folder.mkdir(parents=True, exist_ok=True)
-    n = 0
-    for i, rect in enumerate(tiles):
-        x0, y0, x1, y1 = (c * zoom for c in rect)
-        crop = fr.page_image.crop((int(x0), int(y0), int(x1), int(y1)))
-        crop.save(folder / f"p{page_index}_tile_{i:03d}.png")
-        n += 1
-    return n
-
-
-def _save_vectorclassification_tile_images(p3_debug: dict, folder: Path, page_index: int) -> int:
-    """One PNG per FAST detector tile -- the exact crop of the whole-page
-    FAST render (`FastPageResult.page_image`) matching that tile's
-    page-space rect (`all_tiles`), same pattern as
-    `_save_fastintopaddle_tile_images`. Reads `p3_debug["fast_result"]`."""
-    fr = p3_debug.get("fast_result")
-    tiles = getattr(fr, "all_tiles", None) if fr is not None else None
-    if fr is None or fr.page_image is None or not tiles:
-        return 0
-    from rastervec.P3_Vector_Parsing.VectorClassification.config import FAST_PAGE_RENDER_DPI, FAST_TILE_SCALE_FACTOR
-    from rastervec.commons.helpers.geometry import PDF_POINTS_PER_INCH
-
-    zoom = (FAST_PAGE_RENDER_DPI * FAST_TILE_SCALE_FACTOR) / PDF_POINTS_PER_INCH
-    folder.mkdir(parents=True, exist_ok=True)
-    n = 0
-    for i, rect in enumerate(tiles):
-        x0, y0, x1, y1 = (c * zoom for c in rect)
-        crop = fr.page_image.crop((int(x0), int(y0), int(x1), int(y1)))
-        crop.save(folder / f"p{page_index}_tile_{i:03d}.png")
-        n += 1
-    return n
-
-
 def _save_legacyrecreation_ocr_images(p3_debug: dict, folder: Path, page_index: int) -> int:
     """One PNG per word group's own padded/DPI-boosted OCR render -- exactly
     what PaddleOCR's (recognition-only) engine saw, recognised text in the

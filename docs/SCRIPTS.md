@@ -35,22 +35,23 @@ viewer toggles it by loading/not-loading the file), `dump.json` (reloadable
 viewer) and `config_and_hyperparameters.txt`.
 
 For `pipeline: "current"` (the default, pluggable `core.pipeline` engine):
-the fixed `phase1__*.pdf` / `phase2__*.pdf` / `final__*.pdf` /
-`reconstructed__*.pdf` layers, **plus every debug layer the active `p2`/`p3`
-backend's own `render_debug` produces** (e.g. `p3: "VectorClassification"`
-emits one kept/dropped layer per classification step plus
-fast/segment/ocr/drawing; `p3: "FastIntoPaddle"` emits one layer per named
+the fixed `phase2__*.pdf` / `reconstructed__*.pdf` layers (no `phase1`
+or `final` layers -- the inspector shows native words + raw vectors, and
+the backend's own `drawing`/`ocr` layers show the final output), **plus
+every debug layer the active `p2`/`p3` backend's own `render_debug`
+produces** (e.g. `p3: "VectorClassification"` emits one `kept bbox` layer
+per classification step that changed the kept set, plus
+fast/group_words/ocr/drawing; `p3: "FastIntoPaddle"` emits one layer per named
 step; `p2: "Junction"` emits its own raster-stage layers) -- see
 `CLAUDE.md`'s `P2_Raster_To_Vec/`/`P3_Vector_Parsing/` bullets for what each
-backend actually renders. Each `p3` backend also gets its own distinct
-pre-OCR debug image folder set, read from `res.extra["p3_debug"]`:
-`p3: "FastIntoPaddle"` writes `paddle_detect_images/` + `paddle_recog_images/`
-+ `fast_tile_images/` (what PaddleOCR's detector/recognizer and FAST tiles
-actually saw); `p3: "VectorClassification"` (no detect stage) writes
-`fast_tile_images/` (per-cluster crops of the whole-page FAST render, not a
-literal tile grid) + `paddle_recog_images/` (post-dedup representative
-segments); `p3: "LegacyRecreation"` (no detect, no FAST stage) writes a
-single `paddle_ocr_images/` folder (one padded/DPI-boosted render per word
+backend actually renders. A layer that came out blank on every page (e.g.
+`phase2` under `p2: "Stub"`) is not written at all. Unless the config sets
+`debug_images: false`, each `p3` backend also gets its own distinct pre-OCR
+debug image folder set, read from `res.extra["p3_debug"]`:
+`p3: "FastIntoPaddle"` and `p3: "VectorClassification"` write
+`paddle_detect_images/` + `paddle_recog_images/` (what PaddleOCR's
+detector/recognizer actually saw); `p3: "LegacyRecreation"` writes a single
+`paddle_ocr_images/` folder (one padded/DPI-boosted render per word
 group). There are no per-stage `.txt` stats for the `current` engine --
 `dump.json` is the reloadable source of truth. `pipeline: "legacy"` still
 only ever emits the single `reconstructed` row.
@@ -80,6 +81,7 @@ one of `input_dir` / `input_files`):
 | `iou_edge_min` | `MetricConfig.iou_edge_min` for the benchmark overlays (default 0.1) |
 | `dpi` | render dpi (default 300) |
 | `output_root` | default `outputs/pipeline_report/` |
+| `debug_images` | write the per-page `paddle_*_images/` PNG crops (default `true`) |
 
 Output: `outputs/pipeline_report/<ts>__<config-stem>/<pdf-stem>/`. The run's
 source config path is also recorded in `config_and_hyperparameters.txt`.

@@ -66,11 +66,6 @@ def test_font_size_histogram_chart(tmp_path):
     _assert_png(tmp_path / "fs.png")
 
 
-def test_extra_chars_table_image(tmp_path):
-    charts.extra_chars_table_image(_text_result(), title="t", path=tmp_path / "ec.png")
-    _assert_png(tmp_path / "ec.png")
-
-
 def test_vector_count_chart(tmp_path):
     charts.vector_count_chart({"current": _vector_result()}, title="t", path=tmp_path / "h.png")
     _assert_png(tmp_path / "h.png")

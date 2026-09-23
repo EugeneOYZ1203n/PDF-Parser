@@ -243,7 +243,11 @@ def _entry_bbox(entry):
 
 
 def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
-    from rastervec.commons.renderer import render_boxes_pdf, render_vectors_pdf
+    """One `kept bbox` layer per classification step (the kept vectors
+    themselves are visible in the inspector), and only for a step whose
+    kept boxes differ from the previous step's -- a step that kept
+    everything unchanged adds no layer."""
+    from rastervec.commons.renderer import render_boxes_pdf
 
     out: "list[DebugLayer]" = []
     if cls is None or not cls.clustering:
@@ -252,6 +256,7 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
     if not steps_per_bucket:
         return out
     n_steps = len(steps_per_bucket[0])
+    prev_boxes = None
     for i in range(n_steps):
         label = steps_per_bucket[0][i].label
         kept_groups: list = []
@@ -261,11 +266,13 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
             for cat in steps[i].categories.values():
                 if cat.role == "kept":
                     kept_groups.extend(cat.groups)
+        kept_boxes = sorted(
+            tuple(b) for b in (_entry_bbox(g) for g in kept_groups if g) if b is not None
+        )
+        if kept_boxes == prev_boxes:
+            continue
+        prev_boxes = kept_boxes
         stage = f"classify_{i + 1:02d}_{_slug(label)}"
-        out.append((stage, "kept", _C_KEPT, render_vectors_pdf(
-            page_meta, _flatten_entries(kept_groups), color_of=lambda _v: _hex_rgb(_C_KEPT),
-        )))
-        kept_boxes = [b for b in (_entry_bbox(g) for g in kept_groups if g) if b is not None]
         out.append((stage, "kept bbox", _C_KEPT, render_boxes_pdf(
             page_meta, [(b, _hex_rgb(_C_KEPT)) for b in kept_boxes],
         )))

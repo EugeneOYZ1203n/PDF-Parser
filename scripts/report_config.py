@@ -58,6 +58,10 @@ class ReportConfig(BaseModel):
     iou_edge_min: float = metrics.MetricConfig().iou_edge_min
     dpi: int = 300
     output_root: Path | None = None
+    # Per-page PNG dumps of what PaddleOCR's detector/recognizer saw
+    # (`paddle_detect_images/`, `paddle_recog_images/`, `paddle_ocr_images/`)
+    # -- one file per cluster / word crop, so the bulk of a report's files.
+    debug_images: bool = True
 
     @field_validator("p2")
     @classmethod

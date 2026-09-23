@@ -385,7 +385,8 @@ generic parallel-pool mechanics), never phase-specific business logic.
     `paddle_engine.py::PaddleRecBackend.recognize_crops`. No Radon deskew and no whole-page
     similarity dedup (both removed — every word group gets its own independent detect+recognize
     pass). `parse.py::render_debug` (`P3_RENDER_DEBUG["VectorClassification"]`) renders one
-    kept/dropped layer per classification step plus fast/group_words/ocr/drawing layers, from
+    `kept bbox` layer per classification step whose kept boxes differ from the previous step's,
+    plus fast/group_words/ocr/drawing layers, from
     whatever `parse()` stashed into `debug_out`.
   - **`FastIntoPaddle/`** — the pipeline that had been `rastervec/pipelines/current.py` before
     the phase split, now self-contained here. `parse.py` combines `vectors_p1 + vectors_p2`, then
@@ -935,27 +936,32 @@ generic parallel-pool mechanics), never phase-specific business logic.
   layer, file, color}` — drives the viewer). Each layer file is written incrementally by a small
   `_LayerWriter` (one `fitz.Document` per layer filename, kept open across that PDF's page loop):
   every rendered page's bytes are inserted and dropped immediately rather than accumulated in a
-  Python list and merged in one pass at the end. For `pipeline: "current"`: the fixed
-  `phase1__*.pdf`/`phase2__*.pdf`/`final__*.pdf`/`reconstructed__*.pdf` layers (see
+  Python list and merged in one pass at the end; a layer blank on every page (no content
+  stream — e.g. `phase2` under `p2: "Stub"`) is never written. For `pipeline: "current"`: the
+  fixed `phase2__*.pdf`/`reconstructed__*.pdf` layers (no `phase1`/`final` — the inspector
+  already shows native words + raw vectors, and each backend's own `drawing`/`ocr` layers show
+  the final output; see
   `commons/renderer/stages.py` — these necessarily render post-hoc, from the whole finished
   `PipelineResult`), **plus every backend-specific debug layer** each active P2/P3 backend
   produces — streamed straight into the writer via `on_debug_layer` (`_debug_layer_sink`), passed
   into `run_pipeline` itself, so each layer reaches disk the moment that backend renders it rather
   than only after the whole page's pipeline run finishes (e.g. `VectorClassification` emits one
-  kept/dropped layer per classification step plus fast/segment/ocr/drawing layers,
+  `kept bbox` layer per classification step that changed the kept set plus
+  fast/group_words/ocr/drawing layers,
   `FastIntoPaddle` emits one layer per named step, `Junction` emits its own raster-stage layers —
   see the `P2_Raster_To_Vec/`/`P3_Vector_Parsing/` bullets above for what each backend renders,
   and `core/registry.py`'s docstring for the streaming/`on_debug_layer` convention itself).
   There is no per-stage `.txt` stats file for the `current` engine (the old engine's
   `Evaluation/Report/stage_stats.py` numeric-stats convention doesn't generalize across backends
   with genuinely different internals) — `dump.json` is the reloadable source of truth instead.
-  `paddle_detect_images/`/`paddle_recog_images/`/`fast_tile_images/` (PNG debug crops — what
-  PaddleOCR's detector/recognizer and FAST actually saw) are populated only by backends whose own
-  verbose fields those old-engine-shaped helpers can read via `getattr(..., None)` — they no-op
-  harmlessly for backends that don't have those fields. `legacy` still only ever emits the single
+  `paddle_detect_images/`/`paddle_recog_images/`/`paddle_ocr_images/` (PNG debug crops — what
+  PaddleOCR's detector/recognizer actually saw, per-P3-backend savers in
+  `scripts/debug_image_savers.py`) are written unless the config sets `debug_images: false`
+  (`ReportConfig`, default `true`); `pipeline_report_benchmark.py` links the first 5 of each
+  folder into `report.html` in place (never copied). `legacy` still only ever emits the single
   `reconstructed` row. There is no `stop_after`/partial-run support for `pipeline: "current"` —
   `final_stage` (validated against `core.pipeline`'s short `phase1`/`phase2`/`phase3` names) only
-  trims which of the fixed 4 phase-level artifacts render, not how much of the pipeline executes,
+  trims which of the fixed phase-level artifacts render, not how much of the pipeline executes,
   and doesn't gate the per-backend debug layers at all (those always render in full).
   `scripts/pipeline_report_viewer.py` is the Tkinter counterpart: **1 or 2** per-PDF folders →
   toggleable source page + one side-by-side panel per folder, each a checkbox per layer PDF (grouped

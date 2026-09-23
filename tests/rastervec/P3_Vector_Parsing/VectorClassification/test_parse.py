@@ -99,3 +99,26 @@ def test_parse_streaming_matches_batch_render_debug(page_meta):
         assert isinstance(pdf_bytes, (bytes, bytearray))
         assert pdf_bytes[:4] == b"%PDF"
         assert hexcolor.startswith("#")
+
+
+def test_classification_layers_bbox_only_and_skip_unchanged_steps(page_meta):
+    from types import SimpleNamespace as NS
+
+    def step(label, bboxes):
+        groups = [[NS(bbox=b)] for b in bboxes]
+        return NS(label=label, categories={
+            "kept": NS(role="kept", groups=groups),
+            "dropped": NS(role="dropped", groups=[]),
+        })
+
+    a, b = (10.0, 10.0, 20.0, 20.0), (30.0, 30.0, 40.0, 40.0)
+    cls = NS(clustering={"bucket": NS(steps=[
+        step("first", [a, b]),
+        step("same", [b, a]),  # same boxes, different order -> no layer
+        step("drop b", [a]),
+    ])})
+    layers = vectorclassification._render_classification_layers(page_meta(), cls)
+    assert [(stage, label) for stage, label, _hex, _pdf in layers] == [
+        ("classify_01_first", "kept bbox"),
+        ("classify_03_drop_b", "kept bbox"),
+    ]

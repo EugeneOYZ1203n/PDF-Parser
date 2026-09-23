@@ -237,3 +237,17 @@ def test_char_order_sorts_by_error_rate():
         "C": CharStats(detected=5),
     })
     assert char_order({"r": res, "none": None}, "native_to_vector") == ["B", "A", "C", "X"]
+
+
+def test_gallery_links_run_images_in_place(tmp_path):
+    r = _make_run(tmp_path, "run1", [_A], "HELLO WORLD")
+    img_dir = r / "A" / "paddle_recog_images"
+    img_dir.mkdir()
+    (img_dir / "p0_word_000__HELLO.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    out_root = tmp_path / "out"
+    assert prb.main(["--run", str(r), "--out-root", str(out_root)]) == 0
+    run_out = next(out_root.iterdir())
+    assert not (run_out / "gallery").exists()
+    html = (run_out / "report.html").read_text(encoding="utf-8")
+    assert 'src="../../run1/A/paddle_recog_images/p0_word_000__HELLO.png"' in html
+    assert not any("extra_chars" in p.name for p in (run_out / "charts").glob("*.png"))

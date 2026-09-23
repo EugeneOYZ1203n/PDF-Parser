@@ -174,28 +174,6 @@ def font_size_histogram_chart(
     plt.close(fig)
 
 
-def extra_chars_table_image(
-    result: "TextMetricSuiteResult | None", *, title: str, path: Path, top_n: int = 20,
-) -> None:
-    """Table image of characters predicted with zero overlapping GT at all
-    across EVERY text type (`result.extra_chars`), sorted by count."""
-    fig, ax = plt.subplots(figsize=(4, 4))
-    ax.axis("off")
-    extra = result.extra_chars if result is not None else None
-    if not extra:
-        ax.text(0.5, 0.5, "(no extra predictions)", ha="center", va="center")
-    else:
-        rows = extra.most_common(top_n)
-        total = sum(extra.values())
-        cell_text = [[ch, str(c), f"{100 * c / total:.0f}%"] for ch, c in rows]
-        ax.table(cellText=cell_text, colLabels=["char", "count", "%"], loc="center", cellLoc="left")
-    ax.set_title(title, fontsize=9)
-    fig.tight_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-
-
 def timing_chart(summaries_by_run: "dict[str, dict]", *, title: str, path: Path) -> None:
     """One stacked bar per run: mean seconds per page for each leaf timing
     row (`timing.leaf_rows` -- phase3 split into its sub-steps when the

@@ -251,34 +251,6 @@ def test_save_fastintopaddle_detect_images_missing_keys_no_crash(tmp_path):
     assert not folder.exists()
 
 
-def test_save_fastintopaddle_tile_images_missing_fast_no_crash(tmp_path):
-    folder = tmp_path / "tiles"
-    assert gpr._save_fastintopaddle_tile_images({}, folder, 0) == 0
-    assert not folder.exists()
-
-
-def test_save_vectorclassification_tile_images_crops_page_image(tmp_path):
-    from PIL import Image
-    from rastervec.P3_Vector_Parsing.VectorClassification.fast_filter import FastPageResult
-
-    page_image = Image.new("RGB", (200, 200), color=(255, 255, 255))
-    fast_result = FastPageResult(
-        page_image=page_image, page_mask=None, detect_seconds=None, scores={},
-        all_tiles=[(0.0, 0.0, 10.0, 10.0)],
-    )
-    p3_debug = {"fast_result": fast_result}
-    folder = tmp_path / "tiles"
-    n = gpr._save_vectorclassification_tile_images(p3_debug, folder, page_index=0)
-    assert n == 1
-    assert len(list(folder.glob("*.png"))) == 1
-
-
-def test_save_vectorclassification_tile_images_missing_fast_no_crash(tmp_path):
-    folder = tmp_path / "tiles"
-    assert gpr._save_vectorclassification_tile_images({}, folder, 0) == 0
-    assert not folder.exists()
-
-
 def test_save_vectorclassification_detect_images_draws_quads(tmp_path):
     bgr = np.zeros((20, 20, 3), dtype=np.uint8)
     quads = [np.array([(1, 1), (10, 1), (10, 10), (1, 10)], dtype=np.float64)]
@@ -293,3 +265,45 @@ def test_save_vectorclassification_detect_images_missing_key_no_crash(tmp_path):
     folder = tmp_path / "detect"
     assert gpr._save_vectorclassification_detect_images({}, folder, 0) == 0
     assert not folder.exists()
+
+
+def test_layer_writer_skips_all_blank_layers(tmp_path):
+    from rastervec.commons.models import PageMeta
+    from rastervec.commons.renderer import render_boxes_pdf
+
+    pm = PageMeta(index=0, number=1, mediabox=(0, 0, 100, 100), rotation=0, width=100, height=100)
+    blank = render_boxes_pdf(pm, [])
+    drawn = render_boxes_pdf(pm, [((10, 10, 20, 20), (1, 0, 0))])
+    writer = gpr._LayerWriter()
+    for page_bytes in (blank, blank):
+        writer.add("empty.pdf", {"file": "empty.pdf"}, page_bytes)
+    for page_bytes in (blank, drawn):  # blank on page 0 only -> still written
+        writer.add("some.pdf", {"file": "some.pdf"}, page_bytes)
+    assert writer.filenames() == ["some.pdf"]
+    writer.finalize(tmp_path)
+    assert not (tmp_path / "empty.pdf").exists()
+    with fitz.open(str(tmp_path / "some.pdf")) as doc:
+        assert doc.page_count == 2  # page-aligned with the report's pages
+
+
+def test_new_engine_artifacts_skip_phase1_and_final():
+    variant = gpr.PipelineVariant(name="x", engine="current", p2="Stub", p3="FastIntoPaddle")
+    stems = [row[0] for row in gpr._active_artifacts(gpr.ReportConfig(), variant)]
+    assert stems == ["phase2", "reconstructed"]
+
+
+def test_debug_images_flag_default_and_off(tmp_path):
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    assert gpr.ReportConfig().debug_images is True
+    crop = np.zeros((4, 4, 3), dtype=np.uint8)
+    res = SimpleNamespace(extra={"p3_debug": {"ocr_crops": [(crop, "A")]}})
+    detect_dir, recog_dir, ocr_dir = gpr._image_dirs(tmp_path)
+    for flag, expect in ((False, False), (True, True)):
+        gpr._accumulate_page(
+            res, 0, [], gpr._LayerWriter(), {}, detect_dir, recog_dir, ocr_dir,
+            p3="LegacyRecreation", debug_images=flag,
+        )
+        assert ocr_dir.exists() is expect

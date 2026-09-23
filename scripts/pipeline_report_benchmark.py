@@ -54,6 +54,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -107,6 +108,16 @@ from scripts.benchmark_run_loading import (  # noqa: F401 -- re-exported for cal
 _LOG = get_logger("pipeline_report_benchmark")
 
 _VENV_PY = ".venv/Scripts/python.exe"
+
+
+def _link_from(out_dir: Path, target: Path) -> str:
+    """`target` as an `<img src>` relative to `out_dir` (the report.html
+    folder), or a `file://` URI when no relative path exists (a different
+    Windows drive)."""
+    try:
+        return Path(os.path.relpath(target.resolve(), out_dir.resolve())).as_posix()
+    except ValueError:
+        return target.resolve().as_uri()
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -248,9 +259,6 @@ def main(argv: list[str] | None = None) -> int:
                 charts.font_size_histogram_chart(
                     agg, text_type, title=f"{key} {name} {text_type} font size", path=path)
                 font_size_paths[text_type].append(path)
-            charts.extra_chars_table_image(
-                agg, title=f"{key} {name} extra predicted chars",
-                path=charts_dir / f"{kslug}__{nslug}__extra_chars.png")
 
         font_size_html = ["<h4>Font size distribution</h4>"]
         for text_type in TEXT_TYPES:
@@ -296,21 +304,16 @@ def main(argv: list[str] | None = None) -> int:
                         builder.add_error_examples(f"{label} [{entry.run_name}]", text_type, cards)
 
         # ---- pipeline diagnostic image galleries ----
-        gallery_dir = out_dir / "gallery"
+        # linked in place from the run folder, never copied
         for r in runs:
             entry = r[key]
             for folder in sorted(entry.doc_dir.glob("*_images")):
                 files = sorted(folder.iterdir())[:5]
                 if not files:
                     continue
-                rslug = _short_slug(entry.run_name)
-                gallery_dir.mkdir(parents=True, exist_ok=True)
-                copied: "list[Path]" = []
-                for f in files:
-                    dst = gallery_dir / f"{kslug}__{rslug}__{folder.name}__{f.name}"
-                    dst.write_bytes(f.read_bytes())
-                    copied.append(Path("gallery") / dst.name)
-                builder.add_image_gallery(entry.run_name, folder.name, copied)
+                builder.add_image_gallery(
+                    entry.run_name, folder.name, [_link_from(out_dir, f) for f in files],
+                )
 
         for name, (pp, _agg) in text_scored.items():
             grand_text.setdefault(name, []).extend(r for _pi, r, _g in pp)

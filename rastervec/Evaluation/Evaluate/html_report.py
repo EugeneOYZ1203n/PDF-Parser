@@ -143,14 +143,14 @@ class ReportBuilder:
             )
         self._parts.append("</div>")
 
-    def add_image_gallery(self, run: str, folder_name: str, image_paths: "list[Path]") -> None:
+    def add_image_gallery(self, run: str, folder_name: str, image_paths: "list[Path | str]") -> None:
         self._parts.append(f"<h4>{escape(run)} -- {escape(folder_name)}</h4>")
         if not image_paths:
             self._parts.append('<p class="empty">(no images)</p>')
             return
         cards = "".join(
             f'<div class="card">{_img(p, width=200)}'
-            f'<div class="cap">{escape(p.name)}</div></div>'
+            f'<div class="cap">{escape(Path(str(p)).name)}</div></div>'
             for p in image_paths
         )
         self._parts.append(f'<div class="gallery">{cards}</div>')

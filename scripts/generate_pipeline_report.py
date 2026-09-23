@@ -14,8 +14,9 @@ timestamped run folder:
             native_text.txt ...                       (one stats file per stage)
             dump.json                                 (every Text + Vector, reloadable)
 
-            Pre-OCR debug image folders -- each `p3` backend's own distinct
-            set (read from res.extra["p3_debug"], see
+            Pre-OCR debug image folders (skipped with `debug_images: false`)
+            -- each `p3` backend's own distinct set (read from
+            res.extra["p3_debug"], see
             `report_artifacts._accumulate_page`/each backend's own
             `parse.py`):
               p3=FastIntoPaddle:
@@ -26,11 +27,9 @@ timestamped run folder:
                                        exactly what PaddleOCR's text
                                        *recognizer* saw, recognised text in
                                        the filename)
-                fast_tile_images/      (one PNG per FAST detector tile)
               p3=VectorClassification (classify+FAST filter clusters, then
               merge across every layer/color bucket, seqno-cluster, and run
               PaddleOCR's full detect+recognize per cluster):
-                fast_tile_images/      (one PNG per FAST detector tile)
                 paddle_detect_images/  (one PNG per seqno-cluster's own
                                        rendered+padded image, every detected
                                        quad drawn on top)
@@ -105,12 +104,10 @@ from scripts.debug_image_savers import (  # noqa: F401 -- re-exported for caller
     _save_crop_text_images,
     _save_fastintopaddle_detect_images,
     _save_fastintopaddle_recog_images,
-    _save_fastintopaddle_tile_images,
     _save_legacyrecreation_ocr_images,
     _save_segment_recog_images,
     _save_vectorclassification_detect_images,
     _save_vectorclassification_recog_images,
-    _save_vectorclassification_tile_images,
 )
 from scripts.report_artifacts import (  # noqa: F401 -- re-exported for callers/tests
     _ARTIFACTS,
@@ -174,16 +171,15 @@ def _bench_doc_name(bench: "BenchInput") -> str:
     return "".join(c if c not in '<>:"/\\|?*' else "_" for c in name) or "input"
 
 
-def _image_dirs(doc_dir: Path) -> tuple[Path, Path, Path, Path]:
-    """(detect-input dir, recog-input dir, fast-tile dir, legacy-ocr dir):
-    what PaddleOCR's own text *detector* saw vs. what its text *recognizer*
-    saw vs. what FAST saw per tile/cluster vs. (LegacyRecreation only, which
-    has neither a detect nor a FAST stage) what its single recognition-only
-    OCR call saw. Not every backend populates every folder -- see
+def _image_dirs(doc_dir: Path) -> tuple[Path, Path, Path]:
+    """(detect-input dir, recog-input dir, legacy-ocr dir): what
+    PaddleOCR's own text *detector* saw vs. what its text *recognizer* saw
+    vs. (LegacyRecreation only, which has no separate detect stage) what its
+    single recognition-only OCR call saw. Not every backend populates every folder -- see
     `report_artifacts._accumulate_page`'s per-`p3` dispatch."""
     return (
         doc_dir / "paddle_detect_images", doc_dir / "paddle_recog_images",
-        doc_dir / "fast_tile_images", doc_dir / "paddle_ocr_images",
+        doc_dir / "paddle_ocr_images",
     )
 
 
@@ -194,7 +190,7 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
     is_legacy = variant.engine == "legacy"
     doc_dir = run_dir / pdf_path.stem
     doc_dir.mkdir(parents=True, exist_ok=True)
-    detect_dir, recog_dir, fast_tile_dir, ocr_dir = _image_dirs(doc_dir)
+    detect_dir, recog_dir, ocr_dir = _image_dirs(doc_dir)
 
     pages = _filter_valid_pages(pdf_path, config.pages_for(pdf_path.stem), pdf_path.stem)
     active = _active_artifacts(config, variant)
@@ -223,8 +219,9 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
             _restamp_page(res, page_index)
 
         _accumulate_page(res, page_index, active, writer, stats_pages,
-                         detect_dir, recog_dir, fast_tile_dir, ocr_dir,
-                         is_legacy=is_legacy, p3=variant.p3)
+                         detect_dir, recog_dir, ocr_dir,
+                         is_legacy=is_legacy, p3=variant.p3,
+                         debug_images=config.debug_images)
         dumps.append(dump_io.PageDump(
             page_meta=res.page.meta, texts=list(res.texts or []),
             vectors=list(res.vectors or []), engine=variant.engine,
@@ -372,7 +369,7 @@ def _process_pdf_benchmark(
     doc_name = _bench_doc_name(bench)
     doc_dir = run_dir / doc_name
     doc_dir.mkdir(parents=True, exist_ok=True)
-    detect_dir, recog_dir, fast_tile_dir, ocr_dir = _image_dirs(doc_dir)
+    detect_dir, recog_dir, ocr_dir = _image_dirs(doc_dir)
     pages = _filter_valid_pages(bench.pdf_path, config.pages_for(doc_name), bench.key)
     cfg = metrics.MetricConfig(iou_edge_min=config.iou_edge_min)
     active = _active_artifacts(config, variant)
@@ -395,8 +392,9 @@ def _process_pdf_benchmark(
             )
         _restamp_page(res, p)
         _accumulate_page(res, p, active, writer, stats_pages,
-                         detect_dir, recog_dir, fast_tile_dir, ocr_dir,
-                         is_legacy=is_legacy, p3=variant.p3)
+                         detect_dir, recog_dir, ocr_dir,
+                         is_legacy=is_legacy, p3=variant.p3,
+                         debug_images=config.debug_images)
 
         raster_texts = []
         raster_steps: dict = {}
