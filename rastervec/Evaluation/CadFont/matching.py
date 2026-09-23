@@ -9,7 +9,7 @@ are out of scope here; that's a future caller's job, not this module's.
 Commons-only import convention (same as geometry.py's own docstring): no
 pymupdf import, only rastervec.commons.helpers.geometry primitives.
 Intra-package reuse of character_bank.py IS allowed here (this is not a
-cross-P2/P3-backend import -- see the `_character_scale` reuse below).
+cross-P2/P3-backend import) -- `CharacterTemplate` is imported directly.
 """
 from __future__ import annotations
 
@@ -22,14 +22,14 @@ from scipy.spatial import cKDTree
 from tqdm import tqdm
 
 from rastervec.commons.helpers.geometry import transform_point
-from rastervec.Evaluation.CadFont.character_bank import (
-    AREA_TOL_FRACTION,
-    CURVE_SPACING_FRACTION,
-    CharacterTemplate,
-    _character_scale,
+from rastervec.Evaluation.CadFont.character_bank import CharacterTemplate
+from rastervec.Evaluation.CadFont.geometry import BEZIER_SAMPLE_COUNT, Point, vectors_to_segments
+from rastervec.Evaluation.CadFont.graph import (
+    CharGraph,
+    GraphBuildStats,
+    build_char_graph,
+    critical_point_indices,
 )
-from rastervec.Evaluation.CadFont.geometry import Point, vectors_to_segments
-from rastervec.Evaluation.CadFont.graph import CharGraph, build_char_graph, critical_point_indices
 
 if TYPE_CHECKING:
     from rastervec.commons.models import Vector
@@ -38,29 +38,22 @@ if TYPE_CHECKING:
 def build_candidate_graph(
     vectors: "list[Vector]",
     *,
-    point_merge_tol: float = 1e-3,
-    curve_spacing_fraction: float = CURVE_SPACING_FRACTION,
-    area_tol_fraction: float = AREA_TOL_FRACTION,
-) -> CharGraph:
+    bezier_sample_count: int = BEZIER_SAMPLE_COUNT,
+) -> tuple[CharGraph, GraphBuildStats]:
     """Step 5: build a `CharGraph` for a candidate vector group -- the same
-    flatten/split/merge/simplify pipeline a labelled character gets
+    flatten/split/connect/RDP pipeline a labelled character gets
     (`character_bank.build_character_bank`), but WITHOUT
     `to_baseline_relative_vectors`: `vectors` stay in raw page space, since
-    no baseline is known yet for an unlabelled candidate group. Reuses
-    `character_bank._character_scale` for the same dynamic curve-spacing/
-    area-tolerance derivation a template gets, applied directly to the
-    given page-space vectors instead of a baseline-relative copy of them.
+    no baseline is known yet for an unlabelled candidate group.
+    `epsilon` is derived internally by `build_char_graph`, directly from
+    this candidate's own page-space geometry -- no external scale/fraction
+    needed (see `graph.py::_compute_epsilon`).
 
     The returned graph has no anchors -- candidate graphs never go through
     `graph.select_anchor_points` (that's template-only); its own critical
     points are `graph.critical_point_indices(result)` directly."""
-    scale = _character_scale(vectors)
-    curve_spacing = scale * curve_spacing_fraction
-    area_tol = (scale ** 2) * area_tol_fraction
-    segments, vertex_groups = vectors_to_segments(vectors, curve_spacing=curve_spacing)
-    return build_char_graph(
-        segments, vertex_groups, point_merge_tol=point_merge_tol, area_tol=area_tol,
-    )
+    segments, vertex_groups = vectors_to_segments(vectors, bezier_sample_count=bezier_sample_count)
+    return build_char_graph(segments, vertex_groups)
 
 
 @dataclass
@@ -75,9 +68,18 @@ class SimilarityTransform:
     scale: float
     rotation_deg: float
     translation: Point
+    reflected: bool = False
 
     def apply(self, p: Point) -> Point:
-        scaled = (p[0] * self.scale, p[1] * self.scale)
+        # When reflected, `rotation_deg` parameterizes the improper fit
+        # matrix as `Rot(rotation_deg) @ diag(1, -1)` (see
+        # `fit_similarity_transform`'s docstring) -- flipping y BEFORE the
+        # scale+rotate+translate below reproduces exactly that composite,
+        # not just a proper rotation.
+        x, y = p
+        if self.reflected:
+            y = -y
+        scaled = (x * self.scale, y * self.scale)
         return transform_point(scaled, offset=self.translation, rotation_deg=self.rotation_deg)
 
     def apply_many(self, points: list[Point]) -> list[Point]:
@@ -85,7 +87,7 @@ class SimilarityTransform:
 
 
 def fit_similarity_transform(
-    src_points: list[Point], dst_points: list[Point],
+    src_points: list[Point], dst_points: list[Point], *, allow_reflection: bool = False,
 ) -> SimilarityTransform | None:
     """Closed-form least-squares similarity fit mapping `src_points[i] ->
     dst_points[i]`, via Umeyama's method (S. Umeyama, "Least-Squares
@@ -95,7 +97,22 @@ def fit_similarity_transform(
     this module's real caller via `enumerate_anchor_correspondences`).
     Returns `None` when `src_points` has ~zero variance (every source
     point coincides) -- no rotation/scale is determinable from a
-    degenerate source configuration."""
+    degenerate source configuration.
+
+    `would_reflect` (`det(u) * det(vt) < 0`) is true exactly when the
+    unconstrained least-squares fit is a mirror image, not a proper
+    rotation. By default (`allow_reflection=False`, every current caller)
+    Umeyama's own sign-flip correction is still applied, forcing a proper
+    rotation regardless -- `reflected` on the result is then always
+    `False`, current behavior byte-identical. Passing `allow_reflection=
+    True` skips that correction, so the returned transform can genuinely
+    be a mirror when that's the strictly better fit, and `reflected`
+    reports whether it is -- infrastructure for future per-character
+    reflection support; no caller opts into this yet. When `reflected` is
+    true, the improper fit matrix `r` decomposes as `Rot(rotation_deg) @
+    diag(1, -1)` (flip y, then rotate) -- `SimilarityTransform.apply`
+    flips `y` first in that case so applying the transform still
+    reproduces the actual fit, not just its rotation component."""
     n = len(src_points)
     src = np.asarray(src_points, dtype=float)
     dst = np.asarray(dst_points, dtype=float)
@@ -106,14 +123,21 @@ def fit_similarity_transform(
         return None
     cov = (dst_c.T @ src_c) / n
     u, d, vt = np.linalg.svd(cov)
+    would_reflect = np.linalg.det(u) * np.linalg.det(vt) < 0
     s = np.eye(2)
-    if np.linalg.det(u) * np.linalg.det(vt) < 0:
+    reflected = False
+    if would_reflect and not allow_reflection:
         s[1, 1] = -1.0
+    elif would_reflect and allow_reflection:
+        reflected = True
     r = u @ s @ vt
     scale = float(np.trace(np.diag(d) @ s) / var_src)
     t = mu_dst - scale * (r @ mu_src)
     rotation_deg = math.degrees(math.atan2(r[1, 0], r[0, 0]))
-    return SimilarityTransform(scale=scale, rotation_deg=rotation_deg, translation=(float(t[0]), float(t[1])))
+    return SimilarityTransform(
+        scale=scale, rotation_deg=rotation_deg, translation=(float(t[0]), float(t[1])),
+        reflected=reflected,
+    )
 
 
 def enumerate_anchor_correspondences(
@@ -227,6 +251,80 @@ def map_template_nodes_to_candidate(
 DEFAULT_MSE_WEIGHT = 1.0
 DEFAULT_EDGE_WEIGHT = 1.0
 DEFAULT_EDGE_DEGREE_BLEND = 0.5  # weight of edge-presence vs degree-mismatch inside edge_term
+DEFAULT_ORIGINAL_POINT_WEIGHT = 1.0
+DEFAULT_INTERSECTION_POINT_WEIGHT = 1.0
+DEFAULT_SYNTHETIC_POINT_WEIGHT = 1.0
+
+
+def _critical_point_type(graph: CharGraph, idx: int) -> str:
+    """One of "synthetic"/"original"/"intersection" for a node in a
+    template's evaluated critical-point set (`critical_point_indices(graph)
+    | graph.synthetic_anchor_indices`):
+
+    "synthetic" -- `select_anchor_points`'s own synthesized baseline anchor
+    (`graph.synthetic_anchor_indices`); a brand-new, disconnected node with
+    no real candidate counterpart, only a reference LINE it should lie
+    near (see `_synthetic_point_sq_dist` below).
+
+    "original" -- a genuine labelled data vertex (`graph.
+    original_vertex_indices`) -- the strongest claim, checked first (a
+    node can be both an original vertex and a degree > 2 junction, e.g. two
+    strokes' endpoints coincide; "original" wins that case).
+
+    "intersection" -- a real graph junction (`degree > 2`) that isn't
+    itself an original vertex: a `split_at_intersections`-computed crossing,
+    or a node that became a junction purely from a new
+    `connect_nearby_points` edge.
+
+    Falls back to "original" when neither `original_vertex_indices` nor
+    `synthetic_anchor_indices` carry any provenance info at all (an
+    unrestricted, hand-built graph, e.g. many unit tests) -- keeps every
+    existing weight-1.0 caller's behavior byte-identical."""
+    if idx in graph.synthetic_anchor_indices:
+        return "synthetic"
+    if idx in graph.original_vertex_indices:
+        return "original"
+    if graph.degrees()[idx] > 2:
+        return "intersection"
+    return "original"
+
+
+def _point_segment_dist2(p: Point, a: Point, b: Point) -> float:
+    """Squared distance from `p` to the segment `a`-`b` (clamped
+    projection, unlike `graph._perpendicular_distance`'s infinite-line
+    measure -- a synthetic point's "reference line" is a real, finite
+    candidate edge, not an infinite line through it)."""
+    ax, ay = a
+    bx, by = b
+    px, py = p
+    dx, dy = bx - ax, by - ay
+    denom = dx * dx + dy * dy
+    t = 0.0 if denom < 1e-12 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / denom))
+    cx, cy = ax + t * dx, ay + t * dy
+    return (px - cx) ** 2 + (py - cy) ** 2
+
+
+def _synthetic_point_sq_dist(
+    transformed_point: Point, matched_candidate_idx: int, candidate_graph: CharGraph,
+) -> float:
+    """A synthetic (synthesized-anchor) template point has no real
+    candidate counterpart -- only a reference LINE it should lie near.
+    `matched_candidate_idx` (from `map_template_nodes_to_candidate`'s
+    nearest-neighbor lookup) identifies the relevant local neighborhood:
+    the minimum squared point-to-segment distance over every candidate
+    edge incident on that node. Falls back to plain point-to-point squared
+    distance if that candidate node is isolated (no incident edges)."""
+    incident = [
+        (a, b) for a, b in candidate_graph.edges
+        if a == matched_candidate_idx or b == matched_candidate_idx
+    ]
+    if not incident:
+        cp = candidate_graph.nodes[matched_candidate_idx]
+        return (transformed_point[0] - cp[0]) ** 2 + (transformed_point[1] - cp[1]) ** 2
+    return min(
+        _point_segment_dist2(transformed_point, candidate_graph.nodes[a], candidate_graph.nodes[b])
+        for a, b in incident
+    )
 
 
 @dataclass
@@ -248,6 +346,9 @@ def score_match(
     mse_weight: float = DEFAULT_MSE_WEIGHT,
     edge_weight: float = DEFAULT_EDGE_WEIGHT,
     edge_degree_blend: float = DEFAULT_EDGE_DEGREE_BLEND,
+    original_point_weight: float = DEFAULT_ORIGINAL_POINT_WEIGHT,
+    intersection_point_weight: float = DEFAULT_INTERSECTION_POINT_WEIGHT,
+    synthetic_point_weight: float = DEFAULT_SYNTHETIC_POINT_WEIGHT,
 ) -> MatchScore:
     """Step 6.5: scored ONLY over `template_critical_indices` (which
     TEMPLATE nodes get evaluated), each looked up in `node_map` -- which
@@ -256,12 +357,22 @@ def score_match(
     template critical point matching a non-critical candidate node is a
     completely valid, scored correspondence.
 
-    `mse_term`: mean squared distance (in candidate/page space) between
-    each critical template point's *transformed* position and its matched
-    candidate node's position, normalized by `transform.scale ** 2` --
-    squared distances scale with `scale ** 2`, so dividing by it converts
-    the residual back to the template's own (baseline-relative) unit
-    scale, comparable across differently-sized candidates/templates.
+    `mse_term`: a WEIGHTED mean squared distance (in candidate/page space)
+    between each critical template point's *transformed* position and its
+    match, normalized by `transform.scale ** 2` -- squared distances scale
+    with `scale ** 2`, so dividing by it converts the residual back to the
+    template's own (baseline-relative) unit scale, comparable across
+    differently-sized candidates/templates. Each point is classified by
+    `_critical_point_type` (original data vertex / true intersection-
+    junction / synthesized anchor) and weighted by the matching
+    `*_point_weight` kwarg; an "original"/"intersection" point's distance
+    is plain point-to-point (to `candidate_graph.nodes[node_map[i]]`), but
+    a "synthetic" point (the one baseline-synthesized anchor, if any) has
+    no real candidate counterpart -- only a reference LINE it should lie
+    near -- so its distance is `_synthetic_point_sq_dist` (nearest point on
+    a candidate edge incident to its matched node) instead. All three
+    weights default to `1.0`, making this an unweighted mean identical to
+    the old flat behavior.
 
     `edge_term`: a blend (`edge_degree_blend`) of (a) `edge_presence_cost`
     -- the fraction of the template graph's OWN edges `(i, j)` whose
@@ -276,14 +387,28 @@ def score_match(
     `1.0 / (1.0 + total)` itself."""
     scale = max(abs(transform.scale), 1e-9)
     critical = sorted(template_critical_indices) or list(range(template_graph.num_nodes()))
+    point_weights = {
+        "original": original_point_weight,
+        "intersection": intersection_point_weight,
+        "synthetic": synthetic_point_weight,
+    }
 
     transformed = transform.apply_many(template_graph.nodes)
-    sq_dists = []
+    weighted_sum = 0.0
+    weight_total = 0.0
     for i in critical:
         tp = transformed[i]
-        cp = candidate_graph.nodes[node_map[i]]
-        sq_dists.append((tp[0] - cp[0]) ** 2 + (tp[1] - cp[1]) ** 2)
-    mse_term = (sum(sq_dists) / len(sq_dists)) / (scale ** 2)
+        cand_idx = node_map[i]
+        ptype = _critical_point_type(template_graph, i)
+        weight = point_weights[ptype]
+        if ptype == "synthetic":
+            sq_dist = _synthetic_point_sq_dist(tp, cand_idx, candidate_graph)
+        else:
+            cp = candidate_graph.nodes[cand_idx]
+            sq_dist = (tp[0] - cp[0]) ** 2 + (tp[1] - cp[1]) ** 2
+        weighted_sum += weight * sq_dist
+        weight_total += weight
+    mse_term = (weighted_sum / weight_total if weight_total > 0 else 0.0) / (scale ** 2)
 
     cand_edge_set = {(a, b) if a < b else (b, a) for a, b in candidate_graph.edges}
     total_edges = template_graph.num_edges() or 1
@@ -349,6 +474,9 @@ def match_template_against_candidate(
     mse_weight: float = DEFAULT_MSE_WEIGHT,
     edge_weight: float = DEFAULT_EDGE_WEIGHT,
     edge_degree_blend: float = DEFAULT_EDGE_DEGREE_BLEND,
+    original_point_weight: float = DEFAULT_ORIGINAL_POINT_WEIGHT,
+    intersection_point_weight: float = DEFAULT_INTERSECTION_POINT_WEIGHT,
+    synthetic_point_weight: float = DEFAULT_SYNTHETIC_POINT_WEIGHT,
     candidate_tree: "cKDTree | None" = None,
 ) -> list[CandidateMatch]:
     """Step 6 (6.2-6.5), scoped to one template vs one candidate graph.
@@ -410,6 +538,9 @@ def match_template_against_candidate(
         score = score_match(
             template_graph, template_critical, transform, candidate_graph, node_map,
             mse_weight=mse_weight, edge_weight=edge_weight, edge_degree_blend=edge_degree_blend,
+            original_point_weight=original_point_weight,
+            intersection_point_weight=intersection_point_weight,
+            synthetic_point_weight=synthetic_point_weight,
         )
         full_correspondence = tuple(node_map[a] for a in anchor_indices)
         results.append(CandidateMatch(

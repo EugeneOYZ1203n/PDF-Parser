@@ -15,17 +15,21 @@ from __future__ import annotations
 
 import math
 
-from rastervec.commons.helpers.clustering import cluster_spatial
+from scipy.spatial import cKDTree
 
 Point = tuple[float, float]
 Segment = tuple[Point, Point]
 
-# Fallback/default sample count for `cubic_bezier_points` when called
-# directly (e.g. by `estimate_curve_length`'s own coarse pre-pass, or a
-# caller not going through `flatten_item_to_segments`). The real pipeline
-# no longer flattens beziers to a fixed count -- `flatten_item_to_segments`
-# picks an adaptive count from `curve_spacing` instead (see that function).
+# Default sample count for `cubic_bezier_points` when called directly, and
+# the fixed number of points `flatten_item_to_segments` always samples a
+# "c" item into (2 real endpoints + 3 generated interior points) --
+# deliberately a fixed count now, not adaptive: the old `curve_spacing`-
+# driven adaptive sampling (and the `_character_scale`-derived fraction that
+# fed it) is gone, per this project's move to a fully data-derived
+# `epsilon` (see `graph.py::build_char_graph`) for both connectivity and
+# simplification.
 CURVE_SAMPLE_COUNT = 8
+BEZIER_SAMPLE_COUNT = 5
 
 
 def cubic_bezier_points(
@@ -43,32 +47,24 @@ def cubic_bezier_points(
     return points
 
 
-def estimate_curve_length(p0: Point, p1: Point, p2: Point, p3: Point, samples: int = 16) -> float:
-    """Coarse arc-length estimate for one cubic bezier: sum of consecutive
-    chord distances over a `samples`-point sampling. Only used to pick an
-    adaptive final sample count in `flatten_item_to_segments` -- not exact,
-    just good enough to size the real, final sampling."""
-    pts = cubic_bezier_points(p0, p1, p2, p3, n=samples)
-    return sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:]))
-
-
 def flatten_item_to_segments(
-    item: tuple, curve_spacing: float = 1.0,
+    item: tuple, bezier_sample_count: int = BEZIER_SAMPLE_COUNT,
 ) -> tuple[list[Segment], set[Point]]:
     """One `Vector.items` entry -> `(segments, original_vertices)`.
 
     `"l"` -> one segment, both endpoints are original vertices. `"c"` ->
-    adaptively sampled segments (roughly `curve_spacing` page units apart,
-    via `estimate_curve_length`), where only the curve's own true start/end
-    (`p0`/`p3`) are original vertices -- every interior sample point is
-    synthetic. `"re"`/`"qu"` -> 4 edges closing the polygon (all 4 sides --
-    not the 2-perpendicular-edge shortcut
+    always sampled into a fixed `bezier_sample_count` points (2 real
+    endpoints + `bezier_sample_count - 2` generated interior points, e.g.
+    3 interior points for the default 5), where only the curve's own true
+    start/end (`p0`/`p3`) are original vertices -- every interior sample
+    point is synthetic. `"re"`/`"qu"` -> 4 edges closing the polygon (all 4
+    sides -- not the 2-perpendicular-edge shortcut
     `similarity_single_line_cad_text.ipynb` uses; planarity/graph
     construction needs the real closed shape), all 4 corners are original
     vertices.
 
     `original_vertices` feeds `graph.build_char_graph`'s protected-node
-    rule: an original vertex is never dropped by the area-based
+    rule: an original vertex is never dropped by the RDP-based
     simplification pass, unlike a synthetic curve-interior sample."""
     kind = item[0]
     if kind == "l":
@@ -76,10 +72,7 @@ def flatten_item_to_segments(
         return [(p0, p1)], {p0, p1}
     if kind == "c":
         p0, p1, p2, p3 = item[1], item[2], item[3], item[4]
-        spacing = max(curve_spacing, 1e-6)
-        length = estimate_curve_length(p0, p1, p2, p3)
-        n = max(2, math.ceil(length / spacing))
-        pts = cubic_bezier_points(p0, p1, p2, p3, n=n)
+        pts = cubic_bezier_points(p0, p1, p2, p3, n=bezier_sample_count - 1)
         return list(zip(pts, pts[1:])), {p0, p3}
     if kind == "re":
         x0, y0, x1, y1 = item[1]
@@ -91,18 +84,19 @@ def flatten_item_to_segments(
     return [], set()
 
 
-def vector_to_segments(v, curve_spacing: float = 1.0) -> tuple[list[Segment], list[frozenset[Point]]]:
+def vector_to_segments(
+    v, bezier_sample_count: int = BEZIER_SAMPLE_COUNT,
+) -> tuple[list[Segment], list[frozenset[Point]]]:
     """Every item of one `Vector`, flattened and concatenated in item
     order, alongside `vertex_groups`: one `frozenset[Point]` per item
     holding *that item's own* original vertices -- kept as separate,
     per-item groups (rather than flattened into one set) so a caller can
     tell "these 2 (or 4) points came from the same item" from "these came
-    from different items", which `merge_close_points`'s `forbidden_groups`
-    and `graph.build_char_graph`'s protected-node computation both need."""
+    from different items"."""
     segments: list[Segment] = []
     vertex_groups: list[frozenset[Point]] = []
     for item in v.items:
-        segs, verts = flatten_item_to_segments(item, curve_spacing=curve_spacing)
+        segs, verts = flatten_item_to_segments(item, bezier_sample_count=bezier_sample_count)
         segments.extend(segs)
         if verts:
             vertex_groups.append(frozenset(verts))
@@ -110,7 +104,7 @@ def vector_to_segments(v, curve_spacing: float = 1.0) -> tuple[list[Segment], li
 
 
 def vectors_to_segments(
-    vectors, curve_spacing: float = 1.0,
+    vectors, bezier_sample_count: int = BEZIER_SAMPLE_COUNT,
 ) -> tuple[list[Segment], list[frozenset[Point]]]:
     """`vector_to_segments` over every vector, concatenated in order;
     `vertex_groups` extended (not unioned) across every vector, so
@@ -118,7 +112,7 @@ def vectors_to_segments(
     out: list[Segment] = []
     vertex_groups: list[frozenset[Point]] = []
     for v in vectors:
-        segs, groups = vector_to_segments(v, curve_spacing=curve_spacing)
+        segs, groups = vector_to_segments(v, bezier_sample_count=bezier_sample_count)
         out.extend(segs)
         vertex_groups.extend(groups)
     return out, vertex_groups
@@ -201,81 +195,38 @@ def split_at_intersections(segments: list[Segment], *, point_tol: float = 0.5) -
     return out
 
 
-def merge_close_points(
+def dedupe_exact_points(
     segments: list[Segment],
-    *, point_merge_tol: float = 1e-3,
-    forbidden_groups: list[frozenset[Point]] | None = None,
 ) -> tuple[list[Point], list[tuple[int, int]], dict[Point, int]]:
-    """Reduces every segment endpoint to a canonical node index, merging
-    coincident points (within `point_merge_tol`) into one node.
+    """Reduces every segment endpoint to a canonical node index, collapsing
+    only bit-identical points (a plain `dict[Point, int]` keyed by literal
+    `(x, y)` value) -- never a tolerance merge. This is the minimum
+    dedup needed for basic connectivity: two segments sharing one item's
+    own point (consecutive bezier samples, a rect/quad's own shared
+    corner) must land on the same node, or even one item's own polyline
+    wouldn't be connected. Any two points that are merely *close* (not
+    identical) are left as distinct nodes -- see `connect_nearby_points`
+    for how those get wired together instead of merged.
 
-    Pure floating-point-duplicate dedup now, not a visual-simplification
-    step -- the default tolerance is small on purpose. (Visual point
-    reduction is `graph.py`'s degree-aware simplification pass, which runs
-    after this.)
-
-    `forbidden_groups`, when given, is `vectors_to_segments`'s per-item
-    vertex groups -- used only to protect the **2-member** groups (a
-    single `"l"`/`"c"` item's own 2 original vertices): two points that
-    are both members of the same 2-member group are never allowed to
-    merge directly, even within `point_merge_tol`, so a single non-closed
-    item's own endpoints can never collapse to fewer than 2 distinct
-    nodes. 4-member groups (`"re"`/`"qu"` corners) get no such protection
-    and may still merge normally. This is single-linkage clustering, so a
-    third, unrelated nearby point could in principle still transitively
-    bridge two forbidden points into one cluster -- a known, accepted,
-    low-probability edge case, not solved here.
-
-    Reuses `commons.helpers.clustering.cluster_spatial` over every segment
-    endpoint, each treated as a zero-size bbox, rather than writing a
-    second spatial clusterer. Each returned cluster becomes one node (its
-    position the centroid of its member points); segment endpoints are
-    re-mapped through the point -> node-index map to build deduped edges
-    (self-loop edges -- both endpoints collapsing to the same node -- are
-    dropped). Also returns the raw-point -> node-index map itself, so a
-    caller can look up which final node a known original-data point ended
-    up as (`graph.py`'s protected-node computation)."""
-    all_points: list[Point] = [p for seg in segments for p in seg]
-    if not all_points:
-        return [], [], {}
-
-    extra_close = None
-    if forbidden_groups:
-        point_group_ids: dict[Point, list[int]] = {}
-        for gid, group in enumerate(forbidden_groups):
-            if len(group) != 2:
-                continue
-            for p in group:
-                point_group_ids.setdefault(p, []).append(gid)
-        if point_group_ids:
-            def extra_close(p: Point, q: Point) -> bool:
-                gids_p = point_group_ids.get(p)
-                gids_q = point_group_ids.get(q)
-                if not gids_p or not gids_q:
-                    return True
-                return not (set(gids_p) & set(gids_q))
-
-    clusters = cluster_spatial(
-        all_points,
-        get_bbox=lambda p: (p[0], p[1], p[0], p[1]),
-        threshold=point_merge_tol,
-        extra_close=extra_close,
-    )
-
+    Also returns the raw-point -> node-index map itself, so a caller can
+    look up which final node a known original-data point ended up as
+    (`graph.py`'s protected-node computation)."""
     nodes: list[Point] = []
     point_to_node: dict[Point, int] = {}
-    for node_idx, cluster in enumerate(clusters):
-        cx = sum(p[0] for p in cluster) / len(cluster)
-        cy = sum(p[1] for p in cluster) / len(cluster)
-        nodes.append((cx, cy))
-        for p in cluster:
-            point_to_node[p] = node_idx
+
+    def node_for(p: Point) -> int:
+        idx = point_to_node.get(p)
+        if idx is None:
+            idx = len(nodes)
+            nodes.append(p)
+            point_to_node[p] = idx
+        return idx
 
     edges: list[tuple[int, int]] = []
     seen: set[tuple[int, int]] = set()
     for seg in segments:
-        a = point_to_node[seg[0]]
-        b = point_to_node[seg[1]]
+        a = node_for(seg[0])
+        b = node_for(seg[1])
         if a == b:
             continue
         key = (a, b) if a < b else (b, a)
@@ -284,3 +235,27 @@ def merge_close_points(
         seen.add(key)
         edges.append(key)
     return nodes, edges, point_to_node
+
+
+def connect_nearby_points(
+    nodes: list[Point], edges: list[tuple[int, int]], epsilon: float,
+) -> list[tuple[int, int]]:
+    """`edges` plus one new edge per pair of DISTINCT nodes within
+    `epsilon` of each other that isn't already connected -- the
+    "connect, don't merge" replacement for tolerance-based point merging.
+    Node positions are never touched; this only ever adds edges. Uses
+    `scipy.spatial.cKDTree.query_pairs` for the within-`epsilon` pair
+    search (`O(n log n)`-ish rather than the all-pairs `O(n^2)` a naive
+    scan would need)."""
+    if len(nodes) < 2:
+        return list(edges)
+    existing = {(a, b) if a < b else (b, a) for a, b in edges}
+    tree = cKDTree(nodes)
+    out = list(edges)
+    for i, j in tree.query_pairs(epsilon):
+        key = (i, j) if i < j else (j, i)
+        if key in existing:
+            continue
+        existing.add(key)
+        out.append(key)
+    return out

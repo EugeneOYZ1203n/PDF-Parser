@@ -83,6 +83,7 @@ def test_build_character_bank_sorts_by_complexity_descending(vector):
     assert templates[0].complexity > templates[1].complexity
     assert templates[0].baseline_id == "b1"
     assert len(templates[0].anchor_node_indices) >= 2
+    assert templates[0].build_stats.epsilon > 0
 
 
 def test_build_character_bank_skips_entry_with_no_baseline(vector):

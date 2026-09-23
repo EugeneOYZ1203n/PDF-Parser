@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from rastervec.Evaluation.CadFont.geometry import (
     Point,
     Segment,
-    merge_close_points,
+    connect_nearby_points,
+    dedupe_exact_points,
     split_at_intersections,
 )
 
@@ -57,49 +58,90 @@ class CharGraph:
         return len(self.edges)
 
 
-def build_char_graph(
-    segments: list[Segment],
-    vertex_groups: list[frozenset[Point]],
-    *, point_merge_tol: float = 1e-3, area_tol: float,
-) -> CharGraph:
-    """Orchestrates `geometry.py`'s pipeline -- `split_at_intersections` ->
-    `merge_close_points` (coincidence dedup, protecting each `"l"`/`"c"`
-    item's own 2 vertices from merging with each other) -> protected-node
-    computation -> degree-aware area simplification -> `CharGraph(nodes,
-    edges)`. The single entry point `character_bank.py` and the notebook
-    both call.
+@dataclass
+class GraphBuildStats:
+    """Per-character diagnostics from one `build_char_graph` call --
+    surfaced so a caller (the matching-lab notebook) can print/tune
+    without recomputing the pipeline itself."""
 
-    `segments` is already-flattened, adaptively-sampled geometry (see
+    epsilon: float
+    points_before_rdp: int
+    points_after_rdp: int
+    points_removed: int
+
+
+# Floor so a degenerate segment set (every segment zero-length, or a
+# single-point character) never produces a zero/negative epsilon.
+_MIN_EPSILON = 1e-9
+
+
+def _compute_epsilon(segments: list[Segment]) -> float:
+    """Half the length of the shortest segment in `segments` -- the fully
+    data-derived tolerance used for both `connect_nearby_points` (how close
+    counts as "the same point, topologically") and the RDP simplification
+    pass. Measured from the POST-`split_at_intersections` segment set
+    (splitting can only shorten some segments, and the connect/RDP steps
+    should use the geometry they actually operate on)."""
+    lengths = [
+        math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in segments
+    ]
+    lengths = [length for length in lengths if length > _MIN_EPSILON]
+    if not lengths:
+        return _MIN_EPSILON
+    return max(min(lengths) / 2.0, _MIN_EPSILON)
+
+
+def build_char_graph(
+    segments: list[Segment], vertex_groups: list[frozenset[Point]],
+) -> tuple[CharGraph, GraphBuildStats]:
+    """Orchestrates `geometry.py`'s pipeline -- `split_at_intersections` ->
+    epsilon derivation -> exact-coincidence dedup (`dedupe_exact_points`) ->
+    `connect_nearby_points` -> protected-node computation -> Douglas-Peucker
+    simplification -> `CharGraph(nodes, edges)`. The single entry point
+    `character_bank.py` and `matching.py::build_candidate_graph` both call.
+
+    `segments` is already-flattened geometry (see
     `geometry.flatten_item_to_segments`); `vertex_groups` is that same
     flatten pass's per-item groups of true data-defined points (never
     synthetic curve-interior samples) -- a node built from one of these is
     always protected from simplification, alongside any node with graph
-    degree > 2 (a real junction/crossing), and the resulting `CharGraph`'s
-    `original_vertex_indices` records exactly which final nodes they are
-    (consumed by `select_anchor_points`). `area_tol` has no default:
-    callers must derive it from their own scale (see
-    `character_bank.build_character_bank` for the per-character dynamic
-    derivation this was designed for)."""
+    degree > 2 (a real junction/crossing, whether from `split_at_intersections`
+    or from a new `connect_nearby_points` edge), and the resulting
+    `CharGraph`'s `original_vertex_indices` records exactly which final
+    nodes they are (consumed by `select_anchor_points`).
+
+    No tolerance parameters: unlike the old `point_merge_tol`/`area_tol`
+    (externally supplied, dynamically derived by the caller from its own
+    notion of "scale"), `epsilon` is now computed here, directly from this
+    character's own geometry (`_compute_epsilon`) -- see `GraphBuildStats`
+    for what's returned alongside the graph."""
     original_vertices: set[Point] = set()
     for group in vertex_groups:
         original_vertices.update(group)
 
     split = split_at_intersections(segments)
-    nodes, edges, point_to_node = merge_close_points(
-        split, point_merge_tol=point_merge_tol, forbidden_groups=vertex_groups,
-    )
+    epsilon = _compute_epsilon(split)
+    nodes, edges, point_to_node = dedupe_exact_points(split)
+    edges = connect_nearby_points(nodes, edges, epsilon)
+
     original_vertex_node_indices = {
         point_to_node[p] for p in original_vertices if p in point_to_node
     }
     protected = _compute_protected_nodes(edges, len(nodes), original_vertices, point_to_node)
     simplified_nodes, simplified_edges, final_original_vertex_indices = _simplify_graph(
-        nodes, edges, protected, area_tol, original_vertex_node_indices,
+        nodes, edges, protected, epsilon, original_vertex_node_indices,
+    )
+    stats = GraphBuildStats(
+        epsilon=epsilon,
+        points_before_rdp=len(nodes),
+        points_after_rdp=len(simplified_nodes),
+        points_removed=len(nodes) - len(simplified_nodes),
     )
     return CharGraph(
         nodes=simplified_nodes,
         edges=simplified_edges,
         original_vertex_indices=final_original_vertex_indices,
-    )
+    ), stats
 
 
 def _compute_protected_nodes(
@@ -191,36 +233,50 @@ def _triangle_area(a: Point, b: Point, c: Point) -> float:
     return abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2.0
 
 
-def _simplify_chain(nodes: list[Point], chain: list[int], area_tol: float) -> list[int]:
-    """Cascading-anchor area sweep (Visvalingam-Whyte-style) over one
-    chain of node indices. Both ends of the chain are always kept
-    (protected by construction -- see `_find_chains`); an interior point
-    `b` between the current anchor `a` and its successor `c` is dropped
-    (anchor unchanged) when `triangle(a, b, c)`'s area is below
-    `area_tol`, otherwise kept and promoted to the new anchor -- so several
-    consecutive points can collapse against one anchor in a single pass."""
+def _perpendicular_distance(p: Point, a: Point, b: Point) -> float:
+    """Distance from `p` to the infinite line through `a`/`b` (not clamped
+    to the segment -- classic Douglas-Peucker measures against the line,
+    not the segment). `a == b` degenerates to plain point distance."""
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    norm = math.hypot(dx, dy)
+    if norm < 1e-12:
+        return math.hypot(p[0] - ax, p[1] - ay)
+    return abs(dx * (ay - p[1]) - (ax - p[0]) * dy) / norm
+
+
+def _rdp_chain(nodes: list[Point], chain: list[int], epsilon: float) -> list[int]:
+    """Classic recursive Douglas-Peucker over one chain of node indices.
+    Both ends of the chain are always kept (protected by construction --
+    see `_find_chains`): find the interior point with max perpendicular
+    distance from the line `(chain[0], chain[-1])`; if that max distance is
+    `<= epsilon`, every interior point is dropped, otherwise the
+    max-distance point is kept and the chain recurses on both halves
+    around it."""
     if len(chain) <= 2:
         return list(chain)
-    anchor = chain[0]
-    kept = [anchor]
+    a, b = nodes[chain[0]], nodes[chain[-1]]
+    max_dist, max_idx = -1.0, -1
     for i in range(1, len(chain) - 1):
-        b, c = chain[i], chain[i + 1]
-        if _triangle_area(nodes[anchor], nodes[b], nodes[c]) < area_tol:
-            continue
-        kept.append(b)
-        anchor = b
-    kept.append(chain[-1])
-    return kept
+        d = _perpendicular_distance(nodes[chain[i]], a, b)
+        if d > max_dist:
+            max_dist, max_idx = d, i
+    if max_dist <= epsilon:
+        return [chain[0], chain[-1]]
+    left = _rdp_chain(nodes, chain[: max_idx + 1], epsilon)
+    right = _rdp_chain(nodes, chain[max_idx:], epsilon)
+    return left[:-1] + right
 
 
 def _simplify_graph(
     nodes: list[Point],
     edges: list[tuple[int, int]],
     protected: set[int],
-    area_tol: float,
+    epsilon: float,
     original_vertex_node_indices: set[int],
 ) -> tuple[list[Point], list[tuple[int, int]], frozenset[int]]:
-    """Runs `_simplify_chain` over every chain from `_find_chains`, then
+    """Runs `_rdp_chain` over every chain from `_find_chains`, then
     re-indexes the surviving node indices into a compact final node/edge
     list. `original_vertex_node_indices` is remapped through that same
     re-indexing and returned alongside -- every original vertex is
@@ -231,7 +287,7 @@ def _simplify_graph(
     kept_old_indices: set[int] = set()
     raw_new_edges: list[tuple[int, int]] = []
     for chain in chains:
-        simplified = _simplify_chain(nodes, chain, area_tol)
+        simplified = _rdp_chain(nodes, chain, epsilon)
         kept_old_indices.update(simplified)
         raw_new_edges.extend(zip(simplified, simplified[1:]))
 

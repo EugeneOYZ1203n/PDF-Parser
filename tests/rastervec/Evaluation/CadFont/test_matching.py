@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 
 from rastervec.Evaluation.CadFont.character_bank import CharacterTemplate
-from rastervec.Evaluation.CadFont.graph import CharGraph
+from rastervec.Evaluation.CadFont.graph import CharGraph, GraphBuildStats
 from rastervec.Evaluation.CadFont.matching import (
     build_candidate_graph,
     enumerate_anchor_correspondences,
@@ -13,6 +13,10 @@ from rastervec.Evaluation.CadFont.matching import (
     passes_size_prefilter,
     score_match,
 )
+
+
+def _dummy_build_stats() -> GraphBuildStats:
+    return GraphBuildStats(epsilon=1.0, points_before_rdp=0, points_after_rdp=0, points_removed=0)
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +58,45 @@ def test_fit_similarity_transform_returns_none_for_coincident_source_points():
     assert fit_similarity_transform(src, dst) is None
 
 
+def test_fit_similarity_transform_default_never_reflects():
+    # dst is a mirror image of src (flipped across the x-axis) -- the
+    # unconstrained best fit would be a reflection, but the default
+    # (allow_reflection=False) must still force a proper rotation and
+    # report reflected=False, exactly like before this field existed.
+    src = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]
+    dst = [(0.0, 0.0), (1.0, 0.0), (0.0, -1.0)]
+
+    transform = fit_similarity_transform(src, dst)
+
+    assert transform is not None
+    assert transform.reflected is False
+
+
+def test_fit_similarity_transform_allow_reflection_recovers_mirror_fit():
+    src = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]
+    dst = [(0.0, 0.0), (1.0, 0.0), (0.0, -1.0)]
+
+    transform = fit_similarity_transform(src, dst, allow_reflection=True)
+
+    assert transform is not None
+    assert transform.reflected is True
+    recovered = transform.apply_many(src)
+    for (rx, ry), (dx, dy) in zip(recovered, dst):
+        assert abs(rx - dx) < 1e-6 and abs(ry - dy) < 1e-6
+
+
+def test_fit_similarity_transform_allow_reflection_no_op_when_fit_is_already_proper():
+    # A plain rotation (no mirroring needed) -- allow_reflection=True must
+    # not change anything when the best fit is already proper.
+    src = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]
+    dst = [(0.0, 0.0), (0.0, 1.0), (-1.0, 0.0)]  # 90deg rotation
+
+    transform = fit_similarity_transform(src, dst, allow_reflection=True)
+
+    assert transform is not None
+    assert transform.reflected is False
+
+
 # ---------------------------------------------------------------------------
 # build_candidate_graph
 # ---------------------------------------------------------------------------
@@ -71,13 +114,14 @@ def _l_shape_vectors(vector):
 def test_build_candidate_graph_stays_in_page_space(vector):
     vectors = _l_shape_vectors(vector)
 
-    g = build_candidate_graph(vectors)
+    g, stats = build_candidate_graph(vectors)
 
     assert g.num_nodes() == 3
     assert g.num_edges() == 2
     assert set(g.nodes) == {(100.0, 100.0), (110.0, 100.0), (100.0, 105.0)}
     junction_idx = g.nodes.index((100.0, 100.0))
     assert g.degree(junction_idx) == 2
+    assert stats.epsilon > 0
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +267,95 @@ def test_score_match_worsens_with_missing_edge():
     assert dropped_score.total > exact_score.total
 
 
+def test_critical_point_type_classifies_original_intersection_synthetic():
+    from rastervec.Evaluation.CadFont.matching import _critical_point_type
+
+    g = CharGraph(
+        nodes=[(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
+        edges=[(0, 1), (0, 2), (0, 3)],  # node 0 has degree 3
+        original_vertex_indices=frozenset({1}),  # node 1 is a real data vertex
+        synthetic_anchor_indices=frozenset({3}),  # node 3 is a synthesized anchor
+    )
+    assert _critical_point_type(g, 1) == "original"
+    assert _critical_point_type(g, 0) == "intersection"  # degree 3, not an original vertex
+    assert _critical_point_type(g, 3) == "synthetic"
+
+
+def test_critical_point_type_falls_back_to_original_with_no_provenance_info():
+    from rastervec.Evaluation.CadFont.matching import _critical_point_type
+
+    g = CharGraph(nodes=[(0.0, 0.0), (1.0, 1.0)], edges=[(0, 1)])
+    assert _critical_point_type(g, 0) == "original"
+
+
+def _synthetic_point_template() -> CharGraph:
+    # 2 real anchors plus one synthesized 3rd anchor at (5, -5), off to
+    # the side.
+    return CharGraph(
+        nodes=[(0.0, 0.0), (10.0, 0.0), (5.0, -5.0)],
+        edges=[(0, 1)],
+        original_vertex_indices=frozenset({0, 1}),
+        synthetic_anchor_indices=frozenset({2}),
+    )
+
+
+def test_score_match_synthetic_point_uses_reference_line_not_nearest_node():
+    from rastervec.Evaluation.CadFont.graph import critical_point_indices
+    from rastervec.Evaluation.CadFont.matching import SimilarityTransform
+
+    template = _synthetic_point_template()
+    critical = critical_point_indices(template) | template.synthetic_anchor_indices
+    identity = SimilarityTransform(scale=1.0, rotation_deg=0.0, translation=(0.0, 0.0))
+
+    # Candidate: same 2 real nodes, plus a horizontal edge (2, 3) at
+    # y=-5 that passes EXACTLY through (5, -5) -- the template's synthetic
+    # point's reference line -- even though the matched node itself
+    # (node 2, at (0, -5)) is 5 units away from (5, -5) by plain
+    # point-to-point distance.
+    candidate = CharGraph(
+        nodes=[(0.0, 0.0), (10.0, 0.0), (0.0, -5.0), (10.0, -5.0)],
+        edges=[(0, 1), (2, 3)],
+    )
+    node_map = {0: 0, 1: 1, 2: 2}
+
+    score = score_match(template, critical, identity, candidate, node_map)
+
+    # Both real points match exactly (sq_dist 0) and the synthetic point's
+    # reference-line distance is exactly 0 too (it lies ON the matched
+    # edge) -- this would NOT be ~0 under plain point-to-point distance to
+    # node_map[2]=(0,-5) (sq_dist 25, contributing mse_term ~8.33), so this
+    # also proves the reference-line path is actually being used.
+    assert score.mse_term < 1e-9
+
+
+def test_score_match_synthetic_point_weight_zero_excludes_its_contribution():
+    from rastervec.Evaluation.CadFont.graph import critical_point_indices
+    from rastervec.Evaluation.CadFont.matching import SimilarityTransform
+
+    template = _synthetic_point_template()
+    critical = critical_point_indices(template) | template.synthetic_anchor_indices
+    identity = SimilarityTransform(scale=1.0, rotation_deg=0.0, translation=(0.0, 0.0))
+
+    # Candidate whose matched synthetic-point edge is far from (5, -5),
+    # so the default (weight=1.0) score is dominated by that mismatch.
+    candidate = CharGraph(
+        nodes=[(0.0, 0.0), (10.0, 0.0), (0.0, -1000.0), (10.0, -1000.0)],
+        edges=[(0, 1), (2, 3)],
+    )
+    node_map = {0: 0, 1: 1, 2: 2}
+
+    default_score = score_match(template, critical, identity, candidate, node_map)
+    assert default_score.mse_term > 1.0  # dominated by the far-off synthetic point
+
+    zero_weighted = score_match(
+        template, critical, identity, candidate, node_map, synthetic_point_weight=0.0,
+    )
+    # With synthetic_point_weight=0, only the 2 real (exactly-matched)
+    # points remain -- mse_term must be ~0 regardless of how far off the
+    # synthetic point's own match is.
+    assert zero_weighted.mse_term < 1e-9
+
+
 # ---------------------------------------------------------------------------
 # match_template_against_candidate (end-to-end)
 # ---------------------------------------------------------------------------
@@ -240,6 +373,7 @@ def test_match_template_against_candidate_finds_best_at_translated_copy():
     template = CharacterTemplate(
         label_id="t1", text="T", baseline_id="b1",
         graph=template_graph, complexity=1.0, anchor_node_indices=(1, 0, 3),
+        build_stats=_dummy_build_stats(),
     )
 
     # Candidate: the exact same shape translated by (100, 100).
@@ -283,6 +417,7 @@ def test_match_template_against_candidate_correspondence_count_scales_quadratica
     template = CharacterTemplate(
         label_id="ring", text="O", baseline_id="b1",
         graph=template_graph, complexity=1.0, anchor_node_indices=(0, 1, 2),
+        build_stats=_dummy_build_stats(),
     )
     candidate_graph = _ring_graph(offset=10.0)
 
@@ -339,6 +474,7 @@ def test_match_template_against_candidate_short_circuits_on_prefilter_failure():
     template = CharacterTemplate(
         label_id="t1", text="T", baseline_id="b1",
         graph=template_graph, complexity=1.0, anchor_node_indices=(1, 0, 3),
+        build_stats=_dummy_build_stats(),
     )
     too_small_candidate = CharGraph(nodes=[(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)], edges=[(0, 1), (1, 2)])
 

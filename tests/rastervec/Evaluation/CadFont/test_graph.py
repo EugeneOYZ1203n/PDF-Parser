@@ -193,41 +193,47 @@ def test_build_char_graph_plus_sign_end_to_end():
     # Both segments are "l" items -- one vertex_group per item, all 4 raw
     # endpoints are original vertices, so together with the degree-4
     # crossing every resulting node is protected and nothing is eligible
-    # for simplification, regardless of area_tol.
+    # for simplification, regardless of epsilon.
     segments = [((-5.0, 0.0), (5.0, 0.0)), ((0.0, -5.0), (0.0, 5.0))]
     vertex_groups = [frozenset({(-5.0, 0.0), (5.0, 0.0)}), frozenset({(0.0, -5.0), (0.0, 5.0)})]
-    g = build_char_graph(segments, vertex_groups, area_tol=1.0)
+    g, stats = build_char_graph(segments, vertex_groups)
 
     assert g.num_nodes() == 5
     assert g.num_edges() == 4
     assert sorted(g.degrees()) == [1, 1, 1, 1, 4]
     assert g.max_degree() == 4
     assert g.original_vertex_indices == frozenset(range(4)) or len(g.original_vertex_indices) == 4
+    assert stats.points_removed == 0
 
 
 def test_build_char_graph_simplifies_nearly_straight_curve_to_its_endpoints():
     # A slightly wiggly polyline between two original endpoints (one "c"
-    # item's own flatten output), with no real junction anywhere -- every
-    # interior point should collapse away under a generous area_tol,
-    # leaving just the two protected endpoints.
+    # item's own flatten output), with no real junction anywhere -- the
+    # wiggle amplitude (~0.002) is well under half the shortest segment
+    # length here (each ~1 unit long -> epsilon ~0.5), so every interior
+    # point collapses away, leaving just the two protected endpoints.
     points = [(0.0, 0.0), (1.0, 0.001), (2.0, -0.001), (3.0, 0.002), (4.0, 0.0)]
     segments = list(zip(points, points[1:]))
     vertex_groups = [frozenset({points[0], points[-1]})]
 
-    g = build_char_graph(segments, vertex_groups, area_tol=0.5)
+    g, stats = build_char_graph(segments, vertex_groups)
 
     assert g.num_nodes() == 2
     assert g.num_edges() == 1
     assert set(g.nodes) == {(0.0, 0.0), (4.0, 0.0)}
     assert len(g.original_vertex_indices) == 2
+    assert stats.points_removed == 3
+    assert stats.points_before_rdp == 5
+    assert stats.points_after_rdp == 2
 
 
 def test_build_char_graph_preserves_junction_while_simplifying_its_arms():
     # A near-straight horizontal run from (0,0) to (10,0) (one item) with a
     # vertical branch (a second item) grafted on at (5,0) -- a real
-    # degree-3 junction. Both horizontal arms have small wiggle that
-    # should simplify away, but the junction itself (and the trivial
-    # 2-point vertical arm) must survive untouched.
+    # degree-3 junction. Both horizontal arms have small wiggle (~0.0001,
+    # well under the ~1-unit-segment-derived epsilon) that should simplify
+    # away, but the junction itself (and the trivial 2-point vertical arm)
+    # must survive untouched.
     horizontal = [(0.0, 0.0), (2.0, 0.0), (4.0, 0.0001), (5.0, 0.0),
                   (6.0, -0.0001), (8.0, 0.0), (10.0, 0.0)]
     segments = list(zip(horizontal, horizontal[1:]))
@@ -237,7 +243,7 @@ def test_build_char_graph_preserves_junction_while_simplifying_its_arms():
         frozenset({(5.0, 0.0), (5.0, 5.0)}),
     ]
 
-    g = build_char_graph(segments, vertex_groups, area_tol=0.01)
+    g, _stats = build_char_graph(segments, vertex_groups)
 
     assert g.num_nodes() == 4
     assert set(g.nodes) == {(0.0, 0.0), (5.0, 0.0), (10.0, 0.0), (5.0, 5.0)}
@@ -254,30 +260,53 @@ def test_build_char_graph_closed_loop_curve_with_no_junction_stays_a_single_cycl
     # is still an original vertex, so it anchors the simplification walk
     # without any special-case loop handling.
     item = ("c", (0.0, 0.0), (10.0, 10.0), (-10.0, 10.0), (0.0, 0.0))
-    segments, original_vertices = flatten_item_to_segments(item, curve_spacing=1.0)
+    segments, original_vertices = flatten_item_to_segments(item)
     assert original_vertices == {(0.0, 0.0)}
     vertex_groups = [frozenset(original_vertices)]
 
-    g = build_char_graph(segments, vertex_groups, area_tol=1.0)
+    g, _stats = build_char_graph(segments, vertex_groups)
 
     assert (0.0, 0.0) in g.nodes
     assert g.num_edges() == g.num_nodes()  # a single closed cycle, no self-loop
     assert g.max_degree() == 2
-    assert 3 <= g.num_nodes() < len(segments)  # simplified, but still a real polygon
+    assert 3 <= g.num_nodes() <= len(segments)  # simplified (or unchanged), but still a real polygon
 
 
 def test_build_char_graph_excludes_simplification_survivor_from_original_vertex_indices():
-    # Same near-straight-curve setup as above, but with area_tol tuned so
-    # ONE interior point survives simplification (kept because it wasn't
-    # collinear enough to drop) -- that survivor must NOT be counted as an
-    # original vertex, even though it's a real node in the final graph.
+    # A sharp bend point (2,3) well off the (0,0)-(4,0) chord -- far beyond
+    # half the shortest segment length here, so it survives RDP -- must NOT
+    # be counted as an original vertex, even though it's a real node in the
+    # final graph.
     points = [(0.0, 0.0), (2.0, 3.0), (4.0, 0.0)]
     segments = list(zip(points, points[1:]))
     vertex_groups = [frozenset({points[0], points[-1]})]
 
-    g = build_char_graph(segments, vertex_groups, area_tol=0.01)
+    g, _stats = build_char_graph(segments, vertex_groups)
 
     assert g.num_nodes() == 3  # the bend point survives (not collinear)
     survivor_idx = g.nodes.index((2.0, 3.0))
     assert survivor_idx not in g.original_vertex_indices
     assert len(g.original_vertex_indices) == 2
+
+
+def test_compute_epsilon_is_half_the_shortest_segment():
+    from rastervec.Evaluation.CadFont.graph import _compute_epsilon
+
+    segments = [((0.0, 0.0), (10.0, 0.0)), ((0.0, 0.0), (0.0, 4.0))]
+    assert abs(_compute_epsilon(segments) - 2.0) < 1e-9
+
+
+def test_rdp_chain_drops_in_tolerance_wiggle():
+    from rastervec.Evaluation.CadFont.graph import _rdp_chain
+
+    nodes = [(0.0, 0.0), (5.0, 0.4), (10.0, 0.0)]
+    chain = [0, 1, 2]
+    assert _rdp_chain(nodes, chain, epsilon=0.5) == [0, 2]
+
+
+def test_rdp_chain_keeps_out_of_tolerance_bend():
+    from rastervec.Evaluation.CadFont.graph import _rdp_chain
+
+    nodes = [(0.0, 0.0), (5.0, 5.0), (10.0, 0.0)]
+    chain = [0, 1, 2]
+    assert _rdp_chain(nodes, chain, epsilon=0.5) == [0, 1, 2]

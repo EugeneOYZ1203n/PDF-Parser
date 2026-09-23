@@ -7,8 +7,14 @@ import math
 from dataclasses import dataclass
 
 from rastervec.commons.helpers.geometry import transform_point, transform_vector, item_points
-from rastervec.Evaluation.CadFont.geometry import vectors_to_segments
-from rastervec.Evaluation.CadFont.graph import CharGraph, build_char_graph, complexity, select_anchor_points
+from rastervec.Evaluation.CadFont.geometry import BEZIER_SAMPLE_COUNT, vectors_to_segments
+from rastervec.Evaluation.CadFont.graph import (
+    CharGraph,
+    GraphBuildStats,
+    build_char_graph,
+    complexity,
+    select_anchor_points,
+)
 from rastervec.Evaluation.Labelling.label_schema import LabelSet, path_signature
 from rastervec.commons.logging_setup import get_logger
 
@@ -56,36 +62,14 @@ class CharacterTemplate:
     graph: CharGraph
     complexity: float
     anchor_node_indices: tuple[int, ...]
-
-
-# Curve-sampling spacing and the simplification area threshold both scale
-# with each character's own baseline-relative bounding-box height, rather
-# than being fixed absolute constants -- keeps behaviour consistent across
-# mixed font sizes in the same drawing. Starting defaults, tune empirically
-# via `notebooks/cad_font_char_graph_lab.ipynb`.
-CURVE_SPACING_FRACTION = 0.03
-AREA_TOL_FRACTION = 0.0005
-MIN_SCALE = 1e-6
-
-
-def _character_scale(vectors) -> float:
-    """A per-character size reference (its own baseline-relative bbox
-    height) used to derive dynamic curve-sampling spacing and the
-    simplification area threshold -- floored so a degenerate zero-height
-    character (e.g. a single horizontal hyphen stroke) never produces a
-    zero/negative spacing or threshold."""
-    ys = [p[1] for v in vectors for item in v.items for p in item_points(item)]
-    height = (max(ys) - min(ys)) if ys else 0.0
-    return max(height, MIN_SCALE)
+    build_stats: GraphBuildStats
 
 
 def build_character_bank(
     label_set: LabelSet,
     vectors_by_page: dict[int, list],
     *,
-    point_merge_tol: float = 1e-3,
-    curve_spacing_fraction: float = CURVE_SPACING_FRACTION,
-    area_tol_fraction: float = AREA_TOL_FRACTION,
+    bezier_sample_count: int = BEZIER_SAMPLE_COUNT,
 ) -> list[CharacterTemplate]:
     """For every `source="cad_font"` `LabelEntry` in `label_set`: resolve
     its backing `Vector`s via `path_signature` against
@@ -134,13 +118,8 @@ def build_character_bank(
             continue
 
         transformed = to_baseline_relative_vectors(resolved, baseline.origin, baseline.direction)
-        scale = _character_scale(transformed)
-        curve_spacing = scale * curve_spacing_fraction
-        area_tol = (scale ** 2) * area_tol_fraction
-        segments, vertex_groups = vectors_to_segments(transformed, curve_spacing=curve_spacing)
-        graph = build_char_graph(
-            segments, vertex_groups, point_merge_tol=point_merge_tol, area_tol=area_tol,
-        )
+        segments, vertex_groups = vectors_to_segments(transformed, bezier_sample_count=bezier_sample_count)
+        graph, build_stats = build_char_graph(segments, vertex_groups)
         char_complexity = complexity(graph)  # before any anchor-synthesis augmentation
         graph, anchor_indices = select_anchor_points(graph)
         templates.append(CharacterTemplate(
@@ -150,6 +129,7 @@ def build_character_bank(
             graph=graph,
             complexity=char_complexity,
             anchor_node_indices=anchor_indices,
+            build_stats=build_stats,
         ))
 
     templates.sort(key=lambda t: t.complexity, reverse=True)

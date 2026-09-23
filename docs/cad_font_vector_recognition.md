@@ -66,16 +66,25 @@ label_schema.py`) with `source="cad_font"` entries plus a `baselines` list.
 
 Build a planar graph from a labelled character's vectors: flatten every
 `Vector.items` primitive into straight-line segments (a cubic bezier is
-approximated by 8 straight lines; a rect/quad by its 4 corner points
-connected edge-to-edge), merge segments that lie on the same line and
-touch/overlap, compute every pairwise segment intersection and split
-segments there so the final edge set is planar (edges touch only at shared
-endpoints), then merge near-duplicate points into single graph nodes. No
-position normalization beyond: the assigned baseline is rotated to the line
-`y=0`, and the character's own leftmost point is translated to `x=0`.
-Implemented in `rastervec/Evaluation/CadFont/geometry.py` (the flatten/
-merge/split/point-merge pipeline) and `graph.py` (the `CharGraph` container
-+ orchestration).
+always sampled into a fixed 5 points — 2 real endpoints + 3 generated
+interior points, i.e. 4 straight-line segments; a rect/quad into its 4
+corner points connected edge-to-edge), compute every pairwise segment
+intersection and split segments there so the final edge set is planar
+(edges touch only at shared endpoints), then reduce bit-identical points to
+one graph node each (exact dedup, not a tolerance merge) and connect any
+two *distinct* nodes within `epsilon` of each other that aren't already
+connected (an added edge, not a point merge — see below), before running a
+Douglas-Peucker simplification pass per chain of non-junction nodes.
+`epsilon` is not a tunable constant: it's derived per character as half the
+length of the shortest post-split segment, used for both the
+connect-nearby-points step and the Douglas-Peucker tolerance. No position
+normalization beyond: the assigned baseline is rotated to the line `y=0`,
+and the character's own leftmost point is translated to `x=0`. Implemented
+in `rastervec/Evaluation/CadFont/geometry.py` (the flatten/split/dedupe/
+connect pipeline) and `graph.py` (`CharGraph`, `build_char_graph`'s
+epsilon-derivation + Douglas-Peucker orchestration, and `GraphBuildStats`,
+the per-character epsilon/points-removed diagnostics it returns alongside
+the graph).
 
 ### Step 3 — Character → graph mapping, complexity, anchors `[IMPLEMENTED]`
 
@@ -102,10 +111,12 @@ groups to delta-chain-match.
 ### Step 5 — Candidate graph construction `[FUTURE]`
 
 Build a `CharGraph` for each candidate vector group from step 4, using the
-same flatten/merge/split/point-merge pipeline as step 2. No baseline is
-known yet at this point, so no baseline-relative normalization is possible
-until a baseline hypothesis exists (see step 7.1) — candidate graphs start
-in raw page space.
+same flatten/split/dedupe/connect/Douglas-Peucker pipeline as step 2
+(`matching.py::build_candidate_graph`). No baseline is known yet at this
+point, so no baseline-relative normalization is possible until a baseline
+hypothesis exists (see step 7.1) — candidate graphs start in raw page
+space, and their own `epsilon` is derived from that raw-page-space
+geometry directly (same formula as step 2, no external scale needed).
 
 ### Step 6 — Affine matching `[FUTURE]`
 
@@ -124,7 +135,14 @@ check whether an affine transform is even possible (and to solve for one).
 6.4. Record the winning transform's translation, scale, and rotation.
 6.5. Score similarity as a function of (MSE of matched endpoint pairs,
 normalized by the transform's scale) plus how well edge counts and degrees
-match between the character graph and the matched subset.
+match between the character graph and the matched subset. The MSE term is
+weighted per matched point's provenance — original data vertex / true
+intersection-junction / `select_anchor_points`'s synthesized baseline
+anchor (`matching.py::score_match`'s `*_point_weight` kwargs, all default
+1.0) — since a synthesized anchor has no real candidate counterpart, only
+a reference line it should lie near, so its distance is measured to the
+nearest point on the matched candidate edge rather than to a single
+candidate node.
 
 ### Step 7 — State update per candidate `[FUTURE]`
 
@@ -165,9 +183,10 @@ label and group the text ones by character.
 
 - How step 5's un-normalized (page-space) candidate graphs become
   baseline-relative once a baseline hypothesis exists from step 7.1 — most
-  likely: re-run step 5's flatten/merge/split/point-merge pipeline through
-  `character_bank.to_baseline_relative_vectors` once a candidate baseline
-  is known, mirroring exactly how a labelled character is normalized today.
+  likely: re-run step 5's flatten/split/dedupe/connect/Douglas-Peucker
+  pipeline through `character_bank.to_baseline_relative_vectors` once a
+  candidate baseline is known, mirroring exactly how a labelled character
+  is normalized today.
 - What "nearby" means in steps 7.1 ("no baseline exists... within some
   tolerance") and 10 ("candidates whose scale or rotation is different from
   nearby candidates") — likely a page-distance-along-baseline-direction

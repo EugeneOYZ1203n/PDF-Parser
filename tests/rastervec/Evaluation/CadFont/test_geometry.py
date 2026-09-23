@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from rastervec.Evaluation.CadFont.geometry import (
+    connect_nearby_points,
     cubic_bezier_points,
-    estimate_curve_length,
+    dedupe_exact_points,
     flatten_item_to_segments,
-    merge_close_points,
     split_at_intersections,
 )
 
@@ -28,21 +28,6 @@ def test_cubic_bezier_points_midpoint_matches_closed_form():
     assert abs(my - expected_y) < 1e-9
 
 
-def test_estimate_curve_length_straight_line_matches_chord_distance():
-    # A "curve" whose control points all lie on one line degenerates to a
-    # straight segment -- its arc length should match the chord distance.
-    p0, p1, p2, p3 = (0.0, 0.0), (2.0, 0.0), (5.0, 0.0), (9.0, 0.0)
-    length = estimate_curve_length(p0, p1, p2, p3)
-    assert abs(length - 9.0) < 1e-6
-
-
-def test_estimate_curve_length_curved_path_exceeds_chord_distance():
-    p0, p1, p2, p3 = (0.0, 0.0), (0.0, 5.0), (5.0, 5.0), (5.0, 0.0)
-    length = estimate_curve_length(p0, p1, p2, p3)
-    chord = 5.0  # straight-line distance from p0 to p3
-    assert length > chord
-
-
 def test_flatten_item_to_segments_line():
     item = ("l", (0.0, 0.0), (1.0, 1.0))
     segs, vertices = flatten_item_to_segments(item)
@@ -50,10 +35,11 @@ def test_flatten_item_to_segments_line():
     assert vertices == {(0.0, 0.0), (1.0, 1.0)}
 
 
-def test_flatten_item_to_segments_curve_is_chained_and_adaptively_spaced():
+def test_flatten_item_to_segments_curve_default_is_5_points_4_segments():
     item = ("c", (0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0))
-    segs, vertices = flatten_item_to_segments(item, curve_spacing=1.0)
-    # Chained, with the curve's own endpoints at the very start/end.
+    segs, vertices = flatten_item_to_segments(item)
+    # 5 points (2 endpoints + 3 generated interior) -> 4 chained segments.
+    assert len(segs) == 4
     assert segs[0][0] == (0.0, 0.0)
     assert segs[-1][1] == (10.0, 0.0)
     for a, b in zip(segs, segs[1:]):
@@ -61,23 +47,12 @@ def test_flatten_item_to_segments_curve_is_chained_and_adaptively_spaced():
     # Only the true endpoints are original vertices, never an interior
     # sample point.
     assert vertices == {(0.0, 0.0), (10.0, 0.0)}
-    # Roughly 1pt-spaced samples over a curve with a decent arc length ->
-    # meaningfully more than the old fixed-8 subdivision.
-    assert len(segs) > 8
 
 
-def test_flatten_item_to_segments_curve_coarser_spacing_gives_fewer_segments():
+def test_flatten_item_to_segments_curve_bezier_sample_count_is_configurable():
     item = ("c", (0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0))
-    fine_segs, _ = flatten_item_to_segments(item, curve_spacing=0.5)
-    coarse_segs, _ = flatten_item_to_segments(item, curve_spacing=5.0)
-    assert len(coarse_segs) < len(fine_segs)
-
-
-def test_flatten_item_to_segments_curve_never_below_two_segments():
-    # A very short curve at a coarse spacing must still get >= 2 segments.
-    item = ("c", (0.0, 0.0), (0.0, 0.1), (0.1, 0.1), (0.1, 0.0))
-    segs, _ = flatten_item_to_segments(item, curve_spacing=10.0)
-    assert len(segs) >= 2
+    segs, _ = flatten_item_to_segments(item, bezier_sample_count=9)
+    assert len(segs) == 8
 
 
 def test_flatten_item_to_segments_rect_is_closed_4_edges():
@@ -121,59 +96,51 @@ def test_split_at_intersections_t_touch_no_duplicate_point():
     assert ((5.0, 0.0), (10.0, 0.0)) in split
 
 
-def test_merge_close_points_collapses_near_duplicate_endpoints():
-    segs = [((0.0, 0.0), (5.0, 5.0)), ((5.001, 5.0005), (10.0, 0.0))]
-    nodes, edges, point_to_node = merge_close_points(segs, point_merge_tol=0.01)
-    assert len(nodes) == 3
-    assert len(edges) == 2
-    # both edges reference the same merged node
-    endpoints_used = {n for edge in edges for n in edge}
-    shared = [n for n in endpoints_used if sum(1 for e in edges if n in e) == 2]
-    assert len(shared) == 1
-    # the raw-point -> node-index map resolves both near-duplicate points
-    # to that same shared node.
-    shared_node = shared[0]
-    assert point_to_node[(5.0, 5.0)] == shared_node
-    assert point_to_node[(5.001, 5.0005)] == shared_node
+def test_dedupe_exact_points_collapses_only_bit_identical_points():
+    # One shared item polyline (consecutive segments sharing an exact
+    # coordinate) plus a second, near-but-not-identical point from a
+    # different item -- only the literal duplicate collapses.
+    segs = [
+        ((0.0, 0.0), (5.0, 5.0)),
+        ((5.0, 5.0), (10.0, 0.0)),
+        ((5.001, 5.0005), (20.0, 20.0)),
+    ]
+    nodes, edges, point_to_node = dedupe_exact_points(segs)
+    assert len(nodes) == 5  # (0,0) (5,5) (10,0) (5.001,5.0005) (20,20)
+    assert point_to_node[(5.0, 5.0)] != point_to_node[(5.001, 5.0005)]
+    assert len(edges) == 3
 
 
-def test_merge_close_points_default_tolerance_is_small():
-    # Points that are visually close but not true floating-point
-    # duplicates must NOT collapse under the new small default tolerance
-    # (dedup-only now, not visual consolidation).
-    segs = [((0.0, 0.0), (5.0, 5.0)), ((5.1, 5.05), (10.0, 0.0))]
-    nodes, edges, _ = merge_close_points(segs)
-    assert len(nodes) == 4
+def test_dedupe_exact_points_no_self_loop_for_degenerate_segment():
+    segs = [((1.0, 1.0), (1.0, 1.0)), ((1.0, 1.0), (2.0, 2.0))]
+    nodes, edges, _ = dedupe_exact_points(segs)
+    assert len(nodes) == 2
+    assert len(edges) == 1
 
 
-def test_merge_close_points_forbidden_2_member_group_never_merges():
-    # Two points that are both original vertices of the same "l"/"c" item
-    # (a 2-member group) must never collapse into one node, even when
-    # within point_merge_tol -- without forbidden_groups, they would.
-    p0, p1 = (0.0, 0.0), (0.001, 0.0)
-    segs = [(p0, p1)]
-
-    nodes_unprotected, _, _ = merge_close_points(segs, point_merge_tol=0.01)
-    assert len(nodes_unprotected) == 1  # would merge without protection
-
-    nodes_protected, edges_protected, point_to_node = merge_close_points(
-        segs, point_merge_tol=0.01, forbidden_groups=[frozenset({p0, p1})],
-    )
-    assert len(nodes_protected) == 2
-    assert len(edges_protected) == 1
-    assert point_to_node[p0] != point_to_node[p1]
+def test_connect_nearby_points_adds_edge_for_close_unconnected_pair():
+    nodes = [(0.0, 0.0), (10.0, 10.0), (10.001, 10.0005)]
+    edges: list[tuple[int, int]] = []
+    out = connect_nearby_points(nodes, edges, epsilon=0.01)
+    assert (1, 2) in out or (2, 1) in out
+    assert len(out) == 1
 
 
-def test_merge_close_points_forbidden_group_ignores_4_member_groups():
-    # A "re"/"qu"-style 4-member group gets no such protection -- its
-    # corners still merge normally when close enough, even with
-    # forbidden_groups passed.
-    p0, p1 = (0.0, 0.0), (0.001, 0.0)
-    p2, p3 = (0.0, 5.0), (5.0, 5.0)
-    segs = [(p0, p1), (p1, p2), (p2, p3), (p3, p0)]
+def test_connect_nearby_points_ignores_pairs_beyond_epsilon():
+    nodes = [(0.0, 0.0), (10.0, 10.0)]
+    out = connect_nearby_points(nodes, [], epsilon=0.01)
+    assert out == []
 
-    nodes, edges, point_to_node = merge_close_points(
-        segs, point_merge_tol=0.01, forbidden_groups=[frozenset({p0, p1, p2, p3})],
-    )
-    assert point_to_node[p0] == point_to_node[p1]
-    assert len(nodes) == 3
+
+def test_connect_nearby_points_never_duplicates_an_existing_edge():
+    nodes = [(0.0, 0.0), (0.001, 0.0)]
+    edges = [(0, 1)]
+    out = connect_nearby_points(nodes, edges, epsilon=1.0)
+    assert out == [(0, 1)]
+
+
+def test_connect_nearby_points_never_touches_positions():
+    nodes = [(0.0, 0.0), (0.001, 0.0)]
+    original = list(nodes)
+    connect_nearby_points(nodes, [], epsilon=1.0)
+    assert nodes == original
