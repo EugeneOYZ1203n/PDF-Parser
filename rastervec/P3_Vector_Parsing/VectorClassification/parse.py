@@ -170,7 +170,6 @@ def parse(
 # shared with FastIntoPaddle/LegacyRecreation/Junction.
 # ---------------------------------------------------------------------------
 _C_KEPT = "#059669"
-_C_DROPPED = "#dc2626"
 _C_FAST_PASS = "#059669"
 _C_FAST_DROP = "#dc2626"
 _C_FAST_HEATMAP = "#f97316"
@@ -229,29 +228,19 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
     for i in range(n_steps):
         label = steps_per_bucket[0][i].label
         kept_groups: list = []
-        dropped_groups: list = []
         for steps in steps_per_bucket:
             if i >= len(steps):
                 continue
             for cat in steps[i].categories.values():
                 if cat.role == "kept":
                     kept_groups.extend(cat.groups)
-                elif cat.role == "dropped":
-                    dropped_groups.extend(cat.groups)
         stage = f"classify_{i + 1:02d}_{_slug(label)}"
         out.append((stage, "kept", _C_KEPT, render_vectors_pdf(
             page_meta, _flatten_entries(kept_groups), color_of=lambda _v: _hex_rgb(_C_KEPT),
         )))
-        out.append((stage, "dropped", _C_DROPPED, render_vectors_pdf(
-            page_meta, _flatten_entries(dropped_groups), color_of=lambda _v: _hex_rgb(_C_DROPPED),
-        )))
         kept_boxes = [b for b in (_entry_bbox(g) for g in kept_groups if g) if b is not None]
-        dropped_boxes = [b for b in (_entry_bbox(g) for g in dropped_groups if g) if b is not None]
-        out.append((stage, f"kept bbox ({len(kept_boxes)})", _C_KEPT, render_boxes_pdf(
+        out.append((stage, "kept bbox", _C_KEPT, render_boxes_pdf(
             page_meta, [(b, _hex_rgb(_C_KEPT)) for b in kept_boxes],
-        )))
-        out.append((stage, f"dropped bbox ({len(dropped_boxes)})", _C_DROPPED, render_boxes_pdf(
-            page_meta, [(b, _hex_rgb(_C_DROPPED)) for b in dropped_boxes],
         )))
     return out
 
@@ -313,12 +302,17 @@ def _render_fast_layers(page_meta, fast_passed, fast_dropped, page_mask=None) ->
 def _render_ocr_layers(page_meta, texts, blank_boxes=None) -> "list[DebugLayer]":
     from rastervec.commons.renderer import render_boxes_pdf, render_text_pdf
 
+    texts = texts or []
+    passed_boxes = [t.bbox for t in texts]
     return [
-        ("ocr", "recognized text", _C_OCR, render_text_pdf(
-            page_meta, texts or [], color_of=lambda _t: _hex_rgb(_C_OCR),
+        ("ocr", "passed bbox", _C_OCR, render_boxes_pdf(
+            page_meta, [(b, _hex_rgb(_C_OCR)) for b in passed_boxes],
         )),
-        ("ocr", f"blank text ({len(blank_boxes or [])})", _C_OCR_BLANK, render_boxes_pdf(
+        ("ocr", "failed bbox", _C_OCR_BLANK, render_boxes_pdf(
             page_meta, [(b, _hex_rgb(_C_OCR_BLANK)) for b in (blank_boxes or [])],
+        )),
+        ("ocr", "passed text", _C_OCR, render_text_pdf(
+            page_meta, texts, color_of=lambda _t: _hex_rgb(_C_OCR),
         )),
     ]
 
