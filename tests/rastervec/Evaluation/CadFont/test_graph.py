@@ -191,9 +191,10 @@ def test_select_anchor_points_unrestricted_graph_returns_itself_unchanged():
 
 def test_build_char_graph_plus_sign_end_to_end():
     # Both segments are "l" items -- one vertex_group per item, all 4 raw
-    # endpoints are original vertices, so together with the degree-4
-    # crossing every resulting node is protected and nothing is eligible
-    # for simplification, regardless of epsilon.
+    # endpoints are original vertices. Each of the 4 arms is a trivial
+    # 2-node chain (leaf -> the degree-4 crossing junction) with no
+    # interior point at all, so nothing is eligible for simplification
+    # here regardless of epsilon -- not because every node is protected.
     segments = [((-5.0, 0.0), (5.0, 0.0)), ((0.0, -5.0), (0.0, 5.0))]
     vertex_groups = [frozenset({(-5.0, 0.0), (5.0, 0.0)}), frozenset({(0.0, -5.0), (0.0, 5.0)})]
     g, stats = build_char_graph(segments, vertex_groups)
@@ -310,3 +311,123 @@ def test_rdp_chain_keeps_out_of_tolerance_bend():
     nodes = [(0.0, 0.0), (5.0, 5.0), (10.0, 0.0)]
     chain = [0, 1, 2]
     assert _rdp_chain(nodes, chain, epsilon=0.5) == [0, 1, 2]
+
+
+def test_build_char_graph_drops_geometrically_redundant_interior_original_vertex():
+    # Three collinear "l" items chained end to end: (0,0)-(3,0)-(6,0)-(10,0).
+    # All 4 corner points are original vertices (each item's own true
+    # endpoints), no real junction anywhere. The two interior points sit
+    # exactly on the (0,0)-(10,0) line -- perpendicular distance 0, well
+    # under epsilon -- so RDP must drop them despite being original
+    # vertices, since the component still keeps its floor of 2 (the two
+    # outer endpoints) without them.
+    points = [(0.0, 0.0), (3.0, 0.0), (6.0, 0.0), (10.0, 0.0)]
+    segments = list(zip(points, points[1:]))
+    vertex_groups = [
+        frozenset({(0.0, 0.0), (3.0, 0.0)}),
+        frozenset({(3.0, 0.0), (6.0, 0.0)}),
+        frozenset({(6.0, 0.0), (10.0, 0.0)}),
+    ]
+
+    g, stats = build_char_graph(segments, vertex_groups)
+
+    assert g.num_nodes() == 2
+    assert set(g.nodes) == {(0.0, 0.0), (10.0, 0.0)}
+    assert len(g.original_vertex_indices) == 2
+    assert stats.points_removed == 2
+
+
+def test_build_char_graph_closed_rectangle_with_no_junction_keeps_all_four_corners():
+    # A lone rectangle, no other intersecting geometry -> a closed loop
+    # with zero real junctions. `_force_protect_junctionless_components`
+    # must give `_find_chains` a valid anchor pair (this component's
+    # farthest-apart corner pair, a diagonal) rather than leaving it to an
+    # arbitrary, processing-order-dependent starting edge. Each corner is a
+    # genuine 90-degree turn (well beyond epsilon), so all 4 survive RDP
+    # regardless of which pair got force-protected.
+    item = ("re", (0.0, 0.0, 10.0, 5.0))
+    segments, original_vertices = flatten_item_to_segments(item)
+    vertex_groups = [frozenset(original_vertices)]
+
+    g, _stats = build_char_graph(segments, vertex_groups)
+
+    assert g.num_nodes() == 4
+    assert g.num_edges() == 4
+    assert g.max_degree() == 2
+    assert len(g.original_vertex_indices) == 4
+
+
+def test_rescue_original_vertex_floor_restores_largest_deviation_first():
+    from rastervec.Evaluation.CadFont.graph import _rescue_original_vertex_floor
+
+    # One chain, one component: endpoints 0/4 are NOT original vertices
+    # (stand-ins for real junctions elsewhere in a bigger graph); nodes
+    # 1, 2, 3 are all original vertices that plain RDP already collapsed
+    # away entirely (chain_kept starts at just the two endpoints). With
+    # nothing else in this component to hold the floor, exactly 2 must be
+    # restored -- the largest perpendicular deviation from the (0, 4)
+    # baseline first (node 2, deviation 3.0), then whichever is largest
+    # against the now-updated local segments (node 3, deviation ~1.115,
+    # beating node 1's ~0.686).
+    nodes = [(0.0, 0.0), (3.0, 1.0), (5.0, 3.0), (7.0, 0.5), (10.0, 0.0)]
+    chain_full = [[0, 1, 2, 3, 4]]
+    chain_kept = [[0, 4]]
+    original_vertex_node_indices = {1, 2, 3}
+    components = [0, 0, 0, 0, 0]
+
+    _rescue_original_vertex_floor(nodes, chain_full, chain_kept, original_vertex_node_indices, components)
+
+    assert chain_kept[0][0] == 0 and chain_kept[0][-1] == 4
+    restored = {i for i in chain_kept[0] if i in original_vertex_node_indices}
+    assert restored == {2, 3}
+
+
+def test_rescue_original_vertex_floor_noop_when_component_has_zero_originals():
+    from rastervec.Evaluation.CadFont.graph import _rescue_original_vertex_floor
+
+    nodes = [(0.0, 0.0), (5.0, 5.0), (10.0, 0.0)]
+    chain_full = [[0, 1, 2]]
+    chain_kept = [[0, 2]]
+    components = [0, 0, 0]
+
+    _rescue_original_vertex_floor(nodes, chain_full, chain_kept, set(), components)
+
+    assert chain_kept[0] == [0, 2]
+
+
+def test_rescue_original_vertex_floor_restores_the_single_original_when_only_one_exists():
+    from rastervec.Evaluation.CadFont.graph import _rescue_original_vertex_floor
+
+    # A component with only 1 original vertex total: the floor caps at
+    # min(2, 1) == 1, not a forced 2 that can't exist -- but that 1 must
+    # still be restored, not silently dropped to 0.
+    nodes = [(0.0, 0.0), (5.0, 5.0), (10.0, 0.0)]
+    chain_full = [[0, 1, 2]]
+    chain_kept = [[0, 2]]
+    components = [0, 0, 0]
+
+    _rescue_original_vertex_floor(nodes, chain_full, chain_kept, {1}, components)
+
+    assert chain_kept[0] == [0, 1, 2]
+
+
+def test_rescue_original_vertex_floor_treats_disconnected_components_independently():
+    from rastervec.Evaluation.CadFont.graph import _rescue_original_vertex_floor
+
+    # Two unrelated components, each shaped like the "largest deviation
+    # first" test above. The floor is NOT a single global budget of 2
+    # shared across the whole graph -- each component must independently
+    # reach its own floor of 2.
+    nodes = [
+        (0.0, 0.0), (3.0, 1.0), (5.0, 3.0), (7.0, 0.5), (10.0, 0.0),
+        (100.0, 0.0), (103.0, 1.0), (105.0, 3.0), (107.0, 0.5), (110.0, 0.0),
+    ]
+    chain_full = [[0, 1, 2, 3, 4], [5, 6, 7, 8, 9]]
+    chain_kept = [[0, 4], [5, 9]]
+    original_vertex_node_indices = {1, 2, 3, 6, 7, 8}
+    components = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+
+    _rescue_original_vertex_floor(nodes, chain_full, chain_kept, original_vertex_node_indices, components)
+
+    assert len([i for i in chain_kept[0] if i in original_vertex_node_indices]) == 2
+    assert len([i for i in chain_kept[1] if i in original_vertex_node_indices]) == 2

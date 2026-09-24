@@ -63,9 +63,10 @@ def flatten_item_to_segments(
     construction needs the real closed shape), all 4 corners are original
     vertices.
 
-    `original_vertices` feeds `graph.build_char_graph`'s protected-node
-    rule: an original vertex is never dropped by the RDP-based
-    simplification pass, unlike a synthetic curve-interior sample."""
+    `original_vertices` feeds `graph.build_char_graph`'s node provenance:
+    an original vertex is an ordinary RDP candidate (droppable, same as a
+    synthetic curve-interior sample) subject only to a per-connected-
+    component floor -- see `build_char_graph`'s docstring."""
     kind = item[0]
     if kind == "l":
         p0, p1 = item[1], item[2]

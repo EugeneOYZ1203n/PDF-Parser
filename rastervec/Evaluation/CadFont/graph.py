@@ -103,12 +103,22 @@ def build_char_graph(
     `segments` is already-flattened geometry (see
     `geometry.flatten_item_to_segments`); `vertex_groups` is that same
     flatten pass's per-item groups of true data-defined points (never
-    synthetic curve-interior samples) -- a node built from one of these is
-    always protected from simplification, alongside any node with graph
-    degree > 2 (a real junction/crossing, whether from `split_at_intersections`
-    or from a new `connect_nearby_points` edge), and the resulting
-    `CharGraph`'s `original_vertex_indices` records exactly which final
-    nodes they are (consumed by `select_anchor_points`).
+    synthetic curve-interior samples). A node built from one of these is an
+    "original vertex" (recorded in the resulting `CharGraph`'s
+    `original_vertex_indices`, consumed by `select_anchor_points`), but
+    unlike a real graph junction (degree > 2, structurally protected -- RDP
+    cannot simplify across a branch point) an original vertex is only an
+    ORDINARY RDP candidate: it can be simplified away like any synthetic
+    curve-interior point, subject to one floor -- every connected component
+    of the graph keeps at least 2 of its own original vertices (or however
+    many it has, if fewer than 2 exist at all), restoring the
+    geometrically most significant dropped one(s) first when a component's
+    plain RDP result would otherwise breach that floor. See
+    `_force_protect_junctionless_components` and
+    `_rescue_original_vertex_floor` for the two mechanisms that jointly
+    guarantee this (the former for components with no real junction at
+    all, which would otherwise leave `_find_chains` with no anchor to
+    start from; the latter for everything else).
 
     No tolerance parameters: unlike the old `point_merge_tol`/`area_tol`
     (externally supplied, dynamically derived by the caller from its own
@@ -127,9 +137,11 @@ def build_char_graph(
     original_vertex_node_indices = {
         point_to_node[p] for p in original_vertices if p in point_to_node
     }
-    protected = _compute_protected_nodes(edges, len(nodes), original_vertices, point_to_node)
+    protected = _compute_protected_nodes(edges, len(nodes))
+    components = _connected_components(len(nodes), edges)
+    _force_protect_junctionless_components(nodes, protected, components, original_vertex_node_indices)
     simplified_nodes, simplified_edges, final_original_vertex_indices = _simplify_graph(
-        nodes, edges, protected, epsilon, original_vertex_node_indices,
+        nodes, edges, protected, epsilon, original_vertex_node_indices, components,
     )
     stats = GraphBuildStats(
         epsilon=epsilon,
@@ -144,28 +156,20 @@ def build_char_graph(
     ), stats
 
 
-def _compute_protected_nodes(
-    edges: list[tuple[int, int]],
-    num_nodes: int,
-    original_vertices: set[Point],
-    point_to_node: dict[Point, int],
-) -> set[int]:
-    """A node is protected from the simplification pass if it's a real
-    graph junction (degree > 2) or if it's the canonical node of at least
-    one original (non-synthetic) data vertex. Every degree-1 node is
-    necessarily an original vertex too (nothing else could have produced a
-    dead end), so this rule alone also naturally protects every chain's
-    true endpoints -- no separate degree-1 special case needed."""
+def _compute_protected_nodes(edges: list[tuple[int, int]], num_nodes: int) -> set[int]:
+    """A node is protected from the simplification pass iff it's a real
+    graph junction (degree > 2) -- RDP cannot simplify across a branch
+    point. Original-vertex status alone no longer forces protection (see
+    `build_char_graph`'s docstring): an original vertex is an ordinary RDP
+    candidate, subject only to the connected-component floor of 2 enforced
+    by `_force_protect_junctionless_components` (for components with no
+    junction at all) and `_rescue_original_vertex_floor` (afterwards, for
+    everything else)."""
     deg = [0] * num_nodes
     for a, b in edges:
         deg[a] += 1
         deg[b] += 1
-    protected = {i for i, d in enumerate(deg) if d > 2}
-    for p in original_vertices:
-        node_idx = point_to_node.get(p)
-        if node_idx is not None:
-            protected.add(node_idx)
-    return protected
+    return {i for i, d in enumerate(deg) if d > 2}
 
 
 def _edge_key(a: int, b: int) -> tuple[int, int]:
@@ -178,6 +182,95 @@ def _build_adjacency(num_nodes: int, edges: list[tuple[int, int]]) -> list[list[
         adj[a].append(b)
         adj[b].append(a)
     return adj
+
+
+def _connected_components(num_nodes: int, edges: list[tuple[int, int]]) -> list[int]:
+    """Node index -> connected-component id (0-based, order of discovery),
+    computed once over the full pre-simplification node/edge set.
+    Component membership is invariant under RDP -- a chain's own
+    simplification only ever drops that chain's own interior nodes, never
+    merges/splits which top-level components exist -- so this is safe to
+    compute up front and reuse for both `_force_protect_junctionless_
+    components` and `_rescue_original_vertex_floor`."""
+    adj = _build_adjacency(num_nodes, edges)
+    comp = [-1] * num_nodes
+    cid = 0
+    for start in range(num_nodes):
+        if comp[start] != -1:
+            continue
+        stack = [start]
+        comp[start] = cid
+        while stack:
+            node = stack.pop()
+            for nxt in adj[node]:
+                if comp[nxt] == -1:
+                    comp[nxt] = cid
+                    stack.append(nxt)
+        cid += 1
+    return comp
+
+
+def _group_by_component(components: list[int]) -> dict[int, list[int]]:
+    groups: dict[int, list[int]] = {}
+    for idx, cid in enumerate(components):
+        groups.setdefault(cid, []).append(idx)
+    return groups
+
+
+def _farthest_pair(nodes: list[Point], indices: list[int]) -> tuple[int, int]:
+    """The two node indices (from `indices`) with the greatest Euclidean
+    distance between them -- O(n^2), fine for a single character's
+    handful of original vertices per component."""
+    best_pair, best_dist = (indices[0], indices[0]), -1.0
+    for i in range(len(indices)):
+        for j in range(i + 1, len(indices)):
+            a, b = nodes[indices[i]], nodes[indices[j]]
+            d = math.hypot(a[0] - b[0], a[1] - b[1])
+            if d > best_dist:
+                best_dist, best_pair = d, (indices[i], indices[j])
+    return best_pair
+
+
+def _force_protect_junctionless_components(
+    nodes: list[Point],
+    protected: set[int],
+    components: list[int],
+    original_vertex_node_indices: set[int],
+) -> None:
+    """A connected component with no real junction at all (a closed loop
+    with no self-intersection, e.g. an isolated rectangle or a closed
+    bezier) leaves `_find_chains` with no protected node to anchor a walk
+    from -- without an explicit anchor, its trailing defensive pass would
+    pick an arbitrary starting edge, which for a genuinely branch-free
+    component can split it into chain fragments at an arbitrary,
+    processing-order-dependent point rather than a meaningful one.
+
+    Mutates `protected` in place: for every such component, protects the
+    farthest-apart pair of that component's own original vertices when it
+    has >= 2 (this also satisfies that component's floor of 2 by
+    construction, so `_rescue_original_vertex_floor` never needs to run
+    for it), a single original vertex when it has exactly 1, or --
+    genuinely degenerate, no original-vertex provenance in this component
+    at all -- an arbitrary one of its own nodes, purely so `_find_chains`
+    has an anchor."""
+    protected_components = {components[i] for i in protected}
+    groups = _group_by_component(components)
+    originals_by_component: dict[int, list[int]] = {}
+    for idx in original_vertex_node_indices:
+        originals_by_component.setdefault(components[idx], []).append(idx)
+
+    for cid, members in groups.items():
+        if cid in protected_components:
+            continue
+        originals = originals_by_component.get(cid, [])
+        if len(originals) >= 2:
+            a, b = _farthest_pair(nodes, originals)
+            protected.add(a)
+            protected.add(b)
+        elif len(originals) == 1:
+            protected.add(originals[0])
+        else:
+            protected.add(members[0])
 
 
 def _find_chains(
@@ -269,27 +362,120 @@ def _rdp_chain(nodes: list[Point], chain: list[int], epsilon: float) -> list[int
     return left[:-1] + right
 
 
+def _bounding_kept_neighbors(
+    chain_full: list[int], kept_set: set[int], pos_in_full: dict[int, int], x: int,
+) -> tuple[int, int] | None:
+    """The two node indices currently kept in this chain that bound `x` in
+    the chain's own walk order -- the local segment `x` would be measured
+    against (via `_perpendicular_distance`) if restored. `None` if `x`
+    isn't actually between two kept points on either side (shouldn't
+    happen for any candidate this module ever calls this with: a chain's
+    own `chain_full[0]`/`chain_full[-1]` are always kept by construction,
+    see `_rdp_chain`)."""
+    p = pos_in_full[x]
+    left = next((chain_full[i] for i in range(p - 1, -1, -1) if chain_full[i] in kept_set), None)
+    right = next((chain_full[i] for i in range(p + 1, len(chain_full)) if chain_full[i] in kept_set), None)
+    if left is None or right is None:
+        return None
+    return left, right
+
+
+def _rescue_original_vertex_floor(
+    nodes: list[Point],
+    chain_full: list[list[int]],
+    chain_kept: list[list[int]],
+    original_vertex_node_indices: set[int],
+    components: list[int],
+) -> None:
+    """Mutates `chain_kept` in place (one list per chain from
+    `_find_chains`, each already RDP-simplified by `_rdp_chain`): for every
+    connected component whose surviving original-vertex count -- summed
+    across ALL of that component's own chains, not any single one -- is
+    below `min(2, that component's total original-vertex count)`,
+    repeatedly restores the dropped original vertex (from anywhere in the
+    component, not just one chain) with the largest CURRENT perpendicular
+    deviation from its bounding kept neighbors, splicing it back into its
+    own chain's kept sequence at the correct sorted position. Repeats
+    (recomputing bounding neighbors each round, since a restored point
+    changes its chain-neighbors' local segments) until the component's
+    floor is met or its dropped-original pool is exhausted.
+
+    A component handled by `_force_protect_junctionless_components`
+    already satisfies its floor by construction (both forced anchors are
+    each some chain's own `chain_full[0]`/`[-1]`, always kept) -- this
+    function is a no-op for it."""
+    chains_by_component: dict[int, list[int]] = {}
+    for ci, full in enumerate(chain_full):
+        chains_by_component.setdefault(components[full[0]], []).append(ci)
+
+    originals_by_component: dict[int, set[int]] = {}
+    for idx in original_vertex_node_indices:
+        originals_by_component.setdefault(components[idx], set()).add(idx)
+
+    pos_in_full = [{node: i for i, node in enumerate(full)} for full in chain_full]
+    kept_sets = [set(kept) for kept in chain_kept]
+
+    for cid, chain_indices in chains_by_component.items():
+        total_originals = originals_by_component.get(cid, set())
+        floor = min(2, len(total_originals))
+        if floor == 0:
+            continue
+        surviving = sum(len(kept_sets[ci] & total_originals) for ci in chain_indices)
+
+        while surviving < floor:
+            best: tuple[float, int, int] | None = None  # (dist, chain_idx, node_idx)
+            for ci in chain_indices:
+                full = chain_full[ci]
+                kept_set = kept_sets[ci]
+                for x in full:
+                    if x not in total_originals or x in kept_set:
+                        continue
+                    bounds = _bounding_kept_neighbors(full, kept_set, pos_in_full[ci], x)
+                    if bounds is None:
+                        continue
+                    left, right = bounds
+                    d = _perpendicular_distance(nodes[x], nodes[left], nodes[right])
+                    if best is None or d > best[0]:
+                        best = (d, ci, x)
+            if best is None:
+                break
+            _, ci, x = best
+            kept_sets[ci].add(x)
+            kept_list = chain_kept[ci]
+            px = pos_in_full[ci][x]
+            insert_pos = 0
+            while insert_pos < len(kept_list) and pos_in_full[ci][kept_list[insert_pos]] < px:
+                insert_pos += 1
+            kept_list.insert(insert_pos, x)
+            surviving += 1
+
+
 def _simplify_graph(
     nodes: list[Point],
     edges: list[tuple[int, int]],
     protected: set[int],
     epsilon: float,
     original_vertex_node_indices: set[int],
+    components: list[int],
 ) -> tuple[list[Point], list[tuple[int, int]], frozenset[int]]:
-    """Runs `_rdp_chain` over every chain from `_find_chains`, then
-    re-indexes the surviving node indices into a compact final node/edge
-    list. `original_vertex_node_indices` is remapped through that same
-    re-indexing and returned alongside -- every original vertex is
-    protected (see `_compute_protected_nodes`), so it always survives;
-    this only ever renumbers it."""
+    """Runs `_rdp_chain` over every chain from `_find_chains`, rescues
+    dropped original vertices back up to a floor of 2 per connected
+    component (`_rescue_original_vertex_floor`), then re-indexes the
+    surviving node indices into a compact final node/edge list.
+    `original_vertex_node_indices` is remapped through that same
+    re-indexing and returned alongside."""
     chains = _find_chains(len(nodes), edges, protected)
+
+    chain_full: list[list[int]] = list(chains)
+    chain_kept: list[list[int]] = [_rdp_chain(nodes, chain, epsilon) for chain in chains]
+
+    _rescue_original_vertex_floor(nodes, chain_full, chain_kept, original_vertex_node_indices, components)
 
     kept_old_indices: set[int] = set()
     raw_new_edges: list[tuple[int, int]] = []
-    for chain in chains:
-        simplified = _rdp_chain(nodes, chain, epsilon)
-        kept_old_indices.update(simplified)
-        raw_new_edges.extend(zip(simplified, simplified[1:]))
+    for kept in chain_kept:
+        kept_old_indices.update(kept)
+        raw_new_edges.extend(zip(kept, kept[1:]))
 
     old_to_new: dict[int, int] = {}
     new_nodes: list[Point] = []
