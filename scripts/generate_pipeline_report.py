@@ -97,6 +97,7 @@ from rastervec.Evaluation.Labelling.label_schema import (
 )
 from rastervec.commons.logging_setup import configure_logging, get_logger
 from rastervec.commons.paths import output_dir
+from rastervec.commons.step_timing import StepClock
 
 from scripts.debug_image_savers import (  # noqa: F401 -- re-exported for callers/tests
     _draw_boxes,
@@ -115,8 +116,10 @@ from scripts.report_artifacts import (  # noqa: F401 -- re-exported for callers/
     RASTER_TEXT_TYPES,
     _accumulate_page,
     _active_artifacts,
+    _add_extra_prediction_layers,
     _debug_layer_sink,
     _finalize_doc_dir,
+    _image_reservoirs,
     _LayerWriter,
     _merge_pdfs,
     _reached,
@@ -190,7 +193,10 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
     is_legacy = variant.engine == "legacy"
     doc_dir = run_dir / pdf_path.stem
     doc_dir.mkdir(parents=True, exist_ok=True)
-    detect_dir, recog_dir, ocr_dir = _image_dirs(doc_dir)
+    reservoirs = (
+        _image_reservoirs(*_image_dirs(doc_dir), seed_name=doc_dir.name)
+        if config.debug_images else None
+    )
 
     pages = _filter_valid_pages(pdf_path, config.pages_for(pdf_path.stem), pdf_path.stem)
     active = _active_artifacts(config, variant)
@@ -200,10 +206,13 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
     dumps: list[dump_io.PageDump] = []
 
     for page_index in pages:
+        debug_durations: dict = {}
+        clock = StepClock(debug_durations)
         run_input, run_page = str(pdf_path), page_index
         if config.vectorise:
             conv_path = doc_dir / f"converted_p{page_index}.pdf"
-            _CONVERT[config.vectorise_mode](str(pdf_path), page_index, str(conv_path))
+            with clock("conversion"):
+                _CONVERT[config.vectorise_mode](str(pdf_path), page_index, str(conv_path))
             run_input, run_page = str(conv_path), 0
 
         _LOG.info("running %s page %d (%s)", pdf_path.name, page_index, variant.name)
@@ -218,15 +227,14 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
         if run_page != page_index:
             _restamp_page(res, page_index)
 
-        _accumulate_page(res, page_index, active, writer, stats_pages,
-                         detect_dir, recog_dir, ocr_dir,
-                         is_legacy=is_legacy, p3=variant.p3,
-                         debug_images=config.debug_images)
+        _accumulate_page(res, page_index, active, writer, stats_pages, reservoirs,
+                         is_legacy=is_legacy, p3=variant.p3, clock=clock)
         dumps.append(dump_io.PageDump(
             page_meta=res.page.meta, texts=list(res.texts or []),
             vectors=list(res.vectors or []), engine=variant.engine,
             step_durations=dict(res.step_durations or {}),
             substep_durations=_substeps(res),
+            debug_durations=debug_durations,
         ))
 
     _finalize_doc_dir(doc_dir, pdf_path, pages, config, variant, active,
@@ -369,18 +377,27 @@ def _process_pdf_benchmark(
     doc_name = _bench_doc_name(bench)
     doc_dir = run_dir / doc_name
     doc_dir.mkdir(parents=True, exist_ok=True)
-    detect_dir, recog_dir, ocr_dir = _image_dirs(doc_dir)
+    reservoirs = (
+        _image_reservoirs(*_image_dirs(doc_dir), seed_name=doc_name)
+        if config.debug_images else None
+    )
     pages = _filter_valid_pages(bench.pdf_path, config.pages_for(doc_name), bench.key)
     cfg = metrics.MetricConfig(iou_edge_min=config.iou_edge_min)
     active = _active_artifacts(config, variant)
+    gt_by_type = _bench_ground_truth_by_type(bench, pages)
+    # Extra-prediction layers only when this input has manual vector labels.
+    has_manual = bool(gt_by_type["original_vector"].entries)
 
     writer = _LayerWriter()
     stats_pages: dict[str, list[tuple[int, dict]]] = {row[0]: [] for row in active}
     dumps: list[dump_io.PageDump] = []
 
     for p in pages:
+        debug_durations: dict = {}
+        clock = StepClock(debug_durations)
         conv_path = doc_dir / f"converted_p{p}.pdf"
-        conversion.convert_page_to_vector_text(str(bench.pdf_path), p, str(conv_path))
+        with clock("conversion"):
+            conversion.convert_page_to_vector_text(str(bench.pdf_path), p, str(conv_path))
         _LOG.info("benchmark %s page %d (%s)", bench.key, p, variant.name)
         if is_legacy:
             res = run_legacy(str(conv_path), 0, verbose=True)
@@ -391,10 +408,22 @@ def _process_pdf_benchmark(
                 on_debug_layer=_debug_layer_sink(writer),
             )
         _restamp_page(res, p)
-        _accumulate_page(res, p, active, writer, stats_pages,
-                         detect_dir, recog_dir, ocr_dir,
-                         is_legacy=is_legacy, p3=variant.p3,
-                         debug_images=config.debug_images)
+        _accumulate_page(res, p, active, writer, stats_pages, reservoirs,
+                         is_legacy=is_legacy, p3=variant.p3, clock=clock)
+        if has_manual:
+            with clock("extra_predictions"):
+                _add_extra_prediction_layers(
+                    writer, res, res.page.meta,
+                    gt_boxes=[
+                        tuple(e.cluster_bbox)
+                        for t in ("native_to_vector", "original_vector")
+                        for e in gt_by_type[t].entries if e.page_index == p
+                    ],
+                    manual_boxes=[
+                        tuple(e.cluster_bbox)
+                        for e in gt_by_type["original_vector"].entries if e.page_index == p
+                    ],
+                )
 
         raster_texts = []
         raster_steps: dict = {}
@@ -402,7 +431,8 @@ def _process_pdf_benchmark(
         if bench.rasterised_pdf_path is not None:
             raster_page_path = doc_dir / f"rasterised_p{p}.pdf"
             try:
-                _extract_single_page(bench.rasterised_pdf_path, p, raster_page_path)
+                with clock("conversion"):
+                    _extract_single_page(bench.rasterised_pdf_path, p, raster_page_path)
                 if is_legacy:
                     res_raster = run_legacy(str(raster_page_path), 0, verbose=True)
                 else:
@@ -427,11 +457,12 @@ def _process_pdf_benchmark(
             substep_durations=_substeps(res),
             raster_step_durations=raster_steps,
             raster_substep_durations=raster_substeps,
+            debug_durations=debug_durations,
         ))
 
     sources: list[str] = []
     extra_layers: list[dict] = []
-    gt_by_type = _bench_ground_truth_by_type(bench, pages)
+    doc_durations: dict = {}
     for text_type in TEXT_TYPES:
         gt = gt_by_type[text_type]
         if not gt.entries and not gt.geometry_entries:
@@ -440,7 +471,8 @@ def _process_pdf_benchmark(
             continue
         save_labels(gt, str(doc_dir / f"ground_truth_{text_type}.json"))
         if gt.entries:
-            _write_label_overlays(doc_dir, text_type, gt, dumps, cfg)
+            with StepClock(doc_durations)("label_overlays"):
+                _write_label_overlays(doc_dir, text_type, gt, dumps, cfg)
         sources.append(text_type)
 
     for s in sources:
@@ -452,7 +484,7 @@ def _process_pdf_benchmark(
 
     _finalize_doc_dir(doc_dir, bench.pdf_path, pages, config, variant, active,
                       writer, stats_pages, dumps,
-                      extra_layers=tuple(extra_layers))
+                      extra_layers=tuple(extra_layers), doc_durations=doc_durations)
 
     (doc_dir / "benchmark_meta.json").write_text(json.dumps({
         "key": bench.key,

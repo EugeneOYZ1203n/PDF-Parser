@@ -47,7 +47,9 @@ step; `p2: "Junction"` emits its own raster-stage layers) -- see
 backend actually renders. A layer that came out blank on every page (e.g.
 `phase2` under `p2: "Stub"`) is not written at all. Unless the config sets
 `debug_images: false`, each `p3` backend also gets its own distinct pre-OCR
-debug image folder set, read from `res.extra["p3_debug"]`:
+debug image folder set, read from `res.extra["p3_debug"]`, each folder
+holding at most 100 images sampled at random (fixed seed) across all of the
+input's pages:
 `p3: "FastIntoPaddle"` and `p3: "VectorClassification"` write
 `paddle_detect_images/` + `paddle_recog_images/` (what PaddleOCR's
 detector/recognizer actually saw); `p3: "LegacyRecreation"` writes a single
@@ -81,7 +83,7 @@ one of `input_dir` / `input_files`):
 | `iou_edge_min` | `MetricConfig.iou_edge_min` for the benchmark overlays (default 0.1) |
 | `dpi` | render dpi (default 300) |
 | `output_root` | default `outputs/pipeline_report/` |
-| `debug_images` | write the per-page `paddle_*_images/` PNG crops (default `true`) |
+| `debug_images` | write the `paddle_*_images/` PNG crops, max 100 random per folder per input (default `true`) |
 
 Output: `outputs/pipeline_report/<ts>__<config-stem>/<pdf-stem>/`. The run's
 source config path is also recorded in `config_and_hyperparameters.txt`.
@@ -115,6 +117,21 @@ per-stage report (`manifest.json`, every `<stage>__<layer>.pdf`, `dump.json`,
   prediction, red = missed
 - `auto_text.pdf` / `manual_text.pdf` - GT text, per word green = exact /
   yellow = char edit distance 1-2 / red = worse or unread
+
+When the input has manual vector (`original_vector`) labels, three more
+layers show what the pipeline got wrong against them:
+
+- `benchmark__extra_text.pdf` - OCR text whose box touches no GT region
+- `benchmark__extra_vectors.pdf` - vectors the pipeline sent to OCR that no
+  GT region covers (>= 50% of the vector's bbox, or its centre for a
+  zero-area line)
+- `benchmark__missed_vectors.pdf` - drawing-output vectors inside a manual
+  vector-label region
+
+A layer that is blank on every page is not written. `dump.json` also records
+report-generation seconds: per page `debug_durations` (conversion, stage
+layers, debug images, extra-prediction layers) and per document
+`doc_durations` (GT overlays, saving the layer PDFs).
 
 The overlays are added to `manifest.json`'s `layers` under stage `benchmark`,
 so the viewer toggles them like any other layer. The run root gets a
@@ -185,8 +202,13 @@ Writes `outputs/pipeline_report_benchmark/<ts>/`:
   combined candidate precision.
 - `runs.json` - compared folders + threshold + shared keys.
 - `viewer_commands.txt` - a `pipeline_report_viewer.py` line per shared input.
-- `charts/` - `<key>__p<N>__{auto,manual,confusion}.png` per page,
-  `<key>__aggregate__*.png`, and grand `aggregate__*.png`.
+- `charts/` - `<key>__aggregate__*.png`, and grand `aggregate__*.png`.
+- `report.html` - the tables + charts per shared key, including a Timing
+  section per run kind: `total` is the pipeline only, then `debug › *` rows
+  (backend debug layers, stage layers, debug images, extra-prediction layers,
+  conversion), `debug.total` and `total_incl_debug`, plus a per-document
+  report-generation table. No example crops are rendered; use
+  `pipeline_report_viewer.py` to look at individual errors.
 
 ## `scripts/rasterize_pdf.py`
 

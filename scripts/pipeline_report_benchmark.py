@@ -18,29 +18,24 @@ at the vector-geometry level), and writes one
 self-contained `report.html` -- one section per shared key, broken into
 Text (Char/Word/Font size/Rotation/Bbox/Vector classification/Reading
 order/Confusion), Vector (Count/Endpoint/Property) and Timing (per-page
-wall-clock per phase + P3 sub-step, vectorised and rasterised runs, with a
-stacked-bar chart) subsections, each with linked chart PNGs, a per-character OCR accuracy table per text type
-(detected / dropped / unreached / misclassified / inserted, with a gallery of
-up to 2 word crops per char per error kind beneath it), illustrated
-error-example galleries (extra predictions / missed GT / confusion misreads /
-rotation off by 90 or 180 deg, cropped from the run's own
-`converted_p<N>.pdf`), the run's own diagnostic image galleries
-(`*_images/` folders), and a ready-to-paste `pipeline_report_viewer.py`
-command. Output (timestamped folder under `outputs/pipeline_report_benchmark/`):
+wall-clock per phase + P3 sub-step and report-generation cost, vectorised
+and rasterised runs, with a stacked-bar chart) subsections, each with
+linked chart PNGs, a per-character OCR accuracy table per text type
+(detected / dropped / unreached / misclassified / inserted), the run's own
+diagnostic image galleries (`*_images/` folders, linked in place), and a
+ready-to-paste `pipeline_report_viewer.py` command. No example crops are
+rendered -- `pipeline_report_viewer.py` over the run folders (incl. the
+`benchmark__extra_*` layers) is where individual errors are inspected. Output (timestamped folder under `outputs/pipeline_report_benchmark/`):
 
     report.html             the primary deliverable (see above)
     benchmark.txt           supplementary plain-text dump (grep/diff-friendly)
     runs.json               the compared folders + threshold
     viewer_commands.txt     a viewer CLI line per shared input
     charts/                 <key>__aggregate__*.png, aggregate__*.png
-    examples/                <key>__<run>__<type>__<category>__<n>.png crops,
-                            <key>__<run>__charword__<n>.png per-char word crops
 
 This module's own run-loading + scoring (`RunEntry`/`_merge_gt`/`_load_run`/
-`_score_text`/`_score_vectors`) lives in `benchmark_run_loading.py`, the
-illustrated-example collection (`_collect_examples`/`_collect_char_examples`/
-`_crop_to_png`) in
-`benchmark_examples.py`, and the HTML section builders
+`_score_text`/`_score_vectors`) lives in `benchmark_run_loading.py`, and
+the HTML section builders
 (`_add_text_sections`/`_add_vector_sections`) in
 `benchmark_report_sections.py` -- all re-exported here since some names are
 imported directly from this module's own path.
@@ -53,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
 import json
 import os
 import sys
@@ -82,14 +78,6 @@ from rastervec.Evaluation.Evaluate.vector_metrics import (
 from rastervec.commons.logging_setup import configure_logging, get_logger
 from rastervec.commons.paths import output_dir
 
-from scripts.benchmark_examples import (  # noqa: F401 -- re-exported for callers/tests
-    _EXAMPLE_CAP,
-    _collect_char_examples,
-    _collect_examples,
-    _crop_to_png,
-    _short_slug,
-    _slug,
-)
 from scripts.benchmark_report_sections import (  # noqa: F401 -- re-exported for callers/tests
     _add_text_sections,
     _add_timing_sections,
@@ -108,6 +96,21 @@ from scripts.benchmark_run_loading import (  # noqa: F401 -- re-exported for cal
 _LOG = get_logger("pipeline_report_benchmark")
 
 _VENV_PY = ".venv/Scripts/python.exe"
+
+
+def _slug(text: str) -> str:
+    return "".join(c if c.isalnum() else "_" for c in text).strip("_") or "key"
+
+
+def _short_slug(text: str, max_len: int = 16) -> str:
+    """A filename-safe slug capped to `max_len` chars (+ a short hash
+    suffix for uniqueness) -- unlike `_slug`, safe to compose several of
+    into one path component without hitting Windows' ~260-char MAX_PATH."""
+    full = _slug(text)
+    if len(full) <= max_len:
+        return full
+    h = hashlib.sha1(text.encode()).hexdigest()[:8]
+    return f"{full[:max_len]}_{h}"
 
 
 def _link_from(out_dir: Path, target: Path) -> str:
@@ -151,7 +154,6 @@ def main(argv: list[str] | None = None) -> int:
     ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = Path(root) / ts
     charts_dir = out_dir / "charts"
-    examples_dir = out_dir / "examples"
     charts_dir.mkdir(parents=True, exist_ok=True)
 
     builder = ReportBuilder(f"Pipeline benchmark report ({ts})")
@@ -184,6 +186,11 @@ def main(argv: list[str] | None = None) -> int:
             if len(per_run) > 1:
                 blocks.append(format_variant_timing_comparison(
                     per_run, title=f"[{label}] {kind} run median seconds per page by run"))
+        for run, s_ in summaries.items():
+            if s_.get(timing.DOC_KIND):
+                blocks.append(timing.format_timing_table(
+                    s_[timing.DOC_KIND],
+                    title=f"[{label} / {run}] report generation per document (seconds)"))
         _add_timing_sections(builder, summaries, chart_paths)
 
     for key in sorted(shared_keys):
@@ -199,15 +206,8 @@ def main(argv: list[str] | None = None) -> int:
                 blocks.append(f"[{key} / {name}] " + format_confusion_table(agg))
         blocks.append(format_vector_aggregate_comparison(vector_by_run, title=f"{key} -- vectors"))
 
-        char_examples_by_run = {
-            r[key].run_name: _collect_char_examples(
-                r[key], text_scored[r[key].run_name][0], examples_dir, kslug,
-            )
-            for r in runs
-        }
-
         builder.add_key_section(key)
-        _add_text_sections(builder, text_by_run, char_examples_by_run)
+        _add_text_sections(builder, text_by_run)
         _add_vector_sections(builder, vector_by_run)
         timing_rows = {r[key].run_name: _load_timings(r[key]) for r in runs}
         _timing_block(timing_rows, key, kslug)
@@ -285,23 +285,6 @@ def main(argv: list[str] | None = None) -> int:
                 f'<img src="{(charts_dir / f"{kslug}__aggregate__vector_endpoint.png").relative_to(out_dir).as_posix()}">'
                 '</div>'
             )
-
-        # ---- illustrated error examples (one run's pages at a time) ----
-        for r in runs:
-            entry = r[key]
-            per_page, _agg = text_scored[entry.run_name]
-            examples = _collect_examples(entry, per_page, examples_dir, kslug)
-            for text_type in TEXT_TYPES:
-                for category, label in (
-                    ("extra_prediction", "Extra predictions"),
-                    ("missed_gt", "Missed GT"),
-                    ("confusion", "Confusion misreads"),
-                    ("rotation_off90", "Rotation off by 90°"),
-                    ("rotation_off180", "Rotation off by 180°"),
-                ):
-                    cards = examples.get((text_type, category), [])
-                    if cards:
-                        builder.add_error_examples(f"{label} [{entry.run_name}]", text_type, cards)
 
         # ---- pipeline diagnostic image galleries ----
         # linked in place from the run folder, never copied

@@ -957,8 +957,22 @@ generic parallel-pool mechanics), never phase-specific business logic.
   `paddle_detect_images/`/`paddle_recog_images/`/`paddle_ocr_images/` (PNG debug crops — what
   PaddleOCR's detector/recognizer actually saw, per-P3-backend savers in
   `scripts/debug_image_savers.py`) are written unless the config sets `debug_images: false`
-  (`ReportConfig`, default `true`); `pipeline_report_benchmark.py` links the first 5 of each
-  folder into `report.html` in place (never copied). `legacy` still only ever emits the single
+  (`ReportConfig`, default `true`), capped at `_DEBUG_IMAGE_CAP` (100) per folder per input
+  document — an `_ImageReservoir` reservoir-samples uniformly across every page (seeded from the
+  document name, so reruns pick the same crops; rejected crops are never encoded);
+  `pipeline_report_benchmark.py` links the first 5 of each folder into `report.html` in place
+  (never copied). Every P3 backend's debug layers render **lazily** — `_emit(lambda: ...)`
+  renders nothing unless an `on_debug_layer` callback is attached, and that render + hand-off time
+  is its own `debug_render` sub-step. Report-generation cost is timed too: each `PageDump` carries
+  `debug_durations` (`conversion`/`stage_layers`/`debug_images`/`extra_predictions`) and
+  `dump.json` a document-level `doc_durations` (`label_overlays`/`layer_save`);
+  `Evaluation/Evaluate/timing.py` takes `debug_render` back out of `phase3` so `total` stays
+  pipeline-only, and adds `debug.*`/`debug.total`/`total_incl_debug` rows (legacy engine
+  included). In benchmark mode, an input with manual vector (`original_vector`) labels also gets
+  `benchmark__extra_text.pdf` (OCR text touching no GT), `benchmark__extra_vectors.pdf` (vectors
+  sent to OCR that no GT region covers) and `benchmark__missed_vectors.pdf` (drawing-output
+  vectors inside a manual-label region) — `label_overlays.extra_predictions`, rendered by
+  `report_artifacts._add_extra_prediction_layers`. `legacy` still only ever emits the single
   `reconstructed` row. There is no `stop_after`/partial-run support for `pipeline: "current"` —
   `final_stage` (validated against `core.pipeline`'s short `phase1`/`phase2`/`phase3` names) only
   trims which of the fixed phase-level artifacts render, not how much of the pipeline executes,
@@ -983,9 +997,10 @@ generic parallel-pool mechanics), never phase-specific business logic.
   `_accumulate_page`/`_active_artifacts`/`_finalize_doc_dir`/`_write_label_overlays`/...).
   `pipeline_report_benchmark.py` keeps only its `main`/`build_arg_parser` orchestration;
   `scripts/benchmark_run_loading.py` holds `RunEntry`/`_load_run`/`_merge_gt`/`_score_text`/
-  `_score_vectors`; `scripts/benchmark_examples.py` holds the illustrated-error-example
-  collection (`_collect_examples`/`_crop_to_png`); `scripts/benchmark_report_sections.py` holds
-  the HTML section builders (`_add_text_sections`/`_add_vector_sections`).
+  `_score_vectors`/`_load_timings`; `scripts/benchmark_report_sections.py` holds the HTML section
+  builders (`_add_text_sections`/`_add_vector_sections`/`_add_timing_sections`). The benchmark
+  report renders no example crops — individual errors are inspected with
+  `pipeline_report_viewer.py` over the run folders (incl. the `benchmark__extra_*` layers).
 
 `scripts/rasterize_pdf.py` (outside `rastervec/`, a one-off utility not a pipeline stage): flattens
 every page of a PDF to an image and rebuilds a pure-raster PDF from those images — not currently

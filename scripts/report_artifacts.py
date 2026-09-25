@@ -7,6 +7,7 @@ finalization (`_finalize_doc_dir`), and the GT-overlay writer
 from __future__ import annotations
 
 import json
+import zlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -18,9 +19,18 @@ from rastervec.Evaluation.Evaluate import adapters, label_overlays, metrics
 from rastervec.Evaluation.Labelling.label_schema import LabelSet
 from rastervec.Evaluation.Report import stage_stats
 from rastervec.commons.logging_setup import get_logger
-from rastervec.commons.renderer import render_boxes_pdf, render_reconstructed_pdf, stages
+from rastervec.commons.renderer import (
+    render_boxes_pdf,
+    render_reconstructed_pdf,
+    render_text_pdf,
+    render_vectors_pdf,
+    stages,
+)
+from rastervec.commons.step_timing import StepClock
 
 from scripts.debug_image_savers import (
+    _DEBUG_IMAGE_CAP,
+    _ImageReservoir,
     _save_fastintopaddle_detect_images,
     _save_fastintopaddle_recog_images,
     _save_legacyrecreation_ocr_images,
@@ -184,49 +194,69 @@ def _active_artifacts(config: "ReportConfig", variant) -> list[tuple]:
     return [row for row in _NEW_ARTIFACTS if _reached(row[3], config.final_stage)]
 
 
+def _image_reservoirs(
+    detect_dir: Path, recog_dir: Path, ocr_dir: Path, seed_name: str,
+) -> "dict[str, _ImageReservoir]":
+    """One `_ImageReservoir` per debug-image folder for one input document
+    -- each folder ends up with at most `_DEBUG_IMAGE_CAP` images sampled
+    at random across every page. Seeded from `seed_name` (the document's
+    folder name) so a rerun picks the same crops."""
+    seed = zlib.crc32(seed_name.encode("utf-8"))
+    return {
+        "detect": _ImageReservoir(detect_dir, _DEBUG_IMAGE_CAP, seed),
+        "recog": _ImageReservoir(recog_dir, _DEBUG_IMAGE_CAP, seed + 1),
+        "ocr": _ImageReservoir(ocr_dir, _DEBUG_IMAGE_CAP, seed + 2),
+    }
+
+
 def _accumulate_page(
     res, page_index: int, active: list[tuple],
     writer: _LayerWriter,
     stats_pages: dict[str, list[tuple[int, dict]]],
-    detect_dir: Path, recog_dir: Path, ocr_dir: Path,
-    *, is_legacy: bool = False, p3: str = "", debug_images: bool = True,
+    reservoirs: "dict[str, _ImageReservoir] | None",
+    *, is_legacy: bool = False, p3: str = "", clock: "StepClock | None" = None,
 ) -> None:
     """Render every active stage's fixed layer PDFs (phase2/reconstructed
     -- these need the whole, finished `res`, so they're
     necessarily rendered post-hoc rather than streamed) + numeric stats for
     one page, writing each layer into `writer` immediately; also (unless
-    `debug_images` is False -- `ReportConfig.debug_images`) dump each
+    `reservoirs` is None -- `ReportConfig.debug_images` off) offer each
     backend's own pre-OCR debug images (what PaddleOCR's own text detector /
-    recognizer saw), reading them from `res.extra["p3_debug"]` --
-    each P3 backend's own folder set differs, see
-    `generate_pipeline_report.py`'s module docstring.
+    recognizer saw), reading them from `res.extra["p3_debug"]`, to that
+    document's capped random `reservoirs` -- each P3 backend's own folder
+    set differs, see `generate_pipeline_report.py`'s module docstring.
+    `clock` (a `StepClock` over the page's `debug_durations`) records
+    `stage_layers` and `debug_images` seconds.
     Per-backend debug *layers* (the heavier, genuinely streamable PDF
     overlays) are NOT handled here -- see `_debug_layer_sink` / the
     `on_debug_layer` callback passed straight into `run_pipeline`."""
-    for stem, stage_key, stats_key, _gate in active:
-        try:
-            layers = stages.render_stage_layers(res, stage_key)
-        except Exception as exc:  # noqa: BLE001
-            _LOG.warning("%s render failed for page %d: %s", stem, page_index, exc)
-            layers = []
-        for label, hexc, pdf_bytes in layers:
-            fname = f"{stem}__{_layer_slug(label)}.pdf"
-            writer.add(fname, {"stage": stem, "layer": label, "file": fname, "color": hexc}, pdf_bytes)
-        if stats_key is not None:
-            stats_pages[stem].append(
-                (page_index, stage_stats.stats_for_stage(res, stats_key))
-            )
-    if is_legacy or not debug_images:
+    clock = clock or StepClock()
+    with clock("stage_layers"):
+        for stem, stage_key, stats_key, _gate in active:
+            try:
+                layers = stages.render_stage_layers(res, stage_key)
+            except Exception as exc:  # noqa: BLE001
+                _LOG.warning("%s render failed for page %d: %s", stem, page_index, exc)
+                layers = []
+            for label, hexc, pdf_bytes in layers:
+                fname = f"{stem}__{_layer_slug(label)}.pdf"
+                writer.add(fname, {"stage": stem, "layer": label, "file": fname, "color": hexc}, pdf_bytes)
+            if stats_key is not None:
+                stats_pages[stem].append(
+                    (page_index, stage_stats.stats_for_stage(res, stats_key))
+                )
+    if is_legacy or reservoirs is None:
         return
     p3_debug = (res.extra or {}).get("p3_debug") or {}
-    if p3 == "FastIntoPaddle":
-        _save_fastintopaddle_detect_images(p3_debug, detect_dir, page_index)
-        _save_fastintopaddle_recog_images(p3_debug, recog_dir, page_index)
-    elif p3 == "VectorClassification":
-        _save_vectorclassification_detect_images(p3_debug, detect_dir, page_index)
-        _save_vectorclassification_recog_images(p3_debug, recog_dir, page_index)
-    elif p3 == "LegacyRecreation":
-        _save_legacyrecreation_ocr_images(p3_debug, ocr_dir, page_index)
+    with clock("debug_images"):
+        if p3 == "FastIntoPaddle":
+            _save_fastintopaddle_detect_images(p3_debug, reservoirs["detect"], page_index)
+            _save_fastintopaddle_recog_images(p3_debug, reservoirs["recog"], page_index)
+        elif p3 == "VectorClassification":
+            _save_vectorclassification_detect_images(p3_debug, reservoirs["detect"], page_index)
+            _save_vectorclassification_recog_images(p3_debug, reservoirs["recog"], page_index)
+        elif p3 == "LegacyRecreation":
+            _save_legacyrecreation_ocr_images(p3_debug, reservoirs["ocr"], page_index)
 
 
 def _debug_layer_sink(writer: _LayerWriter):
@@ -250,10 +280,15 @@ def _finalize_doc_dir(
     doc_dir: Path, source_pdf: Path, pages: list[int], config: "ReportConfig", variant,
     active: list[tuple], writer: _LayerWriter,
     stats_pages: dict[str, list[tuple[int, dict]]], dumps: list[dump_io.PageDump],
-    *, extra_layers: tuple[dict, ...] = (),
+    *, extra_layers: tuple[dict, ...] = (), doc_durations: "dict | None" = None,
 ) -> None:
+    """`doc_durations` (document-level report-generation seconds, e.g.
+    `label_overlays`) gains `layer_save` here and is written into
+    `dump.json`; the dump/manifest writes themselves are not timed."""
+    doc_durations = dict(doc_durations or {})
     layer_filenames = writer.filenames()
-    writer.finalize(doc_dir)
+    with StepClock(doc_durations)("layer_save"):
+        writer.finalize(doc_dir)
 
     for stem, _sk, stats_key, _gate in active:
         if stats_key is None:
@@ -266,7 +301,7 @@ def _finalize_doc_dir(
             f"# {stats_key} stats for {Path(source_pdf).name}\n{body}", encoding="utf-8"
         )
 
-    dump_io.write_dump(doc_dir / "dump.json", str(source_pdf), dumps)
+    dump_io.write_dump(doc_dir / "dump.json", str(source_pdf), dumps, doc_durations)
     (doc_dir / "manifest.json").write_text(json.dumps({
         "source_pdf": str(source_pdf),
         "pages": pages,
@@ -312,3 +347,53 @@ def _write_label_overlays(
         )
     _merge_pdfs(bbox_pages, doc_dir / f"{source}_bbox.pdf")
     _merge_pdfs(text_pages, doc_dir / f"{source}_text.pdf")
+
+
+# Extra-prediction debug layers (benchmark mode, inputs with manual vector
+# labels only) -- `label_overlays.extra_predictions` decides membership.
+_EXTRA_LAYERS = (
+    ("extra text", "#dc2626"),
+    ("extra vectors", "#f97316"),
+    ("missed vectors", "#9333ea"),
+)
+
+
+def _rgb01(hexc: str) -> tuple[float, float, float]:
+    h = hexc.lstrip("#")
+    return (int(h[0:2], 16) / 255, int(h[2:4], 16) / 255, int(h[4:6], 16) / 255)
+
+
+def _text_routed_vectors(res) -> list:
+    """Vectors the pipeline sent to OCR: every Phase 1 + Phase 2 input
+    vector that is not in the final drawing output (`res.vectors`),
+    compared by identity. `[]` for the legacy engine, whose result carries
+    no vector split (`extra["phase1"]` only exists for a verbose `current`
+    run)."""
+    extra = getattr(res, "extra", None) or {}
+    phase1 = extra.get("phase1")
+    if phase1 is None:
+        return []
+    drawing_ids = {id(v) for v in (res.vectors or [])}
+    pool = list(getattr(phase1, "vectors", None) or []) + list(extra.get("phase2_vectors") or [])
+    return [v for v in pool if id(v) not in drawing_ids]
+
+
+def _add_extra_prediction_layers(
+    writer: _LayerWriter, res, page_meta, gt_boxes: list, manual_boxes: list,
+) -> None:
+    """Adds this page's `benchmark__extra_text.pdf` /
+    `benchmark__extra_vectors.pdf` / `benchmark__missed_vectors.pdf` pages
+    to `writer` (always one page each, so every layer stays page-aligned;
+    an all-blank layer is dropped by `_LayerWriter`)."""
+    extra_texts, extra_vectors, missed_vectors = label_overlays.extra_predictions(
+        list(res.texts or []), _text_routed_vectors(res), list(res.vectors or []),
+        gt_boxes, manual_boxes,
+    )
+    rendered = (
+        render_text_pdf(page_meta, extra_texts, color_of=lambda _t: _rgb01(_EXTRA_LAYERS[0][1])),
+        render_vectors_pdf(page_meta, extra_vectors, color_of=lambda _v: _rgb01(_EXTRA_LAYERS[1][1])),
+        render_vectors_pdf(page_meta, missed_vectors, color_of=lambda _v: _rgb01(_EXTRA_LAYERS[2][1])),
+    )
+    for (label, hexc), pdf_bytes in zip(_EXTRA_LAYERS, rendered):
+        fname = f"benchmark__{_layer_slug(label)}.pdf"
+        writer.add(fname, {"stage": "benchmark", "layer": label, "file": fname, "color": hexc}, pdf_bytes)

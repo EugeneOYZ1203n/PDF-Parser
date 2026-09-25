@@ -72,3 +72,41 @@ def test_format_timing_table():
     assert "  ocr" in text
     assert "total" in text
     assert "(no timing data)" in timing.format_timing_table({}, title="T")
+
+
+def test_flatten_moves_backend_debug_render_out_of_pipeline_total():
+    row = timing.flatten_page_timing(
+        {"phase1": 1.0, "phase3": 10.0},
+        {"ocr": 6.0, "debug_render": 3.0},
+        {"stage_layers": 0.5, "conversion": 1.5},
+    )
+    assert row["phase3"] == pytest.approx(7.0)  # production cost only
+    assert "phase3.debug_render" not in row
+    assert row["phase3.other"] == pytest.approx(1.0)
+    assert row["total"] == pytest.approx(8.0)
+    assert row["debug.backend_layers"] == 3.0
+    assert row["debug.total"] == pytest.approx(5.0)
+    assert row["total_incl_debug"] == pytest.approx(13.0)
+
+
+def test_row_order_and_leaf_rows_with_debug_group():
+    rows = [timing.flatten_page_timing(
+        {"phase3": 2.0}, {"ocr": 1.0, "debug_render": 0.5}, {"conversion": 0.1, "stage_layers": 0.2},
+    )]
+    assert timing.row_order(rows) == [
+        "phase3", "phase3.ocr", "phase3.other", "total",
+        "debug.backend_layers", "debug.stage_layers", "debug.conversion",
+        "debug.total", "total_incl_debug",
+    ]
+    summary = timing.summarize_timings(rows)
+    assert timing.leaf_rows(summary) == ["phase3.ocr", "phase3.other"]  # chart stays pipeline-only
+    assert "debug stage_layers" in timing.format_timing_table(summary, title="T")
+
+
+def test_legacy_page_gets_debug_rows_and_doc_timing():
+    row = timing.flatten_page_timing({"legacy": 4.0}, None, {"stage_layers": 1.0})
+    assert row["total"] == 4.0 and row["total_incl_debug"] == 5.0
+    assert timing.flatten_doc_timing({"layer_save": 0.5, "label_overlays": 1.0}) == {
+        "layer_save": 0.5, "label_overlays": 1.0, "total": 1.5,
+    }
+    assert timing.flatten_doc_timing({}) == {}

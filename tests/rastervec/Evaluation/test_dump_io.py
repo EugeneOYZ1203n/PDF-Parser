@@ -63,3 +63,23 @@ def test_dump_timing_fields_roundtrip_and_default(tmp_path, page_meta):
     path.write_text(json.dumps(raw), encoding="utf-8")
     old = dump_io.load_dump(path).pages[0]
     assert old.substep_durations == {} and old.raster_step_durations == {}
+
+
+def test_dump_debug_and_doc_durations_roundtrip_and_default(tmp_path, page_meta):
+    pd = dump_io.PageDump(
+        page_meta=page_meta(), texts=[], vectors=[], engine="legacy",
+        step_durations={"legacy": 3.0}, debug_durations={"conversion": 0.2},
+    )
+    path = tmp_path / "dump.json"
+    dump_io.write_dump(path, "x.pdf", [pd], {"layer_save": 0.4})
+    got = dump_io.load_dump(path)
+    assert got.pages[0].debug_durations == {"conversion": 0.2}
+    assert got.doc_durations == {"layer_save": 0.4}
+
+    import json
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw.pop("doc_durations")
+    raw["pages"][0].pop("debug_durations")
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    old = dump_io.load_dump(path)
+    assert old.doc_durations == {} and old.pages[0].debug_durations == {}

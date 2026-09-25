@@ -107,7 +107,8 @@ def test_two_runs_shared_key_report_html_and_viewer_cmds(tmp_path):
     assert "Rotation accuracy" in html
     assert "Per-character OCR accuracy -- native_to_vector" in html
     assert "detected 1 (100.0%)" in html  # run1 reads HELLO WORLD exactly
-    assert "Per-character examples [run2] -- native_to_vector" in html
+    assert "Per-character examples" not in html
+    assert not (run_out / "examples").exists()
     assert "Vector classification funnel" in html
     assert "Font size distribution" in html
     assert "Wall-clock per page -- vectorised run" in html
@@ -195,26 +196,6 @@ def test_merge_gt_supports_legacy_auto_manual_filenames(tmp_path):
     )
     merged = prb._merge_gt(doc)
     assert {e.text for e in merged.entries} == {"HELLO", "WORLD"}
-
-
-def test_char_examples_capped(tmp_path):
-    from types import SimpleNamespace
-
-    from rastervec.Evaluation.Evaluate.metrics import GtRegion, Prediction, build_overlap_graph
-    from scripts.benchmark_examples import _CHAR_EXAMPLE_CAP, _collect_char_examples
-
-    gt = [GtRegion(0, (0, 0, 40, 10), "OOO OOO OOO", 0, "native_to_vector")]
-    preds = [Prediction("000 000 000", (0, 0, 40, 10), 0)]
-    empty = build_overlap_graph([], [])
-    graphs = {t: empty for t in prb.TEXT_TYPES}
-    graphs["native_to_vector"] = build_overlap_graph(gt, preds)
-
-    entry = SimpleNamespace(run_name="r", doc_dir=tmp_path)  # the only RunEntry fields read
-    out = _collect_char_examples(entry, [(0, None, graphs)], tmp_path / "examples", "k")
-    cards = out["native_to_vector"]["O"]["misclassified"]
-    assert len(cards) == _CHAR_EXAMPLE_CAP
-    assert "(O\u21920)" in cards[0].caption
-    assert cards[0].image_path is None  # no converted_p0.pdf in tmp_path -> no crop
 
 
 def test_char_order_sorts_by_error_rate():

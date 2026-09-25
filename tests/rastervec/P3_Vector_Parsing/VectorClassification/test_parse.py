@@ -122,3 +122,21 @@ def test_classification_layers_bbox_only_and_skip_unchanged_steps(page_meta):
         ("classify_01_first", "kept bbox"),
         ("classify_03_drop_b", "kept bbox"),
     ]
+
+
+def test_parse_renders_debug_layers_only_with_a_callback(page_meta, monkeypatch):
+    calls: list = []
+    real = vectorclassification._render_drawing_layers
+    monkeypatch.setattr(
+        vectorclassification, "_render_drawing_layers",
+        lambda *a, **k: calls.append(1) or real(*a, **k),
+    )
+    page = _page(page_meta)
+
+    steps: dict = {}
+    vectorclassification.parse([], [], page, step_durations=steps)
+    assert calls == [] and "debug_render" not in steps  # nobody listening -> nothing rendered
+
+    steps = {}
+    vectorclassification.parse([], [], page, step_durations=steps, on_debug_layer=lambda *layer: None)
+    assert calls == [1] and "debug_render" in steps

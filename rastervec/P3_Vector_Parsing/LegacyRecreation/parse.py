@@ -11,6 +11,8 @@ commons.models types, selectable as a normal P3 backend.
 """
 from __future__ import annotations
 
+from typing import Callable
+
 import numpy as np
 
 from rastervec.commons.models import Page, Text, Vector
@@ -79,22 +81,27 @@ def parse(
     page_meta = page.meta
     clock = StepClock(step_durations)
 
-    def _emit(layers: "list[DebugLayer]") -> None:
-        if on_debug_layer is not None:
-            for layer in layers:
+    def _emit(render: "Callable[[], list[DebugLayer]]") -> None:
+        # Lazy: nothing is rendered unless a caller is listening. Render +
+        # hand-off time is its own `debug_render` step, kept out of every
+        # algorithmic step's timing.
+        if on_debug_layer is None:
+            return
+        with clock("debug_render"):
+            for layer in render():
                 on_debug_layer(*layer)
 
     with clock("filter_fill"):
         fill_vectors = filter_text_vectors(all_vectors)
         fill_ids = {id(v) for v in fill_vectors}
         drawing_vectors = [v for v in all_vectors if id(v) not in fill_ids]
-    _emit(_render_filter_fill_layers(page_meta, fill_vectors))
+    _emit(lambda: _render_filter_fill_layers(page_meta, fill_vectors))
 
     with clock("group_words"):
         page_rotation = int(page.meta.rotation or 0)
         glyphs = convert_vectors_to_glyphs(fill_vectors)
         word_groups = cluster_by_seqno(glyphs, page_rotation)
-    _emit(_render_group_words_layers(page_meta, word_groups))
+    _emit(lambda: _render_group_words_layers(page_meta, word_groups))
 
     rec_backend = PaddleRecBackend()
     det_backend = PaddleDetectBackend()
@@ -147,8 +154,8 @@ def parse(
                 page_index=page.meta.index, seqno=group_vectors[0].seqno,
                 confidence=box.confidence, source="ocr", orientation_source="ocr",
             ))
-    _emit(_render_ocr_layers(page_meta, texts))
-    _emit(_render_drawing_layers(page_meta, drawing_vectors))
+    _emit(lambda: _render_ocr_layers(page_meta, texts))
+    _emit(lambda: _render_drawing_layers(page_meta, drawing_vectors))
 
     if debug_out is not None:
         debug_out["fill_vectors"] = fill_vectors

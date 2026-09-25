@@ -14,6 +14,8 @@ P2_Raster_To_Vec.
 """
 from __future__ import annotations
 
+from typing import Callable
+
 import numpy as np
 
 from rastervec.commons.helpers.geometry import compute_origin, transform_direction
@@ -84,14 +86,19 @@ def parse(
     page_meta = page.meta
     clock = StepClock(step_durations)
 
-    def _emit(layers: "list[DebugLayer]") -> None:
-        if on_debug_layer is not None:
-            for layer in layers:
+    def _emit(render: "Callable[[], list[DebugLayer]]") -> None:
+        # Lazy: nothing is rendered unless a caller is listening. Render +
+        # hand-off time is its own `debug_render` step, kept out of every
+        # algorithmic step's timing.
+        if on_debug_layer is None:
+            return
+        with clock("debug_render"):
+            for layer in render():
                 on_debug_layer(*layer)
 
     with clock("classify"):
         cls = classify_vectors(all_vectors, page, verbose=verbose)
-    _emit(_render_classification_layers(page_meta, cls))
+    _emit(lambda: _render_classification_layers(page_meta, cls))
 
     with clock("fast"):
         flat_clusters = [
@@ -101,7 +108,7 @@ def parse(
             flat_clusters, page, enable_fast=enable_fast, verbose=verbose,
             compute=compute, progress_counter=progress_counter,
         )
-    _emit(_render_fast_layers(
+    _emit(lambda: _render_fast_layers(
         page_meta, fast.passed, fast.dropped_vectors, fast.page_result.page_mask,
     ))
 
@@ -165,11 +172,11 @@ def parse(
                 page_index=page_meta.index, seqno=min(v.seqno for v in group_vectors),
                 confidence=box.confidence, source="ocr", orientation_source="ocr",
             ))
-    _emit(_render_ocr_layers(page_meta, texts, blank_boxes, detect_boxes))
+    _emit(lambda: _render_ocr_layers(page_meta, texts, blank_boxes, detect_boxes))
 
     with clock("drawing"):
         drawing = list(cls.drawing_vectors) + list(fast.dropped_vectors)
-    _emit(_render_drawing_layers(page_meta, drawing))
+    _emit(lambda: _render_drawing_layers(page_meta, drawing))
 
     if debug_out is not None:
         debug_out["classification"] = cls

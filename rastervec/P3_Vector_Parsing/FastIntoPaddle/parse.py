@@ -59,43 +59,48 @@ def parse(
     page_meta = page.meta
     clock = StepClock(step_durations)
 
-    def _emit(layers: "list[DebugLayer]") -> None:
-        if on_debug_layer is not None:
-            for layer in layers:
+    def _emit(render: "Callable[[], list[DebugLayer]]") -> None:
+        # Lazy: nothing is rendered unless a caller is listening. Render +
+        # hand-off time is its own `debug_render` step, kept out of every
+        # algorithmic step's timing.
+        if on_debug_layer is None:
+            return
+        with clock("debug_render"):
+            for layer in render():
                 on_debug_layer(*layer)
 
     with clock("similarity"):
         groups = similarity_group(vectors)
-    _emit(_render_similarity_layers(page_meta, groups))
+    _emit(lambda: _render_similarity_layers(page_meta, groups))
 
     with clock("fast"):
         fast = filter_vectors_fast(
             vectors, page, enable_fast=enable_fast, verbose=verbose,
             compute=compute, progress_counter=progress_counter,
         )
-    _emit(_render_fast_layers(page_meta, fast))
+    _emit(lambda: _render_fast_layers(page_meta, fast))
 
     with clock("reclassify"):
         reclass = reclassify_by_similarity(fast.passed, fast.dropped, groups)
-    _emit(_render_reclassify_layers(page_meta, reclass))
+    _emit(lambda: _render_reclassify_layers(page_meta, reclass))
 
     with clock("separation"):
         buckets = separate_by_layer_color_width(reclass.passed)
     with clock("clusters"):
         clusters = cluster_buckets(buckets, FAST_PADDLE_SEQ_MERGE_TOLERANCE)
-    _emit(_render_clusters_layers(page_meta, clusters))
+    _emit(lambda: _render_clusters_layers(page_meta, clusters))
 
     with clock("paddle_detect"):
         cluster_detections = detect_text_paddle_per_cluster(clusters)
-    _emit(_render_paddle_detect_layers(page_meta, clusters, cluster_detections))
+    _emit(lambda: _render_paddle_detect_layers(page_meta, clusters, cluster_detections))
 
     with clock("assignment"):
         reassignment = reassign_by_overlap(clusters, cluster_detections)
-    _emit(_render_assignment_layers(page_meta, reassignment))
+    _emit(lambda: _render_assignment_layers(page_meta, reassignment))
 
     with clock("rotate"):
         segments = rotate_paddle_detections(clusters, cluster_detections, reassignment.text)
-    _emit(_render_rotate_layers(page_meta, segments))
+    _emit(lambda: _render_rotate_layers(page_meta, segments))
 
     recognize_fn = None
     if compute is not None:
@@ -104,11 +109,11 @@ def parse(
         recognize_fn = lambda crops: compute.apply(_recognize_crops_job, (crops,))  # noqa: E731
     with clock("ocr"):
         texts = recognize_segments(segments, recognize_fn=recognize_fn)
-    _emit(_render_ocr_layers(page_meta, texts))
+    _emit(lambda: _render_ocr_layers(page_meta, texts))
 
     with clock("drawing"):
         drawing = build_drawing_output(reassignment.drawing, reclass.dropped)
-    _emit(_render_drawing_layers(page_meta, drawing))
+    _emit(lambda: _render_drawing_layers(page_meta, drawing))
 
     if debug_out is not None:
         debug_out["similarity_groups"] = groups

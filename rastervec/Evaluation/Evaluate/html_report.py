@@ -1,14 +1,13 @@
 """Plain stdlib HTML report builder for `scripts/pipeline_report_benchmark.py`.
 
-No new dependency -- `html.escape` + f-strings. Charts/example crops stay as
-separate PNG files on disk; this module only ever emits relative `<img
-src="...">` references to them, so the rendered `report.html` must stay
-alongside the `charts/`/`examples/` folders it points at (same convention
+No new dependency -- `html.escape` + f-strings. Charts stay as separate
+PNG files on disk; this module only ever emits relative `<img src="...">`
+references to them, so the rendered `report.html` must stay alongside the
+`charts/` folder (and the linked run folders) it points at (same convention
 `generate_pipeline_report.py` already uses for its own manifest).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 
@@ -31,20 +30,7 @@ th { background: #eee; }
               font-size: .85rem; white-space: pre-wrap; overflow-x: auto; }
 .section { background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 1rem 1.5rem; margin-bottom: 1rem; }
 .empty { color: #888; font-style: italic; }
-.char-row { display: flex; gap: 1rem; align-items: flex-start; border-top: 1px solid #eee; padding: .5rem 0; }
-.char-label { font-family: monospace; font-size: 1.1rem; min-width: 3rem; }
-.char-kind { display: flex; flex-direction: column; }
-.char-kind .gallery { margin: .25rem 0 0; }
-.kind-label { font-size: .8rem; font-weight: 600; color: #555; }
 """
-
-
-@dataclass
-class ExampleCard:
-    caption: str
-    image_path: "Path | None"  # relative to the report file, or None if crop failed
-    run: str
-    text_type: str
 
 
 def _table(headers: "list[str]", rows: "list[list[str]]") -> str:
@@ -93,55 +79,6 @@ class ReportBuilder:
         chart_paths: "list[Path]" = (),
     ) -> None:
         self.add_text_subsection(name, headers, rows, chart_paths)
-
-    def add_error_examples(
-        self, category: str, text_type: str, examples: "list[ExampleCard]",
-    ) -> None:
-        self._parts.append(f"<h5>{escape(category)} -- {escape(text_type)}</h5>")
-        if not examples:
-            self._parts.append('<p class="empty">(none found)</p>')
-            return
-        cards = []
-        for ex in examples:
-            img = _img(ex.image_path, width=200) if ex.image_path else '<p class="empty">(no crop)</p>'
-            cards.append(
-                f'<div class="card">{img}<div class="cap">'
-                f"[{escape(ex.run)}] {escape(ex.caption)}</div></div>"
-            )
-        self._parts.append(f'<div class="gallery">{"".join(cards)}</div>')
-
-    def add_char_examples(
-        self, run: str, text_type: str,
-        rows: "list[tuple[str, dict[str, list[ExampleCard]]]]",
-    ) -> None:
-        """One line per gt char (in the given order), each showing its
-        example cards grouped by error kind (`{kind: [ExampleCard]}`). Chars
-        with no cards at all are skipped."""
-        rows = [(ch, kinds) for ch, kinds in rows if any(kinds.values())]
-        self._parts.append(f"<h5>Per-character examples [{escape(run)}] -- {escape(text_type)}</h5>")
-        if not rows:
-            self._parts.append('<p class="empty">(no errors)</p>')
-            return
-        self._parts.append('<div class="section">')
-        for ch, kinds in rows:
-            blocks = []
-            for kind, cards in kinds.items():
-                if not cards:
-                    continue
-                inner = "".join(
-                    f'<div class="card">'
-                    f'{_img(c.image_path, width=200) if c.image_path else "<p class=empty>(no crop)</p>"}'
-                    f'<div class="cap">{escape(c.caption)}</div></div>'
-                    for c in cards
-                )
-                blocks.append(
-                    f'<div class="char-kind"><div class="kind-label">{escape(kind)}</div>'
-                    f'<div class="gallery">{inner}</div></div>'
-                )
-            self._parts.append(
-                f'<div class="char-row"><div class="char-label">{escape(repr(ch))}</div>{"".join(blocks)}</div>'
-            )
-        self._parts.append("</div>")
 
     def add_image_gallery(self, run: str, folder_name: str, image_paths: "list[Path | str]") -> None:
         self._parts.append(f"<h4>{escape(run)} -- {escape(folder_name)}</h4>")

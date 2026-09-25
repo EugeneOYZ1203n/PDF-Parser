@@ -68,3 +68,29 @@ def test_gt_word_bboxes_follow_reading_direction():
     assert first(180) == ("AB", (20.0, 0, 40, 40))   # right half (right-to-left)
     assert first(90) == ("AB", (0, 0, 40, 20.0))     # top half (downward)
     assert first(270) == ("AB", (0, 20.0, 40, 40))   # bottom half (upward)
+
+
+def test_extra_predictions_definitions():
+    from types import SimpleNamespace as NS
+
+    from rastervec.Evaluation.Evaluate.label_overlays import extra_predictions
+
+    gt = [(0, 0, 10, 10), (50, 50, 60, 60)]
+    manual = [(50, 50, 60, 60)]
+    texts = [
+        NS(bbox=(1, 1, 5, 5), source="ocr"),       # inside GT -> not extra
+        NS(bbox=(9, 9, 20, 20), source="ocr"),     # touches GT -> not extra
+        NS(bbox=(30, 30, 40, 40), source="ocr"),   # outside -> extra
+        NS(bbox=(30, 30, 40, 40), source="native"),  # not OCR -> ignored
+    ]
+    routed = [
+        NS(bbox=(2, 2, 4, 4)),        # covered
+        NS(bbox=(8, 8, 18, 18)),      # 4% covered -> extra
+        NS(bbox=(2, 5, 8, 5)),        # zero-area line, centre inside -> covered
+        NS(bbox=(20, 5, 30, 5)),      # zero-area line outside -> extra
+    ]
+    drawing = [NS(bbox=(51, 51, 55, 55)), NS(bbox=(1, 1, 2, 2))]
+    extra_t, extra_v, missed_v = extra_predictions(texts, routed, drawing, gt, manual)
+    assert extra_t == [texts[2]]
+    assert extra_v == [routed[1], routed[3]]
+    assert missed_v == [drawing[0]]  # only manual regions count as missed

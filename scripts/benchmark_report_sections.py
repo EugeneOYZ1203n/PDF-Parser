@@ -91,11 +91,7 @@ def char_order(agg_by_run: "dict[str, TextMetricSuiteResult | None]", text_type:
 
 def _add_text_sections(
     builder: ReportBuilder, agg_by_run: "dict[str, TextMetricSuiteResult | None]",
-    char_examples_by_run: "dict[str, dict] | None" = None,
 ) -> None:
-    """`char_examples_by_run` (`{run: benchmark_examples._collect_char_examples
-    output}`) adds a per-character example gallery under each text type's
-    per-char table, in the table's own row order."""
     builder.add_group_header("Text")
 
     headers = ["text_type"] + list(agg_by_run)
@@ -198,9 +194,6 @@ def _add_text_sections(
         builder.add_text_subsection(
             f"Per-character OCR accuracy -- {t}", ["gt_char"] + list(agg_by_run), c_rows,
         )
-        for run, examples in (char_examples_by_run or {}).items():
-            by_char = examples.get(t, {})
-            builder.add_char_examples(run, t, [(ch, by_char.get(ch, {})) for ch in order])
 
     chars = set()
     for res in agg_by_run.values():
@@ -266,9 +259,18 @@ def _add_vector_sections(builder: ReportBuilder, agg_by_run: "dict[str, VectorMe
 
 
 def _timing_label(row: str) -> str:
-    if row.startswith(timing.SUBSTEP_PARENT + "."):
-        return f"{timing.SUBSTEP_PARENT} › {row.split('.', 1)[1]}"
+    if row.startswith((timing.SUBSTEP_PARENT + ".", timing.DEBUG_PARENT + ".")):
+        parent, name = row.split(".", 1)
+        return f"{parent} › {name}"
     return row
+
+
+def _timing_cell(st: "dict | None") -> str:
+    return "" if not st else (
+        f"median {timing.fmt_seconds(st['median'])} | mean {timing.fmt_seconds(st['mean'])} | "
+        f"min {timing.fmt_seconds(st['min'])} | max {timing.fmt_seconds(st['max'])} | "
+        f"Σ {timing.fmt_seconds(st['sum'])} (n={st['n']})"
+    )
 
 
 def _add_timing_sections(
@@ -276,12 +278,15 @@ def _add_timing_sections(
     chart_paths: "dict[str, Path] | None" = None,
 ) -> None:
     """One table per run kind (`timing.RUN_KINDS`) that any run recorded:
-    a row per timing step (phases, phase3 sub-steps, `total`), a column per
-    run -- median / mean / min / max seconds per page plus the summed
-    seconds over every page -- and a median delta column vs the first run
-    for every later run. `timings_by_run` = `{run: {kind: timing.
+    a row per timing step (phases, phase3 sub-steps, `total`, then the
+    report-generation `debug › *` rows, `debug.total` and
+    `total_incl_debug`), a column per run -- median / mean / min / max
+    seconds per page plus the summed seconds over every page -- and a
+    median delta column vs the first run for every later run. Then one
+    per-document table of document-level report-generation cost
+    (`timing.DOC_KIND`). `timings_by_run` = `{run: {kind: timing.
     summarize_timings(...)}}`; `chart_paths` = `{kind: report-relative
-    chart PNG}`."""
+    chart PNG}` (the charts are pipeline-only)."""
     builder.add_group_header("Timing")
     runs = list(timings_by_run)
     any_table = False
@@ -296,12 +301,7 @@ def _add_timing_sections(
         for key in rows_order:
             row = [_timing_label(key)]
             for run in runs:
-                st = summaries[run].get(key)
-                row.append("" if not st else (
-                    f"median {timing.fmt_seconds(st['median'])} | mean {timing.fmt_seconds(st['mean'])} | "
-                    f"min {timing.fmt_seconds(st['min'])} | max {timing.fmt_seconds(st['max'])} | "
-                    f"Σ {timing.fmt_seconds(st['sum'])} (n={st['n']})"
-                ))
+                row.append(_timing_cell(summaries[run].get(key)))
             base = summaries[runs[0]].get(key)
             for run in runs[1:]:
                 st = summaries[run].get(key)
@@ -314,8 +314,17 @@ def _add_timing_sections(
             rows.append(row)
         chart = (chart_paths or {}).get(kind)
         builder.add_text_subsection(
-            f"Wall-clock per page -- {kind} run (debug rendering sits in phase3 › other)",
+            f"Wall-clock per page -- {kind} run (total = pipeline only; debug › * = report generation)",
             headers, rows, chart_paths=[chart] if chart else [],
+        )
+    docs = {run: timing_by_kind.get(timing.DOC_KIND, {}) for run, timing_by_kind in timings_by_run.items()}
+    if any(docs.values()):
+        any_table = True
+        builder.add_text_subsection(
+            "Report generation per document (GT overlays, saving layer PDFs)",
+            ["step"] + runs,
+            [[key] + [_timing_cell(docs[run].get(key)) for run in runs]
+             for key in timing.row_order(list(docs.values()))],
         )
     if not any_table:
         builder.add_raw_html('<p class="empty">(no timing recorded in these runs)</p>')

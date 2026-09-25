@@ -5,7 +5,9 @@ no rendering, no pipeline import. `scripts/generate_pipeline_report.py`
 feeds the output straight to `renderer.render_boxes_pdf` /
 `renderer.render_reconstructed_pdf`.
 
-Two overlays, both ground-truth-only (predictions are not drawn):
+Two GT overlays (predictions are not drawn) plus `extra_predictions`
+(false-positive text / text-routed vectors outside every GT region, and
+manual-label vectors lost to drawing output):
 
 - `gt_bbox_overlay` -- one box per GT region, green if any non-blank
   prediction overlaps it, red otherwise.
@@ -24,6 +26,7 @@ from rastervec.Evaluation.Evaluate.metrics import (
     OverlapGraph,
     _region_concat_hyp,
 )
+from rastervec.commons.helpers.geometry import bbox_area, bbox_intersection_area
 from rastervec.Evaluation.Evaluate.text_metrics import (
     levenshtein,
     normalize_text,
@@ -123,3 +126,55 @@ def gt_word_overlay(
         for word, sub in word_boxes:
             out.append((word, sub, float(g.expected_rotation), _word_color(word, hyp_tokens)))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Extra predictions vs ground truth (benchmark `extra_*` / `missed_vectors`
+# debug layers -- only built for inputs that have manual vector labels).
+# Duck-typed: anything with a `.bbox` works for texts/vectors, GT is plain
+# bboxes.
+# ---------------------------------------------------------------------------
+
+# A vector counts as inside a GT region when at least this fraction of its
+# own bbox area lies within one region (a zero-area vector -- a straight
+# horizontal/vertical line -- uses its bbox centre instead).
+VECTOR_COVERED_MIN_FRAC = 0.5
+
+
+def _centre_inside(b: Bbox, box: Bbox) -> bool:
+    cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+    return box[0] <= cx <= box[2] and box[1] <= cy <= box[3]
+
+
+def _covered(b: Bbox, boxes: "list[Bbox]") -> bool:
+    area = bbox_area(b)
+    if area <= 0:
+        return any(_centre_inside(b, box) for box in boxes)
+    return any(bbox_intersection_area(b, box) / area >= VECTOR_COVERED_MIN_FRAC for box in boxes)
+
+
+def _touches(b: Bbox, boxes: "list[Bbox]") -> bool:
+    if bbox_area(b) <= 0:
+        return any(_centre_inside(b, box) for box in boxes)
+    return any(bbox_intersection_area(b, box) > 0 for box in boxes)
+
+
+def extra_predictions(
+    texts: list, text_routed: list, drawing: list,
+    gt_boxes: "list[Bbox]", manual_boxes: "list[Bbox]",
+) -> "tuple[list, list, list]":
+    """`(extra_texts, extra_vectors, missed_vectors)` for one page:
+
+    - extra text: an OCR `Text` (`source == "ocr"`) whose bbox touches no
+      GT region of any type (`gt_boxes`);
+    - extra vector: a vector the pipeline sent to OCR (`text_routed`) that
+      no GT region covers (`_covered`);
+    - missed vector: a vector the pipeline output as drawing (`drawing`)
+      that a manual vector-label region (`manual_boxes`) covers."""
+    extra_texts = [
+        t for t in texts
+        if getattr(t, "source", "ocr") == "ocr" and not _touches(tuple(t.bbox), gt_boxes)
+    ]
+    extra_vectors = [v for v in text_routed if not _covered(tuple(v.bbox), gt_boxes)]
+    missed_vectors = [v for v in drawing if _covered(tuple(v.bbox), manual_boxes)]
+    return extra_texts, extra_vectors, missed_vectors

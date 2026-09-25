@@ -300,10 +300,54 @@ def test_debug_images_flag_default_and_off(tmp_path):
     assert gpr.ReportConfig().debug_images is True
     crop = np.zeros((4, 4, 3), dtype=np.uint8)
     res = SimpleNamespace(extra={"p3_debug": {"ocr_crops": [(crop, "A")]}})
-    detect_dir, recog_dir, ocr_dir = gpr._image_dirs(tmp_path)
-    for flag, expect in ((False, False), (True, True)):
-        gpr._accumulate_page(
-            res, 0, [], gpr._LayerWriter(), {}, detect_dir, recog_dir, ocr_dir,
-            p3="LegacyRecreation", debug_images=flag,
-        )
-        assert ocr_dir.exists() is expect
+    ocr_dir = gpr._image_dirs(tmp_path)[2]
+    gpr._accumulate_page(res, 0, [], gpr._LayerWriter(), {}, None, p3="LegacyRecreation")
+    assert not ocr_dir.exists()
+    reservoirs = gpr._image_reservoirs(*gpr._image_dirs(tmp_path), seed_name="doc")
+    debug: dict = {}
+    gpr._accumulate_page(
+        res, 0, [], gpr._LayerWriter(), {}, reservoirs, p3="LegacyRecreation",
+        clock=gpr.StepClock(debug),
+    )
+    assert len(list(ocr_dir.glob("*.png"))) == 1
+    assert set(debug) == {"stage_layers", "debug_images"}
+
+
+def test_image_reservoir_caps_randomly_and_deterministically(tmp_path):
+    from PIL import Image
+
+    from scripts.debug_image_savers import _ImageReservoir
+
+    def fill(folder, seed):
+        r = _ImageReservoir(folder, cap=10, seed=seed)
+        made = 0
+        for page in range(5):
+            for i in range(40):
+                def _make():
+                    nonlocal made
+                    made += 1
+                    return Image.new("RGB", (2, 2))
+                r.offer(f"p{page}_word_{i:03d}.png", _make)
+        return sorted(p.name for p in folder.glob("*.png")), made, r
+
+    names_a, made_a, r = fill(tmp_path / "a", seed=7)
+    names_b, _made, _r = fill(tmp_path / "b", seed=7)
+    assert len(names_a) == 10 == len(r.kept)
+    assert names_a == names_b  # fixed seed -> same picks
+    assert made_a < 200  # rejected crops are never encoded
+    assert len({n.split("_")[0] for n in names_a}) > 1  # not just the first page
+
+
+def test_extra_prediction_layers_only_with_content(tmp_path):
+    from types import SimpleNamespace
+
+    from rastervec.commons.models import PageMeta
+
+    pm = PageMeta(index=0, number=1, mediabox=(0, 0, 100, 100), rotation=0, width=100, height=100)
+    res = SimpleNamespace(texts=[], vectors=[], extra={})
+    writer = gpr._LayerWriter()
+    gpr._add_extra_prediction_layers(writer, res, pm, gt_boxes=[], manual_boxes=[])
+    assert writer.filenames() == []  # all three layers blank -> none written
+    assert set(writer.meta) == {
+        "benchmark__extra_text.pdf", "benchmark__extra_vectors.pdf", "benchmark__missed_vectors.pdf",
+    }

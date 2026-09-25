@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from rastervec.Evaluation.Evaluate.html_report import ExampleCard, ReportBuilder
+from rastervec.Evaluation.Evaluate.html_report import ReportBuilder
 
 
 def test_render_includes_title_and_key_section():
@@ -32,24 +32,6 @@ def test_add_text_subsection_empty_rows_shows_placeholder():
     b = ReportBuilder("t")
     b.add_text_subsection("Char", ["a"], [])
     assert "(no data)" in b.render()
-
-
-def test_add_error_examples_with_and_without_crop():
-    b = ReportBuilder("t")
-    b.add_error_examples("extra_prediction", "native_to_vector", [
-        ExampleCard(caption="foo", image_path=Path("examples/x.png"), run="current", text_type="native_to_vector"),
-        ExampleCard(caption="bar", image_path=None, run="legacy", text_type="native_to_vector"),
-    ])
-    html = b.render()
-    assert 'src="examples/x.png"' in html
-    assert "(no crop)" in html
-    assert "foo" in html and "bar" in html
-
-
-def test_add_error_examples_empty_shows_placeholder():
-    b = ReportBuilder("t")
-    b.add_error_examples("missed_gt", "original_vector", [])
-    assert "(none found)" in b.render()
 
 
 def test_add_image_gallery():

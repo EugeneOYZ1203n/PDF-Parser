@@ -85,6 +85,10 @@ class PageDump:
     substep_durations: dict = dataclasses.field(default_factory=dict)
     raster_step_durations: dict = dataclasses.field(default_factory=dict)
     raster_substep_durations: dict = dataclasses.field(default_factory=dict)
+    # Report-generation seconds spent on this page outside the pipeline
+    # itself (`generate_pipeline_report.py`): input conversion, fixed stage
+    # layers, debug images, extra-prediction layers. `{}` for older dumps.
+    debug_durations: dict = dataclasses.field(default_factory=dict)
 
 
 def _page_dump_to_json(pd: PageDump) -> dict:
@@ -98,6 +102,7 @@ def _page_dump_to_json(pd: PageDump) -> dict:
         "substep_durations": pd.substep_durations,
         "raster_step_durations": pd.raster_step_durations,
         "raster_substep_durations": pd.raster_substep_durations,
+        "debug_durations": pd.debug_durations,
     }
 
 
@@ -117,14 +122,21 @@ def _page_dump_from_json(d: dict) -> PageDump:
         substep_durations=d.get("substep_durations", {}),
         raster_step_durations=d.get("raster_step_durations", {}),
         raster_substep_durations=d.get("raster_substep_durations", {}),
+        debug_durations=d.get("debug_durations", {}),
     )
 
 
-def write_dump(path: str | Path, pdf_path: str, pages: list[PageDump]) -> None:
+def write_dump(
+    path: str | Path, pdf_path: str, pages: list[PageDump],
+    doc_durations: "dict | None" = None,
+) -> None:
+    """`doc_durations`: report-generation seconds that belong to the whole
+    document rather than one page (GT overlays, saving the layer PDFs)."""
     payload = {
         "schema": _SCHEMA,
         "pdf_path": str(pdf_path),
         "pages": [_page_dump_to_json(p) for p in pages],
+        "doc_durations": dict(doc_durations or {}),
     }
     Path(path).write_text(json.dumps(payload, indent=1), encoding="utf-8")
 
@@ -133,6 +145,7 @@ def write_dump(path: str | Path, pdf_path: str, pages: list[PageDump]) -> None:
 class Dump:
     pdf_path: str
     pages: list[PageDump]
+    doc_durations: dict = dataclasses.field(default_factory=dict)
 
 
 def load_dump(path: str | Path) -> Dump:
@@ -140,4 +153,5 @@ def load_dump(path: str | Path) -> Dump:
     return Dump(
         pdf_path=payload.get("pdf_path", ""),
         pages=[_page_dump_from_json(p) for p in payload.get("pages", [])],
+        doc_durations=payload.get("doc_durations", {}),
     )

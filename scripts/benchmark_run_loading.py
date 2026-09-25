@@ -157,17 +157,22 @@ def _score_vectors(
 def _load_timings(entry: RunEntry) -> "dict[str, list[dict]]":
     """`{run_kind: [flattened per-page timing row]}` from this entry's
     `dump.json` (`timing.flatten_page_timing`) -- `vectorised` for the main
-    run, `rasterised` for the separate rasterised-PDF run. A page that
-    recorded nothing for a kind (no rasterised run, or a pre-timing dump)
-    contributes no row."""
+    run (with the page's report-generation `debug_durations`), `rasterised`
+    for the separate rasterised-PDF run, plus `timing.DOC_KIND` -> this
+    document's single `doc_durations` row (`timing.flatten_doc_timing`). A
+    page that recorded nothing for a kind (no rasterised run, or a
+    pre-timing dump) contributes no row."""
     dump = dump_io.load_dump(entry.dump_path)
-    out: "dict[str, list[dict]]" = {kind: [] for kind in timing.RUN_KINDS}
+    out: "dict[str, list[dict]]" = {kind: [] for kind in (*timing.RUN_KINDS, timing.DOC_KIND)}
     for page in dump.pages:
-        for kind, steps, subs in (
-            ("vectorised", page.step_durations, page.substep_durations),
-            ("rasterised", page.raster_step_durations, page.raster_substep_durations),
+        for kind, steps, subs, debug in (
+            ("vectorised", page.step_durations, page.substep_durations, page.debug_durations),
+            ("rasterised", page.raster_step_durations, page.raster_substep_durations, None),
         ):
-            row = timing.flatten_page_timing(steps, subs)
+            row = timing.flatten_page_timing(steps, subs, debug)
             if row:
                 out[kind].append(row)
+    doc_row = timing.flatten_doc_timing(dump.doc_durations)
+    if doc_row:
+        out[timing.DOC_KIND].append(doc_row)
     return out
