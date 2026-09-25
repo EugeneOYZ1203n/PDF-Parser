@@ -60,6 +60,7 @@ from rastervec.Evaluation.Evaluate import charts, timing
 from rastervec.Evaluation.Evaluate.benchmark import (
     format_aggregate_comparison,
     format_confusion_table,
+    format_fast_cluster_comparison,
     format_variant_timing_comparison,
     format_vector_aggregate_comparison,
 )
@@ -79,6 +80,7 @@ from rastervec.commons.logging_setup import configure_logging, get_logger
 from rastervec.commons.paths import output_dir
 
 from scripts.benchmark_report_sections import (  # noqa: F401 -- re-exported for callers/tests
+    _add_fast_cluster_section,
     _add_text_sections,
     _add_timing_sections,
     _add_vector_sections,
@@ -86,6 +88,7 @@ from scripts.benchmark_report_sections import (  # noqa: F401 -- re-exported for
 )
 from scripts.benchmark_run_loading import (  # noqa: F401 -- re-exported for callers/tests
     RunEntry,
+    _load_fast_cluster_stats,
     _load_run,
     _load_timings,
     _merge_gt,
@@ -162,6 +165,8 @@ def main(argv: list[str] | None = None) -> int:
     grand_vector: "dict[str, list[VectorMetricSuiteResult]]" = {}
     # {run: {kind: [flattened per-page timing row]}} over every shared key
     grand_timing: "dict[str, dict[str, list[dict]]]" = {}
+    # {run: {"total": N, "passed": P}} FAST cluster counts, summed over every shared key
+    grand_fast_cluster: "dict[str, dict]" = {}
 
     def _timing_block(
         rows_by_run: "dict[str, dict[str, list[dict]]]", label: str, cslug: str,
@@ -205,10 +210,19 @@ def main(argv: list[str] | None = None) -> int:
             if agg is not None:
                 blocks.append(f"[{key} / {name}] " + format_confusion_table(agg))
         blocks.append(format_vector_aggregate_comparison(vector_by_run, title=f"{key} -- vectors"))
+        fast_cluster_by_run = {r[key].run_name: _load_fast_cluster_stats(r[key]) for r in runs}
+        blocks.append(format_fast_cluster_comparison(fast_cluster_by_run, title=f"{key} -- clusters dropped by FAST"))
+        for name, stats in fast_cluster_by_run.items():
+            if stats is None:
+                continue
+            acc = grand_fast_cluster.setdefault(name, {"total": 0, "passed": 0})
+            acc["total"] += stats["total"]
+            acc["passed"] += stats["passed"]
 
         builder.add_key_section(key)
         _add_text_sections(builder, text_by_run)
         _add_vector_sections(builder, vector_by_run)
+        _add_fast_cluster_section(builder, fast_cluster_by_run)
         timing_rows = {r[key].run_name: _load_timings(r[key]) for r in runs}
         _timing_block(timing_rows, key, kslug)
         for name, by_kind in timing_rows.items():
@@ -350,6 +364,14 @@ def main(argv: list[str] | None = None) -> int:
                     ) + "</div>"
                 )
         builder.add_raw_html("".join(grand_font_size_html))
+
+    if grand_fast_cluster:
+        if not grand_text_agg:
+            builder.add_key_section("(grand aggregate over every shared input)")
+        blocks.append(format_fast_cluster_comparison(
+            grand_fast_cluster, title="(all inputs) -- clusters dropped by FAST",
+        ))
+        _add_fast_cluster_section(builder, grand_fast_cluster)
 
     if grand_timing:
         if not grand_text_agg:

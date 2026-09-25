@@ -83,3 +83,21 @@ def test_dump_debug_and_doc_durations_roundtrip_and_default(tmp_path, page_meta)
     path.write_text(json.dumps(raw), encoding="utf-8")
     old = dump_io.load_dump(path)
     assert old.doc_durations == {} and old.pages[0].debug_durations == {}
+
+
+def test_dump_fast_cluster_stats_roundtrip_and_default(tmp_path, page_meta):
+    pd = dump_io.PageDump(
+        page_meta=page_meta(), texts=[], vectors=[], engine="current",
+        step_durations={}, fast_cluster_stats={"total": 5, "passed": 3},
+    )
+    path = tmp_path / "dump.json"
+    dump_io.write_dump(path, "x.pdf", [pd])
+    got = dump_io.load_dump(path).pages[0]
+    assert got.fast_cluster_stats == {"total": 5, "passed": 3}
+
+    import json
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["pages"][0].pop("fast_cluster_stats")
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    old = dump_io.load_dump(path).pages[0]
+    assert old.fast_cluster_stats is None

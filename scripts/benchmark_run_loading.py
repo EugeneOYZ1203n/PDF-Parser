@@ -154,6 +154,26 @@ def _score_vectors(
     return per_page, aggregate_vector_metrics([r for _pi, r in per_page])
 
 
+def _load_fast_cluster_stats(entry: RunEntry) -> "dict | None":
+    """`{"total": N, "passed": P}` summed across every page of this run's
+    `dump.json` that recorded a `PageDump.fast_cluster_stats` (the
+    VectorClassification P3 backend's FAST-filter cluster counts, see
+    `generate_pipeline_report.py::_fast_cluster_stats`). `None` if no page
+    recorded this (a different P3 backend, the legacy engine, or an older
+    dump without the field)."""
+    dump = dump_io.load_dump(entry.dump_path)
+    total = passed = 0
+    seen = False
+    for page in dump.pages:
+        stats = page.fast_cluster_stats
+        if stats is None:
+            continue
+        seen = True
+        total += stats.get("total", 0)
+        passed += stats.get("passed", 0)
+    return {"total": total, "passed": passed} if seen else None
+
+
 def _load_timings(entry: RunEntry) -> "dict[str, list[dict]]":
     """`{run_kind: [flattened per-page timing row]}` from this entry's
     `dump.json` (`timing.flatten_page_timing`) -- `vectorised` for the main

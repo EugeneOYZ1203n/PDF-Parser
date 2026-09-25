@@ -34,7 +34,10 @@ from scripts.debug_image_savers import (
     _save_fastintopaddle_detect_images,
     _save_fastintopaddle_recog_images,
     _save_legacyrecreation_ocr_images,
+    _save_vectorclassification_classifier_after_images,
+    _save_vectorclassification_classifier_before_images,
     _save_vectorclassification_detect_images,
+    _save_vectorclassification_hough_images,
     _save_vectorclassification_recog_images,
 )
 from scripts.report_config import NEW_STEP_NAMES, _layer_slug
@@ -195,17 +198,18 @@ def _active_artifacts(config: "ReportConfig", variant) -> list[tuple]:
 
 
 def _image_reservoirs(
-    detect_dir: Path, recog_dir: Path, ocr_dir: Path, seed_name: str,
+    dirs: "dict[str, Path]", seed_name: str,
 ) -> "dict[str, _ImageReservoir]":
-    """One `_ImageReservoir` per debug-image folder for one input document
-    -- each folder ends up with at most `_DEBUG_IMAGE_CAP` images sampled
-    at random across every page. Seeded from `seed_name` (the document's
-    folder name) so a rerun picks the same crops."""
+    """One `_ImageReservoir` per debug-image folder (`dirs`, keyed by the
+    same short name `_accumulate_page`'s per-`p3` dispatch below uses) for
+    one input document -- each folder ends up with at most
+    `_DEBUG_IMAGE_CAP` images sampled at random across every page. Seeded
+    from `seed_name` (the document's folder name, offset by each folder's
+    own stable sort position) so a rerun picks the same crops."""
     seed = zlib.crc32(seed_name.encode("utf-8"))
     return {
-        "detect": _ImageReservoir(detect_dir, _DEBUG_IMAGE_CAP, seed),
-        "recog": _ImageReservoir(recog_dir, _DEBUG_IMAGE_CAP, seed + 1),
-        "ocr": _ImageReservoir(ocr_dir, _DEBUG_IMAGE_CAP, seed + 2),
+        name: _ImageReservoir(path, _DEBUG_IMAGE_CAP, seed + i)
+        for i, (name, path) in enumerate(sorted(dirs.items()))
     }
 
 
@@ -255,6 +259,13 @@ def _accumulate_page(
         elif p3 == "VectorClassification":
             _save_vectorclassification_detect_images(p3_debug, reservoirs["detect"], page_index)
             _save_vectorclassification_recog_images(p3_debug, reservoirs["recog"], page_index)
+            _save_vectorclassification_hough_images(p3_debug, reservoirs["hough"], page_index)
+            _save_vectorclassification_classifier_before_images(
+                p3_debug, reservoirs["classifier_before"], page_index,
+            )
+            _save_vectorclassification_classifier_after_images(
+                p3_debug, reservoirs["classifier_after"], page_index,
+            )
         elif p3 == "LegacyRecreation":
             _save_legacyrecreation_ocr_images(p3_debug, reservoirs["ocr"], page_index)
 

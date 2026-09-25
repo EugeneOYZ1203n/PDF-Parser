@@ -7,6 +7,7 @@ from rastervec.Evaluation.Evaluate.benchmark import (
     distribution_stats,
     format_aggregate,
     format_aggregate_comparison,
+    format_fast_cluster_comparison,
     format_text_report,
     format_timing_report,
     format_variant_timing_comparison,
@@ -128,3 +129,21 @@ def test_format_aggregate_comparison_shows_all_variants():
     out = format_aggregate_comparison({"current": a, "legacy": None})
     assert "current" in out and "legacy" in out
     assert "(no results)" in out
+
+
+def test_format_fast_cluster_comparison_shows_counts_and_na():
+    out = format_fast_cluster_comparison({
+        "current": {"total": 10, "passed": 7}, "legacy": None,
+    })
+    assert "7/10" in out or "7" in out and "10" in out
+    assert "n/a" in out  # legacy has no recorded stats
+
+
+def test_format_fast_cluster_comparison_empty_dict():
+    out = format_fast_cluster_comparison({})
+    assert "(no results)" in out
+
+
+def test_format_fast_cluster_comparison_zero_total_no_division_error():
+    out = format_fast_cluster_comparison({"current": {"total": 0, "passed": 0}})
+    assert "n/a" in out

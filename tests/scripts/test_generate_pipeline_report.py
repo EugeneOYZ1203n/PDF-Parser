@@ -267,6 +267,63 @@ def test_save_vectorclassification_detect_images_missing_key_no_crash(tmp_path):
     assert not folder.exists()
 
 
+def test_save_vectorclassification_hough_images_draws_line_and_names_angles(tmp_path):
+    mask = np.zeros((10, 10), dtype=bool)
+    mask[5, :] = True
+    p3_debug = {"rotation": [{
+        "bbox": (0.0, 0.0, 10.0, 10.0),
+        "quad_angle_deg": 1.5, "hough_angle_deg": 2.0, "combined_angle_deg": 0.0,
+        "base_crop": np.zeros((10, 10, 3), dtype=np.uint8), "dilated_ink_mask": mask,
+    }]}
+    folder = tmp_path / "hough"
+    n = gpr._save_vectorclassification_hough_images(p3_debug, folder, page_index=0)
+    assert n == 1
+    files = list(folder.glob("*.png"))
+    assert len(files) == 1
+    assert "q1.5" in files[0].name and "h2.0" in files[0].name and "c0.0" in files[0].name
+
+
+def test_save_vectorclassification_hough_images_none_hough_angle_in_name(tmp_path):
+    p3_debug = {"rotation": [{
+        "bbox": (0.0, 0.0, 10.0, 10.0),
+        "quad_angle_deg": 0.0, "hough_angle_deg": None, "combined_angle_deg": 0.0,
+        "base_crop": np.zeros((10, 10, 3), dtype=np.uint8), "dilated_ink_mask": None,
+    }]}
+    folder = tmp_path / "hough"
+    n = gpr._save_vectorclassification_hough_images(p3_debug, folder, page_index=0)
+    assert n == 1
+    assert "hna" in list(folder.glob("*.png"))[0].name
+
+
+def test_save_vectorclassification_hough_images_missing_key_no_crash(tmp_path):
+    folder = tmp_path / "hough"
+    assert gpr._save_vectorclassification_hough_images({}, folder, 0) == 0
+    assert not folder.exists()
+
+
+def test_save_vectorclassification_classifier_before_after_images(tmp_path):
+    before = np.zeros((4, 4, 3), dtype=np.uint8)
+    after = np.ones((4, 4, 3), dtype=np.uint8) * 255
+    p3_debug = {"classifier_crops": [(before, after)]}
+    before_dir = tmp_path / "before"
+    after_dir = tmp_path / "after"
+    assert gpr._save_vectorclassification_classifier_before_images(p3_debug, before_dir, 0) == 1
+    assert gpr._save_vectorclassification_classifier_after_images(p3_debug, after_dir, 0) == 1
+
+    from PIL import Image
+    saved_before = np.asarray(Image.open(list(before_dir.glob("*.png"))[0]))
+    saved_after = np.asarray(Image.open(list(after_dir.glob("*.png"))[0]))
+    assert np.array_equal(saved_before[:, :, :3], before)
+    assert np.array_equal(saved_after[:, :, :3], after)
+
+
+def test_save_vectorclassification_classifier_images_missing_key_no_crash(tmp_path):
+    folder = tmp_path / "classifier"
+    assert gpr._save_vectorclassification_classifier_before_images({}, folder, 0) == 0
+    assert gpr._save_vectorclassification_classifier_after_images({}, folder, 0) == 0
+    assert not folder.exists()
+
+
 def test_layer_writer_skips_all_blank_layers(tmp_path):
     from rastervec.commons.models import PageMeta
     from rastervec.commons.renderer import render_boxes_pdf
@@ -300,10 +357,10 @@ def test_debug_images_flag_default_and_off(tmp_path):
     assert gpr.ReportConfig().debug_images is True
     crop = np.zeros((4, 4, 3), dtype=np.uint8)
     res = SimpleNamespace(extra={"p3_debug": {"ocr_crops": [(crop, "A")]}})
-    ocr_dir = gpr._image_dirs(tmp_path)[2]
+    ocr_dir = gpr._image_dirs(tmp_path)["ocr"]
     gpr._accumulate_page(res, 0, [], gpr._LayerWriter(), {}, None, p3="LegacyRecreation")
     assert not ocr_dir.exists()
-    reservoirs = gpr._image_reservoirs(*gpr._image_dirs(tmp_path), seed_name="doc")
+    reservoirs = gpr._image_reservoirs(gpr._image_dirs(tmp_path), seed_name="doc")
     debug: dict = {}
     gpr._accumulate_page(
         res, 0, [], gpr._LayerWriter(), {}, reservoirs, p3="LegacyRecreation",

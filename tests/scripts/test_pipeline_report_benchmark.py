@@ -183,6 +183,58 @@ def test_score_text_routes_vectorised_vs_rasterised_predictions(tmp_path):
     assert agg.by_type["vector_to_raster"].char_overlap.missing == 0
 
 
+def test_load_fast_cluster_stats_sums_across_pages(tmp_path):
+    doc = tmp_path / "doc"
+    doc.mkdir()
+    dump_io.write_dump(
+        doc / "dump.json", "x.pdf",
+        [
+            dump_io.PageDump(
+                _meta(), texts=[], vectors=[], engine="current", step_durations={},
+                fast_cluster_stats={"total": 4, "passed": 3},
+            ),
+            dump_io.PageDump(
+                _meta(), texts=[], vectors=[], engine="current", step_durations={},
+                fast_cluster_stats={"total": 2, "passed": 0},
+            ),
+        ],
+    )
+    entry = prb.RunEntry(
+        run_name="run", run_dir=tmp_path, key="pdf:doc", pdf_stem="doc",
+        doc_dir=doc, dump_path=doc / "dump.json", gt=LabelSet(pdf_path="x.pdf"),
+    )
+    stats = prb._load_fast_cluster_stats(entry)
+    assert stats == {"total": 6, "passed": 3}
+
+
+def test_load_fast_cluster_stats_none_when_no_page_recorded_it(tmp_path):
+    doc = tmp_path / "doc"
+    doc.mkdir()
+    dump_io.write_dump(
+        doc / "dump.json", "x.pdf",
+        [dump_io.PageDump(_meta(), texts=[], vectors=[], engine="current", step_durations={})],
+    )
+    entry = prb.RunEntry(
+        run_name="run", run_dir=tmp_path, key="pdf:doc", pdf_stem="doc",
+        doc_dir=doc, dump_path=doc / "dump.json", gt=LabelSet(pdf_path="x.pdf"),
+    )
+    assert prb._load_fast_cluster_stats(entry) is None
+
+
+def test_add_fast_cluster_section_renders_counts_and_skips_when_all_none():
+    from rastervec.Evaluation.Evaluate.html_report import ReportBuilder
+
+    builder = ReportBuilder("t")
+    prb._add_fast_cluster_section(builder, {"current": {"total": 10, "passed": 6}, "legacy": None})
+    html = builder.render()
+    assert "Clusters dropped by FAST" in html
+    assert "6" in html and "10" in html
+
+    empty_builder = ReportBuilder("t")
+    prb._add_fast_cluster_section(empty_builder, {"legacy": None})
+    assert "Clusters dropped by FAST" not in empty_builder.render()
+
+
 def test_merge_gt_supports_legacy_auto_manual_filenames(tmp_path):
     doc = tmp_path / "doc"
     doc.mkdir()

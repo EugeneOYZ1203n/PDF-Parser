@@ -35,6 +35,16 @@ timestamped run folder:
                                        quad drawn on top)
                 paddle_recog_images/   (one PNG per detected quad's own
                                        crop, recognised text in the filename)
+                hough_line_images/     (one PNG per detection's own dilated
+                                       ink mask, the detected Hough line
+                                       drawn on it, quad/hough/combined
+                                       angles in the filename)
+                paddle_classifier_before_images/  (one PNG per detection's
+                                       own crop right before its 0/180
+                                       classifier flip)
+                paddle_classifier_after_images/   (the same crop right
+                                       after that flip -- what the
+                                       recognizer actually saw)
               p3=LegacyRecreation (no FAST stage):
                 paddle_ocr_images/     (one PNG per word group's own padded/
                                        DPI-boosted render, recognised text
@@ -107,7 +117,10 @@ from scripts.debug_image_savers import (  # noqa: F401 -- re-exported for caller
     _save_fastintopaddle_recog_images,
     _save_legacyrecreation_ocr_images,
     _save_segment_recog_images,
+    _save_vectorclassification_classifier_after_images,
+    _save_vectorclassification_classifier_before_images,
     _save_vectorclassification_detect_images,
+    _save_vectorclassification_hough_images,
     _save_vectorclassification_recog_images,
 )
 from scripts.report_artifacts import (  # noqa: F401 -- re-exported for callers/tests
@@ -174,16 +187,20 @@ def _bench_doc_name(bench: "BenchInput") -> str:
     return "".join(c if c not in '<>:"/\\|?*' else "_" for c in name) or "input"
 
 
-def _image_dirs(doc_dir: Path) -> tuple[Path, Path, Path]:
-    """(detect-input dir, recog-input dir, legacy-ocr dir): what
-    PaddleOCR's own text *detector* saw vs. what its text *recognizer* saw
-    vs. (LegacyRecreation only, which has no separate detect stage) what its
-    single recognition-only OCR call saw. Not every backend populates every folder -- see
-    `report_artifacts._accumulate_page`'s per-`p3` dispatch."""
-    return (
-        doc_dir / "paddle_detect_images", doc_dir / "paddle_recog_images",
-        doc_dir / "paddle_ocr_images",
-    )
+def _image_dirs(doc_dir: Path) -> "dict[str, Path]":
+    """Every possible debug-image folder for one document, keyed by the
+    short name `report_artifacts._accumulate_page`'s per-`p3` dispatch
+    uses. Not every backend populates every folder (a folder no saver ever
+    calls `.offer()` on is simply never created) -- see that dispatch for
+    which backend writes which."""
+    return {
+        "detect": doc_dir / "paddle_detect_images",
+        "recog": doc_dir / "paddle_recog_images",
+        "ocr": doc_dir / "paddle_ocr_images",
+        "hough": doc_dir / "hough_line_images",
+        "classifier_before": doc_dir / "paddle_classifier_before_images",
+        "classifier_after": doc_dir / "paddle_classifier_after_images",
+    }
 
 
 def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -> None:
@@ -194,7 +211,7 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
     doc_dir = run_dir / pdf_path.stem
     doc_dir.mkdir(parents=True, exist_ok=True)
     reservoirs = (
-        _image_reservoirs(*_image_dirs(doc_dir), seed_name=doc_dir.name)
+        _image_reservoirs(_image_dirs(doc_dir), seed_name=doc_dir.name)
         if config.debug_images else None
     )
 
@@ -235,6 +252,7 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
             step_durations=dict(res.step_durations or {}),
             substep_durations=_substeps(res),
             debug_durations=debug_durations,
+            fast_cluster_stats=_fast_cluster_stats(res, variant.p3),
         ))
 
     _finalize_doc_dir(doc_dir, pdf_path, pages, config, variant, active,
@@ -343,6 +361,20 @@ def _substeps(res) -> dict:
     return dict(getattr(res, "substep_durations", None) or {})
 
 
+def _fast_cluster_stats(res, p3: str) -> "dict | None":
+    """`{"total": N, "passed": P}` cluster counts off the VectorClassification
+    P3 backend's own `FastPageResult` (`res.extra["p3_debug"]["fast_result"]`,
+    only present on a `verbose=True` run) -- `None` for any other P3 backend
+    (no such concept) or a run without debug data."""
+    if p3 != "VectorClassification":
+        return None
+    p3_debug = (getattr(res, "extra", None) or {}).get("p3_debug") or {}
+    fast_result = p3_debug.get("fast_result")
+    if fast_result is None:
+        return None
+    return {"total": fast_result.n_clusters, "passed": fast_result.n_passed_clusters}
+
+
 def _extract_single_page(src_pdf: Path, page_index: int, out_path: Path) -> None:
     doc = fitz.open(str(src_pdf))
     try:
@@ -378,7 +410,7 @@ def _process_pdf_benchmark(
     doc_dir = run_dir / doc_name
     doc_dir.mkdir(parents=True, exist_ok=True)
     reservoirs = (
-        _image_reservoirs(*_image_dirs(doc_dir), seed_name=doc_name)
+        _image_reservoirs(_image_dirs(doc_dir), seed_name=doc_name)
         if config.debug_images else None
     )
     pages = _filter_valid_pages(bench.pdf_path, config.pages_for(doc_name), bench.key)
@@ -458,6 +490,7 @@ def _process_pdf_benchmark(
             raster_step_durations=raster_steps,
             raster_substep_durations=raster_substeps,
             debug_durations=debug_durations,
+            fast_cluster_stats=_fast_cluster_stats(res, variant.p3),
         ))
 
     sources: list[str] = []

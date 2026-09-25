@@ -31,8 +31,25 @@ FAST_TILE_SCALE_FACTOR = 2
 # overlap (0.15 * 640 = 96 px, ~23 pt) covers text straddling a tile edge.
 FAST_TILE_CANDIDATE_MARGIN_FRAC = 0.05
 FAST_TILE_OVERLAP_FRAC = 0.15
-# Combined FAST score threshold above which a cluster is kept as text.
-FAST_COMBINED_KEEP_THRESHOLD = 0.3
+# A cluster is kept as text if ANY single member vector's own FAST mask
+# coverage score exceeds this (not a whole-cluster average -- one strong
+# ink-looking vector is enough to save the whole cluster from being dropped
+# to drawing output).
+FAST_VECTOR_ANY_THRESHOLD = 0.05
+
+# ======================================================================
+# Hough-refined rotation (paddle_engine.py::_hough_deskew)
+# ======================================================================
+
+# Grayscale value (0-255) below which a pixel counts as "ink" when building
+# the binary mask Hough line detection runs on.
+HOUGH_INK_THRESHOLD = 200
+# Binary-dilation disk radius (px) applied to the ink mask before Hough --
+# thickens thin/broken strokes so Hough has more to find ("increase ink").
+HOUGH_DILATE_RADIUS_PX = 2
+# The combined (quad + Hough) rotation correction is snapped to the nearest
+# multiple of this many degrees before being applied.
+HOUGH_ANGLE_SNAP_DEG = 10.0
 
 # ======================================================================
 # OCR (paddle_engine.py, wordgrouping.py, parse.py)

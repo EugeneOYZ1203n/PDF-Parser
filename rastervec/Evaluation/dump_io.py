@@ -89,6 +89,12 @@ class PageDump:
     # itself (`generate_pipeline_report.py`): input conversion, fixed stage
     # layers, debug images, extra-prediction layers. `{}` for older dumps.
     debug_durations: dict = dataclasses.field(default_factory=dict)
+    # `{"total": N, "passed": P}` cluster counts from the VectorClassification
+    # P3 backend's FAST-filter step (`P3_Vector_Parsing/VectorClassification/
+    # fast_filter.py::FastPageResult.n_clusters`/`n_passed_clusters`), read
+    # off `res.extra["p3_debug"]["fast_result"]` at report-generation time.
+    # `None` for any other P3 backend (no such concept) or an older dump.
+    fast_cluster_stats: "dict | None" = None
 
 
 def _page_dump_to_json(pd: PageDump) -> dict:
@@ -103,6 +109,7 @@ def _page_dump_to_json(pd: PageDump) -> dict:
         "raster_step_durations": pd.raster_step_durations,
         "raster_substep_durations": pd.raster_substep_durations,
         "debug_durations": pd.debug_durations,
+        "fast_cluster_stats": pd.fast_cluster_stats,
     }
 
 
@@ -123,6 +130,7 @@ def _page_dump_from_json(d: dict) -> PageDump:
         raster_step_durations=d.get("raster_step_durations", {}),
         raster_substep_durations=d.get("raster_substep_durations", {}),
         debug_durations=d.get("debug_durations", {}),
+        fast_cluster_stats=d.get("fast_cluster_stats"),
     )
 
 

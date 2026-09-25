@@ -213,6 +213,28 @@ def _add_text_sections(
     builder.add_text_subsection("Extra predicted characters (no GT overlap at all)", ["char"] + list(agg_by_run), ec_rows)
 
 
+def _add_fast_cluster_section(builder: ReportBuilder, stats_by_run: "dict[str, dict | None]") -> None:
+    """Clusters dropped by the VectorClassification P3 backend's FAST-filter
+    step (`scripts/benchmark_run_loading.py::_load_fast_cluster_stats`,
+    `{"total": N, "passed": P}` per run, summed over pages). Skipped
+    entirely when no run recorded this stat (every other P3 backend / the
+    legacy engine / an older dump)."""
+    if not any(v is not None for v in stats_by_run.values()):
+        return
+    rows = []
+    for run, stats in stats_by_run.items():
+        if stats is None:
+            rows.append([run, "n/a", "n/a", "n/a"])
+            continue
+        total, passed = stats["total"], stats["passed"]
+        dropped = total - passed
+        rate = f"{passed / total:.3f}" if total else "n/a"
+        rows.append([run, str(total), f"{passed} ({rate})", str(dropped)])
+    builder.add_text_subsection(
+        "Clusters dropped by FAST", ["run", "total clusters", "passed", "dropped"], rows,
+    )
+
+
 def _add_vector_sections(builder: ReportBuilder, agg_by_run: "dict[str, VectorMetricSuiteResult | None]") -> None:
     if not any(v is not None for v in agg_by_run.values()):
         return

@@ -1,6 +1,7 @@
-"""FAST-based text filtering: scores every classification cluster (at its
-real page position) against a whole-page FAST mask, keeping only clusters
-that look like text.
+"""FAST-based text filtering: scores every member vector of every
+classification cluster (at its real page position) individually against a
+whole-page FAST mask, keeping a whole cluster (every one of its vectors) if
+any single member scores above threshold.
 """
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from rastervec.P3_Vector_Parsing.VectorClassification.config import FAST_COMBINED_KEEP_THRESHOLD, FAST_PAGE_RENDER_DPI
+from rastervec.P3_Vector_Parsing.VectorClassification.config import FAST_PAGE_RENDER_DPI, FAST_VECTOR_ANY_THRESHOLD
 from rastervec.commons.helpers.geometry import PDF_POINTS_PER_INCH, union_bbox
 from rastervec.commons.models import Vector
 from rastervec.commons.renderer import render_page_paths
@@ -18,10 +19,16 @@ from rastervec.commons.renderer import render_page_paths
 @dataclass
 class FastPageResult:
     """`detect_text_fast`'s whole-page result. `scores` is keyed by a
-    cluster's own index into that step's `clusters` input list. `all_tiles`/
+    cluster's own index into that step's `clusters` input list, each value
+    the list of that cluster's own member vectors' individual FAST scores
+    (a cluster passes if any one of them exceeds `FAST_VECTOR_ANY_THRESHOLD`
+    -- there is no single whole-cluster score any more). `all_tiles`/
     `skipped_tiles`/`tile_count`/`tile_seconds` are the real per-tile FAST
     detector geometry (`verbose`-only), mirroring `FastIntoPaddle/
-    steps.py::FastPageResult`."""
+    steps.py::FastPageResult`. `n_clusters`/`n_passed_clusters` are always
+    populated (cheap ints, not verbose-gated) -- the "clusters dropped by
+    FAST" benchmark stat (`scripts/generate_pipeline_report.py`) reads them
+    straight off this dataclass."""
 
     page_image: object
     page_mask: "np.ndarray | None"
@@ -31,6 +38,8 @@ class FastPageResult:
     all_tiles: list | None = None
     tile_count: int | None = None
     tile_seconds: list | None = None
+    n_clusters: int = 0
+    n_passed_clusters: int = 0
 
 
 def _candidate_tile_bboxes(
@@ -85,13 +94,17 @@ def detect_text_fast(
     compute=None,
     progress_counter=None,
 ) -> FastStepResult:
-    """Scores every classification cluster (at its real page position)
-    against a whole-page FAST mask; a cluster passes on its own score alone."""
+    """Scores every member vector of every classification cluster (at its
+    real page position) individually against a whole-page FAST mask; a
+    cluster passes (keeping all its vectors) if ANY one of them scores
+    above `FAST_VECTOR_ANY_THRESHOLD` -- not a whole-cluster average."""
     from rastervec.P3_Vector_Parsing.VectorClassification.fast_detect import FastDetector
     from rastervec.P3_Vector_Parsing.VectorClassification.config import FAST_TILE_BLOCK_SIZE, FAST_TILE_CANDIDATE_MARGIN_FRAC, FAST_TILE_SCALE_FACTOR
 
     if not enable_fast:
-        result = FastPageResult(None, None, None, {})
+        result = FastPageResult(
+            None, None, None, {}, n_clusters=len(clusters), n_passed_clusters=len(clusters),
+        )
         return FastStepResult(list(clusters), [], result)
 
     page_image = page_mask = None
@@ -115,15 +128,21 @@ def detect_text_fast(
         )
         detect_seconds = time.perf_counter() - start
 
-    cluster_scores = [_sample_mask(page_mask, cluster, zoom) for cluster in clusters]
+    # A cluster passes on ANY single member vector's own score alone -- not
+    # a whole-cluster average -- so one strong ink-looking vector saves the
+    # whole cluster (all its vectors, including any weaker-scoring ones)
+    # from being dropped to drawing output.
+    vector_scores_by_cluster = [
+        [_sample_mask(page_mask, [v], zoom) for v in cluster] for cluster in clusters
+    ]
 
     passed: list[list[Vector]] = []
     dropped_vectors: list[Vector] = []
-    scores_by_cluster: dict[int, float] = {}
+    scores_by_cluster: dict[int, list[float]] = {}
     for i, cluster in enumerate(clusters):
-        score = cluster_scores[i]
-        scores_by_cluster[i] = score
-        if score > FAST_COMBINED_KEEP_THRESHOLD:
+        scores = vector_scores_by_cluster[i]
+        scores_by_cluster[i] = scores
+        if any(s > FAST_VECTOR_ANY_THRESHOLD for s in scores):
             passed.append(cluster)
         else:
             dropped_vectors.extend(cluster)
@@ -144,5 +163,6 @@ def detect_text_fast(
         detect_seconds, scores_by_cluster,
         skipped_tiles=skipped_tiles, all_tiles=all_tiles,
         tile_count=tile_count, tile_seconds=tile_seconds,
+        n_clusters=len(clusters), n_passed_clusters=len(passed),
     )
     return FastStepResult(passed, dropped_vectors, result)

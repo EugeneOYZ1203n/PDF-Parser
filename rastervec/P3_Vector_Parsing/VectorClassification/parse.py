@@ -14,6 +14,7 @@ P2_Raster_To_Vec.
 """
 from __future__ import annotations
 
+import math
 from typing import Callable
 
 import numpy as np
@@ -35,8 +36,7 @@ from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import (
     PaddleRecBackend,
     _normalize_bgr,
     _normalize_rotation,
-    _quad_rotation_deg,
-    _rotate_crop,
+    hough_deskew,
 )
 
 STEP_NAMES = ["classify", "fast", "ocr", "drawing"]
@@ -116,9 +116,11 @@ def parse(
     det_backend = PaddleDetectBackend()
     texts: list[Text] = []
     ocr_crops: list[tuple[np.ndarray, str]] = []
+    classifier_crops: list[tuple[np.ndarray, np.ndarray]] = []
     cluster_detections: list[tuple[np.ndarray, list]] = []
     blank_boxes: list[tuple] = []
     detect_boxes: list[tuple] = []
+    rotation_entries: list[dict] = []
     for group_vectors in fast.passed:
         if not group_vectors:
             continue
@@ -142,26 +144,37 @@ def parse(
         if not quads:
             continue
 
-        # _rotate_crop's output is cropped straight out of `bgr`, so it's
+        # hough_deskew's crop is cropped straight out of `bgr`, so it's
         # already BGR -- reverse channels back before recognize_crops, which
         # does its own RGB->BGR flip internally (same gotcha LegacyRecreation's
         # own identical loop works around).
         with clock("ocr_recognize"):
-            crops = [_rotate_crop(bgr, quad)[:, :, ::-1] for quad in quads]
+            deskewed = [hough_deskew(bgr, quad) for quad in quads]
+            crops = [c[:, :, ::-1] for c, _rd in deskewed]
+            rotation_debugs = [rd for _c, rd in deskewed]
             boxes = rec_backend.recognize_crops(crops)
 
-        for quad, crop, box in zip(quads, crops, boxes):
+        for quad, crop, rd, box in zip(quads, crops, rotation_debugs, boxes):
             # box.flip_deg is the 0/180 decision recognize_crops' own angle
             # classifier made for this crop -- recognition actually ran on
             # the rotated (upright) pixels, not `crop` as-is, so mirror that
             # same rotation here for the stashed debug image too.
             recog_crop = np.rot90(crop, 2) if box.flip_deg else crop
             ocr_crops.append((recog_crop, box.text))
+            classifier_crops.append((crop, recog_crop))
             bbox = pixel_to_page_bbox(group_vectors, dpi_used, quad.tolist(), padding)
+            rotation_entries.append({
+                "bbox": bbox,
+                "quad_angle_deg": rd.quad_angle_deg,
+                "hough_angle_deg": rd.hough_angle_deg,
+                "combined_angle_deg": rd.combined_angle_deg,
+                "base_crop": rd.base_crop,
+                "dilated_ink_mask": rd.dilated_ink_mask,
+            })
             if not box.text:
                 blank_boxes.append(bbox)
                 continue
-            rotate_deg = _normalize_rotation(_quad_rotation_deg(quad) + box.flip_deg)
+            rotate_deg = _normalize_rotation(rd.combined_angle_deg + box.flip_deg)
             direction = transform_direction((1.0, 0.0), rotate_deg)
             texts.append(Text(
                 text=box.text, bbox=bbox, direction=direction,
@@ -173,6 +186,7 @@ def parse(
                 confidence=box.confidence, source="ocr", orientation_source="ocr",
             ))
     _emit(lambda: _render_ocr_layers(page_meta, texts, blank_boxes, detect_boxes))
+    _emit(lambda: _render_rotation_layers(page_meta, rotation_entries))
 
     with clock("drawing"):
         drawing = list(cls.drawing_vectors) + list(fast.dropped_vectors)
@@ -185,9 +199,11 @@ def parse(
         debug_out["fast_result"] = fast.page_result
         debug_out["texts"] = texts
         debug_out["ocr_crops"] = ocr_crops
+        debug_out["classifier_crops"] = classifier_crops
         debug_out["cluster_detections"] = cluster_detections
         debug_out["ocr_blank_boxes"] = blank_boxes
         debug_out["ocr_detect_boxes"] = detect_boxes
+        debug_out["rotation"] = rotation_entries
         debug_out["drawing"] = drawing
 
     return drawing, texts
@@ -210,6 +226,9 @@ _C_OCR = "#16a34a"
 _C_OCR_BLANK = "#9333ea"
 _C_OCR_DETECT = "#2563eb"
 _C_DRAWING = "#111827"
+_C_ANGLE_QUAD = "#0891b2"
+_C_ANGLE_HOUGH = "#ea580c"
+_C_ANGLE_FINAL = "#65a30d"
 
 
 def _hex_rgb(h: str) -> tuple[float, float, float]:
@@ -361,6 +380,66 @@ def _render_ocr_layers(page_meta, texts, blank_boxes=None, detect_boxes=None) ->
     ]
 
 
+def _render_angle_arrows_pdf(page_meta, entries: list[dict], angle_key: str, hexcolor: str) -> bytes:
+    """A fresh page with one direction arrow per `entries` item whose
+    `entries[i][angle_key]` isn't `None` -- centered on that entry's own
+    `"bbox"`, pointing along the angle (same `transform_direction`
+    convention `parse.py` already uses for real `Text.direction`), similar
+    in spirit to `scripts/label/vector_label.py`'s rotation-arrow overlay.
+    Visualizes `hough_deskew`'s three angle sources (quad/hough/final) side
+    by side as toggleable layers -- see `_render_rotation_layers`."""
+    import pymupdf as fitz
+
+    color = _hex_rgb(hexcolor)
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=page_meta.width, height=page_meta.height)
+        page.set_rotation(page_meta.rotation)
+        for entry in entries:
+            angle = entry.get(angle_key)
+            if angle is None:
+                continue
+            x0, y0, x1, y1 = entry["bbox"]
+            cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+            length = max(10.0, 0.4 * max(x1 - x0, y1 - y0))
+            dx, dy = transform_direction((1.0, 0.0), angle)
+            tail = (cx - dx * length / 2.0, cy - dy * length / 2.0)
+            tip = (cx + dx * length / 2.0, cy + dy * length / 2.0)
+            page.draw_line(tail, tip, color=color, width=1.5)
+            head_len = length * 0.3
+            for sign in (1.0, -1.0):
+                wing = _rotate_vec(-dx, -dy, sign * 25.0)
+                page.draw_line(
+                    tip, (tip[0] + wing[0] * head_len, tip[1] + wing[1] * head_len),
+                    color=color, width=1.5,
+                )
+        return doc.tobytes()
+    finally:
+        doc.close()
+
+
+def _rotate_vec(dx: float, dy: float, deg: float) -> "tuple[float, float]":
+    rad = math.radians(deg)
+    c, s = math.cos(rad), math.sin(rad)
+    return dx * c - dy * s, dx * s + dy * c
+
+
+def _render_rotation_layers(page_meta, rotation_entries: "list[dict] | None") -> "list[DebugLayer]":
+    """Three arrow layers, one per angle source `hough_deskew` computes per
+    detection (`parse.py`'s `debug_out["rotation"]`) -- quad's own
+    dominant-edge angle, Hough's raw line-angle reading, and the combined,
+    10-degree-snapped angle actually applied."""
+    entries = rotation_entries or []
+    return [
+        ("rotation", "quad angle", _C_ANGLE_QUAD,
+         _render_angle_arrows_pdf(page_meta, entries, "quad_angle_deg", _C_ANGLE_QUAD)),
+        ("rotation", "hough angle", _C_ANGLE_HOUGH,
+         _render_angle_arrows_pdf(page_meta, entries, "hough_angle_deg", _C_ANGLE_HOUGH)),
+        ("rotation", "final angle", _C_ANGLE_FINAL,
+         _render_angle_arrows_pdf(page_meta, entries, "combined_angle_deg", _C_ANGLE_FINAL)),
+    ]
+
+
 def _render_drawing_layers(page_meta, drawing) -> "list[DebugLayer]":
     from rastervec.commons.renderer import render_vectors_pdf
 
@@ -388,5 +467,6 @@ def render_debug(debug_out: "dict | None", page_meta) -> "list[DebugLayer]":
         page_meta, debug_out.get("texts"), debug_out.get("ocr_blank_boxes"),
         debug_out.get("ocr_detect_boxes"),
     )
+    out += _render_rotation_layers(page_meta, debug_out.get("rotation"))
     out += _render_drawing_layers(page_meta, debug_out.get("drawing"))
     return out

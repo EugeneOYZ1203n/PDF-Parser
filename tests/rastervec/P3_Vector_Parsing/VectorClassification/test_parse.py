@@ -24,7 +24,9 @@ def test_parse_debug_out_has_fast_result_key(page_meta):
     assert debug_out["fast_passed"] == []
     assert debug_out["texts"] == []
     assert debug_out["ocr_crops"] == []
+    assert debug_out["classifier_crops"] == []
     assert debug_out["cluster_detections"] == []
+    assert debug_out["rotation"] == []
 
 
 def test_parse_keeps_ocr_crop_for_blank_recognition(page_meta, vector, monkeypatch):
@@ -58,6 +60,8 @@ def test_parse_ocr_crop_reflects_post_flip_rotation(page_meta, vector, monkeypat
     when the angle classifier decides a crop is upside-down (`flip_deg=180`),
     recognition itself runs on the rotated pixels, so the stashed debug crop
     should be rotated the same way, not the raw pre-flip crop."""
+    from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import RotationDebug
+
     v = vector(kind="l", bbox=(10.0, 10.0, 20.0, 20.0), color=(0.0, 0.0, 0.0), seqno=1)
 
     quad = np.array([[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]])
@@ -65,7 +69,10 @@ def test_parse_ocr_crop_reflects_post_flip_rotation(page_meta, vector, monkeypat
 
     raw_crop = np.zeros((4, 4, 3), dtype=np.uint8)
     raw_crop[0, 0] = [255, 0, 0]  # marker pixel in one corner, to detect rotation
-    monkeypatch.setattr(vectorclassification, "_rotate_crop", lambda bgr, quad: raw_crop)
+    rotation_debug = RotationDebug(quad_angle_deg=0.0, hough_angle_deg=None, combined_angle_deg=0.0)
+    monkeypatch.setattr(
+        vectorclassification, "hough_deskew", lambda bgr, quad: (raw_crop, rotation_debug),
+    )
     monkeypatch.setattr(
         PaddleRecBackend, "recognize_crops",
         lambda self, crops: [OcrBox(text="X", confidence=1.0, flip_deg=180) for _ in crops],
@@ -80,6 +87,15 @@ def test_parse_ocr_crop_reflects_post_flip_rotation(page_meta, vector, monkeypat
     pre_flip_crop = raw_crop[:, :, ::-1]  # parse.py's own BGR->RGB reversal
     assert np.array_equal(stored_crop, np.rot90(pre_flip_crop, 2))
     assert not np.array_equal(stored_crop, pre_flip_crop)  # sanity: rotation actually happened
+
+    before_crop, after_crop = debug_out["classifier_crops"][0]
+    assert np.array_equal(before_crop, pre_flip_crop)
+    assert np.array_equal(after_crop, stored_crop)
+
+    entry = debug_out["rotation"][0]
+    assert entry["quad_angle_deg"] == 0.0
+    assert entry["hough_angle_deg"] is None
+    assert entry["combined_angle_deg"] == 0.0
 
 
 def test_parse_streaming_matches_batch_render_debug(page_meta):

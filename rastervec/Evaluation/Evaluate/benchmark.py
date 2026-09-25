@@ -332,6 +332,31 @@ def format_vector_aggregate_comparison(
     return "\n".join(lines)
 
 
+def format_fast_cluster_comparison(
+    stats_by_run: "dict[str, dict | None]", *,
+    title: str = "Clusters dropped by FAST (VectorClassification only)",
+) -> str:
+    """One line per run: how many classification clusters the FAST-filter
+    step (`P3_Vector_Parsing/VectorClassification/fast_filter.py`) kept vs.
+    dropped to drawing output (`{"total": N, "passed": P}`, summed across
+    every page -- see `scripts/benchmark_run_loading.py::
+    _load_fast_cluster_stats`). `None` (a non-VectorClassification P3
+    backend, the legacy engine, or an older dump with no recorded stats)
+    shows `n/a`."""
+    if not stats_by_run:
+        return f"{title}\n  (no results)"
+    lines = [title]
+    for run, stats in stats_by_run.items():
+        if stats is None:
+            lines.append(f"  [{run}] n/a")
+            continue
+        total, passed = stats["total"], stats["passed"]
+        dropped = total - passed
+        rate = f"{passed / total:.3f}" if total else "n/a"
+        lines.append(f"  [{run}] {passed}/{total} clusters kept ({rate}) -- {dropped} dropped by FAST")
+    return "\n".join(lines)
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Benchmark the Vector Classification + OCR pipeline against auto-labelled ground truth."

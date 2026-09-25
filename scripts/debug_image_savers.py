@@ -18,6 +18,7 @@ page, not the first N. A saver also accepts a plain folder `Path`
 """
 from __future__ import annotations
 
+import math
 import random
 from pathlib import Path
 from typing import Callable
@@ -207,6 +208,95 @@ def _save_vectorclassification_detect_images(p3_debug: dict, target, page_index:
     for i, (bgr, quads) in enumerate(entries):
         n += reservoir.offer(
             f"p{page_index}_cluster_{i:03d}.png", lambda bgr=bgr, quads=quads: _make(bgr, quads),
+        )
+    return n
+
+
+def _draw_angle_line(img: Image.Image, angle_deg: "float | None", color) -> Image.Image:
+    """A short line through the image's own center, tilted by `angle_deg`
+    (same sign convention as `paddle_engine.py::_quad_rotation_deg` --
+    counter-clockwise-positive, the rotation that would bring a line at
+    this angle to horizontal). No-op if `angle_deg` is `None`."""
+    if angle_deg is None:
+        return img
+    out = img.convert("RGB")
+    draw = ImageDraw.Draw(out)
+    w, h = out.size
+    cx, cy = w / 2.0, h / 2.0
+    length = 0.4 * max(w, h)
+    rad = math.radians(-angle_deg)
+    dx, dy = math.cos(rad), math.sin(rad)
+    draw.line(
+        [(cx - dx * length, cy - dy * length), (cx + dx * length, cy + dy * length)],
+        fill=color, width=2,
+    )
+    return out
+
+
+def _save_vectorclassification_hough_images(p3_debug: dict, target, page_index: int) -> int:
+    """One PNG per detection's own dilated ink mask (what Hough line
+    detection actually ran on), with a line drawn through it at the
+    detected Hough angle and the quad/hough/combined angle values in the
+    filename. Reads `p3_debug["rotation"]` (see `paddle_engine.py::
+    RotationDebug` / `parse.py`'s per-quad loop)."""
+    entries = p3_debug.get("rotation") or []
+    if not entries:
+        return 0
+    reservoir = _as_reservoir(target)
+
+    def _make(entry) -> Image.Image:
+        mask = entry.get("dilated_ink_mask")
+        if mask is not None:
+            img = Image.fromarray((np.asarray(mask) * 255).astype(np.uint8)).convert("RGB")
+        else:
+            img = Image.fromarray(np.asarray(entry["base_crop"])[..., ::-1])  # BGR -> RGB
+        return _draw_angle_line(img, entry.get("hough_angle_deg"), (220, 30, 30))
+
+    n = 0
+    for i, entry in enumerate(entries):
+        if entry.get("base_crop") is None:
+            continue
+        quad_a = entry.get("quad_angle_deg")
+        hough_a = entry.get("hough_angle_deg")
+        combined_a = entry.get("combined_angle_deg")
+        name = (
+            f"p{page_index}_det_{i:03d}"
+            f"__q{quad_a:.1f}__h{'na' if hough_a is None else f'{hough_a:.1f}'}"
+            f"__c{combined_a:.1f}.png"
+        )
+        n += reservoir.offer(name, lambda entry=entry: _make(entry))
+    return n
+
+
+def _save_vectorclassification_classifier_before_images(p3_debug: dict, target, page_index: int) -> int:
+    """One PNG per detection's own crop exactly as handed to
+    `recognize_crops`, BEFORE its 0/180 classifier's physical flip. Reads
+    `p3_debug["classifier_crops"]` (`list[tuple[np.ndarray, np.ndarray]]`,
+    each a `(before, after)` pair -- see `parse.py`)."""
+    pairs = p3_debug.get("classifier_crops") or []
+    if not pairs:
+        return 0
+    reservoir = _as_reservoir(target)
+    n = 0
+    for i, (before, _after) in enumerate(pairs):
+        n += reservoir.offer(
+            f"p{page_index}_det_{i:03d}.png", lambda before=before: Image.fromarray(np.asarray(before)),
+        )
+    return n
+
+
+def _save_vectorclassification_classifier_after_images(p3_debug: dict, target, page_index: int) -> int:
+    """One PNG per detection's own crop AFTER the classifier's 0/180
+    physical flip -- exactly what `text_recognizer` actually saw. Reads
+    `p3_debug["classifier_crops"]`, same pairing as the `_before` saver."""
+    pairs = p3_debug.get("classifier_crops") or []
+    if not pairs:
+        return 0
+    reservoir = _as_reservoir(target)
+    n = 0
+    for i, (_before, after) in enumerate(pairs):
+        n += reservoir.offer(
+            f"p{page_index}_det_{i:03d}.png", lambda after=after: Image.fromarray(np.asarray(after)),
         )
     return n
 
