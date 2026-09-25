@@ -45,7 +45,7 @@ Under the same font, each character forms a graph of endpoints and edges.
 | Steps | Status | Where |
 |---|---|---|
 | 1 | **Implemented** | `scripts/label/CAD_font_label.py` |
-| 2-3 | **Implemented** | `rastervec/Evaluation/CadFont/` (`geometry.py`, `graph.py`, `character_bank.py`) + `rastervec/notebooks/cad_font_char_graph_lab.ipynb` |
+| 2-3 | **Implemented** | `rastervec/Evaluation/CadFont/` (`geometry.py`, `graph.py`, `character_bank.py`) + `rastervec/notebooks/cad_font_matching_lab.ipynb` (section 3) |
 | 4-12 | **Future work — documented only, no code** | — |
 
 ## Process
@@ -74,7 +74,14 @@ intersection and split segments there so the final edge set is planar
 one graph node each (exact dedup, not a tolerance merge) and connect any
 two *distinct* nodes within `epsilon` of each other that aren't already
 connected (an added edge, not a point merge — see below), before running a
-Douglas-Peucker simplification pass per chain of non-junction nodes.
+Douglas-Peucker simplification pass per chain of non-junction nodes. An
+original data vertex is an ordinary Douglas-Peucker candidate, not
+unconditionally protected — only a real graph junction (degree > 2)
+structurally survives every time — subject to one floor: each connected
+component of the graph keeps at least 2 of its own original vertices (or
+however many it has, if fewer than 2 exist), restoring the geometrically
+most significant dropped one(s) first when plain simplification would
+otherwise breach that floor.
 `epsilon` is not a tunable constant: it's derived per character as half the
 length of the shortest post-split segment, used for both the
 connect-nearby-points step and the Douglas-Peucker tolerance. No position
@@ -95,8 +102,10 @@ has fewer than 3 non-collinear nodes). Implemented in
 `rastervec/Evaluation/CadFont/character_bank.py`
 (`CharacterTemplate`/`build_character_bank`) and
 `graph.py` (`complexity`/`select_anchor_points`). Exercised end-to-end, with
-per-character debug stats and a graph-over-PDF visualization, by
-`rastervec/notebooks/cad_font_char_graph_lab.ipynb`.
+per-character debug stats and a raw-vectors-vs-graph gallery, by
+`rastervec/notebooks/cad_font_matching_lab.ipynb`'s section 3 (there is no
+separate character-graph-only notebook any more -- the matching lab covers
+this as its own first step before matching).
 
 ### Step 4 — Vector extraction + seqno spatial clustering on the test PDF `[FUTURE]`
 
