@@ -27,7 +27,9 @@ the image and splits it into fixed-size square tiles, detecting each tile
 once (no rotation sweep), since `detect()`'s own `_scale_aligned_short`
 preprocessing always downsizes to a 640px short side regardless of input
 size and so throws away most of a large whole-page render's resolution in
-one direct pass. `detect_tiled` optionally dispatches each tile's
+one direct pass. The configured tiles are exactly 640 px (`config.
+FAST_TILE_BLOCK_SIZE == _SHORT_SIDE`), so that resize is a no-op per tile
+and FAST sees the page at the render's own dpi (300). `detect_tiled` optionally dispatches each tile's
 detection to a `compute` pool (see `Reader/Parallel`) instead of running
 it locally -- the per-tile job (`_detect_job`, module-level and
 picklable) never touches `fitz`, only a plain image array.
@@ -53,8 +55,13 @@ from rastervec.P3_Vector_Parsing.FastIntoPaddle.config import (
     FAST_TILE_SCALE_FACTOR as TILED_SCALE_FACTOR,
 )
 from rastervec.commons.helpers.geometry import bbox_intersection_area
+from rastervec.commons.logging_setup import get_logger
+
+_LOG = get_logger("fast_detect")
 
 _MODEL_CACHE: dict[str, object] = {}
+# block sizes `detect_tiled` has already warned about (see its docstring)
+_WARNED_BLOCK_SIZES: set[int] = set()
 
 _DEFAULT_WEIGHTS_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
@@ -508,7 +515,21 @@ class FastDetector:
         together with `compute`, tile dispatch switches from a single
         blocking `starmap` call to `imap` (still order-preserving) so
         progress can be reported as each result arrives rather than only
-        once every tile in the batch is done."""
+        once every tile in the batch is done.
+
+        `block_size` should equal `_SHORT_SIDE` (the config default does):
+        `detect()`'s `_scale_aligned_short` then feeds every tile to the
+        model 1:1, so FAST sees the render's own dpi. Any other size is
+        resampled by `_SHORT_SIDE / block_size` first -- logged once per
+        size as a warning, since the effective dpi is no longer the render
+        dpi."""
+        if block_size != _SHORT_SIDE and block_size not in _WARNED_BLOCK_SIZES:
+            _WARNED_BLOCK_SIZES.add(block_size)
+            _LOG.warning(
+                "FAST tiles of %d px are resampled x%.2f to FAST's %d px input -- "
+                "effective dpi differs from the render dpi",
+                block_size, _SHORT_SIDE / block_size, _SHORT_SIDE,
+            )
         orig_w, orig_h = image.size
         if scale == 1.0:
             scaled = image.convert("RGB")
