@@ -20,7 +20,6 @@ from rastervec.config import (
     FAST_VECTOR_KEEP_THRESHOLD,
     PADDLE_REASSIGN_MIN_COVERAGE,
     RADON_RENDER_PADDING_EXTRA_PT,
-    RECLASSIFY_PASS_FRACTION,
 )
 from rastervec.commons.helpers.geometry import PDF_POINTS_PER_INCH, item_bbox, union_bbox
 from rastervec.commons.helpers.geometry import bbox_area, bbox_intersection_area
@@ -38,7 +37,6 @@ from rastervec.pipelines.result import FastPageResult
 from rastervec.commons.renderer import render_page_paths
 from rastervec.commons.renderer.stages import render_drawing  # noqa: F401 -- re-exported for callers
 from rastervec.P1_Reading_Native.vector_extract import extract_vectors as _extract_vectors
-from rastervec.P3_Vector_Parsing.FastIntoPaddle.similarity import SimilarityGroup, vector_similarity_group
 
 log = get_logger("pipelines.steps")
 
@@ -187,70 +185,6 @@ def filter_vectors_fast(
         debug_image_scale=(FAST_DEBUG_IMAGE_SCALE if verbose else 1.0),
     )
     return FastFilterResult(passed, dropped, result)
-
-
-# --------------------------------------------------------------------------
-# Vector-level similarity grouping (P3_Vector_Parsing.FastIntoPaddle.similarity,
-# imported above -- the old Vector_Similarity.similarity module this used to
-# live in no longer exists), run before FAST -- every raw extracted Vector,
-# independently, groups into a shape-similarity bucket regardless of FAST's
-# own per-vector verdict.
-# --------------------------------------------------------------------------
-def similarity_group(vectors: list[Vector]) -> list[SimilarityGroup]:
-    return vector_similarity_group(vectors)
-
-
-# --------------------------------------------------------------------------
-# Reclassify FAST's per-vector pass/fail up to a similarity-group consensus,
-# one direction only: a shape FAST mostly accepted probably has a few
-# members that only barely missed, so pull those up to pass too. There is
-# no opposite "whole group fails" rule -- a member FAST passed keeps that
-# verdict regardless of how the rest of its group scored.
-# --------------------------------------------------------------------------
-@dataclass
-class ReclassifyResult:
-    passed: list[Vector]
-    dropped: list[Vector]
-    fail_reclassified_pass: int  # members FAST dropped, reclassified to pass
-    fail_count: int  # final dropped count (post-reclassification)
-    pass_count: int  # final passed count (post-reclassification)
-
-
-def reclassify_by_similarity(
-    passed: list[Vector],
-    dropped: list[Vector],
-    groups: list[SimilarityGroup],
-    *,
-    pass_fraction: float = RECLASSIFY_PASS_FRACTION,
-) -> ReclassifyResult:
-    """Per similarity group: if under `pass_fraction` of its members failed
-    FAST, every member passes; otherwise each member keeps FAST's own
-    individual verdict. Groups are matched to `passed`/`dropped` by Vector
-    identity (`id`), so `groups` must come from `similarity_group` run on
-    the same Vector objects `filter_vectors_fast` scored."""
-    dropped_ids = {id(v) for v in dropped}
-    new_passed: list[Vector] = []
-    new_dropped: list[Vector] = []
-    fail_reclassified_pass = 0
-    for g in groups:
-        members = g.members
-        if not members:
-            continue
-        failed = sum(1 for v in members if id(v) in dropped_ids)
-        fail_frac = failed / len(members)
-        if fail_frac < pass_fraction:
-            for v in members:
-                new_passed.append(v)
-                if id(v) in dropped_ids:
-                    fail_reclassified_pass += 1
-        else:
-            for v in members:
-                (new_dropped if id(v) in dropped_ids else new_passed).append(v)
-    return ReclassifyResult(
-        passed=new_passed, dropped=new_dropped,
-        fail_reclassified_pass=fail_reclassified_pass,
-        fail_count=len(new_dropped), pass_count=len(new_passed),
-    )
 
 
 # --------------------------------------------------------------------------

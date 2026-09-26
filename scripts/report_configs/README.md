@@ -11,7 +11,7 @@ Every field is optional except that you need at least one of `input_dir` /
 |---|---|
 | `pipeline` | `current` (default, the pluggable `core.pipeline` engine) / `legacy` |
 | `p2` | only meaningful when `pipeline: "current"` — a `core.registry.P2_REGISTRY` name (`Stub` default, or `Junction`) |
-| `p3` | only meaningful when `pipeline: "current"` — a `core.registry.P3_REGISTRY` name (`FastIntoPaddle` default, `VectorClassification`, or `LegacyRecreation`) |
+| `p3` | only meaningful when `pipeline: "current"` — a `core.registry.P3_REGISTRY` name (`VectorClassification` default, or `LegacyRecreation`) |
 | `enable_fast` | forwarded to `p3` backends that accept it (default `true`) |
 | `final_stage` | one of `core.pipeline`'s short step names (`phase1`/`phase2`/`phase3`); `null` = all. Trims which of the fixed phase-level artifacts render — doesn't skip any actual pipeline work or gate per-backend debug layers. Ignored for `pipeline: "legacy"`. |
 | `input_dir` | folder scanned for `*.pdf` |

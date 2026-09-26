@@ -2,13 +2,9 @@
 
     native       = extract_native_text(page)                        # list[Text]
     vectors      = extract_vectors(page)                            # list[Vector]
-    groups       = similarity_group(vectors)                        # shape-similarity groups,
-                                                                      # position/size/rotation independent
     fast         = filter_vectors_fast(vectors, page)                # per-Vector,
                                                                       # independent -> passed + dropped
-    reclass      = reclassify_by_similarity(fast.passed, fast.dropped, groups)
-                                                                      # fail -> pass consensus only
-    buckets      = separate_by_layer_color_width(reclass.passed)     # (layer, color, width) split
+    buckets      = separate_by_layer_color_width(fast.passed)        # (layer, color, width) split
     clusters     = cluster_buckets(buckets, tolerance)                # per-bucket union-find spatial
                                                                        # merge (order-independent):
                                                                        # each set tracks its own bbox,
@@ -28,14 +24,20 @@
                                                                        # crop_rotated_detection
     texts        = recognize_segments(segments)                       # PaddleRecBackend,
                                                                        # no similarity/dedup stage
-    drawing_vectors = build_drawing_output(reassignment.drawing, reclass.dropped)
+    drawing_vectors = build_drawing_output(reassignment.drawing, fast.dropped)
 
-See `_steps.py` (including `similarity_group`, which lives here now -- the old
-`Vector_Similarity/similarity.py` it once came from no longer exists) /
-`Vector/layer_color_separation.py` / `OCR/Paddle_OCR/ocr_backend.py` / `OCR/radon.py` for each
-call. This whole module is deprecated but still live -- see `CLAUDE.md`'s top-of-file note and
-`docs/old_pipeline_migration.md`; new code should call `rastervec.core.pipeline.run_pipeline`
-instead.
+See `_steps.py` / `Vector/layer_color_separation.py` / `OCR/Paddle_OCR/ocr_backend.py` /
+`OCR/radon.py` for each call. This whole module is deprecated but still live -- see
+`CLAUDE.md`'s top-of-file note and `docs/old_pipeline_migration.md`; new code should call
+`rastervec.core.pipeline.run_pipeline` instead.
+
+The shape-similarity grouping + reclassification step (`similarity_group`/
+`reclassify_by_similarity`, backed by the old `Vector_Similarity/similarity.py` ->
+`P3_Vector_Parsing/FastIntoPaddle/similarity.py` module) that used to run between `fast` and
+`separation` has been removed -- it wasn't actually relied on by anything outside this module's
+own tests, and its backing module was deleted along with the `FastIntoPaddle` P3 backend.
+`separation` now builds straight from `fast.passed`, and `drawing_vectors` straight from
+`fast.dropped`.
 
 CLI: `python -m rastervec.pipelines.current --pdf PATH --page N [-v] [--no-fast]`
 """
@@ -61,9 +63,7 @@ from rastervec.pipelines._steps import (
     filter_vectors_fast,
     read_page,
     reassign_by_overlap,
-    reclassify_by_similarity,
     rotate_paddle_detections,
-    similarity_group,
 )
 from rastervec.pipelines.result import PipelineResult, StepOutcome
 from rastervec.P1_Reading_Native.reader import Reader
@@ -74,7 +74,7 @@ _LOG = get_logger("pipelines.current")
 __all__ = ["run_pipeline", "STEP_NAMES", "PipelineResult"]
 
 STEP_NAMES = [
-    "read", "native", "vectors", "similarity", "fast", "reclassify",
+    "read", "native", "vectors", "fast",
     "separation", "clusters", "paddle_detect", "assignment", "rotate", "ocr", "drawing",
 ]
 
@@ -226,7 +226,7 @@ def run_pipeline(
     `PipelineResult` fields stay `None`)."""
     timer = StepTimer(verbose=verbose)
     page = native = vectors = None
-    groups = fast = reclass = buckets = clusters = None
+    fast = buckets = clusters = None
     cluster_detections = reassignment = segments = texts = drawing = None
     rotation_debug: list | None = [] if verbose else None
 
@@ -246,9 +246,6 @@ def run_pipeline(
         if _reached("vectors"):
             with timer("vectors"):
                 vectors = extract_vectors(page)
-        if _reached("similarity"):
-            with timer("similarity"):
-                groups = similarity_group(vectors or [])
         if _reached("fast"):
             with timer("fast"):
                 fast = filter_vectors_fast(
@@ -256,14 +253,9 @@ def run_pipeline(
                     enable_fast=enable_fast, verbose=verbose, compute=compute,
                     progress_counter=progress_counter,
                 )
-        if _reached("reclassify"):
-            with timer("reclassify"):
-                reclass = reclassify_by_similarity(
-                    fast.passed if fast else [], fast.dropped if fast else [], groups or [],
-                )
         if _reached("separation"):
             with timer("separation"):
-                buckets = separate_by_layer_color_width(reclass.passed if reclass else [])
+                buckets = separate_by_layer_color_width(fast.passed if fast else [])
         if _reached("clusters"):
             with timer("clusters"):
                 clusters = cluster_buckets(buckets or [], FAST_PADDLE_SEQ_MERGE_TOLERANCE)
@@ -292,7 +284,7 @@ def run_pipeline(
             with timer("drawing"):
                 drawing = build_drawing_output(
                     reassignment.drawing if reassignment else [],
-                    reclass.dropped if reclass else [],
+                    fast.dropped if fast else [],
                 )
 
     # The Reader (and its fitz document) is closed now -- detach the dead page
@@ -311,11 +303,9 @@ def run_pipeline(
         # verbose extras
         native_words=(native if verbose else None),
         vectors_raw=(vectors if verbose else None),
-        similarity_groups=(groups if verbose else None),
         fast_result=(fast.page_result if verbose and fast else None),
         fast_passed=([[v] for v in fast.passed] if verbose and fast else None),
         fast_dropped_vectors=(fast.dropped if verbose and fast else None),
-        reclassify_result=(reclass if verbose else None),
         separation_buckets=(buckets if verbose else None),
         spatial_clusters=(clusters if verbose else None),
         cluster_detections=(cluster_detections if verbose else None),

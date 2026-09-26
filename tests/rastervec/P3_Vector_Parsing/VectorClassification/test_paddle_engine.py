@@ -10,6 +10,7 @@ from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import (
     _axis_aligned_crop,
     _circular_avg_mod90,
     _combined_rotation_deg,
+    _grayscale,
     _hough_angle_deg,
     _hough_ink_mask,
     _minarea_angle_deg,
@@ -46,7 +47,7 @@ def test_axis_aligned_crop_clamps_to_image_bounds():
 def test_hough_ink_mask_flags_dark_pixels_and_thickens_them():
     crop = np.full((10, 10, 3), 255, dtype=np.uint8)
     crop[5, 5] = (0, 0, 0)  # a single dark pixel
-    mask = _hough_ink_mask(crop)
+    mask = _hough_ink_mask(_grayscale(crop))
     assert mask[5, 5]
     assert mask.sum() > 1  # dilation thickened the single ink pixel
 
@@ -54,7 +55,7 @@ def test_hough_ink_mask_flags_dark_pixels_and_thickens_them():
 def test_minarea_ink_mask_flags_dark_pixels_without_dilating():
     crop = np.full((10, 10, 3), 255, dtype=np.uint8)
     crop[5, 5] = (0, 0, 0)  # a single dark pixel
-    mask = _minarea_ink_mask(crop)
+    mask = _minarea_ink_mask(_grayscale(crop))
     assert mask[5, 5]
     assert mask.sum() == 1  # no dilation, unlike _hough_ink_mask
 

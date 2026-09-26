@@ -557,9 +557,16 @@ class FastDetector:
             return (x0, y0, min(x0 + block_size, sw), min(y0 + block_size, sh))
 
         if candidate_bboxes is not None:
+            # Spatial-hash the candidates once (by the same `block_size`
+            # cell as the tile grid) instead of scanning every candidate
+            # against every tile -- O(tiles + candidates) instead of
+            # O(tiles * candidates).
+            candidate_grid = _build_candidate_grid(candidate_bboxes, block_size)
             tile_positions = [
                 (x0, y0) for x0, y0 in all_positions
-                if _tile_has_candidate(_tile_rect(x0, y0), candidate_bboxes)
+                if _tile_has_candidate(
+                    _tile_rect(x0, y0), candidate_bboxes, candidate_grid, block_size,
+                )
             ]
         else:
             tile_positions = list(all_positions)
@@ -628,14 +635,49 @@ def _tile_starts(total: int, block_size: int, stride: int) -> list[int]:
     return starts
 
 
+def _build_candidate_grid(
+    candidate_bboxes: "list[tuple[float, float, float, float]]", cell_size: float,
+) -> "dict[tuple[int, int], list[int]]":
+    """Spatial hash grid over `candidate_bboxes`' own indices, bucketed by
+    `cell_size`-square cells (each candidate inserted into every cell its
+    bbox spans) -- lets `_tile_has_candidate` look up only the candidates
+    near one tile instead of scanning all of them. Same spirit as
+    `commons.helpers.clustering.cluster_spatial`'s own grid hash, simplified
+    since tile geometry here is already a fixed regular grid (no union-find
+    needed, just a lookup)."""
+    cell = max(cell_size, 1e-6)
+    grid: dict[tuple[int, int], list[int]] = {}
+    for idx, (x0, y0, x1, y1) in enumerate(candidate_bboxes):
+        cx0, cy0 = int(x0 // cell), int(y0 // cell)
+        cx1, cy1 = int(x1 // cell), int(y1 // cell)
+        for gx in range(cx0, cx1 + 1):
+            for gy in range(cy0, cy1 + 1):
+                grid.setdefault((gx, gy), []).append(idx)
+    return grid
+
+
 def _tile_has_candidate(
     tile_rect: tuple[int, int, int, int],
     candidate_bboxes: "list[tuple[float, float, float, float]]",
+    candidate_grid: "dict[tuple[int, int], list[int]] | None" = None,
+    cell_size: "float | None" = None,
 ) -> bool:
     """True if `tile_rect` (a `detect_tiled` tile, in scaled-pixel space)
     overlaps at least one of `candidate_bboxes` (already converted into
-    that same space by the caller)."""
-    return any(bbox_intersection_area(tile_rect, cb) > 0 for cb in candidate_bboxes)
+    that same space by the caller). When `candidate_grid` (see
+    `_build_candidate_grid`) is given, only the candidates bucketed near
+    `tile_rect`'s own grid cells are checked instead of every candidate."""
+    if candidate_grid is None:
+        return any(bbox_intersection_area(tile_rect, cb) > 0 for cb in candidate_bboxes)
+    cell = max(cell_size, 1e-6)
+    x0, y0, x1, y1 = tile_rect
+    cx0, cy0 = int(x0 // cell), int(y0 // cell)
+    cx1, cy1 = int(x1 // cell), int(y1 // cell)
+    nearby: set[int] = set()
+    for gx in range(cx0, cx1 + 1):
+        for gy in range(cy0, cy1 + 1):
+            nearby.update(candidate_grid.get((gx, gy), ()))
+    return any(bbox_intersection_area(tile_rect, candidate_bboxes[i]) > 0 for i in nearby)
 
 
 def _detect_job(weights_path: str | None, image_array: "np.ndarray") -> "np.ndarray":

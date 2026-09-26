@@ -19,17 +19,10 @@ timestamped run folder:
             res.extra["p3_debug"], see
             `report_artifacts._accumulate_page`/each backend's own
             `parse.py`):
-              p3=FastIntoPaddle:
-                paddle_detect_images/  (one PNG per cluster: exactly what
-                                       PaddleOCR's text *detector* saw, every
-                                       detected box drawn on top)
-                paddle_recog_images/   (one PNG per rotated detection crop:
-                                       exactly what PaddleOCR's text
-                                       *recognizer* saw, recognised text in
-                                       the filename)
               p3=VectorClassification (classify+FAST filter clusters, then
-              merge across every layer/color bucket, seqno-cluster, and run
-              PaddleOCR's full detect+recognize per cluster):
+              run PaddleOCR's full detect+recognize per FAST-surviving
+              cluster, page-wide batched -- see that backend's own
+              parse.py):
                 paddle_detect_images/  (one PNG per seqno-cluster's own
                                        rendered+padded image, every detected
                                        quad drawn on top)
@@ -120,10 +113,7 @@ from scripts.debug_image_savers import (  # noqa: F401 -- re-exported for caller
     _draw_boxes,
     _safe_slug,
     _save_crop_text_images,
-    _save_fastintopaddle_detect_images,
-    _save_fastintopaddle_recog_images,
     _save_legacyrecreation_ocr_images,
-    _save_segment_recog_images,
     _save_vectorclassification_classifier_after_images,
     _save_vectorclassification_classifier_before_images,
     _save_vectorclassification_detect_images,

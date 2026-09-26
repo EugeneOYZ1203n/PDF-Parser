@@ -9,7 +9,7 @@ contract each implements.
     texts, vectors = P4.organize_outputs(phase1.texts, p2_texts, p3_texts, p3_vectors, phase1.page)
     -> PipelineResult(texts=texts, vectors=vectors, ...)
 
-CLI: `python -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 FastIntoPaddle]`
+CLI: `python -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 VectorClassification]`
 """
 from __future__ import annotations
 

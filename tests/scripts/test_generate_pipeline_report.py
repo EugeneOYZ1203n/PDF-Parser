@@ -189,35 +189,6 @@ def test_bench_ground_truth_by_type_synthesizes_native_to_raster(tmp_path):
 # dead `res.*` attributes.
 # ---------------------------------------------------------------------------
 import numpy as np
-from collections import namedtuple
-
-from rastervec.commons.models import Segment
-
-_FakeText = namedtuple("FakeText", "text")
-
-
-def test_save_segment_recog_images_writes_one_png_per_segment(tmp_path):
-    segs = [Segment(vectors=[], angle=0.0, image=np.zeros((4, 4, 3), dtype=np.uint8))]
-    texts = [_FakeText(text="AB/CD")]
-    folder = tmp_path / "recog"
-    n = gpr._save_segment_recog_images(segs, texts, folder, page_index=0)
-    assert n == 1
-    files = list(folder.glob("*.png"))
-    assert len(files) == 1
-    assert "AB_CD" in files[0].name
-
-
-def test_save_segment_recog_images_empty_input_no_folder(tmp_path):
-    folder = tmp_path / "recog"
-    assert gpr._save_segment_recog_images([], [], folder, page_index=0) == 0
-    assert not folder.exists()
-
-
-def test_save_fastintopaddle_recog_images_reads_p3_debug(tmp_path):
-    segs = [Segment(vectors=[], angle=0.0, image=np.zeros((2, 2, 3), dtype=np.uint8))]
-    p3_debug = {"segments": segs, "texts": [_FakeText(text="X")]}
-    folder = tmp_path / "recog"
-    assert gpr._save_fastintopaddle_recog_images(p3_debug, folder, 0) == 1
 
 
 def test_save_vectorclassification_recog_images_reads_ocr_crops(tmp_path):
@@ -242,12 +213,6 @@ def test_save_legacyrecreation_ocr_images_reads_ocr_crops(tmp_path):
 def test_save_legacyrecreation_ocr_images_missing_key_no_crash(tmp_path):
     folder = tmp_path / "ocr"
     assert gpr._save_legacyrecreation_ocr_images({}, folder, 0) == 0
-    assert not folder.exists()
-
-
-def test_save_fastintopaddle_detect_images_missing_keys_no_crash(tmp_path):
-    folder = tmp_path / "detect"
-    assert gpr._save_fastintopaddle_detect_images({}, folder, 0) == 0
     assert not folder.exists()
 
 
@@ -378,7 +343,7 @@ def test_layer_writer_skips_all_blank_layers(tmp_path):
 
 
 def test_new_engine_artifacts_skip_phase1_and_final():
-    variant = gpr.PipelineVariant(name="x", engine="current", p2="Stub", p3="FastIntoPaddle")
+    variant = gpr.PipelineVariant(name="x", engine="current", p2="Stub", p3="VectorClassification")
     stems = [row[0] for row in gpr._active_artifacts(gpr.ReportConfig(), variant)]
     assert stems == ["phase2", "reconstructed"]
 

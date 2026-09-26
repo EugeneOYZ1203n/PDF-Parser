@@ -41,23 +41,22 @@ Each of these can likely be done as its own small, independently reviewable chan
 need to land in one big PR. Suggested order: infra first (lower risk, has test coverage),
 GUI tools last (no automated tests, need manual verification).
 
-### 1. `core/parallel/pool.py::warmup()`
+### 1. `core/parallel/pool.py::warmup()` -- partially done
 
-Currently warms the old, shared `OCR/fast_detect.FastDetector` and
-`OCR/Paddle_OCR/ocr_backend.PaddleRecBackend` unconditionally, regardless of which P3 backend a
-run will actually use. Per CLAUDE.md's own registry docs, each P3 backend already exposes its
-own `FastDetector`/`PaddleRecBackend` classmethods for exactly this purpose (e.g.
-`P3_Vector_Parsing/FastIntoPaddle/fast_detect.py::FastDetector.warmup()`).
+The "iterate every registered P3 backend's own warmup classmethod unconditionally" option below
+has been implemented (`_warm_fast_detectors`/`_warm_paddle_engines`, one try/except per backend).
+It still ALSO warms the old, shared `OCR/fast_detect.FastDetector` and
+`OCR/Paddle_OCR/ocr_backend.PaddleRecBackend` unconditionally, though -- that part of this item is
+still open, since `pipelines/current.py` is still a genuine live consumer of both (see this file's
+own top-of-file note). Once nothing calls `rastervec.OCR.fast_detect`/
+`rastervec.OCR.Paddle_OCR.ocr_backend` from here, this consumer is fully migrated.
 
-Two options:
+(Original two options, for reference:
 - Thread the run's `p2`/`p3` backend names into `warmup()` so it warms only the backend(s) that
   will actually run.
 - Simpler: have `warmup()` iterate every registered P3 backend's own warmup classmethod
   unconditionally. Slightly more startup cost, no need to plumb backend selection through the
-  pool machinery.
-
-Either way, once nothing calls `rastervec.OCR.fast_detect`/`rastervec.OCR.Paddle_OCR.ocr_backend`
-from here, this consumer is migrated.
+  pool machinery. -- **this is the one implemented.**)
 
 ### 2. `commons/renderer/stages.py`
 

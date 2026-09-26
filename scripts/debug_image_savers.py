@@ -87,77 +87,6 @@ def _draw_boxes(img: Image.Image, boxes, outline=(220, 30, 30), width=2) -> Imag
     return out
 
 
-def _save_fastintopaddle_detect_images(p3_debug: dict, target, page_index: int) -> int:
-    """One PNG per cluster -- exactly what `PaddleDetectBackend.
-    detect_on_cluster` saw (`ClusterDetection.image`, already white-padded),
-    with every detected box drawn on top. Each `PaddleDetection.bbox` is
-    page space, so it must be mapped back into that render's own pixel
-    space via `page_points_to_pixel` using the *same* `padding` the render
-    itself used (`cluster_render_padding`), then shifted by the render's
-    own white-pad offset (`cd.pad_x_px`/`cd.pad_y_px`) -- getting either
-    wrong silently misaligns the overlay boxes. Reads
-    `p3_debug["clusters"]`/`p3_debug["cluster_detections"]`."""
-    clusters = p3_debug.get("clusters") or []
-    cluster_detections = p3_debug.get("cluster_detections") or []
-    if not clusters or not cluster_detections:
-        return 0
-    from rastervec.P3_Vector_Parsing.FastIntoPaddle.steps import cluster_render_padding
-    from rastervec.commons.renderer import page_points_to_pixel
-
-    reservoir = _as_reservoir(target)
-
-    def _make(cd, cluster) -> Image.Image:
-        padding = cluster_render_padding(cluster) if cluster else 0.0
-        img = Image.fromarray(np.asarray(cd.image)[..., ::-1])  # BGR -> RGB
-        boxes = []
-        for det in cd.detections:
-            (px0, py0), (px1, py1) = page_points_to_pixel(
-                cluster, cd.dpi, [(det.bbox[0], det.bbox[1]), (det.bbox[2], det.bbox[3])],
-                padding=padding,
-            )
-            boxes.append((px0 + cd.pad_x_px, py0 + cd.pad_y_px, px1 + cd.pad_x_px, py1 + cd.pad_y_px))
-        return _draw_boxes(img, boxes, outline=(220, 30, 30))
-
-    n = 0
-    for i, cd in enumerate(cluster_detections):
-        if cd is None or cd.image is None:
-            continue
-        cluster = clusters[i] if i < len(clusters) else []
-        n += reservoir.offer(
-            f"p{page_index}_cluster_{i:03d}.png", lambda cd=cd, cluster=cluster: _make(cd, cluster),
-        )
-    return n
-
-
-def _save_segment_recog_images(segs: list, texts: list, target, page_index: int) -> int:
-    """Shared body for FastIntoPaddle's/VectorClassification's own
-    recog-image dumpers -- both hand PaddleOCR recognition a list of
-    `commons.models.Segment` (each already carrying its own crop in
-    `.image`) 1:1-aligned with a `list[Text]` of what got recognised."""
-    if not segs:
-        return 0
-    reservoir = _as_reservoir(target)
-    n = 0
-    for i, seg in enumerate(segs):
-        if seg.image is None:
-            continue
-        rec = texts[i].text if i < len(texts) else ""
-        n += reservoir.offer(
-            f"p{page_index}_word_{i:03d}__{_safe_slug(rec)}.png",
-            lambda seg=seg: Image.fromarray(np.asarray(seg.image)),
-        )
-    return n
-
-
-def _save_fastintopaddle_recog_images(p3_debug: dict, target, page_index: int) -> int:
-    """One PNG per rotated detection crop -- the exact crop handed to
-    PaddleOCR recognition (`Segment.image`), recognised text in the
-    filename. Reads `p3_debug["segments"]` + `p3_debug["texts"]`."""
-    return _save_segment_recog_images(
-        p3_debug.get("segments") or [], p3_debug.get("texts") or [], target, page_index,
-    )
-
-
 def _save_crop_text_images(crops: list, target, page_index: int) -> int:
     """Shared body for LegacyRecreation's/VectorClassification's own
     recog-image dumpers -- both hand PaddleOCR recognition a list of
@@ -186,9 +115,8 @@ def _save_vectorclassification_detect_images(p3_debug: dict, target, page_index:
     """One PNG per seqno-cluster's own rendered+padded image, with every
     detected quad drawn on top -- exactly what `PaddleDetectBackend.detect`
     saw. Quads are already in that image's own pixel space (no page-space
-    round-trip needed, unlike FastIntoPaddle's detect-image saver, since
-    `parse.py` renders/pads each cluster itself and hands the detector that
-    same array). Reads `p3_debug["cluster_detections"]`
+    round-trip needed -- `parse.py` renders/pads each cluster itself and
+    hands the detector that same array). Reads `p3_debug["cluster_detections"]`
     (`list[tuple[np.ndarray, list[np.ndarray]]]`, each a `(bgr, quads)`
     pair)."""
     entries = p3_debug.get("cluster_detections") or []

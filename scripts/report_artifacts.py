@@ -31,8 +31,6 @@ from rastervec.commons.step_timing import StepClock
 from scripts.debug_image_savers import (
     _DEBUG_IMAGE_CAP,
     _ImageReservoir,
-    _save_fastintopaddle_detect_images,
-    _save_fastintopaddle_recog_images,
     _save_legacyrecreation_ocr_images,
     _save_vectorclassification_classifier_after_images,
     _save_vectorclassification_classifier_before_images,
@@ -254,10 +252,7 @@ def _accumulate_page(
         return
     p3_debug = (res.extra or {}).get("p3_debug") or {}
     with clock("debug_images"):
-        if p3 == "FastIntoPaddle":
-            _save_fastintopaddle_detect_images(p3_debug, reservoirs["detect"], page_index)
-            _save_fastintopaddle_recog_images(p3_debug, reservoirs["recog"], page_index)
-        elif p3 == "VectorClassification":
+        if p3 == "VectorClassification":
             _save_vectorclassification_detect_images(p3_debug, reservoirs["detect"], page_index)
             _save_vectorclassification_recog_images(p3_debug, reservoirs["recog"], page_index)
             _save_vectorclassification_hough_images(p3_debug, reservoirs["hough"], page_index)

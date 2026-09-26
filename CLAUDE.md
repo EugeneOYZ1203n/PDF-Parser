@@ -14,8 +14,8 @@ between two always-the-same phases, behind one shared harness**, not a fixed ste
 **Phase 1** (`P1_Reading_Native/`, always the same) opens the PDF and extracts native text + raw
 vectors + page/embedded images; **Phase 2** (`P2_Raster_To_Vec/`, pluggable — `Stub` no-op, or
 `Junction`, a ported classical raster→vector pipeline) turns Phase 1's images into additional
-vectors; **Phase 3** (`P3_Vector_Parsing/`, pluggable — `VectorClassification`, `FastIntoPaddle`,
-or `LegacyRecreation`) takes Phase 1's + Phase 2's vectors and produces the final vectors + OCR'd
+vectors; **Phase 3** (`P3_Vector_Parsing/`, pluggable — `VectorClassification` (the default) or
+`LegacyRecreation`) takes Phase 1's + Phase 2's vectors and produces the final vectors + OCR'd
 text; **Phase 4** (`P4_Output_Organization/`, always the same) combines every phase's text/vector
 output into the final `(texts, vectors)` pair and is a coordinate-space consistency backstop (logs
 a warning if any item's bbox doesn't fit the page's own unrotated MediaBox — see "Coordinate
@@ -36,11 +36,15 @@ Several top-level `rastervec/` folders/files from before this phase split are ge
 `rastervec/Reader/` (superseded by `P1_Reading_Native/reader.py` + `core/parallel/`) and
 `rastervec/pipelines/_common.py`/`sub_pipelines/` (superseded by `core/pipeline.py` + the P3
 backends' own `parse.py`/`steps.py`) no longer exist on disk. `rastervec/Vector_Similarity/` is
-also gone — its one module moved to `P3_Vector_Parsing/FastIntoPaddle/similarity.py` — but a
-handful of comments/type-only imports still cite the old `Vector_Similarity/similarity.py` path
-(`rastervec/pipelines/{current.py,result.py}`, `rastervec/config.py`,
-`P3_Vector_Parsing/FastIntoPaddle/config.py`); don't be misled by those hits, the folder isn't
-there to import from.
+also gone — its one module moved to `P3_Vector_Parsing/FastIntoPaddle/similarity.py` at the phase
+split, and has since been deleted outright, along with the `FastIntoPaddle` P3 backend itself (see
+that bullet below) and the old pipeline's own similarity-grouping/reclassify step that was its
+last real consumer (`pipelines/_steps.py::similarity_group`/`reclassify_by_similarity` — removed
+from `pipelines/current.py`'s chain too, since neither `scripts/label/vector_label.py`/
+`label_viewer.py` nor `Evaluation/Evaluate/benchmark.py` actually exercised it, only
+`pipelines/current.py::run_pipeline` itself and its own tests did). A couple of comments/notebook
+cells may still cite the old `Vector_Similarity/similarity.py` or `FastIntoPaddle/similarity.py`
+paths; neither exists to import from any more.
 
 **`rastervec/OCR/`, `rastervec/Vector/`, and `rastervec/pipelines/{current.py,_steps.py,
 result.py,_cli.py}` are NOT dead — they're deprecated but still genuinely live**, an important
@@ -85,7 +89,7 @@ its own copy of the classical pipeline instead).
 ```
 .venv/Scripts/python.exe -m pip install -r requirements.txt                        # install deps
 .venv/Scripts/python.exe -m rastervec.Evaluation.inspector.inspector [path/to.pdf]  # run the PDF layer inspector
-.venv/Scripts/python.exe -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 FastIntoPaddle]  # run the pluggable pipeline (P1 -> P2_REGISTRY[p2] -> P3_REGISTRY[p3])
+.venv/Scripts/python.exe -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 VectorClassification]  # run the pluggable pipeline (P1 -> P2_REGISTRY[p2] -> P3_REGISTRY[p3])
 .venv/Scripts/python.exe scripts/generate_pipeline_report.py --config run.json      # config-driven per-stage report (PDFs + stats + dump.json per source PDF)
 .venv/Scripts/python.exe scripts/pipeline_report_viewer.py <run>/<stem> [<run2>/<stem>]  # Tkinter viewer: source page + toggleable stage-PDF overlays (1-2 folders side by side)
 .venv/Scripts/python.exe scripts/pipeline_report_benchmark.py --run DIR1 [--run DIR2]  # multiclass-score + chart benchmark report folders (1 or 2) on shared inputs
@@ -234,7 +238,7 @@ raster→vector backends), `P3_Vector_Parsing/` (pluggable vector-parsing/OCR ba
 `P4_Output_Organization/` (the one, always-run output-combination + coordinate-space-guard
 phase) — plus `Evaluation/`, `notebooks/`, `weights/` alongside them (benchmarking/dev tooling,
 not phase code). **Sibling P2 backends (`Stub`/`Junction`) and sibling P3 backends
-(`VectorClassification`/`FastIntoPaddle`/`LegacyRecreation`) import nothing from each other** —
+(`VectorClassification`/`LegacyRecreation`) import nothing from each other** —
 each is fully self-contained, duplicating its own copy of any infra it needs (a FAST-style text
 detector, a PaddleOCR engine wrapper, layer/color/width separation, Radon deskew, ...) rather
 than sharing one. This is deliberate: it lets each backend be rewritten or torn out without ever
@@ -269,7 +273,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
     layers each P2/P3 module renders itself).
 - **`core/`** — the orchestrator, registry, and stable public API:
   - **`pipeline.py`** — `run_pipeline(pdf_path, page_index=0, *, p2="Stub",
-    p3="FastIntoPaddle", enable_fast=True, verbose=False, compute=None, progress_counter=None,
+    p3="VectorClassification", enable_fast=True, verbose=False, compute=None, progress_counter=None,
     on_debug_layer=None) -> PipelineResult`. Body: `phase1 = P1.read_and_extract(...)` →
     `p2_vectors, p2_texts = P2_REGISTRY[p2](phase1.images, phase1.page)` → `p3_vectors, p3_texts =
     P3_REGISTRY[p3](phase1.vectors, p2_vectors, phase1.page, **forwarded_kwargs)` →
@@ -278,11 +282,11 @@ generic parallel-pool mechanics), never phase-specific business logic.
     `debug_out`/`on_debug_layer` — are only passed to a backend whose own signature declares that
     parameter, via `inspect.signature`; `on_debug_layer` is the streaming counterpart to
     `debug_out`/`render_debug` — see `registry.py`'s docstring). CLI:
-    `python -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 FastIntoPaddle]
+    `python -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 VectorClassification]
     [--no-fast] [-v]`. No `stop_after`/partial-run support — always a full Phase1→P2→P3→P4 run.
   - **`registry.py`** — `P2_REGISTRY`/`P3_REGISTRY` (name → backend callable),
     `resolve_p2`/`resolve_p3` (`ValueError` listing valid names on a miss), `DEFAULT_P2="Stub"`,
-    `DEFAULT_P3="FastIntoPaddle"`. Also `P2_RENDER_DEBUG`/`P3_RENDER_DEBUG` — a *separate*,
+    `DEFAULT_P3="VectorClassification"`. Also `P2_RENDER_DEBUG`/`P3_RENDER_DEBUG` — a *separate*,
     optional registry of each backend's own `render_debug(debug_out, page_meta) ->
     list[(stage, label, hex, pdf_bytes)]` function (a backend with nothing to render, e.g. Stub,
     simply isn't in these dicts) — the *batch* debug path: reads a fully-populated `debug_out`
@@ -364,46 +368,44 @@ generic parallel-pool mechanics), never phase-specific business logic.
     fitted segments/arcs) as their own bboxes.
 - **`P3_Vector_Parsing/`** — pluggable vector-parsing/OCR backends, selected by `p3=`, each
   implementing `parse(vectors_p1, vectors_p2, page, **kwargs) -> (vectors, texts)`:
-  - **`VectorClassification/`** — the original Vector Classification chain (restored verbatim
-    from what used to be the repo's `Vector_Classification/` package), followed by a
-    merge-across-buckets + seqno-clustering + full-PaddleOCR-per-cluster stage matching
-    `archive/raster_parser/scripts/type2_dump_extraction_pipeline.py::run_ocr_extraction`'s
-    pattern. `parse.py` combines `vectors_p1 + vectors_p2` into one flat pool, then:
-    `classify_vectors.py`'s fixed 12-step chain (`item_filters.py` steps 1-2, `group_filters.py`
-    steps 3-5+8, `cluster_filters.py` steps 6-7+9-12 — same per-step logic as before, see
-    `classification.py`'s module docstring for the exhaustive per-step description; a
-    `StepResult`/`CategoryResult` per step, `role="kept"`/`"dropped"`/`"info"`, every
-    `"dropped"` category folds into drawing output) → this folder's own `fast_filter.py`
-    (`detect_text_fast`, a whole-page FAST mask scored per surviving classification cluster,
-    still per-`(layer,color)`-bucket cluster at this point) → **merge every FAST-surviving
-    cluster's vectors across every bucket into one flat pool** → this folder's own
-    `wordgrouping.py::cluster_by_seqno` (content-stream draw-order adjacency clustering, the same
-    algorithm `P3_Vector_Parsing/LegacyRecreation/wordgrouping.py` independently ports) → per
-    resulting word group: render (`commons.renderer.ocr_prep.render_cluster_with_dynamic_dpi`) →
-    pad → this folder's own `paddle_engine.py::PaddleDetectBackend.detect` (PaddleOCR's own text
-    detector, bare `detect(bgr)` shape) → crop each detected quad (`_rotate_crop`) →
-    `paddle_engine.py::PaddleRecBackend.recognize_crops`. No Radon deskew and no whole-page
-    similarity dedup (both removed — every word group gets its own independent detect+recognize
-    pass). `parse.py::render_debug` (`P3_RENDER_DEBUG["VectorClassification"]`) renders one
-    `kept bbox` layer per classification step whose kept boxes differ from the previous step's,
-    plus fast/group_words/ocr/drawing layers, from
-    whatever `parse()` stashed into `debug_out`.
-  - **`FastIntoPaddle/`** — the pipeline that had been `rastervec/pipelines/current.py` before
-    the phase split, now self-contained here. `parse.py` combines `vectors_p1 + vectors_p2`, then
-    `steps.py`'s chain: `similarity_group` (`similarity.py::vector_similarity_group`, shape-
-    similarity independent of position/size/rotation) → `filter_vectors_fast` (per-vector FAST
-    coverage score over this folder's own `fast_detect.py`) → `reclassify_by_similarity` (pulls a
-    similarity group's FAST-dropped members up to "pass" under a fraction threshold) →
-    `separate_by_layer_color_width` (this folder's own `layer_color_separation.py`) →
-    `cluster_buckets`/`cluster_bucket_spatial` (union-find spatial merge per bucket) →
-    `detect_text_paddle_per_cluster` (one PaddleOCR-detector render per cluster, this folder's
-    own `paddle_engine.py::PaddleDetectBackend`) → `reassign_by_overlap` (vector→detection
-    assignment by bbox-coverage) → `rotate_paddle_detections` (this folder's own `radon.py::
-    sweep_rotation` refinement + crop) → `recognize_segments` (`paddle_engine.py::
-    PaddleRecBackend`, recognition-only). `parse.py::render_debug`
-    (`P3_RENDER_DEBUG["FastIntoPaddle"]`) renders one layer per named step
-    (`similarity`/`fast`/`reclassify`/`clusters`/`paddle_detect`/`assignment`/`rotate`/`ocr`/
-    `drawing`).
+  - **`VectorClassification/`** — a reduced 2-step Vector Classification chain (down from the
+    original 12-step chain restored from the repo's former `Vector_Classification/` package —
+    every filter beyond the two below has since been removed; see `classify_vectors.py`'s own
+    module docstring), followed by FAST filtering and a full-PaddleOCR-per-cluster stage
+    matching `archive/raster_parser/scripts/type2_dump_extraction_pipeline.py::
+    run_ocr_extraction`'s pattern, but with **no merge-across-buckets/re-grouping step in
+    between** — a FAST-surviving classification cluster is itself the OCR unit, not re-clustered
+    first. `parse.py` combines `vectors_p1 + vectors_p2` into one flat pool, then:
+    `classify_vectors.py`'s per-`(layer,color)`-bucket `_classify_bucket` — `group_filters.py::
+    combine_overlapping_seq` (seqno-overlap merge) then `cluster_filters.py::
+    cluster_spatial_groups` (constrained single-linkage spatial clustering via
+    `commons.helpers.clustering.cluster_spatial`); a `StepResult`/`CategoryResult` per step,
+    `role="kept"` only now, since neither remaining step drops anything — → this folder's own
+    `fast_filter.py` (`detect_text_fast`, a whole-page FAST mask scored per individual member
+    vector of each surviving classification cluster, still per-`(layer,color)`-bucket cluster at
+    this point; a cluster passes if any one member vector clears threshold) → per FAST-surviving
+    cluster, in bounded chunks of `config.DETECT_RENDER_CHUNK_SIZE` clusters at a time (some
+    clusters render to tens of MB even at the base dpi, so the whole page's clusters are never all
+    held in memory at once): render (`commons.renderer.ocr_prep.render_cluster_with_dynamic_dpi`)
+    → this folder's own `paddle_engine.py::PaddleDetectBackend.detect` (PaddleOCR's own text
+    detector, bare `detect(bgr)` shape; dispatched per cluster across Pool-2 workers via
+    `paddle_engine.py::_detect_job` when a caller passes `compute`) → crop + deskew each detected
+    quad (`paddle_engine.py::hough_deskew` — an axis-aligned crop rotated by a raster-refined
+    Hough-line + `cv2.minAreaRect` combined angle estimate, not a perspective warp). Every chunk's
+    quads accumulate into one flat, page-wide pool, which is then recognized
+    (`paddle_engine.py::PaddleRecBackend.recognize_crops`) in `config.OCR_BATCH_SIZE`-sized
+    batches across the *whole page* at once (dispatched per batch via `paddle_engine.py::
+    _recognize_crops_job` when `compute` is given) rather than one call per cluster — a page with
+    hundreds of small text clusters makes a handful of batched PaddleOCR calls instead of hundreds
+    — with a blank-recognition retry sweep (+90/180/270 via `recognize_crops_raw`/
+    `_recognize_crops_raw_job`, same page-wide batching) before giving up on a detection. No Radon
+    deskew and no whole-page similarity dedup (both removed — every surviving cluster still gets
+    its own independent detect pass, just batched recognition). `parse.py::render_debug`
+    (`P3_RENDER_DEBUG["VectorClassification"]`) renders one `kept bbox` layer per classification
+    step whose kept boxes differ from the previous step's, plus fast/ocr/rotation/retry/drawing
+    layers, from whatever `parse()` stashed into `debug_out` (`cluster_detections`'s raw
+    per-cluster bgr arrays are only accumulated into `debug_out` at all when a caller actually
+    passed one, for the same memory reason as the render chunking above).
   - **`LegacyRecreation/`** — a genuine from-scratch port (not a wrapper) of
     `archive/raster_parser`'s own Type-2 algorithm onto `commons.models` types, selectable as a
     normal P3 backend (distinct from the separate `legacy`/`legacy_adapter.py` engine axis, which
@@ -440,13 +442,12 @@ generic parallel-pool mechanics), never phase-specific business logic.
 - **`rastervec/OCR/`** (top-level: `fast_detect.py`, `radon.py`, `Paddle_OCR/ocr_backend.py` +
   `render_ocr.py`) — **deprecated, but not dead**: each P3 backend under `P3_Vector_Parsing/`
   now has its own duplicated copy (`P3_Vector_Parsing/VectorClassification/{fast_detect,
-  paddle_engine,wordgrouping}.py` — no Radon module, deskewing was dropped in favor of seqno
-  clustering + PaddleOCR's own detector/angle-classifier — and
-  `P3_Vector_Parsing/FastIntoPaddle/{fast_detect,radon,paddle_engine,steps}.py` — see the
-  `P3_Vector_Parsing/` bullet above for what each backend actually does now), so no *new* P3
-  backend should import this folder. But it's still genuinely imported by
-  `core/parallel/pool.py::warmup()`, `commons/renderer/stages.py`, the Junction P2 backend, and
-  the old `pipelines/current.py`+`_steps.py` — see the top-of-file "not dead" note and
+  paddle_engine}.py` — no Radon module, deskewing was dropped in favor of seqno clustering +
+  PaddleOCR's own detector/angle-classifier — see the `P3_Vector_Parsing/` bullet above for what
+  each backend actually does now), so no *new* P3 backend should import this folder. But it's
+  still genuinely imported by `core/parallel/pool.py::warmup()`, `commons/renderer/stages.py`, the
+  Junction P2 backend, and the old `pipelines/current.py`+`_steps.py` — see the top-of-file "not
+  dead" note and
   `docs/old_pipeline_migration.md` for the full live-dependent list and the proposed cleanup.
   Don't build *new* code on it, but don't delete it either without finishing that migration.
 - **`Evaluation/conversion.py`** *(implemented)*: three functions, each re-expressing a
@@ -947,8 +948,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
   into `run_pipeline` itself, so each layer reaches disk the moment that backend renders it rather
   than only after the whole page's pipeline run finishes (e.g. `VectorClassification` emits one
   `kept bbox` layer per classification step that changed the kept set plus
-  fast/group_words/ocr/drawing layers,
-  `FastIntoPaddle` emits one layer per named step, `Junction` emits its own raster-stage layers —
+  fast/ocr/rotation/retry/drawing layers, `Junction` emits its own raster-stage layers —
   see the `P2_Raster_To_Vec/`/`P3_Vector_Parsing/` bullets above for what each backend renders,
   and `core/registry.py`'s docstring for the streaming/`on_debug_layer` convention itself).
   There is no per-stage `.txt` stats file for the `current` engine (the old engine's

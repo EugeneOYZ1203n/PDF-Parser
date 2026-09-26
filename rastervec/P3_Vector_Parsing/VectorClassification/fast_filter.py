@@ -24,8 +24,7 @@ class FastPageResult:
     (a cluster passes if any one of them exceeds `FAST_VECTOR_ANY_THRESHOLD`
     -- there is no single whole-cluster score any more). `all_tiles`/
     `skipped_tiles`/`tile_count`/`tile_seconds` are the real per-tile FAST
-    detector geometry (`verbose`-only), mirroring `FastIntoPaddle/
-    steps.py::FastPageResult`. `n_clusters`/`n_passed_clusters` are always
+    detector geometry (`verbose`-only). `n_clusters`/`n_passed_clusters` are always
     populated (cheap ints, not verbose-gated) -- the "clusters dropped by
     FAST" benchmark stat (`scripts/generate_pipeline_report.py`) reads them
     straight off this dataclass."""
@@ -66,23 +65,51 @@ class FastStepResult:
     page_result: FastPageResult
 
 
-def _sample_mask(mask, vectors: list[Vector], zoom: float) -> float:
+def _build_integral_image(mask: "np.ndarray | None") -> "np.ndarray | None":
+    """Summed-area table of `mask` (zero-padded one row/col on the top-left,
+    so a bbox starting at pixel 0 needs no special-casing in
+    `_vector_mask_scores`'s corner-sum lookup), or `None` if there's no mask
+    to score against. Built once per page and reused for every vector's own
+    O(1) region-sum lookup, instead of each vector doing its own
+    numpy-slice-and-`.sum()` call."""
     if mask is None:
-        return 0.0
-    mask_h, mask_w = mask.shape
-    total_pixels = 0
-    total_score = 0.0
-    for v in vectors:
-        x0, y0, x1, y1 = v.bbox
-        px0 = max(0, min(mask_w, int(x0 * zoom)))
-        py0 = max(0, min(mask_h, int(y0 * zoom)))
-        px1 = max(px0, min(mask_w, int(np.ceil(x1 * zoom))))
-        py1 = max(py0, min(mask_h, int(np.ceil(y1 * zoom))))
-        region = mask[py0:py1, px0:px1]
-        if region.size:
-            total_pixels += region.size
-            total_score += float(region.sum())
-    return total_score / total_pixels if total_pixels else 0.0
+        return None
+    padded = np.zeros((mask.shape[0] + 1, mask.shape[1] + 1), dtype=np.float64)
+    padded[1:, 1:] = mask
+    return np.cumsum(np.cumsum(padded, axis=0), axis=1)
+
+
+def _vector_mask_scores(
+    integral: "np.ndarray | None", mask_shape: "tuple[int, int] | None",
+    vectors: list[Vector], zoom: float,
+) -> list[float]:
+    """Every `vectors` entry's own mean FAST-mask coverage inside its
+    page-space bbox (scaled to mask-pixel space and clipped to the mask's
+    own bounds, same convention the old per-vector `_sample_mask` used),
+    computed in a handful of vectorized numpy ops over `integral` (see
+    `_build_integral_image`) rather than one Python call + array slice per
+    vector -- the whole page's worth of vectors (across every cluster) is
+    scored in one shot by `detect_text_fast`."""
+    if integral is None or not vectors or mask_shape is None:
+        return [0.0] * len(vectors)
+    mask_h, mask_w = mask_shape
+    bboxes = np.array([v.bbox for v in vectors], dtype=np.float64)
+    x0, y0, x1, y1 = bboxes[:, 0], bboxes[:, 1], bboxes[:, 2], bboxes[:, 3]
+    px0 = np.clip((x0 * zoom).astype(np.int64), 0, mask_w)
+    py0 = np.clip((y0 * zoom).astype(np.int64), 0, mask_h)
+    px1 = np.maximum(px0, np.clip(np.ceil(x1 * zoom).astype(np.int64), 0, mask_w))
+    py1 = np.maximum(py0, np.clip(np.ceil(y1 * zoom).astype(np.int64), 0, mask_h))
+
+    # Standard summed-area-table corner lookup: sum over mask[y0:y1, x0:x1]
+    # == integral[y1,x1] - integral[y0,x1] - integral[y1,x0] + integral[y0,x0]
+    # (no extra +1 offset needed -- `integral` is already padded so px0/py0
+    # index the row/col immediately before the region starts).
+    total_score = (
+        integral[py1, px1] - integral[py0, px1] - integral[py1, px0] + integral[py0, px0]
+    )
+    total_pixels = (py1 - py0) * (px1 - px0)
+    scores = np.where(total_pixels > 0, total_score / np.maximum(total_pixels, 1), 0.0)
+    return scores.tolist()
 
 
 def detect_text_fast(
@@ -131,9 +158,16 @@ def detect_text_fast(
     # A cluster passes on ANY single member vector's own score alone -- not
     # a whole-cluster average -- so one strong ink-looking vector saves the
     # whole cluster (all its vectors, including any weaker-scoring ones)
-    # from being dropped to drawing output.
+    # from being dropped to drawing output. Every vector across every
+    # cluster is scored in one vectorized pass (see `_vector_mask_scores`),
+    # then re-split back into the per-cluster shape the rest of this
+    # function expects.
+    integral = _build_integral_image(page_mask)
+    flat_scores = iter(_vector_mask_scores(
+        integral, page_mask.shape if page_mask is not None else None, all_vectors, zoom,
+    ))
     vector_scores_by_cluster = [
-        [_sample_mask(page_mask, [v], zoom) for v in cluster] for cluster in clusters
+        [next(flat_scores) for _v in cluster] for cluster in clusters
     ]
 
     passed: list[list[Vector]] = []

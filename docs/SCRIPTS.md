@@ -41,8 +41,8 @@ the backend's own `drawing`/`ocr` layers show the final output), **plus
 every debug layer the active `p2`/`p3` backend's own `render_debug`
 produces** (e.g. `p3: "VectorClassification"` emits one `kept bbox` layer
 per classification step that changed the kept set, plus
-fast/group_words/ocr/drawing; `p3: "FastIntoPaddle"` emits one layer per named
-step; `p2: "Junction"` emits its own raster-stage layers) -- see
+fast/ocr/rotation/retry/drawing; `p2: "Junction"` emits its own
+raster-stage layers) -- see
 `CLAUDE.md`'s `P2_Raster_To_Vec/`/`P3_Vector_Parsing/` bullets for what each
 backend actually renders. A layer that came out blank on every page (e.g.
 `phase2` under `p2: "Stub"`) is not written at all. Unless the config sets
@@ -50,7 +50,7 @@ backend actually renders. A layer that came out blank on every page (e.g.
 debug image folder set, read from `res.extra["p3_debug"]`, each folder
 holding at most 100 images sampled at random (fixed seed) across all of the
 input's pages:
-`p3: "FastIntoPaddle"` and `p3: "VectorClassification"` write
+`p3: "VectorClassification"` writes
 `paddle_detect_images/` + `paddle_recog_images/` (what PaddleOCR's
 detector/recognizer actually saw); `p3: "LegacyRecreation"` writes a single
 `paddle_ocr_images/` folder (one padded/DPI-boosted render per word
@@ -70,7 +70,7 @@ one of `input_dir` / `input_files`):
 |---|---|
 | `pipeline` | `current` (default, the pluggable `core.pipeline` engine) / `legacy` (archive/raster_parser, unmodified) |
 | `p2` | only meaningful when `pipeline: "current"` -- a `core.registry.P2_REGISTRY` name (`Stub` default, or `Junction`) |
-| `p3` | only meaningful when `pipeline: "current"` -- a `core.registry.P3_REGISTRY` name (`FastIntoPaddle` default, `VectorClassification`, or `LegacyRecreation`) |
+| `p3` | only meaningful when `pipeline: "current"` -- a `core.registry.P3_REGISTRY` name (`VectorClassification` default, or `LegacyRecreation`) |
 | `enable_fast` | forwarded to `p3` backends that accept it (default `true`) |
 | `final_stage` | one of `core.pipeline`'s short step names (`phase1`/`phase2`/`phase3`); `null` = all. Only trims which of the 4 fixed phase-level artifacts render -- doesn't skip any actual pipeline work, and doesn't gate the per-backend debug layers (those always render in full). Ignored entirely for `pipeline: "legacy"`. |
 | `input_dir` | folder scanned for `*.pdf` |
@@ -361,7 +361,7 @@ don't build new scripts on it.
 
 ```
 .venv/Scripts/python.exe -m rastervec.core.pipeline \
-    --pdf "references/<stem>.pdf" --page 0 --p2 Stub --p3 FastIntoPaddle
+    --pdf "references/<stem>.pdf" --page 0 --p2 Stub --p3 VectorClassification
 ```
 
 | arg | meaning |
@@ -369,7 +369,7 @@ don't build new scripts on it.
 | `--pdf PATH` | input PDF (required) |
 | `--page N` | 0-based page index (default 0) |
 | `--p2 NAME` | `core.registry.P2_REGISTRY` name (default `Stub`) |
-| `--p3 NAME` | `core.registry.P3_REGISTRY` name (default `FastIntoPaddle`) |
+| `--p3 NAME` | `core.registry.P3_REGISTRY` name (default `VectorClassification`) |
 | `--no-fast` | `enable_fast=False`, forwarded to `p3` backends that accept it |
 | `-v` / `--verbose` | DEBUG logging + populate `PipelineResult.extra` (phase1/phase2 intermediates + each backend's `debug_out`) |
 

@@ -1,7 +1,7 @@
 {
   "pipeline": "current",
   "p2": "Stub",
-  "p3": "FastIntoPaddle",
+  "p3": "VectorClassification",
   "final_stage": "phase2",
   "input_files": ["references/240118-Proposed OW Shopdrawings for Thomson Height CC.pdf"],
   "pages": [0],

@@ -1,5 +1,5 @@
-"""Both FAST-running P3 backends feed FAST 640 px tiles 1:1 (effective dpi =
-render dpi = 300), and warn once when a caller's tile size would resample."""
+"""The FAST-running P3 backend feeds FAST 640 px tiles 1:1 (effective dpi =
+render dpi = 300), and warns once when a caller's tile size would resample."""
 from __future__ import annotations
 
 import importlib
@@ -8,7 +8,7 @@ import logging
 import pytest
 from PIL import Image
 
-BACKENDS = ("VectorClassification", "FastIntoPaddle")
+BACKENDS = ("VectorClassification",)
 
 
 def _mods(backend):

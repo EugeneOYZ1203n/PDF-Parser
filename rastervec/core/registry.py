@@ -35,8 +35,6 @@ from rastervec.core.interfaces import Phase2Backend, Phase3Backend
 from rastervec.P2_Raster_To_Vec.Junction.adapter import extract as _junction_extract
 from rastervec.P2_Raster_To_Vec.Junction.adapter import render_debug as _junction_render_debug
 from rastervec.P2_Raster_To_Vec.Stub.stub import extract as _stub_extract
-from rastervec.P3_Vector_Parsing.FastIntoPaddle.parse import parse as _fast_into_paddle_parse
-from rastervec.P3_Vector_Parsing.FastIntoPaddle.parse import render_debug as _fast_into_paddle_render_debug
 from rastervec.P3_Vector_Parsing.LegacyRecreation.parse import parse as _legacy_recreation_parse
 from rastervec.P3_Vector_Parsing.LegacyRecreation.parse import render_debug as _legacy_recreation_render_debug
 from rastervec.P3_Vector_Parsing.VectorClassification.parse import parse as _vector_classification_parse
@@ -49,7 +47,6 @@ P2_REGISTRY: dict[str, Phase2Backend] = {
 
 P3_REGISTRY: dict[str, Phase3Backend] = {
     "VectorClassification": _vector_classification_parse,
-    "FastIntoPaddle": _fast_into_paddle_parse,
     "LegacyRecreation": _legacy_recreation_parse,
 }
 
@@ -59,12 +56,11 @@ P2_RENDER_DEBUG: dict[str, object] = {
 
 P3_RENDER_DEBUG: dict[str, object] = {
     "VectorClassification": _vector_classification_render_debug,
-    "FastIntoPaddle": _fast_into_paddle_render_debug,
     "LegacyRecreation": _legacy_recreation_render_debug,
 }
 
 DEFAULT_P2 = "Stub"
-DEFAULT_P3 = "FastIntoPaddle"
+DEFAULT_P3 = "VectorClassification"
 
 
 def resolve_p2(name: str) -> Phase2Backend:

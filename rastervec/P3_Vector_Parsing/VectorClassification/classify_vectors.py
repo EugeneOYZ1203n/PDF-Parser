@@ -67,13 +67,11 @@ def _classify_bucket(vectors: list[Vector], page: Page) -> list[StepResult]:
         "kept": CategoryResult(groups, "kept"),
     }))
 
-    clusters, debug_unconstrained, debug_no_parallel = clf.cluster_spatial_groups(
+    clusters = clf.cluster_spatial_groups(
         groups, SPATIAL_CLUSTER_THRESHOLD, SPATIAL_SIZE_TOLERANCE,
     )
     steps.append(StepResult("Spatial cluster", {
         "kept": CategoryResult(clusters, "kept"),
-        "debug_unconstrained": CategoryResult(debug_unconstrained, "info"),
-        "debug_no_parallel": CategoryResult(debug_no_parallel, "info"),
     }))
 
     return steps

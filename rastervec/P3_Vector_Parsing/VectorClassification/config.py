@@ -1,7 +1,8 @@
 """Tunable thresholds for the VectorClassification P3 backend (a reduced
-2-step Vector_Classification chain + Radon word-segmentation + PaddleOCR
-recognition-only OCR). Self-contained -- not shared with FastIntoPaddle's
-own config.py, per the phase-isolation rule (see the repo's plan doc)."""
+2-step Vector_Classification chain + FAST filtering + PaddleOCR
+detect+recognize, page-wide batched). Self-contained -- not shared with
+LegacyRecreation's own config.py, per the phase-isolation rule (see
+CLAUDE.md's "sibling backends share zero code" rule)."""
 from __future__ import annotations
 
 # ======================================================================
@@ -60,7 +61,7 @@ MINAREA_INK_THRESHOLD = 200
 HOUGH_ANGLE_SNAP_DEG = 10.0
 
 # ======================================================================
-# OCR (paddle_engine.py, wordgrouping.py, parse.py)
+# OCR (paddle_engine.py, parse.py)
 # ======================================================================
 
 OCR_VERSION = "PP-OCRv4"
@@ -73,6 +74,17 @@ MAX_RENDER_DPI = 4800
 # group's own render -- matches the value `radon.py::segment_clusters` used
 # to be called with by default, before Radon deskewing was removed.
 OCR_DPI = 300
+
+# parse.py's render+detect stage processes FAST-surviving clusters in chunks
+# of this size rather than rendering the whole page's clusters before
+# detecting any of them -- some clusters (e.g. a large title block/border)
+# render to tens of MB as a raw array even at the base OCR_DPI, so holding
+# every cluster's render simultaneously on a page with hundreds of clusters
+# can exhaust memory (and has been observed to crash PaddleOCR's own
+# detector with an opaque allocator error under memory pressure). Recognize
+# (OCR_BATCH_SIZE) is unaffected -- crops are far smaller than full cluster
+# renders, so that stage still batches across the whole page at once.
+DETECT_RENDER_CHUNK_SIZE = 8
 
 # _cluster_render_padding (parse.py): page-space PDF-point margin added to a
 # cluster's own render frame, on top of half its own max stroke width. This

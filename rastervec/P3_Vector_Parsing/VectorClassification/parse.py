@@ -7,10 +7,12 @@ archive/raster_parser/scripts/type2_dump_extraction_pipeline.py::
 run_ocr_extraction's `paddle_engine.py::PaddleDetectBackend`/
 `PaddleRecBackend` detect-then-recognize pair, the same pair
 `P3_Vector_Parsing/LegacyRecreation/parse.py` already ports independently).
-Fully self-contained (own fast_detect.py/paddle_engine.py/
+Detect still runs once per cluster (each cluster's render is independent),
+but recognize (and the blank-retry sweep) batches across every cluster's
+quads at once -- see `parse()`'s own docstring for the exact staging and
+Pool-2 dispatch. Fully self-contained (own fast_detect.py/paddle_engine.py/
 layer_color_separation.py/config.py) -- imports nothing from
-P3_Vector_Parsing/FastIntoPaddle, P3_Vector_Parsing/LegacyRecreation, or
-P2_Raster_To_Vec.
+P3_Vector_Parsing/LegacyRecreation or P2_Raster_To_Vec.
 """
 from __future__ import annotations
 
@@ -25,18 +27,25 @@ from rastervec.commons.renderer import ocr_prep, pixel_to_page_bbox
 from rastervec.commons.step_timing import StepClock
 from rastervec.P3_Vector_Parsing.VectorClassification.classify_vectors import classify_vectors
 from rastervec.P3_Vector_Parsing.VectorClassification.config import (
+    DETECT_RENDER_CHUNK_SIZE,
     FAST_HEATMAP_DPI,
     MAX_RENDER_DPI,
     MIN_RENDER_SIDE_PX,
+    OCR_BATCH_SIZE,
     OCR_DPI,
+    OCR_LANG,
+    OCR_VERSION,
     RENDER_PADDING_EXTRA_PT,
 )
 from rastervec.P3_Vector_Parsing.VectorClassification.fast_filter import detect_text_fast
 from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import (
     PaddleDetectBackend,
     PaddleRecBackend,
+    _detect_job,
     _normalize_bgr,
     _normalize_rotation,
+    _recognize_crops_job,
+    _recognize_crops_raw_job,
     hough_deskew,
 )
 
@@ -69,7 +78,22 @@ def parse(
     (classify's own drops, always empty now that neither remaining step
     drops anything, plus FAST's drops).
 
-    Two independent, optional debug outlets (see `FastIntoPaddle/parse.py`
+    The OCR pass is staged page-wide rather than looped one cluster at a
+    time: every surviving cluster is rendered first (stage 1, in-process --
+    rendering needs this process's own shared fitz document, which a Pool-2
+    worker never has), then every cluster's PaddleOCR *detect* call runs
+    (stage 2, one independent call per cluster -- dispatched across Pool-2
+    workers via `paddle_engine._detect_job` when `compute` is given, else
+    called in-process), then every detected quad across the *whole page* is
+    deskewed/cropped into one flat pool (stage 3) and *recognized* in
+    `config.OCR_BATCH_SIZE`-sized batches (stage 4, each batch dispatched via
+    `paddle_engine._recognize_crops_job` when `compute` is given), with the
+    blank-recognition retry sweep (stage 5) batched the same way across the
+    whole page's still-blank crops at each pass, not just one cluster's. A
+    page with many small text clusters therefore makes a handful of batched
+    PaddleOCR calls instead of one call per cluster.
+
+    Two independent, optional debug outlets (see `LegacyRecreation/parse.py`
     for the shared convention): `debug_out` stashes every stage's own
     intermediate object verbatim for `render_debug` to render as a
     post-hoc batch later; `on_debug_layer` renders and emits each stage's
@@ -80,9 +104,9 @@ def parse(
 
     `step_durations`, when given, receives wall-clock seconds per step
     (`commons.step_timing.StepClock`; debug rendering excluded) --
-    `classify`, `fast`, then the per-cluster OCR loop split into
-    `ocr_render`/`ocr_detect`/`ocr_recognize` (summed over clusters), and
-    `drawing`."""
+    `classify`, `fast`, then the page-wide OCR stages split into
+    `ocr_render`/`ocr_detect`/`ocr_recognize` (summed across every cluster's/
+    batch's own share of that stage), and `drawing`."""
     all_vectors = list(vectors_p1) + list(vectors_p2)
     page_meta = page.meta
     clock = StepClock(step_durations)
@@ -115,121 +139,195 @@ def parse(
 
     rec_backend = PaddleRecBackend()
     det_backend = PaddleDetectBackend()
+
+    # Stages 1-3 (render -> detect -> deskew/crop) run in bounded chunks of
+    # `DETECT_RENDER_CHUNK_SIZE` clusters, not the whole page's clusters at
+    # once: a cluster's render can be tens of MB (a large title block/border
+    # at even the base OCR_DPI), so holding every cluster's render
+    # simultaneously on a page with hundreds of clusters risks exhausting
+    # memory. Recognition (stage 4/5 below) is unaffected -- crops are far
+    # smaller than full cluster renders, so that stage still batches across
+    # the WHOLE page at once via `page_quads`, accumulated here chunk by
+    # chunk. `cluster_detections` (raw per-cluster bgr + quads, debug-only --
+    # read back by `render_debug`/`debug_out`) is only kept when something
+    # actually asked for it, for the same reason.
+    passed_clusters = [g for g in fast.passed if g]
+    keep_cluster_detections = debug_out is not None
+    cluster_detections: list[tuple[np.ndarray, list]] = []
+    detect_boxes: list[tuple] = []
+    page_quads: list[dict] = []
+    for chunk_start in range(0, len(passed_clusters), DETECT_RENDER_CHUNK_SIZE):
+        chunk = passed_clusters[chunk_start:chunk_start + DETECT_RENDER_CHUNK_SIZE]
+
+        # Stage 1: render this chunk's clusters, in-process --
+        # `render_cluster_with_dynamic_dpi` uses this process's own shared
+        # fitz document, and Pool-2 workers never import fitz/pymupdf, so
+        # rendering can't be dispatched there. Everything downstream
+        # (detect/recognize) works off the plain numpy `bgr` array this
+        # produces.
+        clusters_render: list[dict] = []
+        with clock("ocr_render"):
+            for group_vectors in chunk:
+                padding = _cluster_render_padding(group_vectors)
+                try:
+                    image, dpi_used = ocr_prep.render_cluster_with_dynamic_dpi(
+                        group_vectors, OCR_DPI, MIN_RENDER_SIDE_PX, MAX_RENDER_DPI, padding,
+                    )
+                except ValueError:
+                    continue
+                clusters_render.append({
+                    "group_vectors": group_vectors, "padding": padding,
+                    "dpi_used": dpi_used, "bgr": _normalize_bgr(np.asarray(image)),
+                })
+
+        # Stage 2: PaddleOCR detect, one call per cluster in this chunk.
+        # Each cluster's render is independent of every other, so -- unlike
+        # the old per-cluster detect+recognize loop -- these fan out across
+        # Pool-2 workers via `_detect_job` when a caller passes `compute`,
+        # instead of running one at a time in the calling process.
+        with clock("ocr_detect"):
+            if compute is not None and clusters_render:
+                quads_per_cluster = compute.starmap(
+                    _detect_job, [(c["bgr"], OCR_VERSION, OCR_LANG) for c in clusters_render],
+                )
+            else:
+                quads_per_cluster = [det_backend.detect(c["bgr"]) for c in clusters_render]
+
+        # Stage 3: per detected quad, deskew+crop (cheap CPU work, stays
+        # in-process) and compute its page-space bbox (once, not twice --
+        # see this session's earlier bbox-caching fix). This chunk's quads
+        # are accumulated into the page-wide `page_quads` list so
+        # recognition (stage 4) and the blank-retry sweep (stage 5) batch
+        # across the WHOLE PAGE, not one chunk's handful of quads at a
+        # time -- only `clusters_render`'s own bgr arrays are chunk-scoped
+        # (freed once this chunk's iteration ends), the much smaller crops
+        # they produce are not.
+        with clock("ocr_recognize"):
+            for c, quads in zip(clusters_render, quads_per_cluster):
+                if keep_cluster_detections:
+                    cluster_detections.append((c["bgr"], quads))
+                if not quads:
+                    continue
+                quad_bboxes = [
+                    pixel_to_page_bbox(c["group_vectors"], c["dpi_used"], quad.tolist(), c["padding"])
+                    for quad in quads
+                ]
+                detect_boxes.extend(quad_bboxes)
+                for quad, bbox in zip(quads, quad_bboxes):
+                    # hough_deskew's crop is cropped straight out of `bgr`,
+                    # so it's already BGR -- reverse channels back before
+                    # recognize_crops, which does its own RGB->BGR flip
+                    # internally (same gotcha LegacyRecreation's own
+                    # identical loop works around).
+                    crop, rd = hough_deskew(c["bgr"], quad)
+                    page_quads.append({
+                        "group_vectors": c["group_vectors"], "crop": crop[:, :, ::-1],
+                        "rd": rd, "bbox": bbox,
+                    })
+
+    with clock("ocr_recognize"):
+        # Stage 4: recognize, chunked by OCR_BATCH_SIZE across the whole
+        # page's quads at once -- a page with hundreds of small clusters
+        # now makes a handful of batched engine calls instead of one call
+        # per cluster. Dispatched to Pool 2 per batch when `compute` is
+        # given (mirrors `FastIntoPaddle/paddle_engine.py::
+        # recognize_segments`'s `recognize_fn` hook, before that module was
+        # removed), else called in-process.
+        def _recognize_batches(crops: list[np.ndarray], job, local_fn) -> list:
+            out: list = []
+            for start in range(0, len(crops), OCR_BATCH_SIZE):
+                batch = crops[start:start + OCR_BATCH_SIZE]
+                if compute is not None:
+                    out.extend(compute.apply(job, (batch, OCR_VERSION, OCR_LANG)))
+                else:
+                    out.extend(local_fn(batch))
+            return out
+
+        crops_all = [pq["crop"] for pq in page_quads]
+        boxes = _recognize_batches(crops_all, _recognize_crops_job, rec_backend.recognize_crops)
+
+        # box.flip_deg is pass 1's own classifier 0/180 decision -- captured
+        # now, before a later retry pass can overwrite `boxes`, since it's
+        # always worth recording even if a retry ends up winning.
+        # `recog_crops`/`retry_counts`/`retry_extra_degs` track what
+        # actually got used per detection as the sweep below runs.
+        flip_angle_degs = [float(box.flip_deg) for box in boxes]
+        recog_crops = [
+            np.rot90(pq["crop"], 2) if box.flip_deg else pq["crop"]
+            for pq, box in zip(page_quads, boxes)
+        ]
+        classifier_crops: list[tuple[np.ndarray, np.ndarray]] = [
+            (pq["crop"], recog_crop) for pq, recog_crop in zip(page_quads, recog_crops)
+        ]
+
+        retry_counts: list = [0 if box.text else None for box in boxes]
+        retry_extra_degs: list = [None] * len(boxes)
+
+        # Stage 5: blank-recognition retry sweep, +90 -> 180 -> 270 relative
+        # to each crop's own pass-1 base (hough_deskew's output, not the
+        # classifier-flipped variant), now batched across every still-blank
+        # crop on the WHOLE PAGE at each pass (not just one cluster's),
+        # same OCR_BATCH_SIZE-chunked dispatch as stage 4. No classifier
+        # call in a retry pass -- sweeping all 4 quarter-turns already
+        # covers whatever the classifier's own 0/180 choice would have
+        # picked. Every attempted retry crop (whether or not it recovers
+        # text) is logged to classifier_crops too, so a viewer can see
+        # every rotation variant that was tried.
+        for k, extra_deg in ((1, 90.0), (2, 180.0), (3, 270.0)):
+            blank_idx = [i for i, box in enumerate(boxes) if not box.text]
+            if not blank_idx:
+                break
+            retry_crops = [np.rot90(page_quads[i]["crop"], k) for i in blank_idx]
+            retry_boxes = _recognize_batches(
+                retry_crops, _recognize_crops_raw_job, rec_backend.recognize_crops_raw,
+            )
+            for i, rbox, rcrop in zip(blank_idx, retry_boxes, retry_crops):
+                classifier_crops.append((page_quads[i]["crop"], rcrop))
+                if rbox.text:
+                    boxes[i] = rbox
+                    recog_crops[i] = rcrop
+                    retry_counts[i] = k
+                    retry_extra_degs[i] = extra_deg
+
+    # Stage 6: assemble output, page-wide, in original cluster/quad order.
     texts: list[Text] = []
     ocr_crops: list[tuple[np.ndarray, str]] = []
-    classifier_crops: list[tuple[np.ndarray, np.ndarray]] = []
-    cluster_detections: list[tuple[np.ndarray, list]] = []
     blank_boxes: list[tuple] = []
-    detect_boxes: list[tuple] = []
     rotation_entries: list[dict] = []
-    for group_vectors in fast.passed:
-        if not group_vectors:
+    for pq, box, recog_crop, flip_a, retry_n, retry_extra in zip(
+        page_quads, boxes, recog_crops, flip_angle_degs, retry_counts, retry_extra_degs,
+    ):
+        ocr_crops.append((recog_crop, box.text))
+        rd, bbox = pq["rd"], pq["bbox"]
+        best_angle = None
+        if box.text:
+            effective_extra = retry_extra if retry_extra is not None else flip_a
+            best_angle = _normalize_rotation(rd.combined_angle_deg + effective_extra)
+        rotation_entries.append({
+            "bbox": bbox,
+            "hough_angle_deg": rd.hough_angle_deg,
+            "minarea_angle_deg": rd.minarea_angle_deg,
+            "combined_angle_deg": rd.combined_angle_deg,
+            "flip_angle_deg": flip_a,
+            "retry_count": retry_n,
+            "best_angle_deg": best_angle,
+            "base_crop": rd.base_crop,
+            "dilated_ink_mask": rd.dilated_ink_mask,
+            "minarea_mask": rd.minarea_mask,
+        })
+        if not box.text:
+            blank_boxes.append(bbox)
             continue
-        padding = _cluster_render_padding(group_vectors)
-        try:
-            with clock("ocr_render"):
-                image, dpi_used = ocr_prep.render_cluster_with_dynamic_dpi(
-                    group_vectors, OCR_DPI, MIN_RENDER_SIDE_PX, MAX_RENDER_DPI, padding,
-                )
-        except ValueError:
-            continue
-
-        with clock("ocr_render"):
-            bgr = _normalize_bgr(np.asarray(image))
-        with clock("ocr_detect"):
-            quads = det_backend.detect(bgr)
-        cluster_detections.append((bgr, quads))
-        detect_boxes.extend(
-            pixel_to_page_bbox(group_vectors, dpi_used, quad.tolist(), padding) for quad in quads
-        )
-        if not quads:
-            continue
-
-        # hough_deskew's crop is cropped straight out of `bgr`, so it's
-        # already BGR -- reverse channels back before recognize_crops, which
-        # does its own RGB->BGR flip internally (same gotcha LegacyRecreation's
-        # own identical loop works around).
-        with clock("ocr_recognize"):
-            deskewed = [hough_deskew(bgr, quad) for quad in quads]
-            crops = [c[:, :, ::-1] for c, _rd in deskewed]
-            rotation_debugs = [rd for _c, rd in deskewed]
-            boxes = rec_backend.recognize_crops(crops)
-
-            # box.flip_deg is pass 1's own classifier 0/180 decision --
-            # captured now, before a later retry pass can overwrite `boxes`,
-            # since it's always worth recording even if a retry ends up
-            # winning. `recog_crops`/`retry_counts`/`retry_extra_degs` track
-            # what actually got used per detection as the sweep below runs.
-            flip_angle_degs = [float(box.flip_deg) for box in boxes]
-            recog_crops = [
-                np.rot90(crop, 2) if box.flip_deg else crop
-                for crop, box in zip(crops, boxes)
-            ]
-            for crop, recog_crop in zip(crops, recog_crops):
-                classifier_crops.append((crop, recog_crop))
-
-            retry_counts: list = [0 if box.text else None for box in boxes]
-            retry_extra_degs: list = [None] * len(boxes)
-
-            # Blank-recognition retry sweep: +90 -> 180 -> 270 relative to
-            # each crop's own pass-1 base (hough_deskew's output, not the
-            # classifier-flipped variant), batched across every still-blank
-            # crop in this cluster at each pass rather than looped one crop
-            # at a time. No classifier call in a retry pass -- sweeping all
-            # 4 quarter-turns already covers whatever the classifier's own
-            # 0/180 choice would have picked. Every attempted retry crop
-            # (whether or not it recovers text) is logged to
-            # classifier_crops too, so a viewer can see every rotation
-            # variant that was tried.
-            for k, extra_deg in ((1, 90.0), (2, 180.0), (3, 270.0)):
-                blank_idx = [i for i, box in enumerate(boxes) if not box.text]
-                if not blank_idx:
-                    break
-                retry_crops = [np.rot90(crops[i], k) for i in blank_idx]
-                retry_boxes = rec_backend.recognize_crops_raw(retry_crops)
-                for i, rbox, rcrop in zip(blank_idx, retry_boxes, retry_crops):
-                    classifier_crops.append((crops[i], rcrop))
-                    if rbox.text:
-                        boxes[i] = rbox
-                        recog_crops[i] = rcrop
-                        retry_counts[i] = k
-                        retry_extra_degs[i] = extra_deg
-
-        for quad, crop, rd, box, recog_crop, flip_a, retry_n, retry_extra in zip(
-            quads, crops, rotation_debugs, boxes, recog_crops,
-            flip_angle_degs, retry_counts, retry_extra_degs,
-        ):
-            ocr_crops.append((recog_crop, box.text))
-            bbox = pixel_to_page_bbox(group_vectors, dpi_used, quad.tolist(), padding)
-            best_angle = None
-            if box.text:
-                effective_extra = retry_extra if retry_extra is not None else flip_a
-                best_angle = _normalize_rotation(rd.combined_angle_deg + effective_extra)
-            rotation_entries.append({
-                "bbox": bbox,
-                "hough_angle_deg": rd.hough_angle_deg,
-                "minarea_angle_deg": rd.minarea_angle_deg,
-                "combined_angle_deg": rd.combined_angle_deg,
-                "flip_angle_deg": flip_a,
-                "retry_count": retry_n,
-                "best_angle_deg": best_angle,
-                "base_crop": rd.base_crop,
-                "dilated_ink_mask": rd.dilated_ink_mask,
-                "minarea_mask": rd.minarea_mask,
-            })
-            if not box.text:
-                blank_boxes.append(bbox)
-                continue
-            direction = transform_direction((1.0, 0.0), best_angle)
-            texts.append(Text(
-                text=box.text, bbox=bbox, direction=direction,
-                origin=compute_origin(bbox, direction),
-                font="", font_size=0.0, color=None, flags=0,
-                ascender=None, descender=None, wmode=0,
-                block_no=0, line_no=0, word_no=0,
-                page_index=page_meta.index, seqno=min(v.seqno for v in group_vectors),
-                confidence=box.confidence, source="ocr", orientation_source="ocr",
-            ))
+        direction = transform_direction((1.0, 0.0), best_angle)
+        texts.append(Text(
+            text=box.text, bbox=bbox, direction=direction,
+            origin=compute_origin(bbox, direction),
+            font="", font_size=0.0, color=None, flags=0,
+            ascender=None, descender=None, wmode=0,
+            block_no=0, line_no=0, word_no=0,
+            page_index=page_meta.index, seqno=min(v.seqno for v in pq["group_vectors"]),
+            confidence=box.confidence, source="ocr", orientation_source="ocr",
+        ))
     retry_stats: dict = {"0": 0, "1": 0, "2": 0, "3": 0, "failed": 0}
     for entry in rotation_entries:
         key = "failed" if entry["retry_count"] is None else str(entry["retry_count"])
@@ -262,12 +360,12 @@ def parse(
 
 # ---------------------------------------------------------------------------
 # Debug rendering -- one small `_render_<stage>_layers` helper per pipeline
-# stage (same convention as `FastIntoPaddle/parse.py`), built only from the
+# stage (same convention as `LegacyRecreation/parse.py`), built only from the
 # three generic primitives in `commons/renderer`
 # (render_boxes_pdf/render_text_pdf/render_vectors_pdf). Each is called two
 # ways: inline from `parse()` (streaming) and from `render_debug` below
 # (batch, reading the same data back out of `debug_out`). Nothing here is
-# shared with FastIntoPaddle/LegacyRecreation/Junction.
+# shared with LegacyRecreation/Junction.
 # ---------------------------------------------------------------------------
 _C_KEPT = "#059669"
 _C_FAST_PASS = "#059669"

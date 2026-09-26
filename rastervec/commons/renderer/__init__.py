@@ -11,7 +11,8 @@ Split by output concern:
   (`dpi_for_cluster` / `render_cluster_with_dynamic_dpi`, composing
   `png.render_vector_cluster`) shared by the P3 backends' own
   `paddle_engine.py`/`radon.py`. Rotation helpers and BGR normalization
-  stay backend-local (only `FastIntoPaddle`/`LegacyRecreation` need them).
+  stay backend-local (`VectorClassification`/`LegacyRecreation` each keep
+  their own copy).
 - `pdf.py`  -- `render_reconstructed_page`, the notebook's reconstruction
   preview, plus `render_boxes_pdf`, a generic colored-bbox-outline
   primitive used by the benchmark's pred-vs-GT box overlay.

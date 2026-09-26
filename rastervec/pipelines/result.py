@@ -24,8 +24,6 @@ if TYPE_CHECKING:
 
     from rastervec.commons.models import Page, Segment, Text, Vector
     from rastervec.OCR.Paddle_OCR.ocr_backend import ClusterDetection
-    from rastervec.P3_Vector_Parsing.FastIntoPaddle.similarity import SimilarityGroup
-    from rastervec.pipelines._steps import ReclassifyResult
 
 # (layer, color, width) -- one pipeline separation bucket.
 SeparationKey = "tuple[str, tuple | None, float | None]"
@@ -82,15 +80,11 @@ class PipelineResult:
     # ---- verbose only (None unless verbose=True) -------------------------
     native_words: "list[Text] | None" = None
     vectors_raw: "list[Vector] | None" = None
-    similarity_groups: "list[SimilarityGroup] | None" = None  # vector_similarity_group's
-    # output over every raw extracted Vector, run before FAST
     fast_result: FastPageResult | None = None  # filter_vectors_fast's
     # page-level result (per-Vector scores)
     fast_passed: "list[list[Vector]] | None" = None  # every passed Vector,
     # each wrapped as its own singleton list (render-layer compatibility)
     fast_dropped_vectors: "list[Vector] | None" = None
-    reclassify_result: "ReclassifyResult | None" = None  # FAST's per-vector
-    # verdict pulled up to a similarity-group consensus (fail -> pass only)
     separation_buckets: "list[list[Vector]] | None" = None  # one list per
     # (layer, color, width) bucket -- see `SeparationKey`
     spatial_clusters: "list[list[Vector]] | None" = None  # one per

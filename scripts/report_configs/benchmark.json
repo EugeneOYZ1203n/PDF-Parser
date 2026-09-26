@@ -1,7 +1,7 @@
 {
   "pipeline": "current",
   "p2": "Stub",
-  "p3": "FastIntoPaddle",
+  "p3": "VectorClassification",
   "final_stage": null,
   "benchmark": true,
   "input_files": [

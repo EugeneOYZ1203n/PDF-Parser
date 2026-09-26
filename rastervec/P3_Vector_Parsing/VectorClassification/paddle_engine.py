@@ -1,5 +1,5 @@
 """The OCR backend: PaddleOCR detection + recognition over seqno-clustered
-word groups (`wordgrouping.py::cluster_by_seqno`).
+word groups (`group_filters.py::combine_overlapping_seq`).
 
 `PaddleDetectBackend.detect` runs PaddleOCR's own text-DETECTION model
 against a word group's own rendered+padded image, returning every text quad
@@ -53,8 +53,7 @@ from rastervec.P3_Vector_Parsing.VectorClassification.config import (
 
 # PaddleOCR's own DB detector's det_limit_side_len -- a per-word-group render
 # is rarely anywhere near this, so it's a generous ceiling rather than a
-# tuned value (same constant/rationale as FastIntoPaddle's/LegacyRecreation's
-# own copies).
+# tuned value (same constant/rationale as LegacyRecreation's own copy).
 _DETECT_LIMIT_SIDE_LEN = 4000
 
 # _rotate_crop's own crop-shaping knobs: how much larger than the raw
@@ -196,12 +195,46 @@ class PaddleDetectBackend:
         return [np.asarray(quad, dtype=np.float64) for quad in dt_boxes]
 
 
+# ---------------------------------------------------------------------------
+# Top-level, picklable Pool-2 jobs -- fitz-free, plain numpy/dataclasses in
+# and out, each building/caching its own engine per Pool-2 worker process via
+# the classes' own `_ENGINE_CACHE` (keyed by `(ocr_version, lang)`, same as a
+# local call). Mirrors `FastIntoPaddle/paddle_engine.py`'s identical pattern
+# (`_recognize_crops_job`) before that module was removed -- `parse.py`
+# dispatches these via `compute.starmap`/`compute.apply` when a caller passes
+# a Pool-2 `compute` proxy, and calls the backend directly otherwise.
+# ---------------------------------------------------------------------------
+def _detect_job(
+    bgr: np.ndarray, ocr_version: str = OCR_VERSION, lang: str = OCR_LANG,
+) -> list[np.ndarray]:
+    """One cluster's `PaddleDetectBackend.detect` call as a Pool-2 job --
+    every cluster's render is independent, so a page's clusters fan out
+    across Pool-2 workers instead of running one at a time in the calling
+    process."""
+    return PaddleDetectBackend(ocr_version, lang).detect(bgr)
+
+
+def _recognize_crops_job(
+    crops: list[np.ndarray], ocr_version: str = OCR_VERSION, lang: str = OCR_LANG,
+) -> list[OcrBox]:
+    """One page-wide recognize batch as a Pool-2 job (see `parse.py`'s
+    `OCR_BATCH_SIZE`-chunked dispatch)."""
+    return PaddleRecBackend(ocr_version, lang).recognize_crops(crops)
+
+
+def _recognize_crops_raw_job(
+    crops: list[np.ndarray], ocr_version: str = OCR_VERSION, lang: str = OCR_LANG,
+) -> list[OcrBox]:
+    """`recognize_crops_raw`'s counterpart to `_recognize_crops_job`, for
+    `parse.py`'s page-wide blank-recognition retry sweep."""
+    return PaddleRecBackend(ocr_version, lang).recognize_crops_raw(crops)
+
+
 def _normalize_rotation(angle_deg: float) -> float:
     """Wrap to `[-90, 90)` -- text direction is a line, not an arrow, so a
     0/180 ambiguity always remains mod 180 (resolved separately by the
     cls-flip term this is added to before calling this). Own duplicated copy
-    of `FastIntoPaddle`/`LegacyRecreation`'s `paddle_engine.py::
-    _normalize_rotation`."""
+    of `LegacyRecreation`'s `paddle_engine.py::_normalize_rotation`."""
     return ((angle_deg + 90.0) % 180.0) - 90.0
 
 
@@ -230,29 +263,38 @@ def _axis_aligned_crop(bgr: np.ndarray, quad: np.ndarray) -> np.ndarray:
     )
 
 
-def _ink_mask(crop: np.ndarray, threshold: int) -> np.ndarray:
+def _grayscale(crop: np.ndarray) -> np.ndarray:
+    """`crop` (BGR uint8) -> single-channel 0..1 grayscale, computed once
+    per quad in `hough_deskew` and shared by both `_hough_ink_mask` and
+    `_minarea_ink_mask` -- they used to each call this independently on the
+    same crop (differing only in the threshold applied afterward), doubling
+    this conversion's cost per quad for no reason."""
+    return rgb2gray(np.asarray(crop, dtype=np.uint8)[:, :, ::-1])  # BGR -> RGB -> gray, 0..1
+
+
+def _ink_mask(gray: np.ndarray, threshold: int) -> np.ndarray:
     """Binary ink mask (dark-on-light text/line-art strokes) below
-    `threshold` (0-255 grayscale). Shared thresholding step for both
-    `_hough_ink_mask` (dilated) and `_minarea_ink_mask` (not)."""
-    gray = rgb2gray(np.asarray(crop, dtype=np.uint8)[:, :, ::-1])  # BGR -> RGB -> gray, 0..1
+    `threshold` (0-255 grayscale) from an already-grayscaled `gray` array
+    (see `_grayscale`). Shared thresholding step for both `_hough_ink_mask`
+    (dilated) and `_minarea_ink_mask` (not)."""
     return gray < (threshold / 255.0)
 
 
-def _hough_ink_mask(crop: np.ndarray) -> np.ndarray:
+def _hough_ink_mask(gray: np.ndarray) -> np.ndarray:
     """Binary ink mask thickened by `binary_dilation` ("increase ink colors"
     before Hough gets a look) so thin or broken strokes still form a
     continuous line for Hough to find. No cv2 here, per this module's usual
     convention -- `skimage.morphology` instead."""
-    ink = _ink_mask(crop, HOUGH_INK_THRESHOLD)
+    ink = _ink_mask(gray, HOUGH_INK_THRESHOLD)
     return binary_dilation(ink, footprint=disk(HOUGH_DILATE_RADIUS_PX))
 
 
-def _minarea_ink_mask(crop: np.ndarray) -> np.ndarray:
+def _minarea_ink_mask(gray: np.ndarray) -> np.ndarray:
     """Binary ink mask for `_minarea_angle_deg`, with its own independently
     tunable `MINAREA_INK_THRESHOLD` and (unlike Hough's) no dilation --
     thickening ink is a Hough-specific trick to help a broken stroke form
     one continuous line; a bounding-rect fit doesn't need it."""
-    return _ink_mask(crop, MINAREA_INK_THRESHOLD)
+    return _ink_mask(gray, MINAREA_INK_THRESHOLD)
 
 
 def _hough_angle_deg(mask: np.ndarray) -> "float | None":
@@ -382,8 +424,9 @@ def hough_deskew(bgr: np.ndarray, quad: np.ndarray) -> "tuple[np.ndarray, Rotati
     own corner-geometry angle, dropped for being too inaccurate) entirely:
     this crop's rotation comes solely from `_combined_rotation_deg`."""
     base = _axis_aligned_crop(bgr, quad)
-    hough_mask = _hough_ink_mask(base)
-    minarea_mask = _minarea_ink_mask(base)
+    gray = _grayscale(base)
+    hough_mask = _hough_ink_mask(gray)
+    minarea_mask = _minarea_ink_mask(gray)
     hough_angle = _hough_angle_deg(hough_mask)
     minarea_angle = _minarea_angle_deg(minarea_mask)
     combined = _combined_rotation_deg(hough_angle, minarea_angle)

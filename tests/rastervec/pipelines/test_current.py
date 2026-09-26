@@ -290,7 +290,7 @@ def test_run_pipeline_stop_after_limits_steps(tmp_pdf_path):
     res = run_pipeline(path, 0, enable_fast=False, verbose=True, stop_after="clusters")
 
     assert set(res.step_durations) == {
-        "read", "native", "vectors", "similarity", "fast", "reclassify",
+        "read", "native", "vectors", "fast",
         "separation", "clusters",
     }
     assert res.spatial_clusters is not None

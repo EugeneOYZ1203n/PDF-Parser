@@ -11,8 +11,9 @@ isn't handed to OCR at a few dozen px.
 
 Rotation-related helpers (perspective rotate-crop, quad-angle estimation)
 and BGR normalization are deliberately **not** here -- they stay duplicated
-in whichever of `FastIntoPaddle`/`LegacyRecreation`'s own `paddle_engine.py`
-actually needs them, since this module is scoped to padding and rendering
+in whichever of `VectorClassification`/`LegacyRecreation`'s own
+`paddle_engine.py` actually needs them, since this module is scoped to
+padding and rendering
 only.
 """
 from __future__ import annotations

@@ -161,6 +161,58 @@ def test_parse_blank_recognition_recovers_via_retry_sweep(page_meta, vector, mon
     assert len(debug_out["classifier_crops"]) == 2
 
 
+class _FakeComputePool:
+    """Minimal stand-in for a `multiprocessing.Manager().Pool()` proxy --
+    calls the given job function directly in this process instead of
+    dispatching to a real worker, but exercises the exact same
+    `compute.starmap`/`compute.apply` call shape `parse.py` uses, so this
+    test fails if that dispatch wiring is ever removed or malformed
+    (wrong arg shape, wrong job function, etc)."""
+
+    def __init__(self):
+        self.starmap_calls: list[tuple] = []
+        self.apply_calls: list[tuple] = []
+
+    def starmap(self, fn, args_list):
+        self.starmap_calls.append((fn, list(args_list)))
+        return [fn(*args) for args in args_list]
+
+    def apply(self, fn, args):
+        self.apply_calls.append((fn, args))
+        return fn(*args)
+
+
+def test_parse_dispatches_detect_and_recognize_through_compute(page_meta, vector, monkeypatch):
+    """When `compute` is given, detect is dispatched per-cluster via
+    `compute.starmap(_detect_job, ...)` and recognize via
+    `compute.apply(_recognize_crops_job, ...)` -- not called in-process
+    directly on the backend instances. Regression test for the Pool-2
+    OCR-batching optimization (this codepath had no coverage before)."""
+    v = vector(kind="l", bbox=(10.0, 10.0, 20.0, 20.0), color=(0.0, 0.0, 0.0), seqno=1)
+    quad = np.array([[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]])
+
+    monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: [quad])
+    monkeypatch.setattr(
+        PaddleRecBackend, "recognize_crops",
+        lambda self, crops: [OcrBox(text="X", confidence=1.0, flip_deg=0) for _ in crops],
+    )
+
+    compute = _FakeComputePool()
+    drawing, texts = vectorclassification.parse(
+        [v], [], _page(page_meta), enable_fast=False, compute=compute,
+    )
+
+    assert len(texts) == 1 and texts[0].text == "X"
+    assert len(compute.starmap_calls) == 1
+    fn, args_list = compute.starmap_calls[0]
+    assert fn is vectorclassification._detect_job
+    assert len(args_list) == 1  # one cluster
+    assert len(compute.apply_calls) == 1
+    fn, args = compute.apply_calls[0]
+    assert fn is vectorclassification._recognize_crops_job
+    assert len(args[0]) == 1  # one crop batched
+
+
 def test_parse_streaming_matches_batch_render_debug(page_meta):
     page = _page(page_meta)
 
