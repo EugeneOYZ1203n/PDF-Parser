@@ -25,6 +25,7 @@ from rastervec.commons.renderer import ocr_prep, pixel_to_page_bbox
 from rastervec.commons.step_timing import StepClock
 from rastervec.P3_Vector_Parsing.VectorClassification.classify_vectors import classify_vectors
 from rastervec.P3_Vector_Parsing.VectorClassification.config import (
+    FAST_HEATMAP_DPI,
     MAX_RENDER_DPI,
     MIN_RENDER_SIDE_PX,
     OCR_DPI,
@@ -312,13 +313,23 @@ def _render_fast_heatmap_pdf(page_meta, mask: "np.ndarray") -> bytes:
     viewer see exactly what FAST scored across the page, not just which
     clusters passed/failed. Mirrors the `insert_image` pattern
     `commons/renderer/stages.py::_compose` already uses to embed a raster
-    onto a page-sized PDF."""
+    onto a page-sized PDF.
+
+    The mask is area-averaged down to `FAST_HEATMAP_DPI` (never up) before
+    colouring -- FAST's own 300 dpi mask makes a multi-hundred-MB PNG on a
+    large sheet, far more than a visual overlay needs. `keep_proportion=
+    False` stretches it back over the page rect either way."""
     import io
 
     import pymupdf as fitz
     from PIL import Image
 
-    clipped = np.clip(mask, 0.0, 1.0)
+    tw = max(1, round(page_meta.width * FAST_HEATMAP_DPI / 72.0))
+    th = max(1, round(page_meta.height * FAST_HEATMAP_DPI / 72.0))
+    small = Image.fromarray(np.asarray(mask, dtype=np.float32), mode="F")
+    if small.width > tw and small.height > th:
+        small = small.resize((tw, th), Image.BOX)
+    clipped = np.clip(np.asarray(small), 0.0, 1.0)
     rgb = np.empty((*clipped.shape, 3), dtype=np.uint8)
     rgb[..., 0] = 255
     rgb[..., 1] = ((1.0 - clipped) * 255).astype(np.uint8)

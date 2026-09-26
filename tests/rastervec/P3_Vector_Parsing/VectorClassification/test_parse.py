@@ -156,3 +156,33 @@ def test_parse_renders_debug_layers_only_with_a_callback(page_meta, monkeypatch)
     steps = {}
     vectorclassification.parse([], [], page, step_durations=steps, on_debug_layer=lambda *layer: None)
     assert calls == [1] and "debug_render" in steps
+
+
+def _heatmap_image_size(pdf_bytes: bytes) -> tuple[int, int]:
+    import pymupdf as fitz
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        (img,) = doc[0].get_images()
+        info = doc.extract_image(img[0])
+        return info["width"], info["height"]
+    finally:
+        doc.close()
+
+
+def test_fast_heatmap_embedded_at_heatmap_dpi(page_meta):
+    """FAST's 300 dpi page mask is area-averaged down to FAST_HEATMAP_DPI
+    before it's embedded -- the debug layer never carries a full-res PNG."""
+    meta = page_meta(width=612.0, height=792.0)
+    mask = np.zeros((3300, 2550), dtype=np.float32)
+    mask[1500:1800, 1000:1500] = 1.0
+    pdf = vectorclassification._render_fast_heatmap_pdf(meta, mask)
+    w, h = _heatmap_image_size(pdf)
+    assert abs(w - 850) <= 1 and abs(h - 1100) <= 1
+
+
+def test_fast_heatmap_never_upscales_small_mask(page_meta):
+    meta = page_meta(width=612.0, height=792.0)
+    mask = np.zeros((110, 85), dtype=np.float32)
+    pdf = vectorclassification._render_fast_heatmap_pdf(meta, mask)
+    assert _heatmap_image_size(pdf) == (85, 110)

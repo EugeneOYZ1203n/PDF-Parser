@@ -36,6 +36,9 @@ FAST_TILE_OVERLAP_FRAC = 0.15
 # ink-looking vector is enough to save the whole cluster from being dropped
 # to drawing output).
 FAST_VECTOR_ANY_THRESHOLD = 0.05
+# Resolution of the `fast / heatmap` debug layer's embedded PNG. Debug-only:
+# the mask FAST scores clusters with stays at the 300 dpi render.
+FAST_HEATMAP_DPI = 100
 
 # ======================================================================
 # Hough-refined rotation (paddle_engine.py::_hough_deskew)
