@@ -8,6 +8,7 @@ from rastervec.Evaluation.Evaluate.benchmark import (
     format_aggregate,
     format_aggregate_comparison,
     format_fast_cluster_comparison,
+    format_retry_stats_comparison,
     format_text_report,
     format_timing_report,
     format_variant_timing_comparison,
@@ -147,3 +148,16 @@ def test_format_fast_cluster_comparison_empty_dict():
 def test_format_fast_cluster_comparison_zero_total_no_division_error():
     out = format_fast_cluster_comparison({"current": {"total": 0, "passed": 0}})
     assert "n/a" in out
+
+
+def test_format_retry_stats_comparison_shows_counts_and_na():
+    out = format_retry_stats_comparison({
+        "current": {"0": 4, "1": 2, "2": 1, "3": 0, "failed": 1}, "legacy": None,
+    })
+    assert "0:4" in out and "1:2" in out and "2:1" in out and "3:0" in out and "failed:1" in out
+    assert "n/a" in out  # legacy has no recorded stats
+
+
+def test_format_retry_stats_comparison_empty_dict():
+    out = format_retry_stats_comparison({})
+    assert "(no results)" in out

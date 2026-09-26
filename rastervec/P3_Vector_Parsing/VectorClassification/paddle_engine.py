@@ -5,27 +5,37 @@ word groups (`wordgrouping.py::cluster_by_seqno`).
 against a word group's own rendered+padded image, returning every text quad
 it finds in that image's own pixel space; `PaddleRecBackend.recognize_crops`
 then recognises each detected quad's own crop, built by `hough_deskew` --
-an axis-aligned crop of the quad's region, rotated by a Hough-line-refined
-angle (dilate ink -> Hough line angle, circular-averaged mod 90 with the
-quad's own dominant-edge angle, snapped to the nearest
-`config.HOUGH_ANGLE_SNAP_DEG`) rather than the quad's own perspective warp.
-This mirrors `LegacyRecreation/paddle_engine.py`'s own independent copy of
-the same detect-then-recognize pair (itself a port of archive/raster_parser's
-`PaddleOcr.ocr_image`, which called PaddleOCR's full `ocr()` pipeline per
-word group) -- own duplicated copy here too, per the "sibling P3 backends
-share zero code" rule.
+an axis-aligned crop of the quad's region, rotated by a raster-refined angle
+(a Hough-line reading and a `cv2.minAreaRect` reading, each mod 90,
+circular-averaged and snapped to the nearest `config.HOUGH_ANGLE_SNAP_DEG`)
+rather than the quad's own perspective warp or corner geometry (the quad's
+own dominant-edge angle was tried first and dropped -- too inaccurate in
+practice). If that recognition comes back blank, `parse.py` retries the same
+crop rotated a further +90/180/270 degrees via `recognize_crops_raw` before
+giving up. This mirrors `LegacyRecreation/paddle_engine.py`'s own independent
+copy of the same detect-then-recognize pair (itself a port of
+archive/raster_parser's `PaddleOcr.ocr_image`, which called PaddleOCR's full
+`ocr()` pipeline per word group) -- own duplicated copy here too, per the
+"sibling P3 backends share zero code" rule.
 
 `PaddleRecBackend`/`PaddleDetectBackend` each build one `paddleocr.PaddleOCR`
 engine (`config.OCR_VERSION` = PP-OCRv4, `config.OCR_LANG`), cached at class
 scope by `(ocr_version, lang)` so a spawn pool started next finds the
 weights on disk. This is the same API surface `archive/`'s `raster_parser`
 OCR uses, so the `legacy` benchmark variant needs no compatibility shim.
+
+This module imports `cv2` (for `_minarea_angle_deg`'s `cv2.minAreaRect`) --
+`skimage` still handles everything else (Hough, dilation, rotation) per this
+backend's usual convention, but `cv2` is already an indirect dependency via
+`paddleocr`, and the repo has no blanket "no cv2" rule (`Junction`'s P2
+backend already imports it).
 """
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
 from skimage.color import rgb2gray
 from skimage.morphology import binary_dilation, disk
@@ -35,6 +45,7 @@ from rastervec.P3_Vector_Parsing.VectorClassification.config import (
     HOUGH_ANGLE_SNAP_DEG,
     HOUGH_DILATE_RADIUS_PX,
     HOUGH_INK_THRESHOLD,
+    MINAREA_INK_THRESHOLD,
     OCR_BATCH_SIZE,
     OCR_LANG,
     OCR_VERSION,
@@ -126,6 +137,25 @@ class PaddleRecBackend:
             out.append(OcrBox(text=text, confidence=score if text else 0.0, flip_deg=flip))
         return out
 
+    def recognize_crops_raw(self, crops: list[np.ndarray]) -> list[OcrBox]:
+        """Recognise `crops` as-is, with no `text_classifier` call -- used by
+        `parse.py`'s blank-recognition retry sweep, where the caller has
+        already rotated each crop to a specific quarter-turn it wants tried
+        directly (there is no 0/180 decision left to make). `flip_deg` is
+        always 0 on the returned boxes; the caller tracks whatever extra
+        rotation it applied itself."""
+        if not crops:
+            return []
+        bgr = [_normalize_bgr(c) for c in crops]
+        rec = self._engine().text_recognizer(bgr)
+        rows = rec[0] if isinstance(rec, tuple) else rec
+        out: list[OcrBox] = []
+        for row in rows:
+            text = str(row[0] or "").strip()
+            score = float(row[1] or 0.0)
+            out.append(OcrBox(text=text, confidence=score if text else 0.0, flip_deg=0))
+        return out
+
 
 class PaddleDetectBackend:
     """PaddleOCR's own text-DETECTION model (`engine.text_detector`, PP-OCR's
@@ -175,22 +205,6 @@ def _normalize_rotation(angle_deg: float) -> float:
     return ((angle_deg + 90.0) % 180.0) - 90.0
 
 
-def _quad_rotation_deg(quad: np.ndarray) -> float:
-    """The quad's own dominant-edge orientation, as the rotation (degrees,
-    counter-clockwise-positive) that would bring that edge to horizontal.
-    `quad` is 4 `(x, y)` pixel points in PaddleOCR's own corner order
-    (clockwise from top-left); the longer of the top edge (0->1) and left
-    edge (0->3) is taken as the text's own baseline direction, so this is
-    robust to a quad that's taller than it is wide (vertical/rotated text).
-    Own duplicated copy of `FastIntoPaddle`/`LegacyRecreation`'s
-    `paddle_engine.py::_quad_rotation_deg`."""
-    top = quad[1] - quad[0]
-    left = quad[3] - quad[0]
-    dx, dy = (top if np.hypot(*top) >= np.hypot(*left) else left)
-    theta = math.degrees(math.atan2(dy, dx))
-    return _normalize_rotation(-theta)
-
-
 def _axis_aligned_crop(bgr: np.ndarray, quad: np.ndarray) -> np.ndarray:
     """Axis-aligned bbox crop of `quad`'s region straight out of `bgr` -- no
     perspective warp, unlike the old `_rotate_crop` this replaces for
@@ -216,23 +230,37 @@ def _axis_aligned_crop(bgr: np.ndarray, quad: np.ndarray) -> np.ndarray:
     )
 
 
-def _hough_ink_mask(crop: np.ndarray) -> np.ndarray:
-    """Binary ink mask (dark-on-light text/line-art strokes) thickened by
-    `binary_dilation` ("increase ink colors" before Hough gets a look) so
-    thin or broken strokes still form a continuous line for Hough to find.
-    No cv2, per this project's convention -- `skimage.morphology` instead."""
+def _ink_mask(crop: np.ndarray, threshold: int) -> np.ndarray:
+    """Binary ink mask (dark-on-light text/line-art strokes) below
+    `threshold` (0-255 grayscale). Shared thresholding step for both
+    `_hough_ink_mask` (dilated) and `_minarea_ink_mask` (not)."""
     gray = rgb2gray(np.asarray(crop, dtype=np.uint8)[:, :, ::-1])  # BGR -> RGB -> gray, 0..1
-    ink = gray < (HOUGH_INK_THRESHOLD / 255.0)
+    return gray < (threshold / 255.0)
+
+
+def _hough_ink_mask(crop: np.ndarray) -> np.ndarray:
+    """Binary ink mask thickened by `binary_dilation` ("increase ink colors"
+    before Hough gets a look) so thin or broken strokes still form a
+    continuous line for Hough to find. No cv2 here, per this module's usual
+    convention -- `skimage.morphology` instead."""
+    ink = _ink_mask(crop, HOUGH_INK_THRESHOLD)
     return binary_dilation(ink, footprint=disk(HOUGH_DILATE_RADIUS_PX))
 
 
+def _minarea_ink_mask(crop: np.ndarray) -> np.ndarray:
+    """Binary ink mask for `_minarea_angle_deg`, with its own independently
+    tunable `MINAREA_INK_THRESHOLD` and (unlike Hough's) no dilation --
+    thickening ink is a Hough-specific trick to help a broken stroke form
+    one continuous line; a bounding-rect fit doesn't need it."""
+    return _ink_mask(crop, MINAREA_INK_THRESHOLD)
+
+
 def _hough_angle_deg(mask: np.ndarray) -> "float | None":
-    """The dominant line's rotation (degrees, same sign/range convention as
-    `_quad_rotation_deg`: the rotation that would bring that line to
-    horizontal) from a single-peak Hough line transform over a binary ink
-    `mask`. `None` if the mask is empty or no usable peak is found (a Hough
-    reading isn't always available -- `_combined_rotation_deg` falls back to
-    the quad's own angle alone in that case)."""
+    """The dominant line's rotation (degrees, the rotation that would bring
+    that line to horizontal) from a single-peak Hough line transform over a
+    binary ink `mask`. `None` if the mask is empty or no usable peak is
+    found (a Hough reading isn't always available -- `_combined_rotation_deg`
+    falls back to the minAreaRect reading alone, or to 0, in that case)."""
     if not mask.any():
         return None
     thetas = np.linspace(-np.pi / 2, np.pi / 2, 180, endpoint=False)
@@ -241,11 +269,28 @@ def _hough_angle_deg(mask: np.ndarray) -> "float | None":
         return None
     # skimage's hough theta is the line's own NORMAL angle from the x-axis;
     # a horizontal line has theta = +-90 deg. Converting to "rotation needed
-    # to bring the line to horizontal" (theta - 90, then wrapped) matches
-    # _quad_rotation_deg's own convention so the two angles are directly
-    # comparable/averageable.
+    # to bring the line to horizontal" (theta - 90, then wrapped) is the
+    # convention `_minarea_angle_deg` also lands on, so the two angles are
+    # directly comparable/averageable.
     theta_deg = math.degrees(angles[0])
     return _normalize_rotation(theta_deg - 90.0)
+
+
+def _minarea_angle_deg(mask: np.ndarray) -> "float | None":
+    """The dominant orientation (degrees) of `cv2.minAreaRect`'s minimum-area
+    bounding box over `mask`'s own ink pixels, reduced mod 90. `None` if the
+    mask is empty. `cv2.minAreaRect`'s own returned angle already lands in
+    the same mod-90 convention `_hough_angle_deg` uses (the rotation that
+    would bring the dominant edge to horizontal) -- verified empirically
+    against synthetic tilted masks at a range of angles (see
+    `tests/.../test_paddle_engine.py`), so no sign conversion is needed."""
+    if not mask.any():
+        return None
+    points = cv2.findNonZero(np.asarray(mask, dtype=np.uint8))
+    if points is None or len(points) < 2:
+        return None
+    _center, _size, angle = cv2.minAreaRect(points)
+    return float(angle)
 
 
 def _circular_avg_mod90(a_deg: float, b_deg: float) -> float:
@@ -281,51 +326,67 @@ def _snap_to_angle_grid(angle_deg: float, step_deg: float = HOUGH_ANGLE_SNAP_DEG
     return round(angle_deg / step_deg) * step_deg
 
 
-def _combined_rotation_deg(quad_angle_deg: float, hough_angle_deg: "float | None") -> float:
-    """The final rotation to apply: circular-average `quad_angle_deg` and
-    `hough_angle_deg` (each reduced mod 90 first), convert back to a signed
-    small-angle correction, then snap to the nearest `HOUGH_ANGLE_SNAP_DEG`.
-    `hough_angle_deg=None` (no usable Hough peak) falls back to the quad
-    angle alone."""
-    quad_mod = quad_angle_deg % 90.0
-    if hough_angle_deg is None:
-        combined_mod = quad_mod
+def _combined_rotation_deg(
+    hough_angle_deg: "float | None", minarea_angle_deg: "float | None",
+) -> float:
+    """The final rotation to apply: circular-average `hough_angle_deg` and
+    `minarea_angle_deg` (each reduced mod 90 first), convert back to a
+    signed small-angle correction, then snap to the nearest
+    `HOUGH_ANGLE_SNAP_DEG`. If only one of the two is available, that one
+    alone (mod 90) is used; if neither is available (both ink masks were
+    empty), the correction is `0.0` -- there is no other angle source to
+    fall back to."""
+    have_hough = hough_angle_deg is not None
+    have_minarea = minarea_angle_deg is not None
+    if have_hough and have_minarea:
+        combined_mod = _circular_avg_mod90(hough_angle_deg % 90.0, minarea_angle_deg % 90.0)
+    elif have_hough:
+        combined_mod = hough_angle_deg % 90.0
+    elif have_minarea:
+        combined_mod = minarea_angle_deg % 90.0
     else:
-        combined_mod = _circular_avg_mod90(quad_mod, hough_angle_deg % 90.0)
+        return 0.0
     return _snap_to_angle_grid(_to_signed_small_angle(combined_mod))
 
 
 @dataclass
 class RotationDebug:
-    """One detection's rotation provenance, for the `hough`/classifier debug
-    layers and image folders (`parse.py`). `dilated_ink_mask`/`base_crop`
-    are the pre-rotation axis-aligned crop and the ink mask Hough actually
-    ran on -- kept only for debug-image rendering (`scripts/
-    debug_image_savers.py::_save_vectorclassification_hough_images`), never
-    consumed by the pipeline itself."""
+    """One detection's rotation provenance, for the rotation/retry debug
+    layers and image folders (`parse.py`). `base_crop`/`dilated_ink_mask`/
+    `minarea_mask` are the pre-rotation axis-aligned crop and the two ink
+    masks Hough/minAreaRect actually ran on -- kept only for debug-image
+    rendering (`scripts/debug_image_savers.py`), never consumed by the
+    pipeline itself. `flip_angle_deg`/`retry_count`/`best_angle_deg` are
+    filled in by `parse.py` after recognition (and any blank-retry passes)
+    runs, not by `hough_deskew` itself -- see `parse.py`'s per-quad loop."""
 
-    quad_angle_deg: float
     hough_angle_deg: "float | None"
+    minarea_angle_deg: "float | None"
     combined_angle_deg: float
     base_crop: "np.ndarray | None" = None
     dilated_ink_mask: "np.ndarray | None" = None
+    minarea_mask: "np.ndarray | None" = None
+    flip_angle_deg: "float | None" = None
+    retry_count: "int | None" = None
+    best_angle_deg: "float | None" = None
 
 
 def hough_deskew(bgr: np.ndarray, quad: np.ndarray) -> "tuple[np.ndarray, RotationDebug]":
     """Builds the axis-aligned crop for `quad` (`_axis_aligned_crop`), then
-    rotates it by the Hough-refined combined angle (dilate ink -> Hough line
-    angle -> circular-average with the quad's own dominant-edge angle ->
-    snap to the nearest `HOUGH_ANGLE_SNAP_DEG`) so the crop's baseline lands
-    on a quarter-turn boundary -- the crop `recognize_crops`'s own 0/180
-    classifier then resolves the final flip on (see `parse.py`). Replaces
-    the old `_rotate_crop` perspective-warp approach entirely: this crop's
-    rotation comes solely from `_combined_rotation_deg`, not from the
-    quad's own corner geometry."""
+    rotates it by the raster-refined combined angle (a Hough-line reading
+    and a `cv2.minAreaRect` reading, each mod 90, circular-averaged and
+    snapped to the nearest `HOUGH_ANGLE_SNAP_DEG`) so the crop's baseline
+    lands on a quarter-turn boundary -- the crop `recognize_crops`'s own
+    0/180 classifier then resolves the final flip on (see `parse.py`).
+    Replaces the old `_rotate_crop` perspective-warp approach (and the quad's
+    own corner-geometry angle, dropped for being too inaccurate) entirely:
+    this crop's rotation comes solely from `_combined_rotation_deg`."""
     base = _axis_aligned_crop(bgr, quad)
-    mask = _hough_ink_mask(base)
-    quad_angle = _quad_rotation_deg(quad)
-    hough_angle = _hough_angle_deg(mask)
-    combined = _combined_rotation_deg(quad_angle, hough_angle)
+    hough_mask = _hough_ink_mask(base)
+    minarea_mask = _minarea_ink_mask(base)
+    hough_angle = _hough_angle_deg(hough_mask)
+    minarea_angle = _minarea_angle_deg(minarea_mask)
+    combined = _combined_rotation_deg(hough_angle, minarea_angle)
     if combined == 0.0:
         rotated = base
     else:
@@ -333,8 +394,8 @@ def hough_deskew(bgr: np.ndarray, quad: np.ndarray) -> "tuple[np.ndarray, Rotati
             base, combined, resize=True, cval=255.0, order=1, preserve_range=True,
         ).astype(np.uint8)
     return rotated, RotationDebug(
-        quad_angle_deg=quad_angle, hough_angle_deg=hough_angle, combined_angle_deg=combined,
-        base_crop=base, dilated_ink_mask=mask,
+        hough_angle_deg=hough_angle, minarea_angle_deg=minarea_angle, combined_angle_deg=combined,
+        base_crop=base, dilated_ink_mask=hough_mask, minarea_mask=minarea_mask,
     )
 
 

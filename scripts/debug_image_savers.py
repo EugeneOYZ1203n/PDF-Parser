@@ -214,9 +214,10 @@ def _save_vectorclassification_detect_images(p3_debug: dict, target, page_index:
 
 def _draw_angle_line(img: Image.Image, angle_deg: "float | None", color) -> Image.Image:
     """A short line through the image's own center, tilted by `angle_deg`
-    (same sign convention as `paddle_engine.py::_quad_rotation_deg` --
-    counter-clockwise-positive, the rotation that would bring a line at
-    this angle to horizontal). No-op if `angle_deg` is `None`."""
+    (same sign convention as `paddle_engine.py::_hough_angle_deg`/
+    `_minarea_angle_deg` -- counter-clockwise-positive, the rotation that
+    would bring a line at this angle to horizontal). No-op if `angle_deg` is
+    `None`."""
     if angle_deg is None:
         return img
     out = img.convert("RGB")
@@ -236,7 +237,7 @@ def _draw_angle_line(img: Image.Image, angle_deg: "float | None", color) -> Imag
 def _save_vectorclassification_hough_images(p3_debug: dict, target, page_index: int) -> int:
     """One PNG per detection's own dilated ink mask (what Hough line
     detection actually ran on), with a line drawn through it at the
-    detected Hough angle and the quad/hough/combined angle values in the
+    detected Hough angle and the hough/minarea/combined angle values in the
     filename. Reads `p3_debug["rotation"]` (see `paddle_engine.py::
     RotationDebug` / `parse.py`'s per-quad loop)."""
     entries = p3_debug.get("rotation") or []
@@ -252,17 +253,55 @@ def _save_vectorclassification_hough_images(p3_debug: dict, target, page_index: 
             img = Image.fromarray(np.asarray(entry["base_crop"])[..., ::-1])  # BGR -> RGB
         return _draw_angle_line(img, entry.get("hough_angle_deg"), (220, 30, 30))
 
+    def _fmt(v) -> str:
+        return "na" if v is None else f"{v:.1f}"
+
     n = 0
     for i, entry in enumerate(entries):
         if entry.get("base_crop") is None:
             continue
-        quad_a = entry.get("quad_angle_deg")
-        hough_a = entry.get("hough_angle_deg")
-        combined_a = entry.get("combined_angle_deg")
         name = (
             f"p{page_index}_det_{i:03d}"
-            f"__q{quad_a:.1f}__h{'na' if hough_a is None else f'{hough_a:.1f}'}"
-            f"__c{combined_a:.1f}.png"
+            f"__h{_fmt(entry.get('hough_angle_deg'))}"
+            f"__m{_fmt(entry.get('minarea_angle_deg'))}"
+            f"__c{_fmt(entry.get('combined_angle_deg'))}.png"
+        )
+        n += reservoir.offer(name, lambda entry=entry: _make(entry))
+    return n
+
+
+def _save_vectorclassification_minarea_images(p3_debug: dict, target, page_index: int) -> int:
+    """One PNG per detection's own non-dilated ink mask (what
+    `cv2.minAreaRect` actually ran on), with a line drawn through it at the
+    detected minAreaRect angle and the hough/minarea/combined angle values in
+    the filename -- mirrors `_save_vectorclassification_hough_images` exactly,
+    reading the same `p3_debug["rotation"]` entries' `minarea_mask`/
+    `minarea_angle_deg` fields instead."""
+    entries = p3_debug.get("rotation") or []
+    if not entries:
+        return 0
+    reservoir = _as_reservoir(target)
+
+    def _make(entry) -> Image.Image:
+        mask = entry.get("minarea_mask")
+        if mask is not None:
+            img = Image.fromarray((np.asarray(mask) * 255).astype(np.uint8)).convert("RGB")
+        else:
+            img = Image.fromarray(np.asarray(entry["base_crop"])[..., ::-1])  # BGR -> RGB
+        return _draw_angle_line(img, entry.get("minarea_angle_deg"), (220, 30, 30))
+
+    def _fmt(v) -> str:
+        return "na" if v is None else f"{v:.1f}"
+
+    n = 0
+    for i, entry in enumerate(entries):
+        if entry.get("base_crop") is None:
+            continue
+        name = (
+            f"p{page_index}_det_{i:03d}"
+            f"__h{_fmt(entry.get('hough_angle_deg'))}"
+            f"__m{_fmt(entry.get('minarea_angle_deg'))}"
+            f"__c{_fmt(entry.get('combined_angle_deg'))}.png"
         )
         n += reservoir.offer(name, lambda entry=entry: _make(entry))
     return n

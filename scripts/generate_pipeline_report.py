@@ -37,14 +37,21 @@ timestamped run folder:
                                        crop, recognised text in the filename)
                 hough_line_images/     (one PNG per detection's own dilated
                                        ink mask, the detected Hough line
-                                       drawn on it, quad/hough/combined
+                                       drawn on it, hough/minarea/combined
                                        angles in the filename)
-                paddle_classifier_before_images/  (one PNG per detection's
-                                       own crop right before its 0/180
-                                       classifier flip)
-                paddle_classifier_after_images/   (the same crop right
-                                       after that flip -- what the
-                                       recognizer actually saw)
+                minarea_rect_images/   (one PNG per detection's own
+                                       non-dilated ink mask, the fitted
+                                       cv2.minAreaRect angle drawn on it,
+                                       same hough/minarea/combined angles in
+                                       the filename)
+                paddle_classifier_before_images/  (one PNG per crop right
+                                       before a recognizer call -- pass 1's
+                                       pre-classifier-flip crop, or a blank-
+                                       retry pass's pre-rotation crop)
+                paddle_classifier_after_images/   (the matching crop right
+                                       after -- what the recognizer actually
+                                       saw for that pass, incl. every +90/
+                                       180/270 retry attempt)
               p3=LegacyRecreation (no FAST stage):
                 paddle_ocr_images/     (one PNG per word group's own padded/
                                        DPI-boosted render, recognised text
@@ -121,6 +128,7 @@ from scripts.debug_image_savers import (  # noqa: F401 -- re-exported for caller
     _save_vectorclassification_classifier_before_images,
     _save_vectorclassification_detect_images,
     _save_vectorclassification_hough_images,
+    _save_vectorclassification_minarea_images,
     _save_vectorclassification_recog_images,
 )
 from scripts.report_artifacts import (  # noqa: F401 -- re-exported for callers/tests
@@ -198,6 +206,7 @@ def _image_dirs(doc_dir: Path) -> "dict[str, Path]":
         "recog": doc_dir / "paddle_recog_images",
         "ocr": doc_dir / "paddle_ocr_images",
         "hough": doc_dir / "hough_line_images",
+        "minarea": doc_dir / "minarea_rect_images",
         "classifier_before": doc_dir / "paddle_classifier_before_images",
         "classifier_after": doc_dir / "paddle_classifier_after_images",
     }
@@ -253,6 +262,7 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
             substep_durations=_substeps(res),
             debug_durations=debug_durations,
             fast_cluster_stats=_fast_cluster_stats(res, variant.p3),
+            retry_stats=_retry_stats(res, variant.p3),
         ))
 
     _finalize_doc_dir(doc_dir, pdf_path, pages, config, variant, active,
@@ -375,6 +385,19 @@ def _fast_cluster_stats(res, p3: str) -> "dict | None":
     return {"total": fast_result.n_clusters, "passed": fast_result.n_passed_clusters}
 
 
+def _retry_stats(res, p3: str) -> "dict | None":
+    """`{"0": N, "1": N, "2": N, "3": N, "failed": N}` blank-recognition
+    retry counts off the VectorClassification P3 backend's own
+    `debug_out["retry_stats"]` (`res.extra["p3_debug"]["retry_stats"]`, only
+    present on a `verbose=True` run) -- `None` for any other P3 backend (no
+    such concept) or a run without debug data. Mirrors `_fast_cluster_stats`
+    exactly."""
+    if p3 != "VectorClassification":
+        return None
+    p3_debug = (getattr(res, "extra", None) or {}).get("p3_debug") or {}
+    return p3_debug.get("retry_stats")
+
+
 def _extract_single_page(src_pdf: Path, page_index: int, out_path: Path) -> None:
     doc = fitz.open(str(src_pdf))
     try:
@@ -491,6 +514,7 @@ def _process_pdf_benchmark(
             raster_substep_durations=raster_substeps,
             debug_durations=debug_durations,
             fast_cluster_stats=_fast_cluster_stats(res, variant.p3),
+            retry_stats=_retry_stats(res, variant.p3),
         ))
 
     sources: list[str] = []

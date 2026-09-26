@@ -155,28 +155,72 @@ def parse(
             rotation_debugs = [rd for _c, rd in deskewed]
             boxes = rec_backend.recognize_crops(crops)
 
-        for quad, crop, rd, box in zip(quads, crops, rotation_debugs, boxes):
-            # box.flip_deg is the 0/180 decision recognize_crops' own angle
-            # classifier made for this crop -- recognition actually ran on
-            # the rotated (upright) pixels, not `crop` as-is, so mirror that
-            # same rotation here for the stashed debug image too.
-            recog_crop = np.rot90(crop, 2) if box.flip_deg else crop
+            # box.flip_deg is pass 1's own classifier 0/180 decision --
+            # captured now, before a later retry pass can overwrite `boxes`,
+            # since it's always worth recording even if a retry ends up
+            # winning. `recog_crops`/`retry_counts`/`retry_extra_degs` track
+            # what actually got used per detection as the sweep below runs.
+            flip_angle_degs = [float(box.flip_deg) for box in boxes]
+            recog_crops = [
+                np.rot90(crop, 2) if box.flip_deg else crop
+                for crop, box in zip(crops, boxes)
+            ]
+            for crop, recog_crop in zip(crops, recog_crops):
+                classifier_crops.append((crop, recog_crop))
+
+            retry_counts: list = [0 if box.text else None for box in boxes]
+            retry_extra_degs: list = [None] * len(boxes)
+
+            # Blank-recognition retry sweep: +90 -> 180 -> 270 relative to
+            # each crop's own pass-1 base (hough_deskew's output, not the
+            # classifier-flipped variant), batched across every still-blank
+            # crop in this cluster at each pass rather than looped one crop
+            # at a time. No classifier call in a retry pass -- sweeping all
+            # 4 quarter-turns already covers whatever the classifier's own
+            # 0/180 choice would have picked. Every attempted retry crop
+            # (whether or not it recovers text) is logged to
+            # classifier_crops too, so a viewer can see every rotation
+            # variant that was tried.
+            for k, extra_deg in ((1, 90.0), (2, 180.0), (3, 270.0)):
+                blank_idx = [i for i, box in enumerate(boxes) if not box.text]
+                if not blank_idx:
+                    break
+                retry_crops = [np.rot90(crops[i], k) for i in blank_idx]
+                retry_boxes = rec_backend.recognize_crops_raw(retry_crops)
+                for i, rbox, rcrop in zip(blank_idx, retry_boxes, retry_crops):
+                    classifier_crops.append((crops[i], rcrop))
+                    if rbox.text:
+                        boxes[i] = rbox
+                        recog_crops[i] = rcrop
+                        retry_counts[i] = k
+                        retry_extra_degs[i] = extra_deg
+
+        for quad, crop, rd, box, recog_crop, flip_a, retry_n, retry_extra in zip(
+            quads, crops, rotation_debugs, boxes, recog_crops,
+            flip_angle_degs, retry_counts, retry_extra_degs,
+        ):
             ocr_crops.append((recog_crop, box.text))
-            classifier_crops.append((crop, recog_crop))
             bbox = pixel_to_page_bbox(group_vectors, dpi_used, quad.tolist(), padding)
+            best_angle = None
+            if box.text:
+                effective_extra = retry_extra if retry_extra is not None else flip_a
+                best_angle = _normalize_rotation(rd.combined_angle_deg + effective_extra)
             rotation_entries.append({
                 "bbox": bbox,
-                "quad_angle_deg": rd.quad_angle_deg,
                 "hough_angle_deg": rd.hough_angle_deg,
+                "minarea_angle_deg": rd.minarea_angle_deg,
                 "combined_angle_deg": rd.combined_angle_deg,
+                "flip_angle_deg": flip_a,
+                "retry_count": retry_n,
+                "best_angle_deg": best_angle,
                 "base_crop": rd.base_crop,
                 "dilated_ink_mask": rd.dilated_ink_mask,
+                "minarea_mask": rd.minarea_mask,
             })
             if not box.text:
                 blank_boxes.append(bbox)
                 continue
-            rotate_deg = _normalize_rotation(rd.combined_angle_deg + box.flip_deg)
-            direction = transform_direction((1.0, 0.0), rotate_deg)
+            direction = transform_direction((1.0, 0.0), best_angle)
             texts.append(Text(
                 text=box.text, bbox=bbox, direction=direction,
                 origin=compute_origin(bbox, direction),
@@ -186,8 +230,13 @@ def parse(
                 page_index=page_meta.index, seqno=min(v.seqno for v in group_vectors),
                 confidence=box.confidence, source="ocr", orientation_source="ocr",
             ))
+    retry_stats: dict = {"0": 0, "1": 0, "2": 0, "3": 0, "failed": 0}
+    for entry in rotation_entries:
+        key = "failed" if entry["retry_count"] is None else str(entry["retry_count"])
+        retry_stats[key] = retry_stats.get(key, 0) + 1
     _emit(lambda: _render_ocr_layers(page_meta, texts, blank_boxes, detect_boxes))
     _emit(lambda: _render_rotation_layers(page_meta, rotation_entries))
+    _emit(lambda: _render_retry_layers(page_meta, rotation_entries))
 
     with clock("drawing"):
         drawing = list(cls.drawing_vectors) + list(fast.dropped_vectors)
@@ -205,6 +254,7 @@ def parse(
         debug_out["ocr_blank_boxes"] = blank_boxes
         debug_out["ocr_detect_boxes"] = detect_boxes
         debug_out["rotation"] = rotation_entries
+        debug_out["retry_stats"] = retry_stats
         debug_out["drawing"] = drawing
 
     return drawing, texts
@@ -227,9 +277,14 @@ _C_OCR = "#16a34a"
 _C_OCR_BLANK = "#9333ea"
 _C_OCR_DETECT = "#2563eb"
 _C_DRAWING = "#111827"
-_C_ANGLE_QUAD = "#0891b2"
 _C_ANGLE_HOUGH = "#ea580c"
-_C_ANGLE_FINAL = "#65a30d"
+_C_ANGLE_MINAREA = "#0891b2"
+_C_ANGLE_COMBINED = "#65a30d"
+_C_ANGLE_FLIP = "#9333ea"
+_C_ANGLE_BEST = "#dc2626"
+_C_RETRY_1 = "#f59e0b"
+_C_RETRY_2 = "#ea580c"
+_C_RETRY_3 = "#b91c1c"
 
 
 def _hex_rgb(h: str) -> tuple[float, float, float]:
@@ -397,8 +452,9 @@ def _render_angle_arrows_pdf(page_meta, entries: list[dict], angle_key: str, hex
     `"bbox"`, pointing along the angle (same `transform_direction`
     convention `parse.py` already uses for real `Text.direction`), similar
     in spirit to `scripts/label/vector_label.py`'s rotation-arrow overlay.
-    Visualizes `hough_deskew`'s three angle sources (quad/hough/final) side
-    by side as toggleable layers -- see `_render_rotation_layers`."""
+    Visualizes the rotation pipeline's five angle sources (hough/minarea/
+    combined/flip/best) side by side as toggleable layers -- see
+    `_render_rotation_layers`."""
     import pymupdf as fitz
 
     color = _hex_rgb(hexcolor)
@@ -436,19 +492,43 @@ def _rotate_vec(dx: float, dy: float, deg: float) -> "tuple[float, float]":
 
 
 def _render_rotation_layers(page_meta, rotation_entries: "list[dict] | None") -> "list[DebugLayer]":
-    """Three arrow layers, one per angle source `hough_deskew` computes per
-    detection (`parse.py`'s `debug_out["rotation"]`) -- quad's own
-    dominant-edge angle, Hough's raw line-angle reading, and the combined,
-    10-degree-snapped angle actually applied."""
+    """Five arrow layers, one per angle value `parse.py`'s per-quad loop
+    tracks per detection (`debug_out["rotation"]`): Hough's raw line-angle
+    reading, `cv2.minAreaRect`'s raw reading, the two combined+10-degree-
+    snapped (before classifier/retry), the pass-1 classifier's raw 0/180
+    flip decision, and the fully-resolved "best" angle actually used for a
+    non-blank result (combined + whichever of flip/retry recovered text)."""
     entries = rotation_entries or []
     return [
-        ("rotation", "quad angle", _C_ANGLE_QUAD,
-         _render_angle_arrows_pdf(page_meta, entries, "quad_angle_deg", _C_ANGLE_QUAD)),
         ("rotation", "hough angle", _C_ANGLE_HOUGH,
          _render_angle_arrows_pdf(page_meta, entries, "hough_angle_deg", _C_ANGLE_HOUGH)),
-        ("rotation", "final angle", _C_ANGLE_FINAL,
-         _render_angle_arrows_pdf(page_meta, entries, "combined_angle_deg", _C_ANGLE_FINAL)),
+        ("rotation", "minarea angle", _C_ANGLE_MINAREA,
+         _render_angle_arrows_pdf(page_meta, entries, "minarea_angle_deg", _C_ANGLE_MINAREA)),
+        ("rotation", "combined angle", _C_ANGLE_COMBINED,
+         _render_angle_arrows_pdf(page_meta, entries, "combined_angle_deg", _C_ANGLE_COMBINED)),
+        ("rotation", "flip angle", _C_ANGLE_FLIP,
+         _render_angle_arrows_pdf(page_meta, entries, "flip_angle_deg", _C_ANGLE_FLIP)),
+        ("rotation", "best angle", _C_ANGLE_BEST,
+         _render_angle_arrows_pdf(page_meta, entries, "best_angle_deg", _C_ANGLE_BEST)),
     ]
+
+
+def _render_retry_layers(page_meta, rotation_entries: "list[dict] | None") -> "list[DebugLayer]":
+    """Three bbox-highlight layers (not arrows) -- one per blank-recognition
+    retry count (1, 2, 3), each showing the bboxes of detections that only
+    recovered non-blank text after that many extra +90-degree passes (see
+    `parse.py`'s per-quad loop's retry sweep)."""
+    from rastervec.commons.renderer import render_boxes_pdf
+
+    entries = rotation_entries or []
+    layers: "list[DebugLayer]" = []
+    for n, color in ((1, _C_RETRY_1), (2, _C_RETRY_2), (3, _C_RETRY_3)):
+        boxes = [e["bbox"] for e in entries if e.get("retry_count") == n]
+        layers.append((
+            "retry", f"{n} retry", color,
+            render_boxes_pdf(page_meta, [(b, _hex_rgb(color)) for b in boxes]),
+        ))
+    return layers
 
 
 def _render_drawing_layers(page_meta, drawing) -> "list[DebugLayer]":
@@ -479,5 +559,6 @@ def render_debug(debug_out: "dict | None", page_meta) -> "list[DebugLayer]":
         debug_out.get("ocr_detect_boxes"),
     )
     out += _render_rotation_layers(page_meta, debug_out.get("rotation"))
+    out += _render_retry_layers(page_meta, debug_out.get("rotation"))
     out += _render_drawing_layers(page_meta, debug_out.get("drawing"))
     return out

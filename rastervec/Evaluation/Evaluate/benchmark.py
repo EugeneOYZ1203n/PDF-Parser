@@ -357,6 +357,29 @@ def format_fast_cluster_comparison(
     return "\n".join(lines)
 
 
+def format_retry_stats_comparison(
+    stats_by_run: "dict[str, dict | None]", *,
+    title: str = "Blank-recognition retries (VectorClassification only)",
+) -> str:
+    """One line per run: how many detections needed 0/1/2/3 extra
+    +90-degree recognition passes before recovering non-blank text, and how
+    many never recovered (`{"0": N, "1": N, "2": N, "3": N, "failed": N}`,
+    summed across every page -- see `scripts/benchmark_run_loading.py::
+    _load_retry_stats`). `None` (a non-VectorClassification P3 backend, the
+    legacy engine, or an older dump with no recorded stats) shows `n/a`.
+    Mirrors `format_fast_cluster_comparison` exactly."""
+    if not stats_by_run:
+        return f"{title}\n  (no results)"
+    lines = [title]
+    for run, stats in stats_by_run.items():
+        if stats is None:
+            lines.append(f"  [{run}] n/a")
+            continue
+        parts = " ".join(f"{k}:{stats.get(k, 0)}" for k in ("0", "1", "2", "3", "failed"))
+        lines.append(f"  [{run}] {parts}")
+    return "\n".join(lines)
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Benchmark the Vector Classification + OCR pipeline against auto-labelled ground truth."

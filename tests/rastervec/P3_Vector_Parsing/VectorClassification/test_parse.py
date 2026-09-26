@@ -27,6 +27,7 @@ def test_parse_debug_out_has_fast_result_key(page_meta):
     assert debug_out["classifier_crops"] == []
     assert debug_out["cluster_detections"] == []
     assert debug_out["rotation"] == []
+    assert debug_out["retry_stats"] == {"0": 0, "1": 0, "2": 0, "3": 0, "failed": 0}
 
 
 def test_parse_keeps_ocr_crop_for_blank_recognition(page_meta, vector, monkeypatch):
@@ -43,6 +44,13 @@ def test_parse_keeps_ocr_crop_for_blank_recognition(page_meta, vector, monkeypat
         PaddleRecBackend, "recognize_crops",
         lambda self, crops: [OcrBox(text="", confidence=0.0, flip_deg=0) for _ in crops],
     )
+    # Every blank-retry pass (+90/180/270) stays blank too, so this
+    # detection is permanently unrecoverable -- exercises the "exhausted
+    # every retry pass" path without hitting a real PaddleOCR engine.
+    monkeypatch.setattr(
+        PaddleRecBackend, "recognize_crops_raw",
+        lambda self, crops: [OcrBox(text="", confidence=0.0, flip_deg=0) for _ in crops],
+    )
 
     debug_out: dict = {}
     drawing, texts = vectorclassification.parse(
@@ -53,6 +61,8 @@ def test_parse_keeps_ocr_crop_for_blank_recognition(page_meta, vector, monkeypat
     assert len(debug_out["ocr_crops"]) == 1  # but its crop is still captured for debugging
     assert debug_out["ocr_crops"][0][1] == ""
     assert len(debug_out["ocr_blank_boxes"]) == 1  # and its page-space bbox is recorded for debug rendering
+    assert debug_out["rotation"][0]["retry_count"] is None  # never recovered
+    assert debug_out["retry_stats"] == {"0": 0, "1": 0, "2": 0, "3": 0, "failed": 1}
 
 
 def test_parse_ocr_crop_reflects_post_flip_rotation(page_meta, vector, monkeypatch):
@@ -69,7 +79,7 @@ def test_parse_ocr_crop_reflects_post_flip_rotation(page_meta, vector, monkeypat
 
     raw_crop = np.zeros((4, 4, 3), dtype=np.uint8)
     raw_crop[0, 0] = [255, 0, 0]  # marker pixel in one corner, to detect rotation
-    rotation_debug = RotationDebug(quad_angle_deg=0.0, hough_angle_deg=None, combined_angle_deg=0.0)
+    rotation_debug = RotationDebug(hough_angle_deg=None, minarea_angle_deg=0.0, combined_angle_deg=0.0)
     monkeypatch.setattr(
         vectorclassification, "hough_deskew", lambda bgr, quad: (raw_crop, rotation_debug),
     )
@@ -93,9 +103,62 @@ def test_parse_ocr_crop_reflects_post_flip_rotation(page_meta, vector, monkeypat
     assert np.array_equal(after_crop, stored_crop)
 
     entry = debug_out["rotation"][0]
-    assert entry["quad_angle_deg"] == 0.0
+    assert entry["minarea_angle_deg"] == 0.0
     assert entry["hough_angle_deg"] is None
     assert entry["combined_angle_deg"] == 0.0
+    assert entry["flip_angle_deg"] == 180.0
+    assert entry["retry_count"] == 0  # pass-1 (classifier + recognizer) already succeeded
+    # combined (0) + pass-1's own flip (180) = 180, normalized (mod 180, into
+    # [-90, 90)) to 0.0.
+    assert entry["best_angle_deg"] == 0.0
+    assert debug_out["retry_stats"] == {"0": 1, "1": 0, "2": 0, "3": 0, "failed": 0}
+
+
+def test_parse_blank_recognition_recovers_via_retry_sweep(page_meta, vector, monkeypatch):
+    """A blank pass-1 recognition should be retried at +90 -> 180 -> 270
+    (raw recognizer calls, no classifier), stopping at the first pass that
+    recovers non-blank text -- here the +90 (k=1) pass."""
+    from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import RotationDebug
+
+    v = vector(kind="l", bbox=(10.0, 10.0, 20.0, 20.0), color=(0.0, 0.0, 0.0), seqno=1)
+    quad = np.array([[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]])
+    monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: [quad])
+
+    raw_crop = np.zeros((4, 4, 3), dtype=np.uint8)
+    rotation_debug = RotationDebug(hough_angle_deg=None, minarea_angle_deg=0.0, combined_angle_deg=0.0)
+    monkeypatch.setattr(
+        vectorclassification, "hough_deskew", lambda bgr, quad: (raw_crop, rotation_debug),
+    )
+    monkeypatch.setattr(
+        PaddleRecBackend, "recognize_crops",
+        lambda self, crops: [OcrBox(text="", confidence=0.0, flip_deg=0) for _ in crops],
+    )
+    raw_calls: list[int] = []
+
+    def _recognize_crops_raw(self, crops):
+        raw_calls.append(len(crops))
+        if len(raw_calls) == 1:  # the +90 pass -- recovers text
+            return [OcrBox(text="Y", confidence=1.0, flip_deg=0) for _ in crops]
+        return [OcrBox(text="", confidence=0.0, flip_deg=0) for _ in crops]  # never reached
+
+    monkeypatch.setattr(PaddleRecBackend, "recognize_crops_raw", _recognize_crops_raw)
+
+    debug_out: dict = {}
+    _drawing, texts = vectorclassification.parse(
+        [v], [], _page(page_meta), enable_fast=False, debug_out=debug_out,
+    )
+
+    assert raw_calls == [1]  # only the +90 pass ran -- success stopped the sweep
+    assert len(texts) == 1 and texts[0].text == "Y"
+    entry = debug_out["rotation"][0]
+    assert entry["retry_count"] == 1
+    # combined (0) + the +90 retry rotation = 90, normalized (mod 180, into
+    # [-90, 90)) to -90.0.
+    assert entry["best_angle_deg"] == -90.0
+    assert debug_out["retry_stats"] == {"0": 0, "1": 1, "2": 0, "3": 0, "failed": 0}
+    # classifier_crops logs pass 1's own before/after plus the +90 retry's
+    # before/after -- 2 entries total for this one detection.
+    assert len(debug_out["classifier_crops"]) == 2
 
 
 def test_parse_streaming_matches_batch_render_debug(page_meta):

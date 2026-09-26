@@ -272,7 +272,7 @@ def test_save_vectorclassification_hough_images_draws_line_and_names_angles(tmp_
     mask[5, :] = True
     p3_debug = {"rotation": [{
         "bbox": (0.0, 0.0, 10.0, 10.0),
-        "quad_angle_deg": 1.5, "hough_angle_deg": 2.0, "combined_angle_deg": 0.0,
+        "hough_angle_deg": 2.0, "minarea_angle_deg": 1.5, "combined_angle_deg": 0.0,
         "base_crop": np.zeros((10, 10, 3), dtype=np.uint8), "dilated_ink_mask": mask,
     }]}
     folder = tmp_path / "hough"
@@ -280,13 +280,13 @@ def test_save_vectorclassification_hough_images_draws_line_and_names_angles(tmp_
     assert n == 1
     files = list(folder.glob("*.png"))
     assert len(files) == 1
-    assert "q1.5" in files[0].name and "h2.0" in files[0].name and "c0.0" in files[0].name
+    assert "h2.0" in files[0].name and "m1.5" in files[0].name and "c0.0" in files[0].name
 
 
 def test_save_vectorclassification_hough_images_none_hough_angle_in_name(tmp_path):
     p3_debug = {"rotation": [{
         "bbox": (0.0, 0.0, 10.0, 10.0),
-        "quad_angle_deg": 0.0, "hough_angle_deg": None, "combined_angle_deg": 0.0,
+        "hough_angle_deg": None, "minarea_angle_deg": 0.0, "combined_angle_deg": 0.0,
         "base_crop": np.zeros((10, 10, 3), dtype=np.uint8), "dilated_ink_mask": None,
     }]}
     folder = tmp_path / "hough"
@@ -298,6 +298,40 @@ def test_save_vectorclassification_hough_images_none_hough_angle_in_name(tmp_pat
 def test_save_vectorclassification_hough_images_missing_key_no_crash(tmp_path):
     folder = tmp_path / "hough"
     assert gpr._save_vectorclassification_hough_images({}, folder, 0) == 0
+    assert not folder.exists()
+
+
+def test_save_vectorclassification_minarea_images_draws_line_and_names_angles(tmp_path):
+    mask = np.zeros((10, 10), dtype=bool)
+    mask[:, 5] = True
+    p3_debug = {"rotation": [{
+        "bbox": (0.0, 0.0, 10.0, 10.0),
+        "hough_angle_deg": 2.0, "minarea_angle_deg": 1.5, "combined_angle_deg": 0.0,
+        "base_crop": np.zeros((10, 10, 3), dtype=np.uint8), "minarea_mask": mask,
+    }]}
+    folder = tmp_path / "minarea"
+    n = gpr._save_vectorclassification_minarea_images(p3_debug, folder, page_index=0)
+    assert n == 1
+    files = list(folder.glob("*.png"))
+    assert len(files) == 1
+    assert "h2.0" in files[0].name and "m1.5" in files[0].name and "c0.0" in files[0].name
+
+
+def test_save_vectorclassification_minarea_images_none_minarea_angle_in_name(tmp_path):
+    p3_debug = {"rotation": [{
+        "bbox": (0.0, 0.0, 10.0, 10.0),
+        "hough_angle_deg": 0.0, "minarea_angle_deg": None, "combined_angle_deg": 0.0,
+        "base_crop": np.zeros((10, 10, 3), dtype=np.uint8), "minarea_mask": None,
+    }]}
+    folder = tmp_path / "minarea"
+    n = gpr._save_vectorclassification_minarea_images(p3_debug, folder, page_index=0)
+    assert n == 1
+    assert "mna" in list(folder.glob("*.png"))[0].name
+
+
+def test_save_vectorclassification_minarea_images_missing_key_no_crash(tmp_path):
+    folder = tmp_path / "minarea"
+    assert gpr._save_vectorclassification_minarea_images({}, folder, 0) == 0
     assert not folder.exists()
 
 

@@ -41,7 +41,7 @@ FAST_VECTOR_ANY_THRESHOLD = 0.05
 FAST_HEATMAP_DPI = 100
 
 # ======================================================================
-# Hough-refined rotation (paddle_engine.py::_hough_deskew)
+# Raster-refined rotation (paddle_engine.py::hough_deskew)
 # ======================================================================
 
 # Grayscale value (0-255) below which a pixel counts as "ink" when building
@@ -50,8 +50,13 @@ HOUGH_INK_THRESHOLD = 200
 # Binary-dilation disk radius (px) applied to the ink mask before Hough --
 # thickens thin/broken strokes so Hough has more to find ("increase ink").
 HOUGH_DILATE_RADIUS_PX = 2
-# The combined (quad + Hough) rotation correction is snapped to the nearest
-# multiple of this many degrees before being applied.
+# Grayscale value (0-255) below which a pixel counts as "ink" when building
+# the (non-dilated) mask `cv2.minAreaRect` runs on -- independently tunable
+# from HOUGH_INK_THRESHOLD since the two estimators may want different
+# sensitivity in practice.
+MINAREA_INK_THRESHOLD = 200
+# The combined (Hough + minAreaRect) rotation correction is snapped to the
+# nearest multiple of this many degrees before being applied.
 HOUGH_ANGLE_SNAP_DEG = 10.0
 
 # ======================================================================

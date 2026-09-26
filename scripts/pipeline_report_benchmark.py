@@ -61,6 +61,7 @@ from rastervec.Evaluation.Evaluate.benchmark import (
     format_aggregate_comparison,
     format_confusion_table,
     format_fast_cluster_comparison,
+    format_retry_stats_comparison,
     format_variant_timing_comparison,
     format_vector_aggregate_comparison,
 )
@@ -81,6 +82,7 @@ from rastervec.commons.paths import output_dir
 
 from scripts.benchmark_report_sections import (  # noqa: F401 -- re-exported for callers/tests
     _add_fast_cluster_section,
+    _add_retry_stats_section,
     _add_text_sections,
     _add_timing_sections,
     _add_vector_sections,
@@ -89,6 +91,7 @@ from scripts.benchmark_report_sections import (  # noqa: F401 -- re-exported for
 from scripts.benchmark_run_loading import (  # noqa: F401 -- re-exported for callers/tests
     RunEntry,
     _load_fast_cluster_stats,
+    _load_retry_stats,
     _load_run,
     _load_timings,
     _merge_gt,
@@ -167,6 +170,8 @@ def main(argv: list[str] | None = None) -> int:
     grand_timing: "dict[str, dict[str, list[dict]]]" = {}
     # {run: {"total": N, "passed": P}} FAST cluster counts, summed over every shared key
     grand_fast_cluster: "dict[str, dict]" = {}
+    # {run: {"0": N, "1": N, "2": N, "3": N, "failed": N}} retry counts, summed over every shared key
+    grand_retry_stats: "dict[str, dict]" = {}
 
     def _timing_block(
         rows_by_run: "dict[str, dict[str, list[dict]]]", label: str, cslug: str,
@@ -219,10 +224,20 @@ def main(argv: list[str] | None = None) -> int:
             acc["total"] += stats["total"]
             acc["passed"] += stats["passed"]
 
+        retry_stats_by_run = {r[key].run_name: _load_retry_stats(r[key]) for r in runs}
+        blocks.append(format_retry_stats_comparison(retry_stats_by_run, title=f"{key} -- blank-recognition retries"))
+        for name, stats in retry_stats_by_run.items():
+            if stats is None:
+                continue
+            acc = grand_retry_stats.setdefault(name, {"0": 0, "1": 0, "2": 0, "3": 0, "failed": 0})
+            for k in acc:
+                acc[k] += stats.get(k, 0)
+
         builder.add_key_section(key)
         _add_text_sections(builder, text_by_run)
         _add_vector_sections(builder, vector_by_run)
         _add_fast_cluster_section(builder, fast_cluster_by_run)
+        _add_retry_stats_section(builder, retry_stats_by_run)
         timing_rows = {r[key].run_name: _load_timings(r[key]) for r in runs}
         _timing_block(timing_rows, key, kslug)
         for name, by_kind in timing_rows.items():
@@ -372,6 +387,14 @@ def main(argv: list[str] | None = None) -> int:
             grand_fast_cluster, title="(all inputs) -- clusters dropped by FAST",
         ))
         _add_fast_cluster_section(builder, grand_fast_cluster)
+
+    if grand_retry_stats:
+        if not grand_text_agg:
+            builder.add_key_section("(grand aggregate over every shared input)")
+        blocks.append(format_retry_stats_comparison(
+            grand_retry_stats, title="(all inputs) -- blank-recognition retries",
+        ))
+        _add_retry_stats_section(builder, grand_retry_stats)
 
     if grand_timing:
         if not grand_text_agg:

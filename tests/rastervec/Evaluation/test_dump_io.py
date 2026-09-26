@@ -101,3 +101,22 @@ def test_dump_fast_cluster_stats_roundtrip_and_default(tmp_path, page_meta):
     path.write_text(json.dumps(raw), encoding="utf-8")
     old = dump_io.load_dump(path).pages[0]
     assert old.fast_cluster_stats is None
+
+
+def test_dump_retry_stats_roundtrip_and_default(tmp_path, page_meta):
+    stats = {"0": 4, "1": 2, "2": 1, "3": 0, "failed": 1}
+    pd = dump_io.PageDump(
+        page_meta=page_meta(), texts=[], vectors=[], engine="current",
+        step_durations={}, retry_stats=stats,
+    )
+    path = tmp_path / "dump.json"
+    dump_io.write_dump(path, "x.pdf", [pd])
+    got = dump_io.load_dump(path).pages[0]
+    assert got.retry_stats == stats
+
+    import json
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["pages"][0].pop("retry_stats")
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    old = dump_io.load_dump(path).pages[0]
+    assert old.retry_stats is None

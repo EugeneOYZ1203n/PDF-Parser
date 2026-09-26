@@ -12,6 +12,8 @@ from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import (
     _combined_rotation_deg,
     _hough_angle_deg,
     _hough_ink_mask,
+    _minarea_angle_deg,
+    _minarea_ink_mask,
     _to_signed_small_angle,
     hough_deskew,
 )
@@ -49,6 +51,14 @@ def test_hough_ink_mask_flags_dark_pixels_and_thickens_them():
     assert mask.sum() > 1  # dilation thickened the single ink pixel
 
 
+def test_minarea_ink_mask_flags_dark_pixels_without_dilating():
+    crop = np.full((10, 10, 3), 255, dtype=np.uint8)
+    crop[5, 5] = (0, 0, 0)  # a single dark pixel
+    mask = _minarea_ink_mask(crop)
+    assert mask[5, 5]
+    assert mask.sum() == 1  # no dilation, unlike _hough_ink_mask
+
+
 def test_circular_avg_mod90_matches_worked_examples():
     # Values near the 0/90 wraparound boundary average toward 0, not 45.
     assert _circular_avg_mod90(89.0, 1.0) == pytest.approx(0.0, abs=1e-6)
@@ -63,8 +73,16 @@ def test_to_signed_small_angle_wraps_near_90_to_negative():
     assert _to_signed_small_angle(46.0) == pytest.approx(-44.0)
 
 
-def test_combined_rotation_deg_falls_back_to_quad_when_hough_is_none():
+def test_combined_rotation_deg_falls_back_to_zero_when_both_are_none():
+    assert _combined_rotation_deg(None, None) == pytest.approx(0.0)
+
+
+def test_combined_rotation_deg_uses_hough_alone_when_minarea_is_none():
     assert _combined_rotation_deg(6.0, None) == pytest.approx(10.0)  # 6 snaps to 10
+
+
+def test_combined_rotation_deg_uses_minarea_alone_when_hough_is_none():
+    assert _combined_rotation_deg(None, 6.0) == pytest.approx(10.0)  # 6 snaps to 10
 
 
 def test_combined_rotation_deg_snaps_to_a_multiple_of_10():
@@ -74,12 +92,12 @@ def test_combined_rotation_deg_snaps_to_a_multiple_of_10():
 
 def _draw_line_mask(shape: "tuple[int, int]", angle_deg: float) -> np.ndarray:
     """A synthetic boolean mask with a single straight line through the
-    center, tilted by `angle_deg` using the SAME sign convention
-    `_quad_rotation_deg` uses (the rotation that would bring the line to
-    horizontal) -- built by drawing a horizontal line then rotating the
-    mask itself by `-angle_deg` (skimage.transform.rotate's own
-    counter-clockwise-positive convention), so a correct `_hough_angle_deg`
-    implementation should recover ~`angle_deg` back out."""
+    center, tilted by `angle_deg` using the convention "the rotation that
+    would bring the line to horizontal" -- built by drawing a horizontal
+    line then rotating the mask itself by `-angle_deg`
+    (`skimage.transform.rotate`'s own counter-clockwise-positive
+    convention), so a correct `_hough_angle_deg` implementation should
+    recover ~`angle_deg` back out."""
     h, w = shape
     mask = np.zeros(shape, dtype=np.float64)
     rr, cc = line(h // 2, 5, h // 2, w - 5)
@@ -88,12 +106,11 @@ def _draw_line_mask(shape: "tuple[int, int]", angle_deg: float) -> np.ndarray:
     return rotated > 0.5
 
 
-def test_hough_angle_deg_recovers_known_tilt_sign_matches_quad_rotation_deg():
-    """End-to-end sign check: a mask tilted by a known angle (using
-    `_quad_rotation_deg`'s own rotation convention) should come back out of
-    `_hough_angle_deg` close to that same signed angle -- this is what
-    actually matters for `_combined_rotation_deg`'s circular average to be
-    meaningful, more than either function's angle matching an abstract
+def test_hough_angle_deg_recovers_known_tilt_sign():
+    """End-to-end sign check: a mask tilted by a known angle should come
+    back out of `_hough_angle_deg` close to that same signed angle -- this
+    is what actually matters for `_combined_rotation_deg`'s circular average
+    to be meaningful, more than the function's angle matching an abstract
     convention in isolation."""
     for angle in (-20.0, -5.0, 5.0, 20.0):
         mask = _draw_line_mask((101, 101), angle)
@@ -106,10 +123,39 @@ def test_hough_angle_deg_none_for_empty_mask():
     assert _hough_angle_deg(np.zeros((20, 20), dtype=bool)) is None
 
 
+def _draw_block_mask(shape: "tuple[int, int]", angle_deg: float) -> np.ndarray:
+    """A synthetic boolean mask with a filled horizontal bar through the
+    center (closer to a real ink-block shape than `_draw_line_mask`'s
+    1px line), tilted the same way -- used to verify `_minarea_angle_deg`'s
+    `cv2.minAreaRect` reading lands in the same mod-90 convention
+    `_hough_angle_deg` uses (verified empirically: for a filled block,
+    `cv2.minAreaRect`'s own returned angle already equals `angle_deg % 90`
+    to within a small fraction of a degree, no sign conversion needed)."""
+    h, w = shape
+    mask = np.zeros(shape, dtype=np.float64)
+    mask[h // 2 - 3 : h // 2 + 3, 10 : w - 10] = 1.0
+    rotated = sk_rotate(mask, -angle_deg, resize=False, order=1, preserve_range=True)
+    return rotated > 0.5
+
+
+def test_minarea_angle_deg_recovers_known_tilt_mod_90():
+    # Angles kept within (0, 45) so `angle % 90` needs no wraparound to
+    # compare directly against cv2.minAreaRect's own [0, 90) range.
+    for angle in (5.0, 10.0, 20.0, 40.0):
+        mask = _draw_block_mask((101, 101), angle)
+        measured = _minarea_angle_deg(mask)
+        assert measured is not None
+        assert abs(measured - angle) < 2.0, f"angle={angle} measured={measured}"
+
+
+def test_minarea_angle_deg_none_for_empty_mask():
+    assert _minarea_angle_deg(np.zeros((20, 20), dtype=bool)) is None
+
+
 def test_hough_deskew_reads_a_tilted_line_close_to_its_known_angle():
     """A small white image with a single line tilted 8 degrees, cropped by
-    a perfectly axis-aligned quad (quad_angle_deg=0) -- so the whole
-    correction should come from Hough's own reading of the tilted content,
+    a perfectly axis-aligned quad -- so the whole correction should come
+    from Hough's and minAreaRect's own readings of the tilted content,
     landing close to the known 8-degree tilt and snapping to a multiple of
     10."""
     size = 120
@@ -123,18 +169,21 @@ def test_hough_deskew_reads_a_tilted_line_close_to_its_known_angle():
     crop, debug = hough_deskew(bgr, quad)
 
     assert crop.shape[0] > 0 and crop.shape[1] > 0
-    assert debug.quad_angle_deg == pytest.approx(0.0)
     assert debug.hough_angle_deg is not None
     assert abs(debug.hough_angle_deg - 8.0) <= 2.5
+    assert debug.minarea_angle_deg is not None
+    assert abs(debug.minarea_angle_deg - 8.0) <= 2.5
     assert debug.combined_angle_deg % 10.0 == pytest.approx(0.0)
 
 
 def test_hough_deskew_falls_back_cleanly_on_blank_crop():
-    """A blank (all-white) crop has no ink for Hough to find -- hough_deskew
-    should fall back to the quad's own angle rather than error."""
+    """A blank (all-white) crop has no ink for Hough or minAreaRect to find
+    -- hough_deskew should fall back to a 0-degree correction rather than
+    error (there is no other angle source left once both are unavailable)."""
     bgr = np.full((40, 40, 3), 255, dtype=np.uint8)
     quad = np.array([(0.0, 0.0), (39.0, 0.0), (39.0, 39.0), (0.0, 39.0)])
     crop, debug = hough_deskew(bgr, quad)
     assert crop.shape[0] > 0 and crop.shape[1] > 0
     assert debug.hough_angle_deg is None
+    assert debug.minarea_angle_deg is None
     assert debug.combined_angle_deg == pytest.approx(0.0)

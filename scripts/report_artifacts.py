@@ -38,6 +38,7 @@ from scripts.debug_image_savers import (
     _save_vectorclassification_classifier_before_images,
     _save_vectorclassification_detect_images,
     _save_vectorclassification_hough_images,
+    _save_vectorclassification_minarea_images,
     _save_vectorclassification_recog_images,
 )
 from scripts.report_config import NEW_STEP_NAMES, _layer_slug
@@ -260,6 +261,7 @@ def _accumulate_page(
             _save_vectorclassification_detect_images(p3_debug, reservoirs["detect"], page_index)
             _save_vectorclassification_recog_images(p3_debug, reservoirs["recog"], page_index)
             _save_vectorclassification_hough_images(p3_debug, reservoirs["hough"], page_index)
+            _save_vectorclassification_minarea_images(p3_debug, reservoirs["minarea"], page_index)
             _save_vectorclassification_classifier_before_images(
                 p3_debug, reservoirs["classifier_before"], page_index,
             )

@@ -174,6 +174,30 @@ def _load_fast_cluster_stats(entry: RunEntry) -> "dict | None":
     return {"total": total, "passed": passed} if seen else None
 
 
+_RETRY_BUCKETS = ("0", "1", "2", "3", "failed")
+
+
+def _load_retry_stats(entry: RunEntry) -> "dict | None":
+    """`{"0": N, "1": N, "2": N, "3": N, "failed": N}` blank-recognition
+    retry counts summed across every page of this run's `dump.json` that
+    recorded a `PageDump.retry_stats` (the VectorClassification P3 backend's
+    rotation retry sweep, see `generate_pipeline_report.py::_retry_stats`).
+    `None` if no page recorded this (a different P3 backend, the legacy
+    engine, or an older dump without the field). Mirrors
+    `_load_fast_cluster_stats` exactly."""
+    dump = dump_io.load_dump(entry.dump_path)
+    totals = {k: 0 for k in _RETRY_BUCKETS}
+    seen = False
+    for page in dump.pages:
+        stats = page.retry_stats
+        if stats is None:
+            continue
+        seen = True
+        for k in _RETRY_BUCKETS:
+            totals[k] += stats.get(k, 0)
+    return totals if seen else None
+
+
 def _load_timings(entry: RunEntry) -> "dict[str, list[dict]]":
     """`{run_kind: [flattened per-page timing row]}` from this entry's
     `dump.json` (`timing.flatten_page_timing`) -- `vectorised` for the main

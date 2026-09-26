@@ -95,6 +95,12 @@ class PageDump:
     # off `res.extra["p3_debug"]["fast_result"]` at report-generation time.
     # `None` for any other P3 backend (no such concept) or an older dump.
     fast_cluster_stats: "dict | None" = None
+    # `{"0": N, "1": N, "2": N, "3": N, "failed": N}` blank-recognition retry
+    # counts from the VectorClassification P3 backend's rotation retry sweep
+    # (`P3_Vector_Parsing/VectorClassification/parse.py`'s `retry_stats`),
+    # read off `res.extra["p3_debug"]["retry_stats"]` at report-generation
+    # time. `None` for any other P3 backend or an older dump.
+    retry_stats: "dict | None" = None
 
 
 def _page_dump_to_json(pd: PageDump) -> dict:
@@ -110,6 +116,7 @@ def _page_dump_to_json(pd: PageDump) -> dict:
         "raster_substep_durations": pd.raster_substep_durations,
         "debug_durations": pd.debug_durations,
         "fast_cluster_stats": pd.fast_cluster_stats,
+        "retry_stats": pd.retry_stats,
     }
 
 
@@ -131,6 +138,7 @@ def _page_dump_from_json(d: dict) -> PageDump:
         raster_substep_durations=d.get("raster_substep_durations", {}),
         debug_durations=d.get("debug_durations", {}),
         fast_cluster_stats=d.get("fast_cluster_stats"),
+        retry_stats=d.get("retry_stats"),
     )
 
 
