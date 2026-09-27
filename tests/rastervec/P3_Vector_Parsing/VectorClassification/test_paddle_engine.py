@@ -188,3 +188,23 @@ def test_hough_deskew_falls_back_cleanly_on_blank_crop():
     assert debug.hough_angle_deg is None
     assert debug.minarea_angle_deg is None
     assert debug.combined_angle_deg == pytest.approx(0.0)
+
+
+def test_hough_deskew_omits_debug_arrays_by_default():
+    """`base_crop`/`dilated_ink_mask`/`minarea_mask` are debug-only (read
+    back only by `scripts/debug_image_savers.py`) -- `hough_deskew` should
+    not retain them unless a caller passes `keep_debug=True`, since a page-
+    wide caller (`parse.py`) would otherwise hold one extra full-size array
+    per detected quad for no reason on every non-debug run."""
+    bgr = np.full((40, 40, 3), 255, dtype=np.uint8)
+    quad = np.array([(0.0, 0.0), (39.0, 0.0), (39.0, 39.0), (0.0, 39.0)])
+
+    _crop, debug_default = hough_deskew(bgr, quad)
+    assert debug_default.base_crop is None
+    assert debug_default.dilated_ink_mask is None
+    assert debug_default.minarea_mask is None
+
+    _crop, debug_kept = hough_deskew(bgr, quad, keep_debug=True)
+    assert debug_kept.base_crop is not None
+    assert debug_kept.dilated_ink_mask is not None
+    assert debug_kept.minarea_mask is not None

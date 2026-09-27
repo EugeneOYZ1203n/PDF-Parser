@@ -81,7 +81,8 @@ def test_parse_ocr_crop_reflects_post_flip_rotation(page_meta, vector, monkeypat
     raw_crop[0, 0] = [255, 0, 0]  # marker pixel in one corner, to detect rotation
     rotation_debug = RotationDebug(hough_angle_deg=None, minarea_angle_deg=0.0, combined_angle_deg=0.0)
     monkeypatch.setattr(
-        vectorclassification, "hough_deskew", lambda bgr, quad: (raw_crop, rotation_debug),
+        vectorclassification, "hough_deskew",
+        lambda bgr, quad, **kwargs: (raw_crop, rotation_debug),
     )
     monkeypatch.setattr(
         PaddleRecBackend, "recognize_crops",
@@ -127,7 +128,8 @@ def test_parse_blank_recognition_recovers_via_retry_sweep(page_meta, vector, mon
     raw_crop = np.zeros((4, 4, 3), dtype=np.uint8)
     rotation_debug = RotationDebug(hough_angle_deg=None, minarea_angle_deg=0.0, combined_angle_deg=0.0)
     monkeypatch.setattr(
-        vectorclassification, "hough_deskew", lambda bgr, quad: (raw_crop, rotation_debug),
+        vectorclassification, "hough_deskew",
+        lambda bgr, quad, **kwargs: (raw_crop, rotation_debug),
     )
     monkeypatch.setattr(
         PaddleRecBackend, "recognize_crops",

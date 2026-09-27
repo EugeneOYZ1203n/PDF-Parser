@@ -578,17 +578,22 @@ class FastDetector:
 
         blocks = [_block(x0, y0) for x0, y0 in tile_positions]
 
-        args_list = [(self.weights_path, np.asarray(block)) for block, _ in blocks]
+        # `args_list` is a second, independent numpy copy of every tile
+        # (alongside the PIL images already in `blocks`) -- only build it
+        # when a `compute` pool actually needs it; the local-loop branches
+        # below use `blocks` directly and never touch `args_list`.
         if compute is not None:
             if not blocks:
                 masks = []
-            elif progress_counter is not None:
-                masks = []
-                for mask in compute.imap(_detect_job, args_list):
-                    masks.append(mask)
-                    progress_counter.value += 1
             else:
-                masks = compute.starmap(_detect_job, args_list)
+                args_list = [(self.weights_path, np.asarray(block)) for block, _ in blocks]
+                if progress_counter is not None:
+                    masks = []
+                    for mask in compute.imap(_detect_job, args_list):
+                        masks.append(mask)
+                        progress_counter.value += 1
+                else:
+                    masks = compute.starmap(_detect_job, args_list)
         elif progress_counter is not None:
             masks = []
             for block, _ in blocks:

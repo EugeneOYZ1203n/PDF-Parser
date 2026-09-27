@@ -148,9 +148,13 @@ def parse(
     # memory. Recognition (stage 4/5 below) is unaffected -- crops are far
     # smaller than full cluster renders, so that stage still batches across
     # the WHOLE page at once via `page_quads`, accumulated here chunk by
-    # chunk. `cluster_detections` (raw per-cluster bgr + quads, debug-only --
-    # read back by `render_debug`/`debug_out`) is only kept when something
-    # actually asked for it, for the same reason.
+    # chunk. `cluster_detections`/`classifier_crops`/`ocr_crops` (raw
+    # per-cluster/per-quad bgr, debug-only -- read back by
+    # `render_debug`/`debug_out`) and `hough_deskew`'s own per-quad debug
+    # crop/masks (`keep_debug=`) are all only kept when something actually
+    # asked for debug output, for the same reason -- each holds a full-size
+    # image array per cluster/quad, page-wide, for the rest of this
+    # function's run.
     passed_clusters = [g for g in fast.passed if g]
     keep_cluster_detections = debug_out is not None
     cluster_detections: list[tuple[np.ndarray, list]] = []
@@ -219,7 +223,7 @@ def parse(
                     # recognize_crops, which does its own RGB->BGR flip
                     # internally (same gotcha LegacyRecreation's own
                     # identical loop works around).
-                    crop, rd = hough_deskew(c["bgr"], quad)
+                    crop, rd = hough_deskew(c["bgr"], quad, keep_debug=keep_cluster_detections)
                     page_quads.append({
                         "group_vectors": c["group_vectors"], "crop": crop[:, :, ::-1],
                         "rd": rd, "bbox": bbox,
@@ -256,9 +260,14 @@ def parse(
             np.rot90(pq["crop"], 2) if box.flip_deg else pq["crop"]
             for pq, box in zip(page_quads, boxes)
         ]
-        classifier_crops: list[tuple[np.ndarray, np.ndarray]] = [
-            (pq["crop"], recog_crop) for pq, recog_crop in zip(page_quads, recog_crops)
-        ]
+        # classifier_crops/ocr_crops (below) are debug-only -- read back only
+        # via debug_out["classifier_crops"]/["ocr_crops"] at the very end,
+        # same as cluster_detections -- so only accumulate them when a caller
+        # actually asked for debug output.
+        classifier_crops: list[tuple[np.ndarray, np.ndarray]] = (
+            [(pq["crop"], recog_crop) for pq, recog_crop in zip(page_quads, recog_crops)]
+            if keep_cluster_detections else []
+        )
 
         retry_counts: list = [0 if box.text else None for box in boxes]
         retry_extra_degs: list = [None] * len(boxes)
@@ -282,7 +291,8 @@ def parse(
                 retry_crops, _recognize_crops_raw_job, rec_backend.recognize_crops_raw,
             )
             for i, rbox, rcrop in zip(blank_idx, retry_boxes, retry_crops):
-                classifier_crops.append((page_quads[i]["crop"], rcrop))
+                if keep_cluster_detections:
+                    classifier_crops.append((page_quads[i]["crop"], rcrop))
                 if rbox.text:
                     boxes[i] = rbox
                     recog_crops[i] = rcrop
@@ -297,7 +307,8 @@ def parse(
     for pq, box, recog_crop, flip_a, retry_n, retry_extra in zip(
         page_quads, boxes, recog_crops, flip_angle_degs, retry_counts, retry_extra_degs,
     ):
-        ocr_crops.append((recog_crop, box.text))
+        if keep_cluster_detections:
+            ocr_crops.append((recog_crop, box.text))
         rd, bbox = pq["rd"], pq["bbox"]
         best_angle = None
         if box.text:

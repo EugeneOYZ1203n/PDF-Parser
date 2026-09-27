@@ -398,7 +398,8 @@ class RotationDebug:
     `minarea_mask` are the pre-rotation axis-aligned crop and the two ink
     masks Hough/minAreaRect actually ran on -- kept only for debug-image
     rendering (`scripts/debug_image_savers.py`), never consumed by the
-    pipeline itself. `flip_angle_deg`/`retry_count`/`best_angle_deg` are
+    pipeline itself, and populated only when `hough_deskew` is called with
+    `keep_debug=True` (`None` otherwise -- see that function). `flip_angle_deg`/`retry_count`/`best_angle_deg` are
     filled in by `parse.py` after recognition (and any blank-retry passes)
     runs, not by `hough_deskew` itself -- see `parse.py`'s per-quad loop."""
 
@@ -413,7 +414,9 @@ class RotationDebug:
     best_angle_deg: "float | None" = None
 
 
-def hough_deskew(bgr: np.ndarray, quad: np.ndarray) -> "tuple[np.ndarray, RotationDebug]":
+def hough_deskew(
+    bgr: np.ndarray, quad: np.ndarray, *, keep_debug: bool = False,
+) -> "tuple[np.ndarray, RotationDebug]":
     """Builds the axis-aligned crop for `quad` (`_axis_aligned_crop`), then
     rotates it by the raster-refined combined angle (a Hough-line reading
     and a `cv2.minAreaRect` reading, each mod 90, circular-averaged and
@@ -422,7 +425,18 @@ def hough_deskew(bgr: np.ndarray, quad: np.ndarray) -> "tuple[np.ndarray, Rotati
     0/180 classifier then resolves the final flip on (see `parse.py`).
     Replaces the old `_rotate_crop` perspective-warp approach (and the quad's
     own corner-geometry angle, dropped for being too inaccurate) entirely:
-    this crop's rotation comes solely from `_combined_rotation_deg`."""
+    this crop's rotation comes solely from `_combined_rotation_deg`.
+
+    `keep_debug` controls only whether the pre-rotation crop and the two ink
+    masks are *retained* on the returned `RotationDebug` (`base_crop`/
+    `dilated_ink_mask`/`minarea_mask` -- `None` otherwise, the default): they
+    are always computed either way, since the angles depend on them, but a
+    caller processing a whole page's worth of quads (`parse.py`) would
+    otherwise hold every one of these extra full-size arrays alive for the
+    rest of its OCR pass even though nothing but
+    `scripts/debug_image_savers.py`'s debug-image dumpers ever reads them.
+    `parse.py` passes `keep_debug=True` only when a caller actually asked for
+    debug output (`debug_out is not None`)."""
     base = _axis_aligned_crop(bgr, quad)
     gray = _grayscale(base)
     hough_mask = _hough_ink_mask(gray)
@@ -438,7 +452,9 @@ def hough_deskew(bgr: np.ndarray, quad: np.ndarray) -> "tuple[np.ndarray, Rotati
         ).astype(np.uint8)
     return rotated, RotationDebug(
         hough_angle_deg=hough_angle, minarea_angle_deg=minarea_angle, combined_angle_deg=combined,
-        base_crop=base, dilated_ink_mask=hough_mask, minarea_mask=minarea_mask,
+        base_crop=base if keep_debug else None,
+        dilated_ink_mask=hough_mask if keep_debug else None,
+        minarea_mask=minarea_mask if keep_debug else None,
     )
 
 
