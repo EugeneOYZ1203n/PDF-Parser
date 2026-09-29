@@ -1,9 +1,8 @@
 """Step 10 (debug): compare the traced vectors back against the ink they
 were traced from, pixel by pixel.
 
-`diff_codes` rasterizes a component's segments/arcs at their measured
-widths (the same `render_geometry` the tracer's own remainder step uses)
-and compares them with that component's binarized, text-removed ink, each
+`diff_codes` rasterizes a component's segments at their measured widths
+(`render_geometry`) and compares them with that component's binarized, text-removed ink, each
 side dilated by `tol_px` so a 1-2 px width/position slop isn't flagged:
 
     0  background        (neither)
@@ -20,8 +19,6 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from rastervec.P2_Raster_To_Vec.Junction.junction_test.pipeline import render_geometry
-
 BACKGROUND, MATCHED, MISSED, SPURIOUS = 0, 1, 2, 3
 
 _PALETTE = np.array([
@@ -32,10 +29,20 @@ _PALETTE = np.array([
 ], dtype=np.uint8)
 
 
-def diff_codes(ink: np.ndarray, segments, arcs, tol_px: int) -> "tuple[np.ndarray, np.ndarray]":
+def render_geometry(shape: tuple[int, int], segments) -> np.ndarray:
+    """Segments drawn at their own (rounded) widths onto a bool canvas."""
+    canvas = np.zeros(shape[:2], np.uint8)
+    for s in segments:
+        p0 = (int(round(s.p0[0])), int(round(s.p0[1])))
+        p1 = (int(round(s.p1[0])), int(round(s.p1[1])))
+        cv2.line(canvas, p0, p1, 255, max(1, int(round(s.width))))
+    return canvas > 0
+
+
+def diff_codes(ink: np.ndarray, segments, tol_px: int) -> "tuple[np.ndarray, np.ndarray]":
     """`(codes uint8, rendered bool)` in `ink`'s own pixel frame."""
     ink = np.asarray(ink, dtype=bool)
-    rendered = render_geometry(ink.shape, segments, arcs, None)
+    rendered = render_geometry(ink.shape, segments)
     if tol_px > 0:
         k = np.ones((2 * tol_px + 1, 2 * tol_px + 1), np.uint8)
         rendered_near = cv2.dilate(rendered.astype(np.uint8), k) > 0

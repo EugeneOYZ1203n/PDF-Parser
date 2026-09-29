@@ -365,12 +365,20 @@ generic parallel-pool mechanics), never phase-specific business logic.
     (`source="ocr"`, `color` = ink centroid). **(4)** `enhance.py` — CLAHE (2.0, 8×8) + unsharp
     mask (σ 1, amount 1.5). **(5)** per ink color layer, `components.py::iter_layer_components`
     (a generator — one crop alive at a time) splits the layer into components at
-    `COMPONENT_TOLERANCE_PT` (10 pt) and each is traced by the vendored classical
-    `junction_test.pipeline.run` (from branch `junction-classification`, Dosch et al.-style:
-    binarize → thick/thin → skeletonize+DT → graph → polygon approx → arcs → dashed → regularize →
-    remainder → staircase/symbols) at **native resolution** (`Params.max_work_px=None`; the
-    Fletcher & Kasturi text/graphics separation + dashed reclaim were **removed** — they dropped
-    isolated stair treads/ticks). Vectors carry their layer's color. Pixel → page mapping goes
+    `COMPONENT_TOLERANCE_PT` (10 pt) and each is traced by `junction_test.pipeline.run`
+    at **native resolution** (no downscale): `binarize` (Otsu | gray<245, specks removed by
+    connected-component area — *not* a 2×2 open, which erased 1-px lines) → `skeletonize` +
+    distance transform → `skeleton_graph.build_graph` (chain walk + barb pruning) →
+    `simplify.approximate_rdp` per chain (closed loops re-anchored at their farthest-from-
+    centroid point first) → `regularize` (cKDTree: endpoint snap, min length, isolated-spur drop,
+    collinear merge — the original spike's merge compared both headings *away* from the shared
+    point, so it never merged real straight continuations; fixed). Width = `2·median(DT) − 1`.
+    Output is straight segments only. The vendored spike (branch `junction-classification`,
+    Dosch et al. 2000) originally also had F&K text/graphics separation, dashed reclaim,
+    thick/thin, junction repair, LSD/Hough alternatives, Rosin-West + arc fitting, dashed-line /
+    staircase / symbol recognition, remainder extraction and junction classification — all
+    **removed** (none reached the output, or they dropped real geometry). Vectors carry their
+    layer's color. Pixel → page mapping goes
     through `Image.transform` (unit square → page), falling back to a bbox fill. **This module uses
     `cv2`** — there is no repo-wide "no cv2" rule. Debug (`render_debug` in `P2_RENDER_DEBUG` +
     streaming `on_debug_layer`, same helpers): full-resolution PNG layers embedded in page PDFs

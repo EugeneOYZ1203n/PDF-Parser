@@ -9,9 +9,11 @@ over goes through, in order,
                            background color (`text_removal.py`)
   4. enhancement           CLAHE + unsharp mask (`enhance.py`)
   5. tracing               per ink color layer, per 10 pt-tolerance spatial
-                           component, one at a time (`components.py`), the
-                           classical `junction_test.pipeline.run` at native
-                           resolution
+                           component, one at a time (`components.py`),
+                           `junction_test.pipeline.run` at native resolution:
+                           binarize -> skeleton + distance transform ->
+                           chains (barb pruning) -> Douglas-Peucker ->
+                           regularize; output is straight segments only
   6. diff (debug only)     traced vectors rasterized and compared back
                            against their own ink (`diff.py`)
 
@@ -49,7 +51,7 @@ from rastervec.P2_Raster_To_Vec.Junction.components import iter_layer_components
 from rastervec.P2_Raster_To_Vec.Junction.config import COMPONENT_TOLERANCE_PT, DIFF_TOLERANCE_PX
 from rastervec.P2_Raster_To_Vec.Junction.enhance import enhance, to_gray
 from rastervec.P2_Raster_To_Vec.Junction.junction_test.pipeline import Params, run
-from rastervec.P2_Raster_To_Vec.Junction.junction_test.types_ import Arc, Segment
+from rastervec.P2_Raster_To_Vec.Junction.junction_test.types_ import Segment
 from rastervec.P2_Raster_To_Vec.Junction.text_ocr import run_ocr
 from rastervec.P2_Raster_To_Vec.Junction.text_removal import erase_text
 
@@ -110,7 +112,7 @@ class _PageState:
     seqno: int = 0
     boxes: dict = field(default_factory=lambda: {
         "tile": [], "tile_detect": [], "merged": [], "refined_passed": [], "refined_failed": [],
-        "component": [], "chain": [], "junction": [], "segment": [], "arc": [],
+        "component": [], "chain": [], "segment": [],
     })
 
     def next_seqno(self) -> int:
@@ -221,29 +223,16 @@ def _process_image(
         layer_codes = np.zeros((h, w), dtype=np.uint8) if sink.active else None
         for comp in iter_layer_components(layers.labels, enhanced, layer, tol_px):
             result = run(comp.gray, params)
-            rh, rw = result.gray.shape[:2]
-            sx = comp.gray.shape[1] / rw if rw else 1.0
-            sy = comp.gray.shape[0] / rh if rh else 1.0
 
-            def mapper(pt, _x0=comp.x0, _y0=comp.y0, _sx=sx, _sy=sy):
-                return to_page((pt[0] * _sx + _x0, pt[1] * _sy + _y0))
+            def mapper(pt, _x0=comp.x0, _y0=comp.y0):
+                return to_page((pt[0] + _x0, pt[1] + _y0))
 
             for seg in result.segments:
                 state.vectors.append(_segment_to_vector(seg, mapper, meta.index, state.next_seqno(), color))
-            for arc in result.arcs:
-                state.vectors.append(_arc_to_vector(arc, mapper, meta.index, state.next_seqno(), color))
             _accumulate_trace_boxes(state.boxes, result, mapper, (comp.x0, comp.y0), comp.gray.shape, to_page)
 
             if sink.active:
-                codes, rendered = diff_mod.diff_codes(
-                    result.ink, result.segments, result.arcs, DIFF_TOLERANCE_PX,
-                )
-                if (rh, rw) != comp.gray.shape[:2]:  # only with an opt-in max_work_px
-                    import cv2
-
-                    size = (comp.gray.shape[1], comp.gray.shape[0])
-                    codes = cv2.resize(codes, size, interpolation=cv2.INTER_NEAREST)
-                    rendered = cv2.resize(rendered.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST) > 0
+                codes, rendered = diff_mod.diff_codes(result.ink, result.segments, DIFF_TOLERANCE_PX)
                 diff_mod.paste_codes(layer_codes, codes, comp.x0, comp.y0)
                 diff_mod.paste_codes(total_codes, codes, comp.x0, comp.y0)
                 region = rendered_canvas[comp.y0:comp.y0 + rendered.shape[0], comp.x0:comp.x0 + rendered.shape[1]]
@@ -362,17 +351,6 @@ def _segment_to_vector(seg: Segment, to_page: Mapper, page_index: int, seqno: in
     )
 
 
-def _arc_to_vector(arc: Arc, to_page: Mapper, page_index: int, seqno: int, color) -> Vector:
-    points = [to_page(p) for p in arc.polyline] or [to_page(arc.center)]
-    items = [("l", points[i], points[i + 1]) for i in range(len(points) - 1)]
-    if not items:
-        items = [("l", points[0], points[0])]
-    return Vector(
-        type="s", items=items, width=arc.width, rect=_bbox_of(points),
-        **_base_vector_kwargs(page_index, seqno, color),
-    )
-
-
 def _accumulate_trace_boxes(boxes: dict, result, mapper: Mapper, offset, crop_shape, to_page: Mapper) -> None:
     """Only cheap page-space bbox tuples -- never `result`'s mask arrays."""
     x0, y0 = offset
@@ -381,13 +359,8 @@ def _accumulate_trace_boxes(boxes: dict, result, mapper: Mapper, offset, crop_sh
     for chain in result.graph.chains:
         if chain:
             boxes["chain"].append(_bbox_of([mapper(p) for p in chain]))
-    for junction in result.junctions:
-        cx, cy = mapper(junction.xy)
-        boxes["junction"].append((cx - 2.0, cy - 2.0, cx + 2.0, cy + 2.0))
     for seg in result.segments:
         boxes["segment"].append(_bbox_of([mapper(seg.p0), mapper(seg.p1)]))
-    for arc in result.arcs:
-        boxes["arc"].append(_bbox_of([mapper(p) for p in arc.polyline] or [mapper(arc.center)]))
 
 
 # ---------------------------------------------------------------------------
@@ -406,9 +379,7 @@ _C_OCR_PASS = "#16a34a"
 _C_OCR_FAIL = "#9333ea"
 _C_COMPONENT = "#2563eb"
 _C_GRAPH_CHAIN = "#0d9488"
-_C_JUNCTION = "#dc2626"
 _C_SEGMENT = "#059669"
-_C_ARC = "#c026d3"
 
 
 def _hex_rgb(h: str) -> tuple[float, float, float]:
@@ -498,9 +469,7 @@ def _page_layers(page_meta, raster_layers: "list[DebugLayer]", state: _PageState
         )),
         _boxes_layer(page_meta, "components", "component bbox", _C_COMPONENT, bx["component"]),
         _boxes_layer(page_meta, "graph_build", "chain bbox", _C_GRAPH_CHAIN, bx["chain"]),
-        _boxes_layer(page_meta, "graph_build", "junction", _C_JUNCTION, bx["junction"]),
         _boxes_layer(page_meta, "polyline_fit", "segment bbox", _C_SEGMENT, bx["segment"]),
-        _boxes_layer(page_meta, "arc_detect", "arc bbox", _C_ARC, bx["arc"]),
         ("final_vectors", "vectors", _C_SEGMENT, render_vectors_pdf(
             page_meta, state.vectors, color_of=lambda v: tuple(v.color or (0, 0, 0)),
         )),
