@@ -1,6 +1,13 @@
 """The classical raster->vector pipeline (Dosch 2000 Sec 2-3, no 3D).
 
 run(gray, params) -> PipelineResult  keeps every intermediate for the notebook.
+
+Text is no longer separated here: the Fletcher & Kasturi connected-component
+text/graphics split (and the dashed-dash reclaim that undid its worst
+mistakes) was removed -- it silently discarded every small compact blob,
+including isolated stair treads, ticks and dots. Text is now OCR'd and
+erased *before* this runs (see `Junction/adapter.py`), so every ink pixel
+handed to `run` is traced.
 """
 from __future__ import annotations
 
@@ -12,25 +19,20 @@ import numpy as np
 from skimage.morphology import medial_axis, reconstruction, skeletonize
 
 from . import dashed, polyapprox, staircase, symbols
-from .geom import angle_gap, classify_junction, dedup_points, dist, heading_deg
+from .geom import angle_gap, classify_junction, dist, heading_deg
 from .skeleton_graph import build_graph
 from .types_ import Arc, Graph, Junction, PipelineResult, Point, Segment, StaircaseRegion, SymbolInstance
 
 
 @dataclass
 class Params:
-    # working resolution: downscale so the longer side <= this before analysis
-    # (the pure-python skeleton graph is O(pixels); large scans are otherwise slow)
-    max_work_px: int = 1600
+    # working resolution: if set, downscale so the longer side <= this before
+    # analysis. Off by default -- fine detail (stair treads, thin hatching)
+    # needs native resolution; `Junction/components.py` keeps the per-call
+    # size down instead by tracing one spatial component at a time.
+    max_work_px: int | None = None
     # binarisation
     soft_ink_thresh: int = 245
-    # text / graphics separation (Fletcher & Kasturi)
-    text_max_dim: int = 34
-    text_min_dim: int = 3
-    text_min_fill: float = 0.18
-    text_max_fill: float = 0.98
-    text_max_aspect: float = 8.0
-    run_ocr: bool = False
     # thick / thin
     thick_min_px: int | None = None      # None -> auto from distance transform
     # centerline / primitive extraction (JUNCTION_ABLATION.md Sec 2 "S")
@@ -87,76 +89,6 @@ def binarize(gray: np.ndarray, p: Params) -> np.ndarray:
     ink = cv2.bitwise_or(otsu, soft)
     ink = cv2.morphologyEx(ink, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
     return ink > 0
-
-
-def separate_text_graphics(ink: np.ndarray, p: Params) -> tuple[np.ndarray, np.ndarray]:
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(ink.astype(np.uint8), 8)
-    text = np.zeros_like(ink)
-    for i in range(1, n):
-        x, y, w, h, area = stats[i]
-        long_dim = max(w, h)
-        short_dim = max(min(w, h), 1)
-        fill = area / float(w * h)
-        aspect = long_dim / float(short_dim)
-        if (
-            p.text_min_dim <= long_dim <= p.text_max_dim
-            and short_dim >= 1
-            and p.text_min_fill <= fill <= p.text_max_fill
-            and aspect <= p.text_max_aspect
-        ):
-            text |= labels == i
-    graphics = ink & ~text
-    return text, graphics
-
-
-def reclaim_dashed_from_text(
-    text_mask: np.ndarray, graphics_mask: np.ndarray, p: Params
-) -> tuple[np.ndarray, np.ndarray, list[Segment]]:
-    """Dosch 2000 Sec 3.1 note: Fletcher & Kasturi dumps dashed-line dashes into
-    the text layer. Recover them: treat small text CCs as proto-segments, run the
-    Dov Dori run-grower, and move any CC that lands in a >=DASH_MIN_COUNT
-    collinear evenly-spaced run back into graphics (emitting one dashed Segment)."""
-    n, labels, stats, cents = cv2.connectedComponentsWithStats(text_mask.astype(np.uint8), 8)
-    protos: list[Segment] = []
-    proto_labels: list[int] = []
-    small = [i for i in range(1, n) if max(stats[i][2], stats[i][3]) <= p.dash_max_len]
-    if len(small) > 400:
-        return text_mask, graphics_mask, []   # text-dense page -> skip (see below)
-    for i in range(1, n):
-        x, y, w, h, area = stats[i]
-        if max(w, h) > p.dash_max_len or area < 2:
-            continue
-        cx, cy = cents[i]
-        axis = np.array([1.0, 0.0]) if w >= h else np.array([0.0, 1.0])
-        half = max(w, h) / 2.0
-        protos.append(Segment(p0=(cx - axis[0] * half, cy - axis[1] * half),
-                              p1=(cx + axis[0] * half, cy + axis[1] * half),
-                              width=float(min(w, h) or 1)))
-        proto_labels.append(i)
-
-    if len(protos) < p.dash_min_count:
-        return text_mask, graphics_mask, []
-
-    collapsed = dashed.detect(
-        protos, dash_max_len=p.dash_max_len, dash_max_gap=p.dash_max_gap,
-        dash_min_count=p.dash_min_count,
-    )
-    dashed_segs = [s for s in collapsed if s.dashed]
-    if not dashed_segs:
-        return text_mask, graphics_mask, []
-
-    # which proto CCs were consumed into a dashed run?
-    from .geom import point_to_segment_dist
-    tm = text_mask.copy()
-    gm = graphics_mask.copy()
-    for ds in dashed_segs:
-        for proto, lab in zip(protos, proto_labels):
-            mid = ((proto.p0[0] + proto.p1[0]) / 2, (proto.p0[1] + proto.p1[1]) / 2)
-            if point_to_segment_dist(mid, ds.p0, ds.p1) <= 4.0:
-                comp = labels == lab
-                gm |= comp
-                tm &= ~comp
-    return tm, gm, dashed_segs
 
 
 def thick_thin(graphics: np.ndarray, p: Params) -> tuple[np.ndarray, np.ndarray, int]:
@@ -320,56 +252,39 @@ def _fraction_in_mask(chain: list[Point], mask: np.ndarray) -> float:
 def regularize(segments: list[Segment], p: Params) -> tuple[list[Segment], list[Junction]]:
     if not segments:
         return [], []
+    # Every neighbour query below goes through a cKDTree: at native
+    # resolution one component can hold thousands of segments, and the
+    # original all-pairs loops (O(n^2) snapping/spur checks, an O(n^3)
+    # restart-after-every-merge collinear merge) took minutes per page.
+    from scipy.spatial import cKDTree
+
     # snap endpoints
     endpoints = [ep for s in segments for ep in (s.p0, s.p1)]
-    snapped = dedup_points(endpoints, p.snap_px)
+    snapped = _dedup_points_kd(endpoints, p.snap_px)
+    snap_tree = cKDTree(np.asarray(snapped, float))
 
     def nearest(pt):
-        d = [dist(pt, q) for q in snapped]
-        return snapped[int(np.argmin(d))]
+        return snapped[int(snap_tree.query(pt)[1])]
 
     segs = [Segment(nearest(s.p0), nearest(s.p1), s.width, s.thick, s.dashed) for s in segments]
     segs = [s for s in segs if dist(s.p0, s.p1) >= p.min_segment_px]
 
     # drop short isolated noise spurs: a non-dashed segment shorter than
     # barb_min_px with neither endpoint shared by another segment
-    def _shared_end(pt, exclude):
-        return any(
-            o is not exclude and (dist(pt, o.p0) <= p.snap_px or dist(pt, o.p1) <= p.snap_px)
-            for o in segs
-        )
+    if segs:
+        ep_tree = cKDTree(np.asarray([ep for s in segs for ep in (s.p0, s.p1)], float))
 
-    segs = [
-        s for s in segs
-        if s.dashed
-        or dist(s.p0, s.p1) >= p.barb_min_px
-        or _shared_end(s.p0, s) or _shared_end(s.p1, s)
-    ]
+        def _shared_end(pt, idx):
+            return any(n // 2 != idx for n in ep_tree.query_ball_point(pt, p.snap_px))
 
-    # merge near-collinear pairs sharing an endpoint
-    merged = True
-    while merged:
-        merged = False
-        for i in range(len(segs)):
-            for j in range(i + 1, len(segs)):
-                a, b = segs[i], segs[j]
-                if a.dashed != b.dashed:
-                    continue
-                shared = _shared_point(a, b, p.snap_px)
-                if shared is None:
-                    continue
-                ha = heading_deg(*_oriented(a, shared))
-                hb = heading_deg(*_oriented(b, shared, away=True))
-                if angle_gap(ha, hb, 360.0) <= p.collinear_deg:
-                    pa = a.p1 if _close(a.p0, shared, p.snap_px) else a.p0
-                    pb = b.p1 if _close(b.p0, shared, p.snap_px) else b.p0
-                    segs[i] = Segment(pa, pb, (a.width + b.width) / 2,
-                                      a.thick or b.thick, a.dashed)
-                    segs.pop(j)
-                    merged = True
-                    break
-            if merged:
-                break
+        segs = [
+            s for idx, s in enumerate(segs)
+            if s.dashed
+            or dist(s.p0, s.p1) >= p.barb_min_px
+            or _shared_end(s.p0, idx) or _shared_end(s.p1, idx)
+        ]
+
+    segs = _merge_collinear(segs, p)
 
     # junctions = snapped points where >=2 non-collinear segment ends meet
     incidence: dict[Point, list[float]] = {}
@@ -390,6 +305,81 @@ def regularize(segments: list[Segment], p: Params) -> tuple[list[Segment], list[
                 arm_angles=sorted(float(h) % 360.0 for h in headings),
             ))
     return segs, junctions
+
+
+def _dedup_points_kd(points: list[Point], tol: float) -> list[Point]:
+    """`geom.dedup_points` (greedy: each unused point in order absorbs every
+    still-unused point within `tol`, cluster -> its mean), with the
+    neighbour scan done by a cKDTree instead of all pairs. Same result."""
+    from scipy.spatial import cKDTree
+
+    if not points:
+        return []
+    arr = np.asarray(points, float)
+    tree = cKDTree(arr)
+    used = np.zeros(len(points), dtype=bool)
+    out: list[Point] = []
+    for i in range(len(points)):
+        if used[i]:
+            continue
+        members = [j for j in tree.query_ball_point(arr[i], tol) if not used[j]]
+        used[members] = True
+        c = arr[members].mean(axis=0)
+        out.append((float(c[0]), float(c[1])))
+    return out
+
+
+def _try_merge(a: Segment, b: Segment, p: Params) -> "Segment | None":
+    """The original pairwise collinear-merge rule for one (a, b) pair."""
+    if a.dashed != b.dashed:
+        return None
+    shared = _shared_point(a, b, p.snap_px)
+    if shared is None:
+        return None
+    ha = heading_deg(*_oriented(a, shared))
+    hb = heading_deg(*_oriented(b, shared, away=True))
+    if angle_gap(ha, hb, 360.0) > p.collinear_deg:
+        return None
+    pa = a.p1 if _close(a.p0, shared, p.snap_px) else a.p0
+    pb = b.p1 if _close(b.p0, shared, p.snap_px) else b.p0
+    return Segment(pa, pb, (a.width + b.width) / 2, a.thick or b.thick, a.dashed)
+
+
+def _merge_collinear(segs: list[Segment], p: Params) -> list[Segment]:
+    """Merge near-collinear pairs sharing an endpoint until none remain.
+    Pass-based: each pass indexes all endpoints in a cKDTree and merges
+    many disjoint pairs (lowest index first, each segment at most once per
+    pass), instead of the original restart-from-scratch after every single
+    merge."""
+    from scipy.spatial import cKDTree
+
+    segs = list(segs)
+    while len(segs) > 1:
+        tree = cKDTree(np.asarray([ep for s in segs for ep in (s.p0, s.p1)], float))
+        touched = [False] * len(segs)
+        alive = [True] * len(segs)
+        merged_any = False
+        for i in range(len(segs)):
+            if touched[i] or not alive[i]:
+                continue
+            a = segs[i]
+            cands = sorted({
+                n // 2 for ep in (a.p0, a.p1) for n in tree.query_ball_point(ep, p.snap_px)
+            })
+            for j in cands:
+                if j <= i or touched[j] or not alive[j]:
+                    continue
+                m = _try_merge(a, segs[j], p)
+                if m is not None:
+                    segs[i] = m
+                    alive[j] = False
+                    touched[i] = touched[j] = True
+                    merged_any = True
+                    break
+        segs = [s for s, keep in zip(segs, alive) if keep]
+        if not merged_any:
+            break
+    return segs
 
 
 def _close(a, b, tol):
@@ -452,23 +442,6 @@ def extract_remainder(ink, segments, arcs, p: Params) -> np.ndarray:
     return ink & ~(covered > 0)
 
 
-def ocr_text_boxes(gray: np.ndarray, text_mask: np.ndarray) -> list[tuple[float, float, float, float]]:
-    """Optional: PaddleOCR box detection over the page (used to mask text)."""
-    try:
-        from rastervec.OCR.Paddle_OCR.render_ocr import RenderOCR  # type: ignore
-        from PIL import Image
-    except Exception:
-        return []
-    img = Image.fromarray(cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB))
-    det = RenderOCR().backend.detect(np.array(img))
-    out = []
-    for b in det.boxes:
-        xs = [c[0] for c in b.corners]
-        ys = [c[1] for c in b.corners]
-        out.append((min(xs), min(ys), max(xs), max(ys)))
-    return out
-
-
 # ----------------------------------------------------------------------- driver
 
 
@@ -487,10 +460,7 @@ def run(gray: np.ndarray, params: Params | None = None) -> PipelineResult:
         return r
 
     ink = _t("binarize", lambda: binarize(gray, p))
-    text_mask, graphics_mask = _t("text_graphics", lambda: separate_text_graphics(ink, p))
-    text_mask, graphics_mask, reclaimed_dashed = _t(
-        "reclaim_dashed", lambda: reclaim_dashed_from_text(text_mask, graphics_mask, p)
-    )
+    graphics_mask = ink
     thick_mask, thin_mask, _w = _t("thick_thin", lambda: thick_thin(graphics_mask, p))
     skeleton, dist_map = _t("skeleton", lambda: skeleton_and_dt(graphics_mask, p.skeleton_method))
     if p.junction_repair:
@@ -518,20 +488,14 @@ def run(gray: np.ndarray, params: Params | None = None) -> PipelineResult:
         dash_min_count=p.dash_min_count,
     ))
     segments, junctions = _t("regularize", lambda: regularize(segments, p))
-    if reclaimed_dashed:
-        existing = {(round(s.p0[0]), round(s.p0[1])) for s in segments if s.dashed}
-        for ds in reclaimed_dashed:
-            if (round(ds.p0[0]), round(ds.p0[1])) not in existing:
-                segments.append(ds)
     staircases = _t("staircases", lambda: detect_staircase_regions(segments, p))
     symbols_found = _t("symbols", lambda: recognize_symbols(segments, arcs, p))
     remainder = _t("remainder", lambda: extract_remainder(ink, segments, arcs, p))
-    ocr_boxes = ocr_text_boxes(gray, text_mask) if p.run_ocr else []
 
     return PipelineResult(
-        params=p, gray=gray, ink=ink, text_mask=text_mask, graphics_mask=graphics_mask,
+        params=p, gray=gray, ink=ink, graphics_mask=graphics_mask,
         thick_mask=thick_mask, thin_mask=thin_mask, skeleton=skeleton, dist_map=dist_map,
         graph=graph, polylines=polylines, segments=segments, arcs=arcs, junctions=junctions,
-        remainder=remainder, ocr_boxes=ocr_boxes, timings=t,
+        remainder=remainder, timings=t,
         staircases=staircases, symbols=symbols_found,
     )

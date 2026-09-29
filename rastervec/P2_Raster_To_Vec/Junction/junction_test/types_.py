@@ -104,7 +104,6 @@ class PipelineResult:
     params: "object"
     gray: np.ndarray
     ink: np.ndarray
-    text_mask: np.ndarray
     graphics_mask: np.ndarray
     thick_mask: np.ndarray
     thin_mask: np.ndarray
@@ -117,7 +116,6 @@ class PipelineResult:
     junctions: list[Junction]
     remainder: np.ndarray
     beziers: list[Bezier] = field(default_factory=list)
-    ocr_boxes: list[tuple[float, float, float, float]] = field(default_factory=list)
     timings: dict[str, float] = field(default_factory=dict)
     staircases: list[StaircaseRegion] = field(default_factory=list)
     symbols: list[SymbolInstance] = field(default_factory=list)

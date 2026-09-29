@@ -249,8 +249,10 @@ generic parallel-pool mechanics), never phase-specific business logic.
 - **`commons/`** — the shared foundation:
   - **`models/`** (`page.py`, `text.py`, `vector.py`, `segment.py`, `image.py`) — all shared
     dataclasses: `PageMeta`/`Page`, `Text`, `Vector` (one drawing-item primitive, replacing the
-    old `VectorPath`/`DrawingVector` split), `Segment`/`SegmentMeta`, `Image` (a raster image
-    handed from Phase 1 to a Phase 2 backend — `array`, `bbox` in page space, source metadata).
+    old `VectorPath`/`DrawingVector` split), `Segment`/`SegmentMeta`, `Image` (an embedded raster
+    image handed from Phase 1 to a Phase 2 backend — native-resolution `array`, `bbox` in page
+    space, `transform` = the placement's image matrix from `get_image_info`, mapping the image's
+    unit square into page space, so rotated/flipped placements map correctly).
   - **`output_types.py`** — pydantic DTOs (`TextDTO`, `VectorDTO`, `NativePDFElements`) mirroring
     what a raw PyMuPDF `get_text("words")` word / `get_drawings()` drawing look like, built from
     the dataclasses above — the serialization/export shape for external consumers.
@@ -333,39 +335,51 @@ generic parallel-pool mechanics), never phase-specific business logic.
     (formerly `Vector/vector.py::extract_paths`) — walks `page.fitz_page.get_drawings()`, one
     `Vector` per drawing item, tagged with `seq`/stroke/fill/width/dashes/layer. No
     classification here — that's entirely a P3 backend's job.
-  - **`image_extract.py`** — `extract_images(page) -> list[Image]`: the whole-page raster
-    (`page.get_pixmap` at a configured DPI) plus any embedded raster images
-    (`page.get_image_info(xrefs=True)`) — feeds Phase 2. The whole-page render composes
-    `page.fitz_page.derotation_matrix` with the zoom matrix before calling `get_pixmap` —
-    `get_pixmap()` always bakes the page's own `/Rotate` into what it renders regardless of the
-    `matrix` passed, so without counter-rotating first, a 90°/270° page's raster comes back in
-    rotated display space (dimensions swapped) while still tagged with the unrotated `Image.bbox`
-    every other Phase-1 output uses, corrupting anything downstream (e.g. `Junction`'s `to_page`
-    fraction-of-frame mapper) that trusts that bbox. Embedded images
-    (`page.get_image_info`/raw XObject pixmaps) were never subject to `/Rotate` in the first
-    place, so they need no such correction.
+  - **`image_extract.py`** — `extract_images(page) -> list[Image]`: **only real embedded raster
+    images** (`page.get_image_info(xrefs=True)` + the raw XObject pixmap, native resolution,
+    with its `transform`) — feeds Phase 2. There is deliberately **no whole-page render** any
+    more: re-rasterising a page's own native text/vector drawing made Phase 2 trace content
+    Phase 1/3 already own exactly, and on a benchmark `rasterised.pdf` page (one full-page
+    embedded image, `scripts/rasterize_pdf.py`) traced the same page twice. A pure vector PDF
+    hands Phase 2 no images; raster benchmarking goes through a rasterised PDF instead.
   - **`phase1.py`** — `read_and_extract(pdf_path, page_index) -> Phase1Result(page, texts,
     images, vectors)`, the one entrypoint `core.pipeline` calls.
 - **`P2_Raster_To_Vec/`** — pluggable raster→vector backends, selected by `p2=`:
   - **`Stub/stub.py`** — `extract(images, page) -> ([], [])`, a documented no-op. The default
     (`p2="Stub"`) — matches the old (pre-phase-split) pipeline's behaviour of never deriving
     vectors from raster content.
-  - **`Junction/`** — a ported classical (no-ML) raster→vector pipeline, vendored from branch
-    `junction-classification`'s `junction_test/` package (Dosch et al.-style: binarize →
-    text/graphics separation → dashed-line reclaim → thick/thin split → skeletonize+distance-
-    transform → graph build → polygon approx → arc detection → dashed-line detection → width
-    measurement → regularize → remainder extraction → staircase/symbol recognition). `adapter.py`
-    is the `Phase2Backend` entrypoint: runs `junction_test.pipeline.run(gray, params)` per
-    `Image`, maps its pixel-space `Segment`/`Arc` primitives into page-space `Vector`s via a
-    fraction-of-frame `to_page` mapper (dpi-agnostic, correct regardless of the pipeline's own
-    internal downscale ratio). Returns no `Text` — OCR text-box extraction inside `junction_test`
-    stays off (`Params(run_ocr=False)`); Phase 3 OCRs the merged vector pool for real. **This
-    module uses `cv2`** (ported as-is from `junction_test`) — there is no longer a repo-wide
-    "`rastervec/` never imports `cv2`" rule; other modules still don't need it, this one does.
-    `adapter.py::render_debug` (registered in `P2_RENDER_DEBUG`) renders the earliest
-    raster-processing stages coarsely (mask ink-bbox as a single box, since they're numpy masks
-    not vector geometry) and the later, genuinely vector-shaped stages (graph chains, junctions,
-    fitted segments/arcs) as their own bboxes.
+  - **`Junction/`** — raster→vector + raster OCR. `adapter.py` (the `Phase2Backend` entrypoint)
+    runs, per embedded `Image`: **(1)** `color_separation.py` — DBSCAN (scikit-learn) over the
+    distinct `COLOR_QUANT_LEVELS`-quantized colors weighted by pixel count, in HSV *cone* space
+    `(S·V·cosH, S·V·sinH, V)` (hue wraps; dark/unsaturated collapse onto the gray axis), plus a
+    weighted-Otsu V split of any cluster spanning > `VALUE_SPLIT_RANGE` (DBSCAN density-chains
+    ink↔paper through a blurred scan's gray ramp otherwise); noise → nearest centroid; background =
+    largest layer. **(2)** `text_ocr.py` — 960 px / 20 % overlapping tiles → PaddleOCR detect →
+    `merge_cross_tile_boxes` (union-find, *cross-tile only*, extreme x/y) → pad 1 (15 pt, P3's
+    render padding) + upscale to ≥100 px short side → detect again → `hough_deskew` (pad 2: 5 %
+    expand + 5 px border, P3's crop padding) → page-wide batched recognize + 90/180/270 blank
+    retry. Own `paddle_engine.py` copy (P2 may not import P3); `compute` (Pool 2) supported.
+    **(3)** `text_removal.py` — ink = most frequent non-background layer inside the refined quad;
+    erase only that layer's pixels in the pad-2 region (1 px dilate), background-colored, only
+    for non-blank recognitions — a differently-colored crossing line survives. Emits `Text`
+    (`source="ocr"`, `color` = ink centroid). **(4)** `enhance.py` — CLAHE (2.0, 8×8) + unsharp
+    mask (σ 1, amount 1.5). **(5)** per ink color layer, `components.py::iter_layer_components`
+    (a generator — one crop alive at a time) splits the layer into components at
+    `COMPONENT_TOLERANCE_PT` (10 pt) and each is traced by the vendored classical
+    `junction_test.pipeline.run` (from branch `junction-classification`, Dosch et al.-style:
+    binarize → thick/thin → skeletonize+DT → graph → polygon approx → arcs → dashed → regularize →
+    remainder → staircase/symbols) at **native resolution** (`Params.max_work_px=None`; the
+    Fletcher & Kasturi text/graphics separation + dashed reclaim were **removed** — they dropped
+    isolated stair treads/ticks). Vectors carry their layer's color. Pixel → page mapping goes
+    through `Image.transform` (unit square → page), falling back to a bbox fill. **This module uses
+    `cv2`** — there is no repo-wide "no cv2" rule. Debug (`render_debug` in `P2_RENDER_DEBUG` +
+    streaming `on_debug_layer`, same helpers): full-resolution PNG layers embedded in page PDFs
+    (`color_separation/clusters`, `text_removal/cleaned image`, `enhance/enhanced image`,
+    `vector_render/rendered vectors`, `vector_diff/total` + `vector_diff/layer #rrggbb` —
+    `diff.py`: red = ink with no vector within `DIFF_TOLERANCE_PX` (missed), blue = vector with no
+    ink (spurious), for future missed-line recovery) plus ocr/component/graph/segment box layers;
+    each (stage, label) appears once per page. `debug_out["diff_codes"]` keeps the raw uint8
+    code canvases. Tunables in `Junction/config.py`.
 - **`P3_Vector_Parsing/`** — pluggable vector-parsing/OCR backends, selected by `p3=`, each
   implementing `parse(vectors_p1, vectors_p2, page, **kwargs) -> (vectors, texts)`:
   - **`VectorClassification/`** — a reduced 2-step Vector Classification chain (down from the
@@ -435,9 +449,8 @@ generic parallel-pool mechanics), never phase-specific business logic.
   (2) a coordinate-space consistency backstop — every `Text`/`Vector` is supposed to stay in
   unrotated MediaBox space end-to-end (see "Coordinate spaces" above), so this logs a warning
   (never silently drops or reprojects) for any item whose bbox doesn't fit the page's own
-  unrotated `width`/`height`, the shape of bug that `P1_Reading_Native/image_extract.py`'s
-  whole-page raster had before it was fixed to counter-rotate via `derotation_matrix` (see that
-  module) — this phase exists to catch a future regression like that one at the seam instead of
+  unrotated `width`/`height`, the shape of bug Phase 1's since-removed whole-page raster once
+  had before it was fixed to counter-rotate via `derotation_matrix` — this phase exists to catch a future regression like that one at the seam instead of
   letting it silently reach final output.
 - **`rastervec/OCR/`** (top-level: `fast_detect.py`, `radon.py`, `Paddle_OCR/ocr_backend.py` +
   `render_ocr.py`) — **deprecated, but not dead**: each P3 backend under `P3_Vector_Parsing/`

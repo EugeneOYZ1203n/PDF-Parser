@@ -12,9 +12,9 @@ Two jobs:
   2. A coordinate-space consistency backstop: every `Text`/`Vector` in the
      pipeline is supposed to stay in unrotated MediaBox space end-to-end
      (`commons/models/__init__.py`'s documented contract). A P2/P3 backend
-     that leaks rotated-display-space geometry (the shape of bug fixed in
-     `P1_Reading_Native/image_extract.py::_render_whole_page` -- see that
-     module) produces a bbox that doesn't fit the page's own unrotated
+     that leaks rotated-display-space geometry (the shape of bug once fixed
+     in Phase 1's since-removed whole-page render, which forgot to
+     counter-rotate `get_pixmap()`'s baked-in `/Rotate`) produces a bbox that doesn't fit the page's own unrotated
      `width`/`height`, most obviously on a 90/270-degree page where a
      rotated-space bbox has its axes swapped. This phase logs (never
      silently drops or tries to guess-and-reproject) anything that doesn't

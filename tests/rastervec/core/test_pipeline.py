@@ -71,8 +71,8 @@ def test_run_pipeline_forwards_debug_out_only_when_verbose(
     assert quiet.extra == {}
 
     verbose = run_pipeline(path, 0, p2="FakeP2", p3="FakeP3", verbose=True)
-    # extract_images always returns at least the whole-page render.
-    assert verbose.extra["p2_debug"]["images_seen"] >= 1
+    # The synthetic page has no embedded images, so Phase 2 sees none.
+    assert verbose.extra["p2_debug"]["images_seen"] == 0
     assert "vectors_in" in verbose.extra["p3_debug"]
 
 
