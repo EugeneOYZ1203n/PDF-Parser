@@ -15,6 +15,7 @@ from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import (
     _hough_ink_mask,
     _minarea_angle_deg,
     _minarea_ink_mask,
+    _mod90_circular_distance,
     _to_signed_small_angle,
     hough_deskew,
 )
@@ -78,17 +79,46 @@ def test_combined_rotation_deg_falls_back_to_zero_when_both_are_none():
     assert _combined_rotation_deg(None, None) == pytest.approx(0.0)
 
 
-def test_combined_rotation_deg_uses_hough_alone_when_minarea_is_none():
-    assert _combined_rotation_deg(6.0, None) == pytest.approx(10.0)  # 6 snaps to 10
+def test_combined_rotation_deg_defaults_to_zero_when_minarea_is_none():
+    # A single uncorroborated reading is no longer trusted alone -- only
+    # having Hough (no minAreaRect to agree with) now defaults to 0, not the
+    # old single-reading fallback.
+    assert _combined_rotation_deg(6.0, None) == pytest.approx(0.0)
 
 
-def test_combined_rotation_deg_uses_minarea_alone_when_hough_is_none():
-    assert _combined_rotation_deg(None, 6.0) == pytest.approx(10.0)  # 6 snaps to 10
+def test_combined_rotation_deg_defaults_to_zero_when_hough_is_none():
+    assert _combined_rotation_deg(None, 6.0) == pytest.approx(0.0)
 
 
-def test_combined_rotation_deg_snaps_to_a_multiple_of_10():
-    combined = _combined_rotation_deg(6.0, 4.0)
+def test_combined_rotation_deg_defaults_to_zero_when_readings_disagree():
+    # 6.0 and 4.0 (mod 90) are 2.0 deg apart -- beyond
+    # ROTATION_AGREEMENT_TOLERANCE_DEG (1.0), so the correction is not
+    # trusted even though both readings are present.
+    assert _combined_rotation_deg(6.0, 4.0) == pytest.approx(0.0)
+
+
+def test_combined_rotation_deg_agrees_at_the_tolerance_boundary():
+    # Exactly 1.0 deg apart (mod 90) is still "agrees" -- the tolerance
+    # check is inclusive. Picked so the agreeing average (6.0) snaps to a
+    # distinctly non-zero 10.0, unlike the disagreement-default of 0.0, so
+    # this actually distinguishes "treated as agreeing" from "defaulted".
+    assert _combined_rotation_deg(5.5, 6.5) == pytest.approx(10.0)
+
+
+def test_combined_rotation_deg_defaults_to_zero_just_beyond_tolerance():
+    assert _combined_rotation_deg(5.5, 6.7) == pytest.approx(0.0)
+
+
+def test_combined_rotation_deg_snaps_to_a_multiple_of_10_when_readings_agree():
+    # 6.0 and 6.5 (mod 90) are 0.5 deg apart -- within tolerance.
+    combined = _combined_rotation_deg(6.0, 6.5)
     assert combined % 10.0 == pytest.approx(0.0)
+
+
+def test_mod90_circular_distance_wraps_around_the_0_90_boundary():
+    assert _mod90_circular_distance(89.0, 1.0) == pytest.approx(2.0)
+    assert _mod90_circular_distance(1.0, 3.0) == pytest.approx(2.0)
+    assert _mod90_circular_distance(10.0, 10.0) == pytest.approx(0.0)
 
 
 def _draw_line_mask(shape: "tuple[int, int]", angle_deg: float) -> np.ndarray:
@@ -153,12 +183,18 @@ def test_minarea_angle_deg_none_for_empty_mask():
     assert _minarea_angle_deg(np.zeros((20, 20), dtype=bool)) is None
 
 
-def test_hough_deskew_reads_a_tilted_line_close_to_its_known_angle():
+def test_hough_deskew_defaults_to_zero_when_estimators_disagree_beyond_tolerance():
     """A small white image with a single line tilted 8 degrees, cropped by
-    a perfectly axis-aligned quad -- so the whole correction should come
-    from Hough's and minAreaRect's own readings of the tilted content,
-    landing close to the known 8-degree tilt and snapping to a multiple of
-    10."""
+    a perfectly axis-aligned quad. Hough's own reading is quantized to
+    whole-degree bins (`_hough_angle_deg`'s `np.linspace(..., 180, ...)` --
+    1-degree steps) while minAreaRect's is continuous, so the two commonly
+    differ by more than `ROTATION_AGREEMENT_TOLERANCE_DEG` (1.0) even for a
+    perfectly clean synthetic tilt like this one -- the correction correctly
+    defaults to 0 rather than trusting either single reading alone (see
+    `_combined_rotation_deg`). Each individual reading is still close to the
+    known 8-degree tilt; see
+    `test_hough_deskew_applies_correction_when_estimators_agree` for a case
+    where the two do agree and a correction is actually applied."""
     size = 120
     base = np.ones((size, size), dtype=np.float64)
     rr, cc = line(size // 2, 10, size // 2, size - 10)
@@ -174,7 +210,54 @@ def test_hough_deskew_reads_a_tilted_line_close_to_its_known_angle():
     assert abs(debug.hough_angle_deg - 8.0) <= 2.5
     assert debug.minarea_angle_deg is not None
     assert abs(debug.minarea_angle_deg - 8.0) <= 2.5
-    assert debug.combined_angle_deg % 10.0 == pytest.approx(0.0)
+    assert debug.combined_angle_deg == pytest.approx(0.0)
+
+
+def test_hough_deskew_applies_correction_when_estimators_agree():
+    """A thicker, filled tilted block (closer to real ink than a 1px line)
+    at 20 degrees: both Hough and minAreaRect land close enough together
+    (within `ROTATION_AGREEMENT_TOLERANCE_DEG`) that the correction is
+    actually applied, recovering the known tilt exactly."""
+    size = 120
+    base = np.ones((size, size), dtype=np.float64)
+    base[size // 2 - 3 : size // 2 + 3, 10 : size - 10] = 0.0
+    tilted = sk_rotate(base, -20.0, resize=False, cval=1.0, order=1, preserve_range=True)
+    bgr = np.stack([tilted * 255.0] * 3, axis=-1).astype(np.uint8)
+
+    quad = np.array([(0.0, 0.0), (size - 1.0, 0.0), (size - 1.0, size - 1.0), (0.0, size - 1.0)])
+    crop, debug = hough_deskew(bgr, quad)
+
+    assert crop.shape[0] > 0 and crop.shape[1] > 0
+    assert debug.combined_angle_deg == pytest.approx(20.0)
+
+
+def test_hough_deskew_skips_estimation_when_rotation_not_allowed():
+    """`allow_rotation=False` (the caller's own gate, see `parse.py::
+    _quad_allows_rotation`) should skip the grayscale/ink-mask/Hough/
+    minAreaRect estimation entirely -- both angles stay `None`, the
+    correction is `0.0`, and the crop comes back unrotated, even for
+    content (this same tilted line) that would otherwise read a real
+    tilt."""
+    size = 120
+    base = np.ones((size, size), dtype=np.float64)
+    rr, cc = line(size // 2, 10, size // 2, size - 10)
+    base[rr, cc] = 0.0
+    tilted = sk_rotate(base, -8.0, resize=False, cval=1.0, order=1, preserve_range=True)
+    bgr = np.stack([tilted * 255.0] * 3, axis=-1).astype(np.uint8)
+
+    quad = np.array([(0.0, 0.0), (size - 1.0, 0.0), (size - 1.0, size - 1.0), (0.0, size - 1.0)])
+    crop, debug = hough_deskew(bgr, quad, keep_debug=True, allow_rotation=False)
+
+    assert crop.shape[0] > 0 and crop.shape[1] > 0
+    assert debug.hough_angle_deg is None
+    assert debug.minarea_angle_deg is None
+    assert debug.combined_angle_deg == pytest.approx(0.0)
+    # base_crop is still retained (it's just the axis-aligned crop, always
+    # built regardless of whether rotation was attempted) -- only the two
+    # ink masks are skipped, since they were never computed to begin with.
+    assert debug.base_crop is not None
+    assert debug.dilated_ink_mask is None
+    assert debug.minarea_mask is None
 
 
 def test_hough_deskew_falls_back_cleanly_on_blank_crop():

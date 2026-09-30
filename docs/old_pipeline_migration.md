@@ -44,12 +44,14 @@ GUI tools last (no automated tests, need manual verification).
 ### 1. `core/parallel/pool.py::warmup()` -- partially done
 
 The "iterate every registered P3 backend's own warmup classmethod unconditionally" option below
-has been implemented (`_warm_fast_detectors`/`_warm_paddle_engines`, one try/except per backend).
-It still ALSO warms the old, shared `OCR/fast_detect.FastDetector` and
-`OCR/Paddle_OCR/ocr_backend.PaddleRecBackend` unconditionally, though -- that part of this item is
-still open, since `pipelines/current.py` is still a genuine live consumer of both (see this file's
-own top-of-file note). Once nothing calls `rastervec.OCR.fast_detect`/
-`rastervec.OCR.Paddle_OCR.ocr_backend` from here, this consumer is fully migrated.
+has been implemented for `_warm_paddle_engines` (one try/except per backend). `_warm_fast_detectors`
+is now moot for this purpose -- no current P3 backend has its own FAST detector any more
+(`VectorClassification`'s FAST filtering stage, and its `fast_detect.py` copy, were removed
+entirely; `LegacyRecreation` never had one), so that function only warms the old, shared
+`OCR/fast_detect.FastDetector` unconditionally. That part of this item is still open, since
+`pipelines/current.py` is still a genuine live consumer of it (see this file's own top-of-file
+note). Once nothing calls `rastervec.OCR.fast_detect`/`rastervec.OCR.Paddle_OCR.ocr_backend` from
+here, this consumer is fully migrated.
 
 (Original two options, for reference:
 - Thread the run's `p2`/`p3` backend names into `warmup()` so it warms only the backend(s) that

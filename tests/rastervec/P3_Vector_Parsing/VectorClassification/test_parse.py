@@ -17,11 +17,15 @@ def test_parse_empty_input_returns_empty_output(page_meta):
     assert texts == []
 
 
-def test_parse_debug_out_has_fast_result_key(page_meta):
+def test_parse_debug_out_has_no_fast_keys(page_meta):
+    """FAST was removed entirely from this backend -- `debug_out` should
+    never contain `fast_result`/`fast_passed`/`fast_dropped` (a regression
+    guard against accidentally re-introducing them)."""
     debug_out: dict = {}
     vectorclassification.parse([], [], _page(page_meta), verbose=True, debug_out=debug_out)
-    assert debug_out["fast_result"] is not None
-    assert debug_out["fast_passed"] == []
+    assert "fast_result" not in debug_out
+    assert "fast_passed" not in debug_out
+    assert "fast_dropped" not in debug_out
     assert debug_out["texts"] == []
     assert debug_out["ocr_crops"] == []
     assert debug_out["classifier_crops"] == []
@@ -54,7 +58,7 @@ def test_parse_keeps_ocr_crop_for_blank_recognition(page_meta, vector, monkeypat
 
     debug_out: dict = {}
     drawing, texts = vectorclassification.parse(
-        [v], [], _page(page_meta), enable_fast=False, debug_out=debug_out,
+        [v], [], _page(page_meta), debug_out=debug_out,
     )
 
     assert texts == []  # a blank recognition never becomes a real Text
@@ -91,7 +95,7 @@ def test_parse_ocr_crop_reflects_post_flip_rotation(page_meta, vector, monkeypat
 
     debug_out: dict = {}
     vectorclassification.parse(
-        [v], [], _page(page_meta), enable_fast=False, debug_out=debug_out,
+        [v], [], _page(page_meta), debug_out=debug_out,
     )
 
     stored_crop = debug_out["ocr_crops"][0][0]
@@ -147,7 +151,7 @@ def test_parse_blank_recognition_recovers_via_retry_sweep(page_meta, vector, mon
 
     debug_out: dict = {}
     _drawing, texts = vectorclassification.parse(
-        [v], [], _page(page_meta), enable_fast=False, debug_out=debug_out,
+        [v], [], _page(page_meta), debug_out=debug_out,
     )
 
     assert raw_calls == [1]  # only the +90 pass ran -- success stopped the sweep
@@ -201,7 +205,7 @@ def test_parse_dispatches_detect_and_recognize_through_compute(page_meta, vector
 
     compute = _FakeComputePool()
     drawing, texts = vectorclassification.parse(
-        [v], [], _page(page_meta), enable_fast=False, compute=compute,
+        [v], [], _page(page_meta), compute=compute,
     )
 
     assert len(texts) == 1 and texts[0].text == "X"
@@ -275,31 +279,92 @@ def test_parse_renders_debug_layers_only_with_a_callback(page_meta, monkeypatch)
     assert calls == [1] and "debug_render" in steps
 
 
-def _heatmap_image_size(pdf_bytes: bytes) -> tuple[int, int]:
-    import pymupdf as fitz
-
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    try:
-        (img,) = doc[0].get_images()
-        info = doc.extract_image(img[0])
-        return info["width"], info["height"]
-    finally:
-        doc.close()
+def test_bbox_aspect_ratio_is_orientation_agnostic(vector):
+    wide = (0.0, 0.0, 30.0, 10.0)
+    tall = (0.0, 0.0, 10.0, 30.0)
+    assert vectorclassification._bbox_aspect_ratio(wide) == 3.0
+    assert vectorclassification._bbox_aspect_ratio(tall) == 3.0
 
 
-def test_fast_heatmap_embedded_at_heatmap_dpi(page_meta):
-    """FAST's 300 dpi page mask is area-averaged down to FAST_HEATMAP_DPI
-    before it's embedded -- the debug layer never carries a full-res PNG."""
-    meta = page_meta(width=612.0, height=792.0)
-    mask = np.zeros((3300, 2550), dtype=np.float32)
-    mask[1500:1800, 1000:1500] = 1.0
-    pdf = vectorclassification._render_fast_heatmap_pdf(meta, mask)
-    w, h = _heatmap_image_size(pdf)
-    assert abs(w - 850) <= 1 and abs(h - 1100) <= 1
+def test_bbox_aspect_ratio_zero_for_degenerate_bbox():
+    assert vectorclassification._bbox_aspect_ratio((0.0, 0.0, 0.0, 10.0)) == 0.0
+    assert vectorclassification._bbox_aspect_ratio((0.0, 0.0, 10.0, 0.0)) == 0.0
 
 
-def test_fast_heatmap_never_upscales_small_mask(page_meta):
-    meta = page_meta(width=612.0, height=792.0)
-    mask = np.zeros((110, 85), dtype=np.float32)
-    pdf = vectorclassification._render_fast_heatmap_pdf(meta, mask)
-    assert _heatmap_image_size(pdf) == (85, 110)
+def test_quad_allows_rotation_false_below_aspect_ratio_threshold(vector):
+    # A near-square bbox, even with several disjoint vectors under it.
+    bbox = (0.0, 0.0, 10.0, 9.0)
+    vectors = [
+        vector(kind="l", bbox=(0.0, 0.0, 2.0, 2.0), color=(0.0, 0.0, 0.0), seqno=1),
+        vector(kind="l", bbox=(8.0, 8.0, 10.0, 9.0), color=(0.0, 0.0, 0.0), seqno=2),
+    ]
+    assert vectorclassification._quad_allows_rotation(bbox, vectors) is False
+
+
+def test_quad_allows_rotation_false_for_single_connected_component(vector):
+    # Elongated bbox, but the two vectors overlap each other -> one component.
+    bbox = (0.0, 0.0, 30.0, 5.0)
+    vectors = [
+        vector(kind="l", bbox=(0.0, 0.0, 5.0, 5.0), color=(0.0, 0.0, 0.0), seqno=1),
+        vector(kind="l", bbox=(3.0, 0.0, 8.0, 5.0), color=(0.0, 0.0, 0.0), seqno=2),
+    ]
+    assert vectorclassification._quad_allows_rotation(bbox, vectors) is False
+
+
+def test_quad_allows_rotation_true_for_elongated_multi_component_quad(vector):
+    # Elongated bbox, two disjoint (non-overlapping) vectors under it.
+    bbox = (0.0, 0.0, 30.0, 5.0)
+    vectors = [
+        vector(kind="l", bbox=(0.0, 0.0, 5.0, 5.0), color=(0.0, 0.0, 0.0), seqno=1),
+        vector(kind="l", bbox=(20.0, 0.0, 25.0, 5.0), color=(0.0, 0.0, 0.0), seqno=2),
+    ]
+    assert vectorclassification._quad_allows_rotation(bbox, vectors) is True
+
+
+def test_drawing_extra_vectors_empty_inputs_return_empty():
+    assert vectorclassification._drawing_extra_vectors([], []) == []
+    assert vectorclassification._drawing_extra_vectors([], [(0.0, 0.0, 1.0, 1.0)]) == []
+
+
+def test_drawing_extra_vectors_excludes_vector_overlapping_accepted_box(vector):
+    v = vector(kind="l", bbox=(0.0, 0.0, 5.0, 5.0), color=(0.0, 0.0, 0.0), seqno=1)
+    accepted = [(0.0, 0.0, 5.0, 5.0)]
+    assert vectorclassification._drawing_extra_vectors([v], accepted) == []
+
+
+def test_drawing_extra_vectors_includes_vector_overlapping_only_rejected_box(vector):
+    # No accepted boxes at all -- a rejected/blank detection never appears in
+    # `accepted_boxes` to begin with, so this is indistinguishable from "no
+    # accepted box covers it".
+    v = vector(kind="l", bbox=(0.0, 0.0, 5.0, 5.0), color=(0.0, 0.0, 0.0), seqno=1)
+    assert vectorclassification._drawing_extra_vectors([v], []) == [v]
+
+
+def test_drawing_extra_vectors_includes_vector_not_overlapping_any_box(vector):
+    v = vector(kind="l", bbox=(0.0, 0.0, 5.0, 5.0), color=(0.0, 0.0, 0.0), seqno=1)
+    accepted = [(50.0, 50.0, 55.0, 55.0)]  # far away, no overlap
+    assert vectorclassification._drawing_extra_vectors([v], accepted) == [v]
+
+
+def test_drawing_extra_vectors_excludes_transitively_connected_chain(vector):
+    """`a` doesn't directly touch the accepted box, but `b` does, and `a`
+    overlaps `b` -- both should be excluded from drawing (transitivity),
+    not just `b`."""
+    a = vector(kind="l", bbox=(0.0, 0.0, 5.0, 5.0), color=(0.0, 0.0, 0.0), seqno=1)
+    b = vector(kind="l", bbox=(4.0, 0.0, 9.0, 5.0), color=(0.0, 0.0, 0.0), seqno=2)
+    accepted = [(8.0, 0.0, 12.0, 5.0)]  # touches b's bbox, not a's
+    assert vectorclassification._drawing_extra_vectors([a, b], accepted) == []
+
+
+def test_parse_ocr_rejected_cluster_ends_up_in_drawing(page_meta, vector, monkeypatch):
+    """With FAST removed, every classification cluster reaches OCR -- a
+    cluster whose detection comes back blank (or is never detected) must
+    now surface as `drawing` output instead of silently vanishing, since
+    that's FAST's former role, now decided downstream of OCR itself."""
+    v = vector(kind="l", bbox=(10.0, 10.0, 20.0, 20.0), color=(0.0, 0.0, 0.0), seqno=1)
+    monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: [])  # never detected
+
+    drawing, texts = vectorclassification.parse([v], [], _page(page_meta))
+
+    assert texts == []
+    assert drawing == [v]

@@ -1,10 +1,18 @@
 # Phase 3 `VectorClassification`: runtime optimizations, 2026-09
 
-**Status: implemented.** This document records a session-long runtime-optimization pass over
-`rastervec/P3_Vector_Parsing/VectorClassification/` (the classify → FAST-filter → OCR backend,
-now `core.registry.DEFAULT_P3`) — what was slow, why, and exactly what changed. It's a changelog,
-not a proposal: every item below has landed and is covered by the test suite
-(`tests/rastervec/P3_Vector_Parsing/VectorClassification/`).
+**Historical note (2026-09, later in the same month): the FAST filtering stage this document
+describes optimizing (`fast_filter.py`, `fast_detect.py`, item 6/7 below) has since been removed
+from this backend entirely** — every classification cluster now goes straight to OCR with no
+FAST gate, and a vector OCR rejects (or never detects) is folded into `drawing` output downstream
+instead (`parse.py::_drawing_extra_vectors`), replacing FAST's former role. The optimization work
+below is kept as a historical record of what was true at the time; it no longer describes the
+current backend.
+
+**Status: implemented (historical).** This document records a session-long runtime-optimization
+pass over `rastervec/P3_Vector_Parsing/VectorClassification/` (at the time, the classify →
+FAST-filter → OCR backend, now `core.registry.DEFAULT_P3`) — what was slow, why, and exactly what
+changed. It's a changelog, not a proposal: every item below had landed and was covered by the
+test suite at the time (`tests/rastervec/P3_Vector_Parsing/VectorClassification/`).
 
 The audit that produced this list started from a simple question — "where does this backend's
 time actually go, and is any of it wasted?" — and found two recurring patterns: the classify

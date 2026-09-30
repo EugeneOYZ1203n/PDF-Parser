@@ -17,10 +17,14 @@ import cv2
 import numpy as np
 from skimage.morphology import skeletonize
 
+from rastervec.commons.logging_setup import get_logger
+
 from .geom import angle_gap, dist, heading_deg
 from .simplify import approximate_rdp
 from .skeleton_graph import build_graph
 from .types_ import Graph, PipelineResult, Point, Segment
+
+_LOG = get_logger("P2.Junction.trace")
 
 
 @dataclass
@@ -249,11 +253,20 @@ def run(gray: np.ndarray, params: Params | None = None) -> PipelineResult:
         t[name] = time.perf_counter() - s
         return r
 
+    _LOG.debug("trace: %dx%d px crop", gray.shape[1], gray.shape[0])
     ink = _t("binarize", lambda: binarize(gray, p))
+    _LOG.debug("  binarize: %d ink px (%.4fs)", int(ink.sum()), t["binarize"])
     skeleton, dist_map = _t("skeleton", lambda: skeleton_and_dt(ink))
+    _LOG.debug("  skeleton: %d skeleton px (%.4fs)", int(skeleton.sum()), t["skeleton"])
     graph = _t("graph", lambda: build_graph(skeleton, p.barb_min_px))
+    _LOG.debug(
+        "  graph: %d node(s), %d chain(s) (%.4fs)",
+        len(graph.nodes), len(graph.chains), t["graph"],
+    )
     segments = _t("vectorize", lambda: vectorize(graph, dist_map, p))
+    _LOG.debug("  vectorize: %d segment(s) (%.4fs)", len(segments), t["vectorize"])
     segments = _t("regularize", lambda: regularize(segments, p))
+    _LOG.debug("  regularize: %d segment(s) (%.4fs)", len(segments), t["regularize"])
     return PipelineResult(
         params=p, ink=ink, skeleton=skeleton, dist_map=dist_map,
         graph=graph, segments=segments, timings=t,

@@ -1,8 +1,9 @@
 """Tunable thresholds for the VectorClassification P3 backend (a reduced
-2-step Vector_Classification chain + FAST filtering + PaddleOCR
-detect+recognize, page-wide batched). Self-contained -- not shared with
-LegacyRecreation's own config.py, per the phase-isolation rule (see
-CLAUDE.md's "sibling backends share zero code" rule)."""
+2-step Vector_Classification chain + PaddleOCR detect+recognize, page-wide
+batched -- there is no FAST filtering stage; every classification cluster
+goes straight to OCR). Self-contained -- not shared with LegacyRecreation's
+own config.py, per the phase-isolation rule (see CLAUDE.md's "sibling
+backends share zero code" rule)."""
 from __future__ import annotations
 
 # ======================================================================
@@ -12,34 +13,6 @@ from __future__ import annotations
 SEQ_OVERLAP_TOLERANCE_PX = 1.0
 SPATIAL_CLUSTER_THRESHOLD = 10.0
 SPATIAL_SIZE_TOLERANCE = 0.30
-
-# ======================================================================
-# fast_text_detect stage (fast_filter.py / fast_detect.py)
-# ======================================================================
-
-# The page is rendered once at FAST_PAGE_RENDER_DPI * FAST_TILE_SCALE_FACTOR
-# (= 300 dpi) and cut into FAST_TILE_BLOCK_SIZE-square tiles. The block size
-# must equal fast_detect._SHORT_SIDE (FAST's own 640 px test-time short
-# side): each tile is then fed to the model 1:1, never resampled, so FAST
-# really sees the page at 300 dpi. (The old 2048 px tiles were shrunk 3.2x
-# to 640 px -- an effective ~94 dpi.)
-FAST_PAGE_RENDER_DPI = 150
-FAST_TILE_BLOCK_SIZE = 640
-FAST_TILE_SCALE_FACTOR = 2
-# Tile-selection margin around each candidate bbox, as a fraction of the
-# block size (0.05 * 640 = 32 px, ~7.7 pt at 300 dpi). Only decides which
-# tiles run -- a candidate's own bbox always selects its tiles, and the
-# overlap (0.15 * 640 = 96 px, ~23 pt) covers text straddling a tile edge.
-FAST_TILE_CANDIDATE_MARGIN_FRAC = 0.05
-FAST_TILE_OVERLAP_FRAC = 0.15
-# A cluster is kept as text if ANY single member vector's own FAST mask
-# coverage score exceeds this (not a whole-cluster average -- one strong
-# ink-looking vector is enough to save the whole cluster from being dropped
-# to drawing output).
-FAST_VECTOR_ANY_THRESHOLD = 0.05
-# Resolution of the `fast / heatmap` debug layer's embedded PNG. Debug-only:
-# the mask FAST scores clusters with stays at the 300 dpi render.
-FAST_HEATMAP_DPI = 100
 
 # ======================================================================
 # Raster-refined rotation (paddle_engine.py::hough_deskew)
@@ -59,6 +32,19 @@ MINAREA_INK_THRESHOLD = 200
 # The combined (Hough + minAreaRect) rotation correction is snapped to the
 # nearest multiple of this many degrees before being applied.
 HOUGH_ANGLE_SNAP_DEG = 10.0
+# Only trust the combined Hough+minAreaRect rotation reading if the two
+# (each reduced mod 90) are within this many degrees of each other;
+# otherwise the correction defaults to 0 (no rotation) rather than
+# trusting either reading alone.
+ROTATION_AGREEMENT_TOLERANCE_DEG = 1.0
+# Rotation-correction gating (parse.py::_quad_allows_rotation): a detected
+# quad's own bbox must be at least this elongated (orientation-agnostic
+# max(w,h)/min(w,h) -- a tall vertical run of text counts the same as a
+# wide horizontal one) for a raster-refined rotation correction to be
+# attempted at all. Below this, or if the quad's own vectors form only one
+# connected component, rotation defaults to 0 without running
+# Hough/minAreaRect at all.
+ROTATION_MIN_ASPECT_RATIO = 3.0
 
 # ======================================================================
 # OCR (paddle_engine.py, parse.py)
@@ -75,7 +61,7 @@ MAX_RENDER_DPI = 4800
 # to be called with by default, before Radon deskewing was removed.
 OCR_DPI = 300
 
-# parse.py's render+detect stage processes FAST-surviving clusters in chunks
+# parse.py's render+detect stage processes classification clusters in chunks
 # of this size rather than rendering the whole page's clusters before
 # detecting any of them -- some clusters (e.g. a large title block/border)
 # render to tens of MB as a raw array even at the base OCR_DPI, so holding

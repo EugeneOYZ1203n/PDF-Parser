@@ -65,41 +65,36 @@ def warmup() -> None:
     lazily on whichever job happens to reach it first). Cheap no-op once the
     caches / on-disk models exist.
 
-    Warms every P3 backend's own duplicated FAST/PaddleOCR classes, not just
-    the deprecated top-level `OCR/` module's -- a Pool-1 worker can be handed
-    a page task running any configured P3 backend (e.g. `benchmark_jobs.py`
+    Warms every P3 backend's own duplicated PaddleOCR classes, not just the
+    deprecated top-level `OCR/` module's -- a Pool-1 worker can be handed a
+    page task running any configured P3 backend (e.g. `benchmark_jobs.py`
     dispatching several `variants.VARIANTS` across the same pool), and
-    Pool-2 workers receive FAST-tile/OCR-crop jobs dispatched from whichever
-    backend's own module-level job function (`VectorClassification`'s FAST
-    and OCR detect/recognize stages all dispatch to Pool 2 via their own
-    `fast_detect.py::_detect_job`/`paddle_engine.py::_detect_job`/
-    `_recognize_crops_job`) -- per the "sibling backends share zero code"
-    rule, each backend has its own separate model-class cache, so warming
-    one backend's classes never warms another's."""
+    Pool-2 workers receive OCR-crop jobs dispatched from whichever backend's
+    own module-level job function (`VectorClassification`'s OCR detect/
+    recognize stages dispatch to Pool 2 via their own `paddle_engine.py::
+    _detect_job`/`_recognize_crops_job`) -- per the "sibling backends share
+    zero code" rule, each backend has its own separate model-class cache, so
+    warming one backend's classes never warms another's."""
     # FAST (torch) before PaddleOCR (paddle): on Windows a paddle-first
-    # process fails torch's later DLL load (clashing OpenMP runtimes).
+    # process fails torch's later DLL load (clashing OpenMP runtimes). No P3
+    # backend has its own FAST detector any more (VectorClassification's was
+    # removed; LegacyRecreation never had one) -- only the deprecated
+    # top-level `OCR/` module's is warmed here.
     _warm_fast_detectors()
     _warm_paddle_engines()
 
 
 def _warm_fast_detectors() -> None:
-    """One `FastDetector().warmup()` per backend that has its own copy
-    (the deprecated top-level `OCR/` module, plus every P3 backend that
-    duplicates a `fast_detect.py` -- currently `VectorClassification`;
-    `LegacyRecreation` has none). Each import+call is its own try/except so
-    one backend's missing/broken model doesn't block the others' warmup."""
+    """One `FastDetector().warmup()` for the deprecated top-level `OCR/`
+    module's own FAST detector -- the only one left in the repo. No current
+    P3 backend duplicates a `fast_detect.py` any more (VectorClassification's
+    copy was removed; LegacyRecreation never had one)."""
     try:
         from rastervec.OCR.fast_detect import FastDetector
 
         FastDetector().warmup()
     except Exception as exc:  # noqa: BLE001 -- warmup is best-effort
         _LOG.warning("FAST warmup skipped (legacy OCR): %s", exc)
-    try:
-        from rastervec.P3_Vector_Parsing.VectorClassification.fast_detect import FastDetector
-
-        FastDetector().warmup()
-    except Exception as exc:  # noqa: BLE001
-        _LOG.warning("FAST warmup skipped (VectorClassification): %s", exc)
 
 
 def _warm_paddle_engines() -> None:

@@ -49,6 +49,7 @@ from rastervec.P3_Vector_Parsing.VectorClassification.config import (
     OCR_BATCH_SIZE,
     OCR_LANG,
     OCR_VERSION,
+    ROTATION_AGREEMENT_TOLERANCE_DEG,
 )
 
 # PaddleOCR's own DB detector's det_limit_side_len -- a per-word-group render
@@ -368,26 +369,31 @@ def _snap_to_angle_grid(angle_deg: float, step_deg: float = HOUGH_ANGLE_SNAP_DEG
     return round(angle_deg / step_deg) * step_deg
 
 
+def _mod90_circular_distance(a_deg: float, b_deg: float) -> float:
+    """Smallest separation between two angles already reduced mod 90 (each
+    in `[0, 90)`), on the periodic mod-90 circle where 0 deg and 90 deg are
+    the same point (e.g. 89 and 1 are 2 deg apart, not 88)."""
+    diff = abs(a_deg - b_deg) % 90.0
+    return min(diff, 90.0 - diff)
+
+
 def _combined_rotation_deg(
     hough_angle_deg: "float | None", minarea_angle_deg: "float | None",
 ) -> float:
-    """The final rotation to apply: circular-average `hough_angle_deg` and
-    `minarea_angle_deg` (each reduced mod 90 first), convert back to a
-    signed small-angle correction, then snap to the nearest
-    `HOUGH_ANGLE_SNAP_DEG`. If only one of the two is available, that one
-    alone (mod 90) is used; if neither is available (both ink masks were
-    empty), the correction is `0.0` -- there is no other angle source to
-    fall back to."""
-    have_hough = hough_angle_deg is not None
-    have_minarea = minarea_angle_deg is not None
-    if have_hough and have_minarea:
-        combined_mod = _circular_avg_mod90(hough_angle_deg % 90.0, minarea_angle_deg % 90.0)
-    elif have_hough:
-        combined_mod = hough_angle_deg % 90.0
-    elif have_minarea:
-        combined_mod = minarea_angle_deg % 90.0
-    else:
+    """The final rotation to apply: ONLY when both `hough_angle_deg` and
+    `minarea_angle_deg` are available AND agree -- their mod-90 reductions
+    within `ROTATION_AGREEMENT_TOLERANCE_DEG` of each other -- circular-
+    average them, convert back to a signed small-angle correction, then
+    snap to the nearest `HOUGH_ANGLE_SNAP_DEG`. Either reading missing, or
+    the two disagreeing beyond tolerance, returns `0.0` -- a single
+    uncorroborated raster reading is no longer trusted alone."""
+    if hough_angle_deg is None or minarea_angle_deg is None:
         return 0.0
+    hough_mod = hough_angle_deg % 90.0
+    minarea_mod = minarea_angle_deg % 90.0
+    if _mod90_circular_distance(hough_mod, minarea_mod) > ROTATION_AGREEMENT_TOLERANCE_DEG:
+        return 0.0
+    combined_mod = _circular_avg_mod90(hough_mod, minarea_mod)
     return _snap_to_angle_grid(_to_signed_small_angle(combined_mod))
 
 
@@ -399,9 +405,18 @@ class RotationDebug:
     masks Hough/minAreaRect actually ran on -- kept only for debug-image
     rendering (`scripts/debug_image_savers.py`), never consumed by the
     pipeline itself, and populated only when `hough_deskew` is called with
-    `keep_debug=True` (`None` otherwise -- see that function). `flip_angle_deg`/`retry_count`/`best_angle_deg` are
-    filled in by `parse.py` after recognition (and any blank-retry passes)
-    runs, not by `hough_deskew` itself -- see `parse.py`'s per-quad loop."""
+    `keep_debug=True` (`None` otherwise -- see that function); `dilated_
+    ink_mask`/`minarea_mask` additionally stay `None` under `keep_debug=True`
+    whenever `allow_rotation=False`, since they're never built at all in
+    that case (`base_crop` still is -- it's just the axis-aligned crop,
+    needed regardless of whether rotation is attempted). `hough_angle_deg`/
+    `minarea_angle_deg` also stay `None` (and `combined_angle_deg` stays
+    `0.0`) whenever the caller passed `allow_rotation=False` -- the
+    estimators are never even run for a quad the caller decided has no
+    reliable baseline direction (see `parse.py::_quad_allows_rotation`).
+    `flip_angle_deg`/`retry_count`/`best_angle_deg` are filled in by
+    `parse.py` after recognition (and any blank-retry passes) runs, not by
+    `hough_deskew` itself -- see `parse.py`'s per-quad loop."""
 
     hough_angle_deg: "float | None"
     minarea_angle_deg: "float | None"
@@ -415,35 +430,54 @@ class RotationDebug:
 
 
 def hough_deskew(
-    bgr: np.ndarray, quad: np.ndarray, *, keep_debug: bool = False,
+    bgr: np.ndarray, quad: np.ndarray, *, keep_debug: bool = False, allow_rotation: bool = True,
 ) -> "tuple[np.ndarray, RotationDebug]":
     """Builds the axis-aligned crop for `quad` (`_axis_aligned_crop`), then
     rotates it by the raster-refined combined angle (a Hough-line reading
     and a `cv2.minAreaRect` reading, each mod 90, circular-averaged and
-    snapped to the nearest `HOUGH_ANGLE_SNAP_DEG`) so the crop's baseline
-    lands on a quarter-turn boundary -- the crop `recognize_crops`'s own
-    0/180 classifier then resolves the final flip on (see `parse.py`).
+    snapped to the nearest `HOUGH_ANGLE_SNAP_DEG`, and only trusted at all
+    when the two agree -- see `_combined_rotation_deg`) so the crop's
+    baseline lands on a quarter-turn boundary -- the crop `recognize_crops`'s
+    own 0/180 classifier then resolves the final flip on (see `parse.py`).
     Replaces the old `_rotate_crop` perspective-warp approach (and the quad's
     own corner-geometry angle, dropped for being too inaccurate) entirely:
     this crop's rotation comes solely from `_combined_rotation_deg`.
 
+    `allow_rotation=False` (set by the caller, `parse.py::
+    _quad_allows_rotation`, when the quad's own bbox isn't elongated enough
+    or its underlying vectors collapse to a single connected component --
+    no reliable baseline direction either way) skips the grayscale/ink-mask/
+    Hough/minAreaRect estimation entirely: both angles stay `None`, the
+    combined correction is `0.0`, and the crop is returned unrotated. This
+    also means the estimators are never run for a quad that was going to be
+    forced to `0.0` anyway.
+
     `keep_debug` controls only whether the pre-rotation crop and the two ink
     masks are *retained* on the returned `RotationDebug` (`base_crop`/
-    `dilated_ink_mask`/`minarea_mask` -- `None` otherwise, the default): they
-    are always computed either way, since the angles depend on them, but a
-    caller processing a whole page's worth of quads (`parse.py`) would
+    `dilated_ink_mask`/`minarea_mask` -- `None` otherwise, the default):
+    `base_crop` is always *built* either way (it's just the axis-aligned
+    crop `_axis_aligned_crop` produces, needed regardless of whether
+    rotation is attempted) and so is retained under `keep_debug=True` even
+    when `allow_rotation=False`; `dilated_ink_mask`/`minarea_mask` are only
+    ever built when `allow_rotation=True` (the angles depend on them) and
+    so stay `None` under `keep_debug=True` whenever `allow_rotation=False`.
+    A caller processing a whole page's worth of quads (`parse.py`) would
     otherwise hold every one of these extra full-size arrays alive for the
-    rest of its OCR pass even though nothing but
-    `scripts/debug_image_savers.py`'s debug-image dumpers ever reads them.
-    `parse.py` passes `keep_debug=True` only when a caller actually asked for
-    debug output (`debug_out is not None`)."""
+    rest of its OCR pass even though nothing but `scripts/
+    debug_image_savers.py`'s debug-image dumpers ever reads them. `parse.py`
+    passes `keep_debug=True` only when a caller actually asked for debug
+    output (`debug_out is not None`)."""
     base = _axis_aligned_crop(bgr, quad)
-    gray = _grayscale(base)
-    hough_mask = _hough_ink_mask(gray)
-    minarea_mask = _minarea_ink_mask(gray)
-    hough_angle = _hough_angle_deg(hough_mask)
-    minarea_angle = _minarea_angle_deg(minarea_mask)
-    combined = _combined_rotation_deg(hough_angle, minarea_angle)
+    hough_angle = minarea_angle = None
+    hough_mask = minarea_mask = None
+    combined = 0.0
+    if allow_rotation:
+        gray = _grayscale(base)
+        hough_mask = _hough_ink_mask(gray)
+        minarea_mask = _minarea_ink_mask(gray)
+        hough_angle = _hough_angle_deg(hough_mask)
+        minarea_angle = _minarea_angle_deg(minarea_mask)
+        combined = _combined_rotation_deg(hough_angle, minarea_angle)
     if combined == 0.0:
         rotated = base
     else:

@@ -1,8 +1,8 @@
 """VectorClassification's Phase3Backend entrypoint -- the reduced 2-step
-Vector_Classification chain (seqno-overlap merge + spatial clustering) +
-FAST filtering, then full PaddleOCR detect/recognize directly over each
-FAST-surviving cluster (no re-clustering step in between -- a cluster
-already *is* a `list[Vector]`, matching
+Vector_Classification chain (seqno-overlap merge + spatial clustering),
+then full PaddleOCR detect/recognize directly over every classification
+cluster (no FAST filtering stage, no re-clustering step in between -- a
+cluster already *is* a `list[Vector]`, matching
 archive/raster_parser/scripts/type2_dump_extraction_pipeline.py::
 run_ocr_extraction's `paddle_engine.py::PaddleDetectBackend`/
 `PaddleRecBackend` detect-then-recognize pair, the same pair
@@ -10,7 +10,7 @@ run_ocr_extraction's `paddle_engine.py::PaddleDetectBackend`/
 Detect still runs once per cluster (each cluster's render is independent),
 but recognize (and the blank-retry sweep) batches across every cluster's
 quads at once -- see `parse()`'s own docstring for the exact staging and
-Pool-2 dispatch. Fully self-contained (own fast_detect.py/paddle_engine.py/
+Pool-2 dispatch. Fully self-contained (own paddle_engine.py/
 layer_color_separation.py/config.py) -- imports nothing from
 P3_Vector_Parsing/LegacyRecreation or P2_Raster_To_Vec.
 """
@@ -21,14 +21,16 @@ from typing import Callable
 
 import numpy as np
 
-from rastervec.commons.helpers.geometry import compute_origin, transform_direction
+from rastervec.commons.helpers.clustering import group_by_overlap
+from rastervec.commons.helpers.geometry import (
+    bboxes_intersect, compute_origin, transform_direction,
+)
 from rastervec.commons.models import Page, Vector, Text
 from rastervec.commons.renderer import ocr_prep, pixel_to_page_bbox
 from rastervec.commons.step_timing import StepClock
 from rastervec.P3_Vector_Parsing.VectorClassification.classify_vectors import classify_vectors
 from rastervec.P3_Vector_Parsing.VectorClassification.config import (
     DETECT_RENDER_CHUNK_SIZE,
-    FAST_HEATMAP_DPI,
     MAX_RENDER_DPI,
     MIN_RENDER_SIDE_PX,
     OCR_BATCH_SIZE,
@@ -36,8 +38,8 @@ from rastervec.P3_Vector_Parsing.VectorClassification.config import (
     OCR_LANG,
     OCR_VERSION,
     RENDER_PADDING_EXTRA_PT,
+    ROTATION_MIN_ASPECT_RATIO,
 )
-from rastervec.P3_Vector_Parsing.VectorClassification.fast_filter import detect_text_fast
 from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import (
     PaddleDetectBackend,
     PaddleRecBackend,
@@ -49,7 +51,7 @@ from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import (
     hough_deskew,
 )
 
-STEP_NAMES = ["classify", "fast", "ocr", "drawing"]
+STEP_NAMES = ["classify", "ocr", "drawing"]
 
 DebugLayer = "tuple[str, str, str, bytes]"
 OnDebugLayer = "Callable[[str, str, str, bytes], None]"
@@ -63,29 +65,100 @@ def _cluster_render_padding(vectors: list[Vector]) -> float:
     return max((v.width or 0.0) for v in vectors) / 2.0 + RENDER_PADDING_EXTRA_PT
 
 
+def _bbox_aspect_ratio(bbox: tuple[float, float, float, float]) -> float:
+    """Orientation-agnostic elongation of a page-space bbox: max(w,h) /
+    min(w,h), always >= 1 -- a tall vertical run of text scores the same as
+    a wide horizontal one. 0.0 for a degenerate (zero-width or -height)
+    bbox, which safely fails any `ROTATION_MIN_ASPECT_RATIO` gate."""
+    x0, y0, x1, y1 = bbox
+    w, h = x1 - x0, y1 - y0
+    if w <= 0.0 or h <= 0.0:
+        return 0.0
+    return max(w, h) / min(w, h)
+
+
+def _quad_allows_rotation(
+    bbox: tuple[float, float, float, float], cluster_vectors: list[Vector],
+) -> bool:
+    """Whether `hough_deskew` should attempt a rotation correction for the
+    detected quad at page-space `bbox`: only when the quad's own box is
+    elongated enough to have a well-defined baseline direction
+    (`_bbox_aspect_ratio` >= `ROTATION_MIN_ASPECT_RATIO`) AND the vectors
+    underneath it (`cluster_vectors` filtered to this quad's own bbox via
+    `bboxes_intersect`) form more than one connected component by bbox
+    overlap (`group_by_overlap` -- a pure overlap/touch union-find, no
+    distance slack). A single connected component (0/1 overlapping
+    vectors, or several that all touch/overlap into one blob) is one
+    glyph/shape with no baseline to measure."""
+    if _bbox_aspect_ratio(bbox) < ROTATION_MIN_ASPECT_RATIO:
+        return False
+    vectors_in_quad = [v for v in cluster_vectors if bboxes_intersect(v.bbox, bbox)]
+    if len(vectors_in_quad) <= 1:
+        return False
+    components = group_by_overlap(vectors_in_quad, get_bbox=lambda v: v.bbox)
+    return len(components) > 1
+
+
+def _drawing_extra_vectors(
+    ocr_vectors: list[Vector], accepted_boxes: list[tuple[float, float, float, float]],
+) -> list[Vector]:
+    """Every vector from `ocr_vectors` that fails to connect, by bbox
+    overlap (`group_by_overlap` -- the same pure overlap/touch union-find
+    `_quad_allows_rotation` uses), to any of `accepted_boxes` (a detected
+    quad whose recognition actually returned non-blank text). Covers both
+    "rejected from OCR" (a vector under a detected-but-blank quad) and
+    "never detected at all" (no quad over it whatsoever) in one pass --
+    either way, that vector's own connected component contains no
+    accepted-box marker. A vector transitively touching an accepted box
+    through other overlapping vectors is NOT drawing, even if its own bbox
+    doesn't directly touch the box itself -- this replaces FAST's former
+    role of deciding what reaches `drawing`."""
+    if not ocr_vectors:
+        return []
+    items = [("vec", i) for i in range(len(ocr_vectors))] + [
+        ("box", j) for j in range(len(accepted_boxes))
+    ]
+    bbox_of = {
+        **{("vec", i): v.bbox for i, v in enumerate(ocr_vectors)},
+        **{("box", j): b for j, b in enumerate(accepted_boxes)},
+    }
+    components = group_by_overlap(items, get_bbox=lambda it: bbox_of[it])
+    drawing_vecs: list[Vector] = []
+    for component in components:
+        if any(kind == "box" for kind, _ in component):
+            continue
+        drawing_vecs.extend(ocr_vectors[i] for kind, i in component if kind == "vec")
+    return drawing_vecs
+
+
 def parse(
     vectors_p1: list[Vector], vectors_p2: list[Vector], page: Page,
-    *, enable_fast: bool = True, verbose: bool = False, compute=None, progress_counter=None,
+    *, verbose: bool = False, compute=None,
     debug_out: "dict | None" = None, on_debug_layer: "OnDebugLayer | None" = None,
     step_durations: "dict | None" = None,
 ) -> tuple[list[Vector], list[Text]]:
     """Combines Phase 1's raw native vectors and Phase 2's raster-derived
     vectors into one flat pool, then: classify (reduced 2-step chain, per
-    `(layer,color)` bucket) -> FAST filter (still per classification
-    cluster) -> per FAST-surviving cluster (a plain `list[Vector]`, no
-    re-clustering step in between), render + PaddleOCR's full
-    detect+recognize pass -> merge every dropped Vector as drawing content
-    (classify's own drops, always empty now that neither remaining step
-    drops anything, plus FAST's drops).
+    `(layer,color)` bucket) -> per classification cluster (a plain
+    `list[Vector]`, no FAST filter and no re-clustering step in between --
+    every cluster classification produces goes straight to OCR), render +
+    PaddleOCR's full detect+recognize pass -> merge into `drawing` every
+    vector that classification itself dropped (always empty now that
+    neither remaining classification step drops anything) plus every
+    vector that OCR rejected or never detected at all (see
+    `_drawing_extra_vectors` -- this replaces FAST's former role of
+    deciding what reaches `drawing`, now decided downstream of OCR's own
+    detect+recognize results instead of upstream of them).
 
     The OCR pass is staged page-wide rather than looped one cluster at a
-    time: every surviving cluster is rendered first (stage 1, in-process --
+    time: every cluster is rendered first (stage 1, in-process --
     rendering needs this process's own shared fitz document, which a Pool-2
     worker never has), then every cluster's PaddleOCR *detect* call runs
     (stage 2, one independent call per cluster -- dispatched across Pool-2
     workers via `paddle_engine._detect_job` when `compute` is given, else
     called in-process), then every detected quad across the *whole page* is
-    deskewed/cropped into one flat pool (stage 3) and *recognized* in
+    deskewed/cropped into one flat pool (stage 3, gated per-quad by
+    `_quad_allows_rotation` -- see that function) and *recognized* in
     `config.OCR_BATCH_SIZE`-sized batches (stage 4, each batch dispatched via
     `paddle_engine._recognize_crops_job` when `compute` is given), with the
     blank-recognition retry sweep (stage 5) batched the same way across the
@@ -100,11 +173,11 @@ def parse(
     layers immediately, right after that stage runs. The classification
     chain itself (`classify_vectors`) is one atomic call either way -- its
     own per-step kept/dropped breakdown is rendered as soon as it returns,
-    still well before the later (heavier) fast/ocr stages run.
+    still well before the later (heavier) OCR stages run.
 
     `step_durations`, when given, receives wall-clock seconds per step
     (`commons.step_timing.StepClock`; debug rendering excluded) --
-    `classify`, `fast`, then the page-wide OCR stages split into
+    `classify`, then the page-wide OCR stages split into
     `ocr_render`/`ocr_detect`/`ocr_recognize` (summed across every cluster's/
     batch's own share of that stage), and `drawing`."""
     all_vectors = list(vectors_p1) + list(vectors_p2)
@@ -123,19 +196,12 @@ def parse(
 
     with clock("classify"):
         cls = classify_vectors(all_vectors, page, verbose=verbose)
-    _emit(lambda: _render_classification_layers(page_meta, cls))
-
-    with clock("fast"):
         flat_clusters = [
             [v for group in cluster for v in group] for cluster in cls.text_clusters
         ]
-        fast = detect_text_fast(
-            flat_clusters, page, enable_fast=enable_fast, verbose=verbose,
-            compute=compute, progress_counter=progress_counter,
-        )
-    _emit(lambda: _render_fast_layers(
-        page_meta, fast.passed, fast.dropped_vectors, fast.page_result.page_mask,
-    ))
+    _emit(lambda: _render_classification_layers(page_meta, cls))
+
+    ocr_clusters = [g for g in flat_clusters if g]
 
     rec_backend = PaddleRecBackend()
     det_backend = PaddleDetectBackend()
@@ -155,13 +221,12 @@ def parse(
     # asked for debug output, for the same reason -- each holds a full-size
     # image array per cluster/quad, page-wide, for the rest of this
     # function's run.
-    passed_clusters = [g for g in fast.passed if g]
     keep_cluster_detections = debug_out is not None
     cluster_detections: list[tuple[np.ndarray, list]] = []
     detect_boxes: list[tuple] = []
     page_quads: list[dict] = []
-    for chunk_start in range(0, len(passed_clusters), DETECT_RENDER_CHUNK_SIZE):
-        chunk = passed_clusters[chunk_start:chunk_start + DETECT_RENDER_CHUNK_SIZE]
+    for chunk_start in range(0, len(ocr_clusters), DETECT_RENDER_CHUNK_SIZE):
+        chunk = ocr_clusters[chunk_start:chunk_start + DETECT_RENDER_CHUNK_SIZE]
 
         # Stage 1: render this chunk's clusters, in-process --
         # `render_cluster_with_dynamic_dpi` uses this process's own shared
@@ -223,7 +288,11 @@ def parse(
                     # recognize_crops, which does its own RGB->BGR flip
                     # internally (same gotcha LegacyRecreation's own
                     # identical loop works around).
-                    crop, rd = hough_deskew(c["bgr"], quad, keep_debug=keep_cluster_detections)
+                    allow_rotation = _quad_allows_rotation(bbox, c["group_vectors"])
+                    crop, rd = hough_deskew(
+                        c["bgr"], quad, keep_debug=keep_cluster_detections,
+                        allow_rotation=allow_rotation,
+                    )
                     page_quads.append({
                         "group_vectors": c["group_vectors"], "crop": crop[:, :, ::-1],
                         "rd": rd, "bbox": bbox,
@@ -348,14 +417,13 @@ def parse(
     _emit(lambda: _render_retry_layers(page_meta, rotation_entries))
 
     with clock("drawing"):
-        drawing = list(cls.drawing_vectors) + list(fast.dropped_vectors)
+        ocr_vectors = [v for cluster in ocr_clusters for v in cluster]
+        accepted_boxes = [txt.bbox for txt in texts]
+        drawing = list(cls.drawing_vectors) + _drawing_extra_vectors(ocr_vectors, accepted_boxes)
     _emit(lambda: _render_drawing_layers(page_meta, drawing))
 
     if debug_out is not None:
         debug_out["classification"] = cls
-        debug_out["fast_passed"] = fast.passed
-        debug_out["fast_dropped"] = fast.dropped_vectors
-        debug_out["fast_result"] = fast.page_result
         debug_out["texts"] = texts
         debug_out["ocr_crops"] = ocr_crops
         debug_out["classifier_crops"] = classifier_crops
@@ -379,9 +447,6 @@ def parse(
 # shared with LegacyRecreation/Junction.
 # ---------------------------------------------------------------------------
 _C_KEPT = "#059669"
-_C_FAST_PASS = "#059669"
-_C_FAST_DROP = "#dc2626"
-_C_FAST_HEATMAP = "#f97316"
 _C_OCR = "#16a34a"
 _C_OCR_BLANK = "#9333ea"
 _C_OCR_DETECT = "#2563eb"
@@ -468,70 +533,6 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
             page_meta, [(b, _hex_rgb(_C_KEPT)) for b in kept_boxes],
         )))
     return out
-
-
-def _render_fast_heatmap_pdf(page_meta, mask: "np.ndarray") -> bytes:
-    """Full-page raster of FAST's stitched text-probability mask (the same
-    array `fast_filter.FastPageResult.page_mask` samples per-cluster) as a
-    white(0)->red(1) heat ramp, embedded as one full-page image -- lets a
-    viewer see exactly what FAST scored across the page, not just which
-    clusters passed/failed. Mirrors the `insert_image` pattern
-    `commons/renderer/stages.py::_compose` already uses to embed a raster
-    onto a page-sized PDF.
-
-    The mask is area-averaged down to `FAST_HEATMAP_DPI` (never up) before
-    colouring -- FAST's own 300 dpi mask makes a multi-hundred-MB PNG on a
-    large sheet, far more than a visual overlay needs. `keep_proportion=
-    False` stretches it back over the page rect either way."""
-    import io
-
-    import pymupdf as fitz
-    from PIL import Image
-
-    tw = max(1, round(page_meta.width * FAST_HEATMAP_DPI / 72.0))
-    th = max(1, round(page_meta.height * FAST_HEATMAP_DPI / 72.0))
-    small = Image.fromarray(np.asarray(mask, dtype=np.float32), mode="F")
-    if small.width > tw and small.height > th:
-        small = small.resize((tw, th), Image.BOX)
-    clipped = np.clip(np.asarray(small), 0.0, 1.0)
-    rgb = np.empty((*clipped.shape, 3), dtype=np.uint8)
-    rgb[..., 0] = 255
-    rgb[..., 1] = ((1.0 - clipped) * 255).astype(np.uint8)
-    rgb[..., 2] = rgb[..., 1]
-    buf = io.BytesIO()
-    Image.fromarray(rgb, mode="RGB").save(buf, format="PNG")
-
-    doc = fitz.open()
-    try:
-        page = doc.new_page(width=page_meta.width, height=page_meta.height)
-        page.set_rotation(page_meta.rotation)
-        page.insert_image(
-            fitz.Rect(0, 0, page_meta.width, page_meta.height),
-            stream=buf.getvalue(), keep_proportion=False,
-        )
-        return doc.tobytes()
-    finally:
-        doc.close()
-
-
-def _render_fast_layers(page_meta, fast_passed, fast_dropped, page_mask=None) -> "list[DebugLayer]":
-    from rastervec.commons.helpers.geometry import union_bbox
-    from rastervec.commons.renderer import render_boxes_pdf
-
-    passed_boxes = [union_bbox([v.bbox for v in c]) for c in (fast_passed or []) if c]
-    dropped_boxes = [v.bbox for v in (fast_dropped or [])]
-    layers: "list[DebugLayer]" = [
-        ("fast", "passed", _C_FAST_PASS, render_boxes_pdf(
-            page_meta, [(b, _hex_rgb(_C_FAST_PASS)) for b in passed_boxes],
-        )),
-        ("fast", "dropped", _C_FAST_DROP, render_boxes_pdf(
-            page_meta, [(b, _hex_rgb(_C_FAST_DROP)) for b in dropped_boxes],
-        )),
-    ]
-    if page_mask is not None:
-        layers.append(("fast", "heatmap", _C_FAST_HEATMAP,
-                        _render_fast_heatmap_pdf(page_meta, page_mask)))
-    return layers
 
 
 def _render_ocr_layers(page_meta, texts, blank_boxes=None, detect_boxes=None) -> "list[DebugLayer]":
@@ -656,13 +657,8 @@ def render_debug(debug_out: "dict | None", page_meta) -> "list[DebugLayer]":
     `on_debug_layer` callback."""
     if not debug_out:
         return []
-    fast_result = debug_out.get("fast_result")
     out: "list[DebugLayer]" = []
     out += _render_classification_layers(page_meta, debug_out.get("classification"))
-    out += _render_fast_layers(
-        page_meta, debug_out.get("fast_passed"), debug_out.get("fast_dropped"),
-        fast_result.page_mask if fast_result is not None else None,
-    )
     out += _render_ocr_layers(
         page_meta, debug_out.get("texts"), debug_out.get("ocr_blank_boxes"),
         debug_out.get("ocr_detect_boxes"),

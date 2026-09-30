@@ -9,8 +9,12 @@ Radon word-segmentation + whole-page similarity dedup + recognition-only OCR —
 `ocr.py` no longer exist in this folder. The sections below (Segment/segment/similarity/ocr/
 restore) no longer match `parse.py`; read `P3_Vector_Parsing/VectorClassification/parse.py` and
 `wordgrouping.py` directly instead of trusting this file's step-by-step narrative. The
-classification chain description (steps 1-12, `classify_vectors.py`) and the FAST step
-(`fast_filter.py::detect_text_fast`) are still accurate.**
+classification chain description (steps 1-12, `classify_vectors.py`) is still accurate. **The
+FAST step is not** -- `fast_filter.py`/`fast_detect.py` were removed entirely (2026-09): every
+classification cluster now goes straight to OCR with no FAST gate, and a vector OCR rejects (or
+never detects at all) is folded into drawing output downstream instead (`parse.py::
+_drawing_extra_vectors`), replacing FAST's former role. Every mention of the FAST step below is
+now historical only.**
 
 **This document describes one P3 backend's algorithm, not the whole pipeline.** `rastervec/`
 today is two pluggable phases sandwiched between two always-the-same phases, behind

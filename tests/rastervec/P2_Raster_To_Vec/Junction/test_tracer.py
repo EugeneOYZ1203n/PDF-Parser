@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import cv2
 import numpy as np
 import pytest
@@ -80,3 +82,19 @@ def test_long_chain_of_collinear_pieces_collapses():
     out = regularize(pieces, p)
     assert len(out) == 1
     assert dist(out[0].p0, out[0].p1) == pytest.approx(400)
+
+
+def test_run_logs_each_stage_at_debug_and_nothing_louder(caplog):
+    """`run()` is called once per connected component (thousands of times
+    per page), so its per-stage logging must stay at DEBUG -- INFO would
+    flood the log at real page scale (see `adapter.py`'s own already-INFO
+    per-layer summary for the aggregate view)."""
+    img = _white()
+    cv2.line(img, (10, 10), (140, 100), 0, 2)
+
+    with caplog.at_level(logging.DEBUG, logger="rastervec.P2.Junction.trace"):
+        run(img)
+
+    for stage in ("binarize", "skeleton", "graph", "vectorize", "regularize"):
+        assert stage in caplog.text
+    assert all(record.levelno <= logging.DEBUG for record in caplog.records)
