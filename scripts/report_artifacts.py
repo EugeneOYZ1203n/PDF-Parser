@@ -218,6 +218,7 @@ def _accumulate_page(
     stats_pages: dict[str, list[tuple[int, dict]]],
     reservoirs: "dict[str, _ImageReservoir] | None",
     *, is_legacy: bool = False, p3: str = "", clock: "StepClock | None" = None,
+    render_layers: bool = True,
 ) -> None:
     """Render every active stage's fixed layer PDFs (phase2/reconstructed
     -- these need the whole, finished `res`, so they're
@@ -229,18 +230,21 @@ def _accumulate_page(
     document's capped random `reservoirs` -- each P3 backend's own folder
     set differs, see `generate_pipeline_report.py`'s module docstring.
     `clock` (a `StepClock` over the page's `debug_durations`) records
-    `stage_layers` and `debug_images` seconds.
+    `stage_layers` and `debug_images` seconds. `render_layers=False`
+    (`ReportConfig.debug_layers` off) skips the layer PDFs; stats + debug
+    images still run.
     Per-backend debug *layers* (the heavier, genuinely streamable PDF
     overlays) are NOT handled here -- see `_debug_layer_sink` / the
     `on_debug_layer` callback passed straight into `run_pipeline`."""
     clock = clock or StepClock()
     with clock("stage_layers"):
         for stem, stage_key, stats_key, _gate in active:
-            try:
-                layers = stages.render_stage_layers(res, stage_key)
-            except Exception as exc:  # noqa: BLE001
-                _LOG.warning("%s render failed for page %d: %s", stem, page_index, exc)
-                layers = []
+            layers = []
+            if render_layers:
+                try:
+                    layers = stages.render_stage_layers(res, stage_key)
+                except Exception as exc:  # noqa: BLE001
+                    _LOG.warning("%s render failed for page %d: %s", stem, page_index, exc)
             for label, hexc, pdf_bytes in layers:
                 fname = f"{stem}__{_layer_slug(label)}.pdf"
                 writer.add(fname, {"stage": stem, "layer": label, "file": fname, "color": hexc}, pdf_bytes)

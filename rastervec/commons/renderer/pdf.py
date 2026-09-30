@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import dataclasses
 import io
+from itertools import groupby
 
 import pymupdf as fitz
 from PIL import Image
@@ -102,6 +103,10 @@ def _build_reconstructed_doc(
 
     base_font = fitz.Font("helv")
     font_span = base_font.ascender - base_font.descender
+    # Every word goes into this one Shape, committed once at the end (after
+    # the vectors above, so text still paints on top) -- `page.insert_text`
+    # per word makes its own Shape + commit, one content stream per word.
+    text_shape = page.new_shape()
 
     def _place_word(word: Text) -> None:
         if not word.text.strip():
@@ -118,7 +123,7 @@ def _build_reconstructed_doc(
         # non-zero y component reconstructs mirrored about the x-axis (e.g.
         # text reading up comes out reading down).
         matrix = fitz.Matrix(1, 1).prerotate(-word.angle())
-        page.insert_text(
+        text_shape.insert_text(
             _premorph(fitz.Point(word.origin), center, matrix), word.text,
             fontsize=max(word.font_size, 1.0),
             color=_text_color(word.color),
@@ -169,7 +174,7 @@ def _build_reconstructed_doc(
         if bbox_width > 0 and natural > bbox_width:
             fontsize = max(fontsize * bbox_width / natural, 1.0)
             origin = fitz.Point(x0, y0 + base_font.ascender * fontsize)
-            page.insert_text(
+            text_shape.insert_text(
                 _premorph(origin, center, matrix), text,
                 fontsize=fontsize, color=color, rotate=0, morph=morph,
             )
@@ -179,7 +184,7 @@ def _build_reconstructed_doc(
 
         # Already fits, or no width to fill -> one call at natural spacing.
         if bbox_width <= 0 or natural >= bbox_width - 1e-3:
-            page.insert_text(
+            text_shape.insert_text(
                 _premorph(fitz.Point(x0, origin_y), center, matrix), text,
                 fontsize=fontsize, color=color, rotate=0, morph=morph,
             )
@@ -194,7 +199,7 @@ def _build_reconstructed_doc(
             gap = base_font.text_length(" ", fontsize=fontsize) + slack / (len(tokens) - 1)
             cursor = x0
             for token in tokens:
-                page.insert_text(
+                text_shape.insert_text(
                     _premorph(fitz.Point(cursor, origin_y), center, matrix), token,
                     fontsize=fontsize, color=color, rotate=0, morph=morph,
                 )
@@ -209,7 +214,7 @@ def _build_reconstructed_doc(
         # glyphs still start at the box's left edge after the scale+rotate.
         scale = min(bbox_width / natural, 3.0) if natural > 0 else 1.0
         stretch_matrix = fitz.Matrix(scale, 1.0).prerotate(-rotation)
-        page.insert_text(
+        text_shape.insert_text(
             _premorph(fitz.Point(x0, origin_y), center, stretch_matrix), text,
             fontsize=fontsize, color=color, rotate=0,
             morph=(center, stretch_matrix),
@@ -227,6 +232,7 @@ def _build_reconstructed_doc(
             color = spec[3] if len(spec) > 3 else (0.0, 0.0, 0.0)
             _place_text(text, bbox, rotation, color=color)
 
+    text_shape.commit()  # no-op when nothing was placed
     return doc
 
 
@@ -307,15 +313,27 @@ def render_boxes_pdf(
     tuple element, when present, is a PyMuPDF dash string (`None` = solid).
     Used by `Evaluation/Evaluate/metrics.py`'s `overlay_boxes_split`
     (dashed = auto GT, solid = manual GT, dotted = prediction); generic
-    otherwise."""
+    otherwise.
+
+    All boxes go into one `Shape` (one `finish()` per consecutive run of
+    same-(color, dashes) boxes, so paint order is unchanged) and one
+    `commit()`: `page.draw_rect` per box makes its own Shape + commit, adding
+    one content stream per box -- quadratic, ~12 s for 4000 boxes."""
     doc = fitz.open()
     try:
         page = doc.new_page(width=page_meta.width, height=page_meta.height)
         page.set_rotation(page_meta.rotation)
-        for spec in boxes:
-            bbox, color = spec[0], spec[1]
-            dashes = spec[2] if len(spec) > 2 else None
-            page.draw_rect(fitz.Rect(*bbox), color=color, width=width, dashes=dashes)
+        shape = page.new_shape()
+        drawn = False
+        for (color, dashes), run in groupby(
+            boxes, key=lambda spec: (spec[1], spec[2] if len(spec) > 2 else None),
+        ):
+            for spec in run:
+                shape.draw_rect(fitz.Rect(*spec[0]))
+            shape.finish(color=color, width=width, dashes=dashes)
+            drawn = True
+        if drawn:
+            shape.commit()
         return doc.tobytes()
     finally:
         doc.close()

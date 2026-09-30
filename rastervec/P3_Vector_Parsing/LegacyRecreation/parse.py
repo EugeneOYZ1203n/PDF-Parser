@@ -59,7 +59,7 @@ def parse(
     vectors_p1: list[Vector], vectors_p2: list[Vector], page: Page,
     *, verbose: bool = False, compute=None, progress_counter=None,
     debug_out: "dict | None" = None, on_debug_layer: "OnDebugLayer | None" = None,
-    step_durations: "dict | None" = None,
+    step_durations: "dict | None" = None, keep_debug_arrays: bool = True,
 ) -> tuple[list[Vector], list[Text]]:
     """Combines Phase 1's raw native vectors and Phase 2's raster-derived
     vectors, classifies them into Type-2 glyph-ink candidates vs everything
@@ -76,7 +76,11 @@ def parse(
     `step_durations`, when given, receives wall-clock seconds per step
     (`commons.step_timing.StepClock`; debug rendering excluded) --
     `filter_fill`, `group_words`, then the per-group OCR loop split into
-    `ocr_render`/`ocr_detect`/`ocr_recognize` (summed over groups)."""
+    `ocr_render`/`ocr_detect`/`ocr_recognize` (summed over groups).
+
+    `ocr_crops` (one image array per recognized crop) is only accumulated
+    for a `debug_out` and only while `keep_debug_arrays` (see
+    `core.pipeline.run_pipeline`)."""
     all_vectors = list(vectors_p1) + list(vectors_p2)
     page_meta = page.meta
     clock = StepClock(step_durations)
@@ -107,6 +111,7 @@ def parse(
     det_backend = PaddleDetectBackend()
     texts: list[Text] = []
     ocr_crops: list[tuple[np.ndarray, str]] = []
+    keep_crops = debug_out is not None and keep_debug_arrays
     for wg in word_groups:
         group_vectors = get_vectors(wg)
         if not group_vectors:
@@ -138,7 +143,8 @@ def parse(
             boxes = rec_backend.recognize_crops(crops)
 
         for quad, crop, box in zip(quads, crops, boxes):
-            ocr_crops.append((crop, box.text))
+            if keep_crops:
+                ocr_crops.append((crop, box.text))
             if not box.text:
                 continue
             unpadded_quad = (quad - np.array([pad_x_px, pad_y_px])).tolist()

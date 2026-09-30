@@ -62,6 +62,13 @@ class ReportConfig(BaseModel):
     # (`paddle_detect_images/`, `paddle_recog_images/`, `paddle_ocr_images/`)
     # -- one file per cluster / word crop, so the bulk of a report's files.
     debug_images: bool = True
+    # Every layer PDF (`<stage>__<layer>.pdf` -- each backend's own debug
+    # layers + phase2/reconstructed + `benchmark__extra_*` -- and the
+    # benchmark `<text_type>_{bbox,text}.pdf` GT overlays), plus the work
+    # done only to produce them. Off: dump.json / ground truth / stats /
+    # debug images still written, so `pipeline_report_benchmark.py` still
+    # scores the run; the viewer then shows only the source page.
+    debug_layers: bool = True
 
     @field_validator("p2")
     @classmethod

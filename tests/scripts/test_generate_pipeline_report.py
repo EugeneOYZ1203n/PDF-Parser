@@ -369,6 +369,35 @@ def test_debug_images_flag_default_and_off(tmp_path):
     assert set(debug) == {"stage_layers", "debug_images"}
 
 
+def test_debug_layers_flag_default_and_off(monkeypatch):
+    from types import SimpleNamespace
+
+    import scripts.report_artifacts as ra
+
+    assert gpr.ReportConfig().debug_layers is True
+    assert gpr.ReportConfig(debug_layers=False).debug_layers is False
+
+    rendered: list[str] = []
+
+    def fake_render(res, stage_key):
+        rendered.append(stage_key)
+        return [("layer", "#000000", b"%PDF-fake")]
+
+    monkeypatch.setattr(ra.stages, "render_stage_layers", fake_render)
+    active = [("reconstructed", "reconstructed", None, "phase3")]
+    res = SimpleNamespace(extra={})
+
+    off = gpr._LayerWriter()
+    gpr._accumulate_page(res, 0, active, off, {"reconstructed": []}, None, render_layers=False)
+    assert rendered == [] and off.meta == {}
+
+    on = gpr._LayerWriter()
+    monkeypatch.setattr(on, "add", lambda fname, meta, pdf_bytes: on.meta.setdefault(fname, meta))
+    gpr._accumulate_page(res, 0, active, on, {"reconstructed": []}, None)
+    assert rendered == ["reconstructed"]
+    assert list(on.meta) == ["reconstructed__layer.pdf"]
+
+
 def test_image_reservoir_caps_randomly_and_deterministically(tmp_path):
     from PIL import Image
 

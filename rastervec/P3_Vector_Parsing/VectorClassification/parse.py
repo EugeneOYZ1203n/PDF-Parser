@@ -135,7 +135,7 @@ def parse(
     vectors_p1: list[Vector], vectors_p2: list[Vector], page: Page,
     *, verbose: bool = False, compute=None,
     debug_out: "dict | None" = None, on_debug_layer: "OnDebugLayer | None" = None,
-    step_durations: "dict | None" = None,
+    step_durations: "dict | None" = None, keep_debug_arrays: bool = True,
 ) -> tuple[list[Vector], list[Text]]:
     """Combines Phase 1's raw native vectors and Phase 2's raster-derived
     vectors into one flat pool, then: classify (reduced 2-step chain, per
@@ -179,7 +179,12 @@ def parse(
     (`commons.step_timing.StepClock`; debug rendering excluded) --
     `classify`, then the page-wide OCR stages split into
     `ocr_render`/`ocr_detect`/`ocr_recognize` (summed across every cluster's/
-    batch's own share of that stage), and `drawing`."""
+    batch's own share of that stage), and `drawing`.
+
+    `keep_debug_arrays=False` keeps the full-size image arrays out of
+    `debug_out` (`cluster_detections`/`classifier_crops`/`ocr_crops` stay
+    empty, `rotation` entries carry no crops/masks) -- see
+    `core.pipeline.run_pipeline`."""
     all_vectors = list(vectors_p1) + list(vectors_p2)
     page_meta = page.meta
     clock = StepClock(step_durations)
@@ -220,8 +225,9 @@ def parse(
     # crop/masks (`keep_debug=`) are all only kept when something actually
     # asked for debug output, for the same reason -- each holds a full-size
     # image array per cluster/quad, page-wide, for the rest of this
-    # function's run.
-    keep_cluster_detections = debug_out is not None
+    # function's run. `keep_debug_arrays=False` skips them even with a
+    # `debug_out` (the cheap boxes/angles/stats are still stashed).
+    keep_cluster_detections = debug_out is not None and keep_debug_arrays
     cluster_detections: list[tuple[np.ndarray, list]] = []
     detect_boxes: list[tuple] = []
     page_quads: list[dict] = []
@@ -572,6 +578,10 @@ def _render_angle_arrows_pdf(page_meta, entries: list[dict], angle_key: str, hex
     try:
         page = doc.new_page(width=page_meta.width, height=page_meta.height)
         page.set_rotation(page_meta.rotation)
+        # One Shape + one commit for every arrow -- `page.draw_line` per
+        # stroke would add one content stream each (quadratic).
+        shape = page.new_shape()
+        drawn = False
         for entry in entries:
             angle = entry.get(angle_key)
             if angle is None:
@@ -582,14 +592,18 @@ def _render_angle_arrows_pdf(page_meta, entries: list[dict], angle_key: str, hex
             dx, dy = transform_direction((1.0, 0.0), angle)
             tail = (cx - dx * length / 2.0, cy - dy * length / 2.0)
             tip = (cx + dx * length / 2.0, cy + dy * length / 2.0)
-            page.draw_line(tail, tip, color=color, width=1.5)
+            shape.draw_line(tail, tip)
             head_len = length * 0.3
             for sign in (1.0, -1.0):
                 wing = _rotate_vec(-dx, -dy, sign * 25.0)
-                page.draw_line(
-                    tip, (tip[0] + wing[0] * head_len, tip[1] + wing[1] * head_len),
-                    color=color, width=1.5,
-                )
+                # Drawn wing-end -> tip, not tip -> wing-end: a Shape continues
+                # the current subpath when a line starts at its last point,
+                # and the shaft/wing miter join would spike past the tip.
+                shape.draw_line((tip[0] + wing[0] * head_len, tip[1] + wing[1] * head_len), tip)
+            drawn = True
+        if drawn:
+            shape.finish(color=color, width=1.5, closePath=False)
+            shape.commit()
         return doc.tobytes()
     finally:
         doc.close()

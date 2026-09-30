@@ -995,7 +995,12 @@ generic parallel-pool mechanics), never phase-specific business logic.
   `paddle_detect_images/`/`paddle_recog_images/`/`paddle_ocr_images/` (PNG debug crops — what
   PaddleOCR's detector/recognizer actually saw, per-P3-backend savers in
   `scripts/debug_image_savers.py`) are written unless the config sets `debug_images: false`
-  (`ReportConfig`, default `true`), capped at `_DEBUG_IMAGE_CAP` (100) per folder per input
+  (`ReportConfig`, default `true`; it's also passed to `run_pipeline(keep_debug_arrays=...)`,
+  which backends that declare it use to decide whether a `debug_out` keeps full-size image arrays
+  at all). `debug_layers: false` (default `true`) likewise skips *every* layer PDF — no
+  `on_debug_layer` sink, no `phase2`/`reconstructed`/`benchmark__extra_*` layers, no
+  `<type>_{bbox,text}.pdf` overlays — leaving `dump.json`/ground truth/debug images, which is all
+  `pipeline_report_benchmark.py` needs. Debug images are capped at `_DEBUG_IMAGE_CAP` (100) per folder per input
   document — an `_ImageReservoir` reservoir-samples uniformly across every page (seeded from the
   document name, so reruns pick the same crops; rejected crops are never encoded);
   `pipeline_report_benchmark.py` links the first 5 of each folder into `report.html` in place

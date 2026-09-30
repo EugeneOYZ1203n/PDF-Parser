@@ -37,7 +37,6 @@ the array dropped, so no full-size debug array outlives its own step;
 canvases, `diff.MATCHED/MISSED/SPURIOUS`) for later missed-line work."""
 from __future__ import annotations
 
-import io
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -68,16 +67,20 @@ _LOG = get_logger("P2.Junction")
 def extract(
     images: list[Image], page: Page, *, params: Params | None = None, compute=None,
     debug_out: "dict | None" = None, on_debug_layer: "OnDebugLayer | None" = None,
-    ocr_fns: "dict | None" = None,
+    ocr_fns: "dict | None" = None, keep_debug_arrays: bool = True,
 ) -> tuple[list[Vector], list[Text]]:
     """Runs the full flow (module docstring) on every image. `compute` is a
     Pool-2 proxy for PaddleOCR calls (forwarded by `core.pipeline` by
     signature). `ocr_fns` optionally overrides `text_ocr.run_ocr`'s
-    `detect_many`/`recognize`/`recognize_raw` (tests inject fakes)."""
+    `detect_many`/`recognize`/`recognize_raw` (tests inject fakes).
+    `keep_debug_arrays=False` keeps the full-resolution raster arrays out of
+    `debug_out` -- with no `on_debug_layer` either, the debug-only raster
+    work (recolor, image copies, per-component diff) is skipped entirely."""
     params = params or Params()
     state = _PageState()
     sink = _RasterSink(
-        stream=on_debug_layer is not None, keep=debug_out is not None,
+        stream=on_debug_layer is not None,
+        keep=debug_out is not None and keep_debug_arrays,
     )
     t_start = time.perf_counter()
     _LOG.info("Junction: page %d, %d embedded image(s)", page.meta.index, len(images))
@@ -477,16 +480,20 @@ def _oriented_for_page(array: np.ndarray, image: Image) -> np.ndarray:
 
 
 def _place_raster(page, array: np.ndarray, image: Image, _shape) -> None:
+    """Embeds the array's raw samples as a `fitz.Pixmap` -- a PNG stream
+    would be encoded here only for MuPDF to decode and re-compress it
+    (~35 % slower on a full-resolution scan)."""
     import pymupdf as fitz
-    from PIL import Image as PILImage
 
-    arr = np.asarray(_oriented_for_page(array, image), dtype=np.uint8)
+    arr = np.ascontiguousarray(_oriented_for_page(array, image), dtype=np.uint8)
     if arr.ndim == 3 and arr.shape[2] == 1:
         arr = arr[:, :, 0]
-    mode = "L" if arr.ndim == 2 else {3: "RGB", 4: "RGBA"}[arr.shape[2]]
-    buf = io.BytesIO()
-    PILImage.fromarray(arr, mode=mode).save(buf, format="PNG", compress_level=6)
-    page.insert_image(fitz.Rect(*image.bbox), stream=buf.getvalue(), keep_proportion=False)
+    h, w = arr.shape[:2]
+    if arr.ndim == 2:
+        pixmap = fitz.Pixmap(fitz.csGRAY, w, h, arr.tobytes(), 0)
+    else:
+        pixmap = fitz.Pixmap(fitz.csRGB, w, h, arr.tobytes(), int(arr.shape[2] == 4))
+    page.insert_image(fitz.Rect(*image.bbox), pixmap=pixmap, keep_proportion=False)
 
 
 def _boxes_layer(page_meta, stage: str, label: str, hexcolor: str, boxes) -> DebugLayer:

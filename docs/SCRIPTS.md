@@ -84,6 +84,7 @@ one of `input_dir` / `input_files`):
 | `dpi` | render dpi (default 300) |
 | `output_root` | default `outputs/pipeline_report/` |
 | `debug_images` | write the `paddle_*_images/` PNG crops, max 100 random per folder per input (default `true`) |
+| `debug_layers` | write every layer PDF (backend debug layers, `phase2`/`reconstructed`, `benchmark__extra_*`, `<type>_{bbox,text}.pdf` overlays) and do the work only they need (default `true`). `false` still writes `dump.json`/ground truth/debug images, so `pipeline_report_benchmark.py` still scores the run. With Junction, set `debug_images: false` too for the fastest run (otherwise its debug arrays are still computed) |
 
 Output: `outputs/pipeline_report/<ts>__<config-stem>/<pdf-stem>/`. The run's
 source config path is also recorded in `config_and_hyperparameters.txt`.

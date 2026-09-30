@@ -14,6 +14,12 @@ timestamped run folder:
             native_text.txt ...                       (one stats file per stage)
             dump.json                                 (every Text + Vector, reloadable)
 
+            Every layer PDF above (and the benchmark `<text_type>_{bbox,text}.pdf`
+            overlays below) is skipped with `debug_layers: false`, along
+            with the work done only to render it -- dump.json, ground truth
+            and debug images are still written, so the benchmark still
+            scores the run.
+
             Pre-OCR debug image folders (skipped with `debug_images: false`)
             -- each `p3` backend's own distinct set (read from
             res.extra["p3_debug"], see
@@ -238,13 +244,15 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
             res = run_current(
                 run_input, run_page, p2=variant.p2, p3=variant.p3,
                 enable_fast=variant.enable_fast, verbose=True,
-                on_debug_layer=_debug_layer_sink(writer),
+                on_debug_layer=_debug_layer_sink(writer) if config.debug_layers else None,
+                keep_debug_arrays=config.debug_images,
             )
         if run_page != page_index:
             _restamp_page(res, page_index)
 
         _accumulate_page(res, page_index, active, writer, stats_pages, reservoirs,
-                         is_legacy=is_legacy, p3=variant.p3, clock=clock)
+                         is_legacy=is_legacy, p3=variant.p3, clock=clock,
+                         render_layers=config.debug_layers)
         dumps.append(dump_io.PageDump(
             page_meta=res.page.meta, texts=list(res.texts or []),
             vectors=list(res.vectors or []), engine=variant.engine,
@@ -450,12 +458,14 @@ def _process_pdf_benchmark(
             res = run_current(
                 str(conv_path), 0, p2=variant.p2, p3=variant.p3,
                 enable_fast=variant.enable_fast, verbose=True,
-                on_debug_layer=_debug_layer_sink(writer),
+                on_debug_layer=_debug_layer_sink(writer) if config.debug_layers else None,
+                keep_debug_arrays=config.debug_images,
             )
         _restamp_page(res, p)
         _accumulate_page(res, p, active, writer, stats_pages, reservoirs,
-                         is_legacy=is_legacy, p3=variant.p3, clock=clock)
-        if has_manual:
+                         is_legacy=is_legacy, p3=variant.p3, clock=clock,
+                         render_layers=config.debug_layers)
+        if has_manual and config.debug_layers:
             with clock("extra_predictions"):
                 _add_extra_prediction_layers(
                     writer, res, res.page.meta,
@@ -481,9 +491,12 @@ def _process_pdf_benchmark(
                 if is_legacy:
                     res_raster = run_legacy(str(raster_page_path), 0, verbose=True)
                 else:
+                    # Only texts + timings are read back from this run --
+                    # never its debug arrays.
                     res_raster = run_current(
                         str(raster_page_path), 0, p2=variant.p2, p3=variant.p3,
                         enable_fast=variant.enable_fast, verbose=True,
+                        keep_debug_arrays=False,
                     )
                 _restamp_page(res_raster, p)
                 raster_texts = list(res_raster.texts or [])
@@ -508,6 +521,10 @@ def _process_pdf_benchmark(
         ))
 
     sources: list[str] = []
+    # Types whose `<type>_{bbox,text}.pdf` overlays were actually written
+    # (a manifest layer entry per file) -- `sources` itself lists every
+    # type with ground truth, overlays or not.
+    overlay_sources: list[str] = []
     extra_layers: list[dict] = []
     doc_durations: dict = {}
     for text_type in TEXT_TYPES:
@@ -517,12 +534,13 @@ def _process_pdf_benchmark(
                 _LOG.info("%s: no %s labels for pages %s", bench.key, text_type, pages)
             continue
         save_labels(gt, str(doc_dir / f"ground_truth_{text_type}.json"))
-        if gt.entries:
+        if gt.entries and config.debug_layers:
             with StepClock(doc_durations)("label_overlays"):
                 _write_label_overlays(doc_dir, text_type, gt, dumps, cfg)
+            overlay_sources.append(text_type)
         sources.append(text_type)
 
-    for s in sources:
+    for s in overlay_sources:
         for kind in ("bbox", "text"):
             extra_layers.append({
                 "stage": "benchmark", "layer": f"{s} label {kind}",

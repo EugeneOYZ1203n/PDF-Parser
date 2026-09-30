@@ -316,6 +316,29 @@ def test_render_boxes_pdf_accepts_2_and_3_tuples():
         doc.close()
 
 
+def _content_streams(pdf_bytes: bytes) -> int:
+    doc = fitz.open("pdf", pdf_bytes)
+    try:
+        return sum(1 for x in doc[0].get_contents() if (doc.xref_stream(x) or b"").strip())
+    finally:
+        doc.close()
+
+
+def test_render_boxes_pdf_batches_into_one_content_stream():
+    # One `page.draw_rect` per box made one content stream each (quadratic
+    # to build); every box, colour and dash run now shares one commit.
+    boxes = [((i, i, i + 5, i + 5), (1.0, 0.0, 0.0) if i % 2 else (0.0, 0.0, 1.0)) for i in range(50)]
+    boxes.append(((0, 0, 5, 5), (0.0, 0.0, 0.0), "[2 2] 0"))
+    assert _content_streams(render_boxes_pdf(_meta(), boxes)) == 1
+    assert _content_streams(render_boxes_pdf(_meta(), [])) == 0  # blank layer stays blank
+
+
+def test_render_reconstructed_pdf_batches_text_into_one_content_stream():
+    boxes = [(f"W{i}", (10, 5 + i * 8, 60, 12 + i * 8), 0.0) for i in range(10)]
+    assert _content_streams(render_reconstructed_pdf(_meta(), text_boxes=boxes)) == 1
+    assert _content_streams(render_reconstructed_pdf(_meta(), text_boxes=[])) == 0
+
+
 # --------------------------------------------------------------------------
 # New: text-scaling / perimeter-coverage -- reconstructed text must
 # actually reach the edges of its own bbox, not render shrunken into a

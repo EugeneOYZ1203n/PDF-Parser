@@ -76,6 +76,33 @@ def test_run_pipeline_forwards_debug_out_only_when_verbose(
     assert "vectors_in" in verbose.extra["p3_debug"]
 
 
+def test_run_pipeline_forwards_keep_debug_arrays_by_signature(
+    synthetic_pdf_factory, tmp_pdf_path, monkeypatch,
+):
+    seen: dict = {}
+
+    def p2_with_flag(images, page, *, keep_debug_arrays=True):
+        seen["p2"] = keep_debug_arrays
+        return [], []
+
+    def p3_with_flag(vectors_p1, vectors_p2, page, *, keep_debug_arrays=True):
+        seen["p3"] = keep_debug_arrays
+        return [], []
+
+    monkeypatch.setitem(registry.P2_REGISTRY, "FlagP2", p2_with_flag)
+    monkeypatch.setitem(registry.P3_REGISTRY, "FlagP3", p3_with_flag)
+    monkeypatch.setitem(registry.P2_REGISTRY, "FakeP2", _fake_p2)
+    monkeypatch.setitem(registry.P3_REGISTRY, "FakeP3", _fake_p3)
+    path = _synthetic_pdf_path(synthetic_pdf_factory, tmp_pdf_path)
+
+    run_pipeline(path, 0, p2="FlagP2", p3="FlagP3", keep_debug_arrays=False)
+    assert seen == {"p2": False, "p3": False}
+    run_pipeline(path, 0, p2="FlagP2", p3="FlagP3")
+    assert seen == {"p2": True, "p3": True}
+    # A backend that doesn't declare it never receives it.
+    run_pipeline(path, 0, p2="FakeP2", p3="FakeP3", keep_debug_arrays=False)
+
+
 def test_run_pipeline_streams_on_debug_layer_independent_of_verbose(
     synthetic_pdf_factory, tmp_pdf_path, monkeypatch,
 ):

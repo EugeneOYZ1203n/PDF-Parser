@@ -69,6 +69,7 @@ def run_pipeline(
     compute=None,
     progress_counter=None,
     on_debug_layer=None,
+    keep_debug_arrays: bool = True,
 ) -> PipelineResult:
     """Run one page through Phase 1 (always) -> `p2` -> `p3` -> Phase 4
     (always). `enable_fast` is forwarded to `p3` backends that accept it
@@ -85,7 +86,15 @@ def run_pipeline(
     layer to disk as it's produced rather than holding every backend's
     heavier step-local debug data (render crops, masks) for the whole run.
     Independent of `verbose`/`debug_out` -- a caller may use either, both,
-    or neither."""
+    or neither.
+
+    `keep_debug_arrays` is forwarded to any `p2`/`p3` backend whose own
+    signature declares it. `False` tells a backend given a `debug_out`
+    (`verbose=True`) to stash only its cheap intermediates there -- boxes,
+    angles, stats -- and skip the full-size image arrays (render crops,
+    masks, diff canvases) plus any work done only to produce them, for a
+    caller that wants the verbose result but not those arrays (e.g. the
+    report generator with `debug_images: false`)."""
     p2_fn = resolve_p2(p2)
     p3_fn = resolve_p3(p3)
     timer = _StepTimer(verbose=verbose)
@@ -119,6 +128,8 @@ def run_pipeline(
             p2_kwargs["on_debug_layer"] = on_debug_layer
         if compute is not None and "compute" in p2_params:
             p2_kwargs["compute"] = compute
+        if "keep_debug_arrays" in p2_params:
+            p2_kwargs["keep_debug_arrays"] = keep_debug_arrays
         p2_vectors, p2_texts = p2_fn(phase1.images, phase1.page, **p2_kwargs)
 
     _LOG.info("phase3 (p3=%s): %d P1 + %d P2 vector(s)", p3, len(phase1.vectors), len(p2_vectors))
@@ -129,6 +140,7 @@ def run_pipeline(
         for name, value in (
             ("enable_fast", enable_fast), ("verbose", verbose),
             ("compute", compute), ("progress_counter", progress_counter),
+            ("keep_debug_arrays", keep_debug_arrays),
         ):
             if name in sig.parameters:
                 p3_kwargs[name] = value

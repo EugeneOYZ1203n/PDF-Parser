@@ -25,7 +25,6 @@ only covers the current pipeline's own stages.
 """
 from __future__ import annotations
 
-import io
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -164,11 +163,15 @@ def _compose(
         page.set_rotation(page_meta.rotation)
 
         if image is not None:
-            buf = io.BytesIO()
-            image.convert("RGB").save(buf, format="PNG")
+            # Raw samples straight into a Pixmap -- a PNG stream would be
+            # encoded here only for MuPDF to decode and re-compress it.
+            rgb_image = image.convert("RGB")
             page.insert_image(
                 fitz.Rect(0, 0, page_meta.width, page_meta.height),
-                stream=buf.getvalue(), keep_proportion=False,
+                pixmap=fitz.Pixmap(
+                    fitz.csRGB, rgb_image.width, rgb_image.height, rgb_image.tobytes(), 0,
+                ),
+                keep_proportion=False,
             )
 
         import dataclasses
@@ -186,28 +189,50 @@ def _compose(
             if recol:
                 replay_drawing_paths(page, recol)
 
+        # Every rect/poly/text layer below draws into one Shape per layer with
+        # a single commit -- `page.draw_rect`/`draw_polyline`/`insert_text`
+        # per item each make their own Shape + commit, one content stream per
+        # item (quadratic on a busy page).
         for bboxes, hexcol, filled in rect_layers or []:
             rgb = _hex_to_rgb01(hexcol)
+            kw = {"color": rgb, "width": 1.0}
+            if filled:
+                kw["fill"] = rgb
+                kw["fill_opacity"] = 0.25
+            shape = page.new_shape()
+            drawn = False
             for b in bboxes:
                 if b is None:
                     continue
-                kw = {"color": rgb, "width": 1.0}
+                shape.draw_rect(fitz.Rect(*b))
+                drawn = True
+                # A translucent fill is finished per rect so overlaps still
+                # darken each other, as separate draw_rect calls did.
                 if filled:
-                    kw["fill"] = rgb
-                    kw["fill_opacity"] = 0.25
-                page.draw_rect(fitz.Rect(*b), **kw)
+                    shape.finish(**kw)
+            if drawn:
+                if not filled:
+                    shape.finish(**kw)
+                shape.commit()
 
         for polys, hexcol in poly_layers or []:
             rgb = _hex_to_rgb01(hexcol)
+            shape = page.new_shape()
+            drawn = False
             for poly in polys:
                 if poly is None or len(poly) < 2:
                     continue
                 pts = [fitz.Point(float(px), float(py)) for px, py in poly]
-                page.draw_polyline(pts + [pts[0]], color=rgb, width=1.0)
+                shape.draw_polyline(pts + [pts[0]])
+                drawn = True
+            if drawn:
+                shape.finish(color=rgb, width=1.0, closePath=False)
+                shape.commit()
 
         if text_layer:
             base_font = fitz.Font("helv")
             span = base_font.ascender - base_font.descender
+            shape = page.new_shape()
             for text, bbox, rotation, rgb in text_layer:
                 if not text or not text.strip():
                     continue
@@ -217,12 +242,13 @@ def _compose(
                 if natural > (x1 - x0) > 0:
                     fs = max(fs * (x1 - x0) / natural, 1.0)
                 try:
-                    page.insert_text(
+                    shape.insert_text(
                         fitz.Point(x0, y0 + base_font.ascender * fs), text,
                         fontsize=fs, color=rgb,
                     )
                 except Exception:  # noqa: BLE001 -- a preview; never fail the run over one label
                     pass
+            shape.commit()  # no-op when nothing was placed
 
         return doc.tobytes()
     finally:
