@@ -36,3 +36,13 @@ def test_crop_contains_only_this_layer_and_offsets_are_right():
 def test_missing_layer_yields_nothing():
     labels, enhanced = _two_blobs(5)
     assert list(iter_layer_components(labels, enhanced, 7, tol_px=10.0)) == []
+
+
+@pytest.mark.parametrize("gap", [5, 20])
+def test_layer_components_count_matches_yielded(gap):
+    from rastervec.P2_Raster_To_Vec.Junction.components import layer_components
+
+    labels, enhanced = _two_blobs(gap)
+    count, it = layer_components(labels, enhanced, 1, tol_px=10.0)
+    assert count == len(list(it))
+    assert layer_components(labels, enhanced, 7, tol_px=10.0)[0] == 0

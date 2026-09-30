@@ -24,11 +24,16 @@ given (`paddle_engine._detect_job` / `_recognize_crops_job` /
 `_recognize_crops_raw_job`), else runs in-process."""
 from __future__ import annotations
 
+import math
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
 import cv2
 import numpy as np
+from tqdm import tqdm
+
+from rastervec.commons.logging_setup import get_logger
 
 from rastervec.P2_Raster_To_Vec.Junction.config import (
     MAX_UPSCALE,
@@ -50,6 +55,8 @@ from rastervec.P2_Raster_To_Vec.Junction.paddle_engine import (
     hough_deskew,
     normalize_rotation,
 )
+
+_LOG = get_logger("P2.Junction.ocr")
 
 BBox = tuple[float, float, float, float]
 # Images per detect dispatch -- bounds how many tile/crop copies are pickled
@@ -205,9 +212,13 @@ def _make_detect_many(compute) -> Callable[[list[np.ndarray]], list[list[np.ndar
 def _make_recognize(compute):
     rec = PaddleRecBackend()
 
-    def run(crops: list[np.ndarray], job, local_fn) -> list:
+    def run(crops: list[np.ndarray], job, local_fn, desc: str) -> list:
         out: list = []
-        for batch in _chunks(crops, OCR_BATCH_SIZE):
+        batches = tqdm(
+            _chunks(crops, OCR_BATCH_SIZE), total=math.ceil(len(crops) / OCR_BATCH_SIZE),
+            desc=desc, unit="batch", leave=False,
+        )
+        for batch in batches:
             if compute is not None:
                 out.extend(compute.apply(job, (batch, OCR_VERSION, OCR_LANG)))
             else:
@@ -215,10 +226,10 @@ def _make_recognize(compute):
         return out
 
     def recognize(crops):
-        return run(crops, _recognize_crops_job, rec.recognize_crops)
+        return run(crops, _recognize_crops_job, rec.recognize_crops, "Junction OCR recognize")
 
     def recognize_raw(crops):
-        return run(crops, _recognize_crops_raw_job, rec.recognize_crops_raw)
+        return run(crops, _recognize_crops_raw_job, rec.recognize_crops_raw, "Junction OCR retry")
 
     return recognize, recognize_raw
 
@@ -229,14 +240,17 @@ def _make_recognize(compute):
 def detect_tiles(bgr: np.ndarray, tiles: list[tuple[int, int, int, int]], detect_many) -> list[TileBox]:
     """Detect per tile (tiles are views into `bgr`, never copied locally)."""
     out: list[TileBox] = []
+    bar = tqdm(total=len(tiles), desc="Junction OCR tile detect", unit="tile", leave=False)
     for chunk_start in range(0, len(tiles), _DETECT_CHUNK):
         chunk = tiles[chunk_start:chunk_start + _DETECT_CHUNK]
         quads_per_tile = detect_many([bgr[y0:y1, x0:x1] for x0, y0, x1, y1 in chunk])
+        bar.update(len(chunk))
         for offset, (tile, quads) in enumerate(zip(chunk, quads_per_tile)):
             x0, y0 = tile[0], tile[1]
             for quad in quads:
                 b = _quad_bbox(np.asarray(quad, dtype=np.float64))
                 out.append(TileBox((b[0] + x0, b[1] + y0, b[2] + x0, b[3] + y0), chunk_start + offset))
+    bar.close()
     return out
 
 
@@ -266,10 +280,12 @@ def refine_and_recognize(
     angles: list[float] = []
     kept_bboxes: list[BBox] = []
 
+    bar = tqdm(total=len(merged), desc="Junction OCR refine detect", unit="box", leave=False)
     for chunk in _chunks(merged, _DETECT_CHUNK):
         prepared = [(_padded_crop(bgr, box, pad_px), box) for box in chunk]
         prepared = [(p, box) for p, box in prepared if p is not None]
         quads_per_crop = detect_many([p[0] for p, _box in prepared])
+        bar.update(len(chunk))
         for ((crop, padded, scale), box), quads in zip(prepared, quads_per_crop):
             for quad in quads:
                 quad = np.asarray(quad, dtype=np.float64)
@@ -285,7 +301,11 @@ def refine_and_recognize(
                 angles.append(angle)
                 hits.append(OcrHit(quad=quad_img, padded_box=padded))
 
+    bar.close()
+    _LOG.debug("refine: %d merged boxes -> %d quads", len(merged), len(hits))
+
     boxes = recognize(crops_for_rec)
+    _LOG.debug("recognize: %d/%d non-blank", sum(1 for b in boxes if b.text), len(boxes))
     flips = [float(b.flip_deg) for b in boxes]
     retry_counts: list = [0 if b.text else None for b in boxes]
     extras: list = [None] * len(boxes)
@@ -293,6 +313,7 @@ def refine_and_recognize(
         blank = [i for i, b in enumerate(boxes) if not b.text]
         if not blank:
             break
+        _LOG.debug("retry +%d deg: %d blank crops", int(extra), len(blank))
         retried = recognize_raw([np.ascontiguousarray(np.rot90(crops_for_rec[i], k)) for i in blank])
         for i, rbox in zip(blank, retried):
             if rbox.text:
@@ -325,9 +346,16 @@ def run_ocr(
         recognize_raw = recognize_raw or rec_raw
     h, w = bgr.shape[:2]
     tiles = tile_grid(h, w)
+    t0 = time.perf_counter()
     tile_boxes = detect_tiles(bgr, tiles, detect_many)
+    _LOG.info("OCR tile detect: %d tiles -> %d boxes (%.1fs)", len(tiles), len(tile_boxes),
+              time.perf_counter() - t0)
     merged = merge_cross_tile_boxes(tile_boxes)
+    _LOG.debug("OCR cross-tile merge: %d -> %d boxes", len(tile_boxes), len(merged))
+    t0 = time.perf_counter()
     hits = refine_and_recognize(bgr, merged, px_per_pt, bg_bgr, detect_many, recognize, recognize_raw)
+    _LOG.info("OCR refine + recognize: %d merged -> %d hits, %d non-blank (%.1fs)", len(merged),
+              len(hits), sum(1 for x in hits if x.text), time.perf_counter() - t0)
     return OcrResult(
         tiles=[tuple(float(v) for v in t) for t in tiles], tile_boxes=tile_boxes,
         merged=merged, hits=hits,

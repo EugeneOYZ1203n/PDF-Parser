@@ -42,18 +42,31 @@ def iter_layer_components(
     labels: np.ndarray, enhanced: np.ndarray, layer: int, tol_px: float,
 ) -> Iterator[Component]:
     """Yield `Component`s of `layer`, largest first -- see module docstring."""
+    _count, it = layer_components(labels, enhanced, layer, tol_px)
+    return it
+
+
+def layer_components(
+    labels: np.ndarray, enhanced: np.ndarray, layer: int, tol_px: float,
+) -> "tuple[int, Iterator[Component]]":
+    """`iter_layer_components`, plus how many components it will yield at
+    most (for a progress total) -- the labelling runs eagerly, the crops are
+    still built lazily one at a time."""
     h, w = labels.shape[:2]
     layer_mask = (labels == layer).astype(np.uint8)
     if not layer_mask.any():
-        return
+        return 0, iter(())
     fringe = cv2.dilate(layer_mask, np.ones((3, 3), np.uint8))
     del layer_mask
     r = max(0, int(np.ceil(tol_px / 2.0)))
     grown = cv2.dilate(fringe, np.ones((2 * r + 1, 2 * r + 1), np.uint8)) if r else fringe
     n, cc, stats, _ = cv2.connectedComponentsWithStats(grown, connectivity=8, ltype=cv2.CV_32S)
     del grown
-
     order = sorted(range(1, n), key=lambda i: -int(stats[i, cv2.CC_STAT_AREA]))
+    return len(order), _crops(order, cc, stats, fringe, enhanced, h, w)
+
+
+def _crops(order, cc, stats, fringe, enhanced, h, w) -> Iterator[Component]:
     for i in order:
         bx, by, bw, bh = (int(v) for v in stats[i, :4])
         sub = (cc[by:by + bh, bx:bx + bw] == i) & (fringe[by:by + bh, bx:bx + bw] > 0)

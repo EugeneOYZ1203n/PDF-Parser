@@ -121,3 +121,25 @@ def test_every_p3_backend_accepts_step_durations():
 
     for name, fn in registry.P3_REGISTRY.items():
         assert "step_durations" in inspect.signature(fn).parameters, name
+
+
+def _broken_p2(images, page):
+    raise ValueError("boom in p2")
+
+
+def test_failed_p2_under_verbose_does_not_cascade_into_unbound_local(
+    synthetic_pdf_factory, tmp_pdf_path, monkeypatch,
+):
+    monkeypatch.setitem(registry.P2_REGISTRY, "BrokenP2", _broken_p2)
+    monkeypatch.setitem(registry.P3_REGISTRY, "FakeP3", _fake_p3)
+    path = _synthetic_pdf_path(synthetic_pdf_factory, tmp_pdf_path)
+
+    result = run_pipeline(path, 0, p2="BrokenP2", p3="FakeP3", verbose=True)
+
+    outcomes = {o.name: o for o in result.step_outputs} if isinstance(result.step_outputs, list) \
+        else result.step_outputs
+    assert outcomes["phase2"].status == "error"
+    assert "boom in p2" in outcomes["phase2"].error
+    assert outcomes["phase3"].status == "ok"
+    assert [t.text for t in result.texts] == ["hello"]
+    assert len(result.vectors) == 1

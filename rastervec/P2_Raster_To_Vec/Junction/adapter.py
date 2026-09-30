@@ -38,16 +38,19 @@ canvases, `diff.MATCHED/MISSED/SPURIOUS`) for later missed-line work."""
 from __future__ import annotations
 
 import io
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
 import numpy as np
+from tqdm import tqdm
 
+from rastervec.commons.logging_setup import get_logger
 from rastervec.commons.helpers.geometry import compute_origin, transform_direction
 from rastervec.commons.models import Image, Page, Text, Vector
 from rastervec.P2_Raster_To_Vec.Junction import diff as diff_mod
 from rastervec.P2_Raster_To_Vec.Junction.color_separation import recolor, separate_colors
-from rastervec.P2_Raster_To_Vec.Junction.components import iter_layer_components
+from rastervec.P2_Raster_To_Vec.Junction.components import layer_components
 from rastervec.P2_Raster_To_Vec.Junction.config import COMPONENT_TOLERANCE_PT, DIFF_TOLERANCE_PX
 from rastervec.P2_Raster_To_Vec.Junction.enhance import enhance, to_gray
 from rastervec.P2_Raster_To_Vec.Junction.junction_test.pipeline import Params, run
@@ -58,6 +61,8 @@ from rastervec.P2_Raster_To_Vec.Junction.text_removal import erase_text
 DebugLayer = "tuple[str, str, str, bytes]"
 OnDebugLayer = "Callable[[str, str, str, bytes], None]"
 Mapper = Callable[[tuple[float, float]], tuple[float, float]]
+
+_LOG = get_logger("P2.Junction")
 
 
 def extract(
@@ -74,12 +79,20 @@ def extract(
     sink = _RasterSink(
         stream=on_debug_layer is not None, keep=debug_out is not None,
     )
-    for image in images:
+    t_start = time.perf_counter()
+    _LOG.info("Junction: page %d, %d embedded image(s)", page.meta.index, len(images))
+    for i, image in enumerate(tqdm(images, desc="Junction images", unit="img",
+                                   leave=False, disable=len(images) <= 1)):
+        _LOG.info("Junction image %d/%d", i + 1, len(images))
         _process_image(image, page, params, compute, state, sink, ocr_fns or {})
 
     if on_debug_layer is not None:
-        for layer in _page_layers(page.meta, sink.finish_stream(page.meta), state):
+        t0 = time.perf_counter()
+        _LOG.debug("Junction debug layers: rendering")
+        layers_out = _page_layers(page.meta, sink.finish_stream(page.meta), state)
+        for layer in layers_out:
             on_debug_layer(*layer)
+        _LOG.info("Junction debug layers: %d emitted (%.1fs)", len(layers_out), time.perf_counter() - t0)
     if debug_out is not None:
         debug_out["raster_images"] = sink.kept
         # (label, image, uint8 codes HxW): "total" + one per layer hex --
@@ -90,6 +103,8 @@ def extract(
         debug_out["state"] = state
         debug_out["vectors"] = state.vectors
         debug_out["texts"] = state.texts
+    _LOG.info("Junction done: %d vectors, %d texts (%.1fs)", len(state.vectors), len(state.texts),
+              time.perf_counter() - t_start)
     return state.vectors, state.texts
 
 
@@ -189,9 +204,16 @@ def _process_image(
     meta = page.meta
     to_page = _make_to_page(image, w, h)
     px_per_pt = _px_per_pt(image, w, h)
+    _LOG.info("  %dx%d px, %.2f px/pt", w, h, px_per_pt)
 
     # 1. color separation
+    t0 = time.perf_counter()
+    _LOG.debug("  color separation: start")
     layers = separate_colors(rgb)
+    _LOG.info("  color separation: %d layer(s) %s, background %s (%.1fs)", layers.n_layers,
+              [_rgb_hex(c) for c in layers.centroids_rgb],
+              _rgb_hex(layers.centroids_rgb[layers.background]) if layers.n_layers else "-",
+              time.perf_counter() - t0)
     if layers.n_layers == 0:
         return
     if sink.active:
@@ -199,19 +221,31 @@ def _process_image(
     bg_rgb = tuple(int(c) for c in layers.centroids_rgb[layers.background])
 
     # 2. OCR (BGR view -- PaddleOCR is cv2/BGR)
+    t0 = time.perf_counter()
+    _LOG.debug("  OCR: start")
     ocr = run_ocr(rgb[:, :, ::-1], px_per_pt, bg_rgb[::-1], compute=compute, **ocr_fns)
+    _LOG.info("  OCR: %d tiles, %d tile boxes, %d merged, %d hits (%.1fs)", len(ocr.tiles),
+              len(ocr.tile_boxes), len(ocr.merged), len(ocr.hits), time.perf_counter() - t0)
 
     # 3. text removal + Text output
+    t0 = time.perf_counter()
+    _LOG.debug("  text removal: start")
     inks = erase_text(rgb, layers, ocr.hits)
+    n_texts = len(state.texts)
     _collect_ocr(state, ocr, inks, layers, to_page, meta.index)
     if sink.active:
         sink.add("text_removal", "cleaned image", _C_CLEANED, rgb.copy(), image, meta)
+    _LOG.info("  text removal: %d text(s) erased (%.1fs)", len(state.texts) - n_texts,
+              time.perf_counter() - t0)
 
     # 4. enhancement
+    t0 = time.perf_counter()
+    _LOG.debug("  enhance: start")
     enhanced = enhance(to_gray(rgb))
     del rgb
     if sink.active:
         sink.add("enhance", "enhanced image", _C_ENHANCED, enhanced, image, meta)
+    _LOG.info("  enhance: CLAHE + unsharp mask (%.1fs)", time.perf_counter() - t0)
 
     # 5. per-layer, per-component tracing (+ 6. diff when debugging)
     tol_px = COMPONENT_TOLERANCE_PT * px_per_pt
@@ -221,7 +255,13 @@ def _process_image(
         color_rgb = layers.centroids_rgb[layer]
         color = tuple(float(c) / 255.0 for c in color_rgb)
         layer_codes = np.zeros((h, w), dtype=np.uint8) if sink.active else None
-        for comp in iter_layer_components(layers.labels, enhanced, layer, tol_px):
+        hexcolor = _rgb_hex(color_rgb)
+        t0 = time.perf_counter()
+        n_vec = len(state.vectors)
+        n_comp, comps = layer_components(layers.labels, enhanced, layer, tol_px)
+        _LOG.debug("  trace layer %s: %d component(s)", hexcolor, n_comp)
+        bar = tqdm(comps, total=n_comp, desc=f"Junction trace {hexcolor}", unit="comp", leave=False)
+        for comp in bar:
             result = run(comp.gray, params)
 
             def mapper(pt, _x0=comp.x0, _y0=comp.y0):
@@ -237,8 +277,11 @@ def _process_image(
                 diff_mod.paste_codes(total_codes, codes, comp.x0, comp.y0)
                 region = rendered_canvas[comp.y0:comp.y0 + rendered.shape[0], comp.x0:comp.x0 + rendered.shape[1]]
                 region |= rendered[:region.shape[0], :region.shape[1]]
+            bar.set_postfix(segments=len(state.vectors) - n_vec, refresh=False)
+        bar.close()
+        _LOG.info("  trace layer %s: %d component(s) -> %d segment(s) (%.1fs)", hexcolor, n_comp,
+                  len(state.vectors) - n_vec, time.perf_counter() - t0)
         if sink.active:
-            hexcolor = _rgb_hex(color_rgb)
             sink.add("vector_diff", f"layer {hexcolor}", hexcolor,
                      diff_mod.codes_to_rgba(layer_codes), image, meta)
             if sink.keep:

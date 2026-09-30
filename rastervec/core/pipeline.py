@@ -49,7 +49,11 @@ class _StepTimer:
         if exc_type is None:
             self.outcomes[name] = StepOutcome(name, "ok", None, elapsed)
             return False
-        _LOG.exception("pipeline phase %s failed", name)
+        _LOG.error(
+            "pipeline phase %s failed%s", name,
+            "; continuing with empty output (verbose=True)" if self.verbose else "",
+            exc_info=(exc_type, exc, tb),
+        )
         self.outcomes[name] = StepOutcome(name, "error", str(exc), elapsed)
         return self.verbose
 
@@ -94,7 +98,18 @@ def run_pipeline(
 
     with timer("phase1"):
         phase1 = read_and_extract(pdf_path, page_index)
+    if timer.outcomes["phase1"].status != "ok":
+        # nothing downstream can run without Phase 1's page
+        raise RuntimeError(f"phase1 failed: {timer.outcomes['phase1'].error}")
 
+    # A failed phase is swallowed under verbose=True (see _StepTimer); start
+    # every downstream input empty so the next phase runs on nothing instead
+    # of raising UnboundLocalError and hiding the real failure.
+    p2_vectors, p2_texts = [], []
+    p3_vectors, p3_texts = [], []
+    texts, vectors = [], []
+
+    _LOG.info("phase2 (p2=%s): %d image(s)", p2, len(phase1.images))
     with timer("phase2"):
         p2_kwargs = {}
         p2_params = inspect.signature(p2_fn).parameters
@@ -102,8 +117,11 @@ def run_pipeline(
             p2_kwargs["debug_out"] = p2_debug
         if on_debug_layer is not None and "on_debug_layer" in p2_params:
             p2_kwargs["on_debug_layer"] = on_debug_layer
+        if compute is not None and "compute" in p2_params:
+            p2_kwargs["compute"] = compute
         p2_vectors, p2_texts = p2_fn(phase1.images, phase1.page, **p2_kwargs)
 
+    _LOG.info("phase3 (p3=%s): %d P1 + %d P2 vector(s)", p3, len(phase1.vectors), len(p2_vectors))
     with timer("phase3"):
         p3_kwargs = {}
 
