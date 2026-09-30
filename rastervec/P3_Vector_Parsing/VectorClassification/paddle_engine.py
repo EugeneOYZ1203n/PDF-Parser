@@ -444,10 +444,9 @@ def hough_deskew(
     this crop's rotation comes solely from `_combined_rotation_deg`.
 
     `allow_rotation=False` (set by the caller, `parse.py::
-    _quad_allows_rotation`, when the quad's own bbox isn't elongated enough
-    or its underlying vectors collapse to a single connected component --
-    no reliable baseline direction either way) skips the grayscale/ink-mask/
-    Hough/minAreaRect estimation entirely: both angles stay `None`, the
+    _quad_allows_rotation`, when the quad's underlying vectors collapse to a
+    single connected component -- no reliable baseline direction) skips the
+    grayscale/ink-mask/Hough/minAreaRect estimation entirely: both angles stay `None`, the
     combined correction is `0.0`, and the crop is returned unrotated. This
     also means the estimators are never run for a quad that was going to be
     forced to `0.0` anyway.

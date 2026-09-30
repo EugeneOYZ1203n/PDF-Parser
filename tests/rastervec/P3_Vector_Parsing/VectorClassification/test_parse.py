@@ -279,26 +279,13 @@ def test_parse_renders_debug_layers_only_with_a_callback(page_meta, monkeypatch)
     assert calls == [1] and "debug_render" in steps
 
 
-def test_bbox_aspect_ratio_is_orientation_agnostic(vector):
-    wide = (0.0, 0.0, 30.0, 10.0)
-    tall = (0.0, 0.0, 10.0, 30.0)
-    assert vectorclassification._bbox_aspect_ratio(wide) == 3.0
-    assert vectorclassification._bbox_aspect_ratio(tall) == 3.0
-
-
-def test_bbox_aspect_ratio_zero_for_degenerate_bbox():
-    assert vectorclassification._bbox_aspect_ratio((0.0, 0.0, 0.0, 10.0)) == 0.0
-    assert vectorclassification._bbox_aspect_ratio((0.0, 0.0, 10.0, 0.0)) == 0.0
-
-
-def test_quad_allows_rotation_false_below_aspect_ratio_threshold(vector):
-    # A near-square bbox, even with several disjoint vectors under it.
-    bbox = (0.0, 0.0, 10.0, 9.0)
-    vectors = [
-        vector(kind="l", bbox=(0.0, 0.0, 2.0, 2.0), color=(0.0, 0.0, 0.0), seqno=1),
-        vector(kind="l", bbox=(8.0, 8.0, 10.0, 9.0), color=(0.0, 0.0, 0.0), seqno=2),
-    ]
+def test_quad_allows_rotation_false_for_single_or_no_vectors(vector):
+    # A single vector under the bbox -> no baseline to measure, regardless
+    # of the bbox's own shape.
+    bbox = (0.0, 0.0, 30.0, 5.0)
+    vectors = [vector(kind="l", bbox=(0.0, 0.0, 5.0, 5.0), color=(0.0, 0.0, 0.0), seqno=1)]
     assert vectorclassification._quad_allows_rotation(bbox, vectors) is False
+    assert vectorclassification._quad_allows_rotation(bbox, []) is False
 
 
 def test_quad_allows_rotation_false_for_single_connected_component(vector):
@@ -317,6 +304,17 @@ def test_quad_allows_rotation_true_for_elongated_multi_component_quad(vector):
     vectors = [
         vector(kind="l", bbox=(0.0, 0.0, 5.0, 5.0), color=(0.0, 0.0, 0.0), seqno=1),
         vector(kind="l", bbox=(20.0, 0.0, 25.0, 5.0), color=(0.0, 0.0, 0.0), seqno=2),
+    ]
+    assert vectorclassification._quad_allows_rotation(bbox, vectors) is True
+
+
+def test_quad_allows_rotation_true_regardless_of_aspect_ratio(vector):
+    # A near-square bbox with two disjoint vectors under it -> still True;
+    # the aspect-ratio gate was removed, only connectivity matters now.
+    bbox = (0.0, 0.0, 10.0, 9.0)
+    vectors = [
+        vector(kind="l", bbox=(0.0, 0.0, 2.0, 2.0), color=(0.0, 0.0, 0.0), seqno=1),
+        vector(kind="l", bbox=(8.0, 8.0, 10.0, 9.0), color=(0.0, 0.0, 0.0), seqno=2),
     ]
     assert vectorclassification._quad_allows_rotation(bbox, vectors) is True
 

@@ -417,11 +417,10 @@ generic parallel-pool mechanics), never phase-specific business logic.
     quad (`paddle_engine.py::hough_deskew` — an axis-aligned crop rotated by a raster-refined
     Hough-line + `cv2.minAreaRect` combined angle estimate, not a perspective warp, and only
     applied when the two readings agree within `config.ROTATION_AGREEMENT_TOLERANCE_DEG`, and only
-    attempted at all when `parse.py::_quad_allows_rotation` finds the detected quad's own bbox
-    elongated enough — `config.ROTATION_MIN_ASPECT_RATIO`, orientation-agnostic — and its
+    attempted at all when `parse.py::_quad_allows_rotation` finds the detected quad's own
     underlying vectors form more than one connected component by bbox overlap
-    (`commons.helpers.clustering.group_by_overlap`); either condition failing forces a 0-degree
-    correction without even running Hough/minAreaRect). Every chunk's quads accumulate into one
+    (`commons.helpers.clustering.group_by_overlap`) — a single connected component forces a
+    0-degree correction without even running Hough/minAreaRect). Every chunk's quads accumulate into one
     flat, page-wide pool, which is then recognized (`paddle_engine.py::
     PaddleRecBackend.recognize_crops`) in `config.OCR_BATCH_SIZE`-sized batches across the *whole
     page* at once (dispatched per batch via `paddle_engine.py::_recognize_crops_job` when

@@ -38,7 +38,6 @@ from rastervec.P3_Vector_Parsing.VectorClassification.config import (
     OCR_LANG,
     OCR_VERSION,
     RENDER_PADDING_EXTRA_PT,
-    ROTATION_MIN_ASPECT_RATIO,
 )
 from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import (
     PaddleDetectBackend,
@@ -65,33 +64,17 @@ def _cluster_render_padding(vectors: list[Vector]) -> float:
     return max((v.width or 0.0) for v in vectors) / 2.0 + RENDER_PADDING_EXTRA_PT
 
 
-def _bbox_aspect_ratio(bbox: tuple[float, float, float, float]) -> float:
-    """Orientation-agnostic elongation of a page-space bbox: max(w,h) /
-    min(w,h), always >= 1 -- a tall vertical run of text scores the same as
-    a wide horizontal one. 0.0 for a degenerate (zero-width or -height)
-    bbox, which safely fails any `ROTATION_MIN_ASPECT_RATIO` gate."""
-    x0, y0, x1, y1 = bbox
-    w, h = x1 - x0, y1 - y0
-    if w <= 0.0 or h <= 0.0:
-        return 0.0
-    return max(w, h) / min(w, h)
-
-
 def _quad_allows_rotation(
     bbox: tuple[float, float, float, float], cluster_vectors: list[Vector],
 ) -> bool:
     """Whether `hough_deskew` should attempt a rotation correction for the
-    detected quad at page-space `bbox`: only when the quad's own box is
-    elongated enough to have a well-defined baseline direction
-    (`_bbox_aspect_ratio` >= `ROTATION_MIN_ASPECT_RATIO`) AND the vectors
-    underneath it (`cluster_vectors` filtered to this quad's own bbox via
+    detected quad at page-space `bbox`: only when the vectors underneath it
+    (`cluster_vectors` filtered to this quad's own bbox via
     `bboxes_intersect`) form more than one connected component by bbox
     overlap (`group_by_overlap` -- a pure overlap/touch union-find, no
     distance slack). A single connected component (0/1 overlapping
     vectors, or several that all touch/overlap into one blob) is one
     glyph/shape with no baseline to measure."""
-    if _bbox_aspect_ratio(bbox) < ROTATION_MIN_ASPECT_RATIO:
-        return False
     vectors_in_quad = [v for v in cluster_vectors if bboxes_intersect(v.bbox, bbox)]
     if len(vectors_in_quad) <= 1:
         return False

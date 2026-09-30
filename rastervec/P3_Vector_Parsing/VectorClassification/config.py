@@ -37,14 +37,6 @@ HOUGH_ANGLE_SNAP_DEG = 10.0
 # otherwise the correction defaults to 0 (no rotation) rather than
 # trusting either reading alone.
 ROTATION_AGREEMENT_TOLERANCE_DEG = 1.0
-# Rotation-correction gating (parse.py::_quad_allows_rotation): a detected
-# quad's own bbox must be at least this elongated (orientation-agnostic
-# max(w,h)/min(w,h) -- a tall vertical run of text counts the same as a
-# wide horizontal one) for a raster-refined rotation correction to be
-# attempted at all. Below this, or if the quad's own vectors form only one
-# connected component, rotation defaults to 0 without running
-# Hough/minAreaRect at all.
-ROTATION_MIN_ASPECT_RATIO = 3.0
 
 # ======================================================================
 # OCR (paddle_engine.py, parse.py)
