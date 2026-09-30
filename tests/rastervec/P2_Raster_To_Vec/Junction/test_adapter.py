@@ -122,3 +122,31 @@ def test_transform_maps_quarter_turn_placement():
     assert oriented.shape == (20, 10)
     # page top-right (row 0, last col) must be image pixel (0, 0)
     assert oriented[0, -1] == 0
+
+
+def test_tracing_debug_layers_draw_points_and_lines_not_boxes(page_meta):
+    import pymupdf as fitz
+
+    arr = np.full((150, 200, 3), 255, dtype=np.uint8)
+    arr[39:42, 20:180] = 0                  # T: horizontal bar
+    arr[40:130, 99:102] = 0                 #    + vertical stem
+    image = Image(array=arr, bbox=(0.0, 0.0, 200.0, 150.0), dpi=72.0, source="embedded")
+    seen: dict = {}
+    adapter.extract([image], _page(page_meta), ocr_fns=_NO_OCR,
+                    on_debug_layer=lambda s, l, _h, pdf: seen.__setitem__((s, l), pdf))
+
+    def drawings(key):
+        with fitz.open(stream=seen[key], filetype="pdf") as doc:
+            return doc[0].get_drawings()
+
+    for key in [("graph_build", "chains"), ("graph_build", "junctions"), ("graph_build", "endpoints"),
+                ("polyline_fit", "segments"), ("polyline_fit", "segment endpoints")]:
+        ds = drawings(key)
+        assert ds, key
+        assert all(item[0] != "re" for d in ds for item in d["items"]), key
+    assert any(item[0] == "l" for d in drawings(("polyline_fit", "segments")) for item in d["items"])
+    # dots are filled circles (bezier items); a T has 3 free ends and >= 1 junction
+    endpoint_dots = [d for d in drawings(("graph_build", "endpoints")) if d.get("fill")]
+    assert sum(1 for d in endpoint_dots for it in d["items"] if it[0] == "c") >= 3 * 4
+    assert ("graph_build", "chain bbox") not in seen
+    assert ("polyline_fit", "segment bbox") not in seen

@@ -390,7 +390,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
     (`color_separation/clusters`, `text_removal/cleaned image`, `enhance/enhanced image`,
     `vector_render/rendered vectors`, `vector_diff/total` + `vector_diff/layer #rrggbb` —
     `diff.py`: red = ink with no vector within `DIFF_TOLERANCE_PX` (missed), blue = vector with no
-    ink (spurious), for future missed-line recovery) plus ocr/component/graph/segment box layers;
+    ink (spurious), for future missed-line recovery) plus ocr/component box layers and tracing point/line layers (`graph_build/chains|junctions|endpoints`, `polyline_fit/segments|segment endpoints` -- real geometry, not bboxes);
     each (stage, label) appears once per page. `debug_out["diff_codes"]` keeps the raw uint8
     code canvases. Tunables in `Junction/config.py`.
 - **`P3_Vector_Parsing/`** — pluggable vector-parsing/OCR backends, selected by `p3=`, each

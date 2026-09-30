@@ -30,7 +30,9 @@ batch, both through the same helpers): raster stages (color clusters,
 cleaned image, enhanced image, rendered vectors, total + per-layer diff)
 become full-resolution PNGs embedded in page-sized PDFs -- each layer label
 appears once per page even with several images, the images composed onto
-it; OCR and tracing stages become box / text layers. On the streaming path
+it; OCR and component stages become box / text layers, and the tracing
+stages (skeleton chains, junction / end nodes, fitted segments) become
+point / line layers drawn on the real geometry. On the streaming path
 each raster debug image is PNG-encoded into its layer's page right away and
 the array dropped, so no full-size debug array outlives its own step;
 `debug_out` instead keeps the raw arrays (incl. the uint8 diff-code
@@ -53,6 +55,7 @@ from rastervec.P2_Raster_To_Vec.Junction.components import layer_components
 from rastervec.P2_Raster_To_Vec.Junction.config import COMPONENT_TOLERANCE_PT, DIFF_TOLERANCE_PX
 from rastervec.P2_Raster_To_Vec.Junction.enhance import enhance, to_gray
 from rastervec.P2_Raster_To_Vec.Junction.junction_test.pipeline import Params, run
+from rastervec.P2_Raster_To_Vec.Junction.junction_test.simplify import approximate_rdp
 from rastervec.P2_Raster_To_Vec.Junction.junction_test.types_ import Segment
 from rastervec.P2_Raster_To_Vec.Junction.text_ocr import run_ocr
 from rastervec.P2_Raster_To_Vec.Junction.text_removal import erase_text
@@ -130,7 +133,11 @@ class _PageState:
     seqno: int = 0
     boxes: dict = field(default_factory=lambda: {
         "tile": [], "tile_detect": [], "merged": [], "refined_passed": [], "refined_failed": [],
-        "component": [], "chain": [], "segment": [],
+        "component": [],
+    })
+    # page-space tracing geometry for the point / line debug layers
+    geom: dict = field(default_factory=lambda: {
+        "chains": [], "junctions": [], "endpoints": [], "segments": [], "segment_ends": [],
     })
 
     def next_seqno(self) -> int:
@@ -272,7 +279,7 @@ def _process_image(
 
             for seg in result.segments:
                 state.vectors.append(_segment_to_vector(seg, mapper, meta.index, state.next_seqno(), color))
-            _accumulate_trace_boxes(state.boxes, result, mapper, (comp.x0, comp.y0), comp.gray.shape, to_page)
+            _accumulate_trace_geometry(state, result, mapper, (comp.x0, comp.y0), comp.gray.shape, to_page)
 
             if sink.active:
                 codes, rendered = diff_mod.diff_codes(result.ink, result.segments, DIFF_TOLERANCE_PX)
@@ -397,16 +404,36 @@ def _segment_to_vector(seg: Segment, to_page: Mapper, page_index: int, seqno: in
     )
 
 
-def _accumulate_trace_boxes(boxes: dict, result, mapper: Mapper, offset, crop_shape, to_page: Mapper) -> None:
-    """Only cheap page-space bbox tuples -- never `result`'s mask arrays."""
+# Skeleton chains are one vertex per pixel at native resolution; a sub-pixel
+# Douglas-Peucker pass keeps the debug polyline visually identical with far
+# fewer vertices (debug display only -- tracing itself is unaffected).
+_CHAIN_DISPLAY_EPS_PX = 0.5
+
+
+def _accumulate_trace_geometry(state: _PageState, result, mapper: Mapper, offset, crop_shape, to_page: Mapper) -> None:
+    """Only cheap page-space tuples -- never `result`'s mask arrays. A graph
+    node touched by exactly one chain end is an endpoint; anything else
+    (>= 3 ends, or a pruning leftover) is a junction."""
     x0, y0 = offset
     ch, cw = crop_shape[:2]
-    boxes["component"].append(_bbox_of([to_page((x0, y0)), to_page((x0 + cw, y0 + ch))]))
-    for chain in result.graph.chains:
+    state.boxes["component"].append(_bbox_of([to_page((x0, y0)), to_page((x0 + cw, y0 + ch))]))
+    geom = state.geom
+    chains = result.graph.chains
+    for chain in chains:
+        if len(chain) >= 2:
+            geom["chains"].append([mapper(p) for p in approximate_rdp(chain, _CHAIN_DISPLAY_EPS_PX)])
+    ends: dict = {}
+    for chain in chains:
         if chain:
-            boxes["chain"].append(_bbox_of([mapper(p) for p in chain]))
+            for p in (chain[0], chain[-1]):
+                ends[p] = ends.get(p, 0) + 1
+    for node in result.graph.nodes:
+        geom["endpoints" if ends.get(node, 0) == 1 else "junctions"].append(mapper(node))
+    seg_ends: set = set()
     for seg in result.segments:
-        boxes["segment"].append(_bbox_of([mapper(seg.p0), mapper(seg.p1)]))
+        geom["segments"].append([mapper(seg.p0), mapper(seg.p1)])
+        seg_ends.update((seg.p0, seg.p1))
+    geom["segment_ends"].extend(mapper(p) for p in seg_ends)
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +453,9 @@ _C_OCR_FAIL = "#9333ea"
 _C_COMPONENT = "#2563eb"
 _C_GRAPH_CHAIN = "#0d9488"
 _C_SEGMENT = "#059669"
+_C_JUNCTION = "#e11d48"
+_C_ENDPOINT = "#ca8a04"
+_C_SEGMENT_END = "#1d4ed8"
 
 
 def _hex_rgb(h: str) -> tuple[float, float, float]:
@@ -503,10 +533,46 @@ def _boxes_layer(page_meta, stage: str, label: str, hexcolor: str, boxes) -> Deb
     return (stage, label, hexcolor, render_boxes_pdf(page_meta, [(b, rgb) for b in boxes]))
 
 
+def _geometry_layer(
+    page_meta, stage: str, label: str, hexcolor: str, *,
+    polylines=(), points=(), width: float = 0.6, radius: float = 0.8,
+) -> DebugLayer:
+    """Polylines (stroked) and points (small filled dots) on a fresh page
+    sized/rotated to `page_meta`. One `Shape` + one `commit()` for the whole
+    layer, like `render_boxes_pdf` -- a Shape per item adds a content stream
+    per item (quadratic)."""
+    import pymupdf as fitz
+
+    rgb = _hex_rgb(hexcolor)
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=page_meta.width, height=page_meta.height)
+        page.set_rotation(page_meta.rotation)
+        shape = page.new_shape()
+        drawn = False
+        lines = [pl for pl in polylines if len(pl) >= 2]
+        if lines:
+            for pl in lines:
+                shape.draw_polyline([fitz.Point(*p) for p in pl])
+            shape.finish(color=rgb, width=width, closePath=False)
+            drawn = True
+        if points:
+            for p in points:
+                shape.draw_circle(fitz.Point(*p), radius)
+            shape.finish(color=None, fill=rgb, width=0)
+            drawn = True
+        if drawn:
+            shape.commit()
+        return (stage, label, hexcolor, doc.tobytes())
+    finally:
+        doc.close()
+
+
 def _page_layers(page_meta, raster_layers: "list[DebugLayer]", state: _PageState) -> "list[DebugLayer]":
     from rastervec.commons.renderer import render_text_pdf, render_vectors_pdf
 
     bx = state.boxes
+    geom = state.geom
     out: "list[DebugLayer]" = [layer for layer in raster_layers if not layer[0].startswith("_")]
     out += [
         _boxes_layer(page_meta, "ocr", "tiles", _C_TILE, bx["tile"]),
@@ -518,8 +584,12 @@ def _page_layers(page_meta, raster_layers: "list[DebugLayer]", state: _PageState
             page_meta, state.texts, color_of=lambda _t: _hex_rgb(_C_OCR_PASS),
         )),
         _boxes_layer(page_meta, "components", "component bbox", _C_COMPONENT, bx["component"]),
-        _boxes_layer(page_meta, "graph_build", "chain bbox", _C_GRAPH_CHAIN, bx["chain"]),
-        _boxes_layer(page_meta, "polyline_fit", "segment bbox", _C_SEGMENT, bx["segment"]),
+        _geometry_layer(page_meta, "graph_build", "chains", _C_GRAPH_CHAIN, polylines=geom["chains"]),
+        _geometry_layer(page_meta, "graph_build", "junctions", _C_JUNCTION, points=geom["junctions"]),
+        _geometry_layer(page_meta, "graph_build", "endpoints", _C_ENDPOINT, points=geom["endpoints"]),
+        _geometry_layer(page_meta, "polyline_fit", "segments", _C_SEGMENT, polylines=geom["segments"]),
+        _geometry_layer(page_meta, "polyline_fit", "segment endpoints", _C_SEGMENT_END,
+                        points=geom["segment_ends"]),
         ("final_vectors", "vectors", _C_SEGMENT, render_vectors_pdf(
             page_meta, state.vectors, color_of=lambda v: tuple(v.color or (0, 0, 0)),
         )),
