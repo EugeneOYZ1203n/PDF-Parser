@@ -20,37 +20,41 @@ timestamped run folder:
             and debug images are still written, so the benchmark still
             scores the run.
 
-            Pre-OCR debug image folders (skipped with `debug_images: false`)
-            -- each `p3` backend's own distinct set (read from
-            res.extra["p3_debug"], see
+            Pre-OCR debug image folders (skipped with `debug_images: false`,
+            each leaf folder capped at `debug_image_cap` images -- default
+            100, `None` uncapped) -- each `p3` backend's own distinct set
+            (read from res.extra["p3_debug"], see
             `report_artifacts._accumulate_page`/each backend's own
-            `parse.py`):
-              p3=VectorClassification (classify+FAST filter clusters, then
-              run PaddleOCR's full detect+recognize per FAST-surviving
-              cluster, page-wide batched -- see that backend's own
-              parse.py):
-                paddle_detect_images/  (one PNG per seqno-cluster's own
-                                       rendered+padded image, every detected
-                                       quad drawn on top)
-                paddle_recog_images/   (one PNG per detected quad's own
-                                       crop, recognised text in the filename)
-                hough_line_images/     (one PNG per detection's own dilated
-                                       ink mask, the detected Hough line
-                                       drawn on it, hough/minarea/combined
-                                       angles in the filename)
-                minarea_rect_images/   (one PNG per detection's own
-                                       non-dilated ink mask, the fitted
-                                       cv2.minAreaRect angle drawn on it,
-                                       same hough/minarea/combined angles in
-                                       the filename)
-                paddle_classifier_before_images/  (one PNG per crop right
-                                       before a recognizer call -- pass 1's
-                                       pre-classifier-flip crop, or a blank-
-                                       retry pass's pre-rotation crop)
-                paddle_classifier_after_images/   (the matching crop right
-                                       after -- what the recognizer actually
-                                       saw for that pass, incl. every +90/
-                                       180/270 retry attempt)
+            `parse.py`). Every saved image is exactly (channel order aside,
+            never an overlay) the array that model/algorithm call actually
+            received:
+              p3=VectorClassification (classify clusters, then run
+              PaddleOCR's full detect+recognize per cluster, page-wide
+              batched -- see that backend's own parse.py), organized by
+              which call each image was the input to:
+                for_paddle_detect/     (one PNG per seqno-cluster's own
+                                       rendered+padded image -- exactly what
+                                       PaddleDetectBackend.detect saw)
+                for_rotation_correction/
+                  hough_line/          (one PNG per detection's own dilated
+                                       ink mask -- exactly what the Hough
+                                       line estimator ran on)
+                  minarea_rect/        (one PNG per detection's own
+                                       non-dilated ink mask -- exactly what
+                                       cv2.minAreaRect ran on)
+                  paddle_classifier/   (one PNG per detection -- exactly the
+                                       crop handed to the recognizer's own
+                                       internal text_classifier call, pass 1
+                                       pre-flip)
+                for_paddle_recog/
+                  0_retry/ 1_retry/ 2_retry/ 3_retry/ failed/
+                                       (one PNG per detection, bucketed by
+                                       which recognize_crops/
+                                       recognize_crops_raw pass decided its
+                                       outcome -- "failed" holds the last
+                                       rotation variant tried before giving
+                                       up; recognised text in the filename
+                                       where available)
               p3=LegacyRecreation (no FAST stage):
                 paddle_ocr_images/     (one PNG per word group's own padded/
                                        DPI-boosted render, recognised text
@@ -120,12 +124,11 @@ from scripts.debug_image_savers import (  # noqa: F401 -- re-exported for caller
     _safe_slug,
     _save_crop_text_images,
     _save_legacyrecreation_ocr_images,
-    _save_vectorclassification_classifier_after_images,
-    _save_vectorclassification_classifier_before_images,
     _save_vectorclassification_detect_images,
-    _save_vectorclassification_hough_images,
-    _save_vectorclassification_minarea_images,
-    _save_vectorclassification_recog_images,
+    _save_vectorclassification_recog_bucket_images,
+    _save_vectorclassification_rotation_classifier_images,
+    _save_vectorclassification_rotation_hough_images,
+    _save_vectorclassification_rotation_minarea_images,
 )
 from scripts.report_artifacts import (  # noqa: F401 -- re-exported for callers/tests
     _ARTIFACTS,
@@ -196,15 +199,23 @@ def _image_dirs(doc_dir: Path) -> "dict[str, Path]":
     short name `report_artifacts._accumulate_page`'s per-`p3` dispatch
     uses. Not every backend populates every folder (a folder no saver ever
     calls `.offer()` on is simply never created) -- see that dispatch for
-    which backend writes which."""
+    which backend writes which. VectorClassification's own folders are
+    organized by which model/algorithm call the saved image was the actual
+    input to (see `scripts/debug_image_savers.py`'s module docstring);
+    `for_rotation_correction`/`for_paddle_recog` fan out into subfolders,
+    which a plain `_ImageReservoir(path, ...)` handles the same as a
+    top-level folder (`Path.mkdir(parents=True, ...)`)."""
     return {
-        "detect": doc_dir / "paddle_detect_images",
-        "recog": doc_dir / "paddle_recog_images",
+        "detect": doc_dir / "for_paddle_detect",
+        "rotation_hough": doc_dir / "for_rotation_correction" / "hough_line",
+        "rotation_minarea": doc_dir / "for_rotation_correction" / "minarea_rect",
+        "rotation_classifier": doc_dir / "for_rotation_correction" / "paddle_classifier",
+        "recog_0": doc_dir / "for_paddle_recog" / "0_retry",
+        "recog_1": doc_dir / "for_paddle_recog" / "1_retry",
+        "recog_2": doc_dir / "for_paddle_recog" / "2_retry",
+        "recog_3": doc_dir / "for_paddle_recog" / "3_retry",
+        "recog_failed": doc_dir / "for_paddle_recog" / "failed",
         "ocr": doc_dir / "paddle_ocr_images",
-        "hough": doc_dir / "hough_line_images",
-        "minarea": doc_dir / "minarea_rect_images",
-        "classifier_before": doc_dir / "paddle_classifier_before_images",
-        "classifier_after": doc_dir / "paddle_classifier_after_images",
     }
 
 
@@ -216,7 +227,7 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
     doc_dir = run_dir / pdf_path.stem
     doc_dir.mkdir(parents=True, exist_ok=True)
     reservoirs = (
-        _image_reservoirs(_image_dirs(doc_dir), seed_name=doc_dir.name)
+        _image_reservoirs(_image_dirs(doc_dir), seed_name=doc_dir.name, cap=config.debug_image_cap)
         if config.debug_images else None
     )
 
@@ -431,7 +442,7 @@ def _process_pdf_benchmark(
     doc_dir = run_dir / doc_name
     doc_dir.mkdir(parents=True, exist_ok=True)
     reservoirs = (
-        _image_reservoirs(_image_dirs(doc_dir), seed_name=doc_name)
+        _image_reservoirs(_image_dirs(doc_dir), seed_name=doc_name, cap=config.debug_image_cap)
         if config.debug_images else None
     )
     pages = _filter_valid_pages(bench.pdf_path, config.pages_for(doc_name), bench.key)

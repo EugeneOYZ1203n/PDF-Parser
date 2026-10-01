@@ -165,9 +165,9 @@ def parse(
     batch's own share of that stage), and `drawing`.
 
     `keep_debug_arrays=False` keeps the full-size image arrays out of
-    `debug_out` (`cluster_detections`/`classifier_crops`/`ocr_crops` stay
-    empty, `rotation` entries carry no crops/masks) -- see
-    `core.pipeline.run_pipeline`."""
+    `debug_out` (`cluster_detections`/`paddle_classifier_crops` stay empty,
+    `recog_bucket_crops` stays all-empty-buckets, `rotation` entries carry no
+    crops/masks) -- see `core.pipeline.run_pipeline`."""
     all_vectors = list(vectors_p1) + list(vectors_p2)
     page_meta = page.meta
     clock = StepClock(step_durations)
@@ -308,6 +308,12 @@ def parse(
         crops_all = [pq["crop"] for pq in page_quads]
         boxes = _recognize_batches(crops_all, _recognize_crops_job, rec_backend.recognize_crops)
 
+        # `crops_all` is also exactly what recognize_crops's own internal
+        # text_classifier call saw (pass 1, pre-flip, every detection) --
+        # debug-only, read back via debug_out["paddle_classifier_crops"], so
+        # only kept when a caller actually asked for debug output.
+        classifier_inputs: list[np.ndarray] = list(crops_all) if keep_cluster_detections else []
+
         # box.flip_deg is pass 1's own classifier 0/180 decision -- captured
         # now, before a later retry pass can overwrite `boxes`, since it's
         # always worth recording even if a retry ends up winning.
@@ -318,13 +324,15 @@ def parse(
             np.rot90(pq["crop"], 2) if box.flip_deg else pq["crop"]
             for pq, box in zip(page_quads, boxes)
         ]
-        # classifier_crops/ocr_crops (below) are debug-only -- read back only
-        # via debug_out["classifier_crops"]/["ocr_crops"] at the very end,
-        # same as cluster_detections -- so only accumulate them when a caller
-        # actually asked for debug output.
-        classifier_crops: list[tuple[np.ndarray, np.ndarray]] = (
-            [(pq["crop"], recog_crop) for pq, recog_crop in zip(page_quads, recog_crops)]
-            if keep_cluster_detections else []
+        # last_attempt_crop tracks, per detection index, the most recent crop
+        # handed to recognize_crops/recognize_crops_raw regardless of
+        # outcome -- a permanently-blank detection's own `recog_crops[i]`
+        # never advances past its pass-1 value (only overwritten on
+        # success, below), so this is the only way to recover "the last
+        # rotation variant actually tried" for the eventual "failed" debug
+        # bucket. Debug-only, same gating as classifier_inputs.
+        last_attempt_crop: dict[int, np.ndarray] = (
+            {i: c for i, c in enumerate(recog_crops)} if keep_cluster_detections else {}
         )
 
         retry_counts: list = [0 if box.text else None for box in boxes]
@@ -337,9 +345,9 @@ def parse(
         # same OCR_BATCH_SIZE-chunked dispatch as stage 4. No classifier
         # call in a retry pass -- sweeping all 4 quarter-turns already
         # covers whatever the classifier's own 0/180 choice would have
-        # picked. Every attempted retry crop (whether or not it recovers
-        # text) is logged to classifier_crops too, so a viewer can see
-        # every rotation variant that was tried.
+        # picked. `last_attempt_crop` is updated for every attempted retry
+        # crop (whether or not it recovers text), so a permanently-blank
+        # detection's final debug image is its own last-tried rotation.
         for k, extra_deg in ((1, 90.0), (2, 180.0), (3, 270.0)):
             blank_idx = [i for i, box in enumerate(boxes) if not box.text]
             if not blank_idx:
@@ -350,7 +358,7 @@ def parse(
             )
             for i, rbox, rcrop in zip(blank_idx, retry_boxes, retry_crops):
                 if keep_cluster_detections:
-                    classifier_crops.append((page_quads[i]["crop"], rcrop))
+                    last_attempt_crop[i] = rcrop
                 if rbox.text:
                     boxes[i] = rbox
                     recog_crops[i] = rcrop
@@ -359,14 +367,19 @@ def parse(
 
     # Stage 6: assemble output, page-wide, in original cluster/quad order.
     texts: list[Text] = []
-    ocr_crops: list[tuple[np.ndarray, str]] = []
+    recog_bucket_crops: dict[str, list[tuple[np.ndarray, str]]] = {
+        "0": [], "1": [], "2": [], "3": [], "failed": [],
+    }
     blank_boxes: list[tuple] = []
     rotation_entries: list[dict] = []
-    for pq, box, recog_crop, flip_a, retry_n, retry_extra in zip(
+    for idx, (pq, box, recog_crop, flip_a, retry_n, retry_extra) in enumerate(zip(
         page_quads, boxes, recog_crops, flip_angle_degs, retry_counts, retry_extra_degs,
-    ):
+    )):
         if keep_cluster_detections:
-            ocr_crops.append((recog_crop, box.text))
+            if box.text:
+                recog_bucket_crops[str(retry_n)].append((recog_crop, box.text))
+            else:
+                recog_bucket_crops["failed"].append((last_attempt_crop[idx], box.text))
         rd, bbox = pq["rd"], pq["bbox"]
         best_angle = None
         if box.text:
@@ -414,8 +427,8 @@ def parse(
     if debug_out is not None:
         debug_out["classification"] = cls
         debug_out["texts"] = texts
-        debug_out["ocr_crops"] = ocr_crops
-        debug_out["classifier_crops"] = classifier_crops
+        debug_out["paddle_classifier_crops"] = classifier_inputs
+        debug_out["recog_bucket_crops"] = recog_bucket_crops
         debug_out["cluster_detections"] = cluster_detections
         debug_out["ocr_blank_boxes"] = blank_boxes
         debug_out["ocr_detect_boxes"] = detect_boxes

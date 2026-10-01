@@ -27,8 +27,8 @@ def test_parse_debug_out_has_no_fast_keys(page_meta):
     assert "fast_passed" not in debug_out
     assert "fast_dropped" not in debug_out
     assert debug_out["texts"] == []
-    assert debug_out["ocr_crops"] == []
-    assert debug_out["classifier_crops"] == []
+    assert debug_out["paddle_classifier_crops"] == []
+    assert debug_out["recog_bucket_crops"] == {"0": [], "1": [], "2": [], "3": [], "failed": []}
     assert debug_out["cluster_detections"] == []
     assert debug_out["rotation"] == []
     assert debug_out["retry_stats"] == {"0": 0, "1": 0, "2": 0, "3": 0, "failed": 0}
@@ -36,10 +36,11 @@ def test_parse_debug_out_has_no_fast_keys(page_meta):
 
 def test_parse_keeps_ocr_crop_for_blank_recognition(page_meta, vector, monkeypatch):
     """A detected quad whose PaddleOCR recognition comes back blank must
-    still be recorded in `ocr_crops` (for debug-image dumping) -- it just
-    shouldn't become a real output `Text`. Regression test for the bug where
-    `ocr_crops.append` sat after the `if not box.text: continue` guard, so
-    blank recognitions were silently dropped from the debug-crop list."""
+    still be recorded in `recog_bucket_crops["failed"]` (for debug-image
+    dumping) -- it just shouldn't become a real output `Text`. Regression
+    test for the bug where the crop-capture sat after the `if not box.text:
+    continue` guard, so blank recognitions were silently dropped from the
+    debug-crop list."""
     v = vector(kind="l", bbox=(10.0, 10.0, 20.0, 20.0), color=(0.0, 0.0, 0.0), seqno=1)
 
     quad = np.array([[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]])
@@ -62,18 +63,21 @@ def test_parse_keeps_ocr_crop_for_blank_recognition(page_meta, vector, monkeypat
     )
 
     assert texts == []  # a blank recognition never becomes a real Text
-    assert len(debug_out["ocr_crops"]) == 1  # but its crop is still captured for debugging
-    assert debug_out["ocr_crops"][0][1] == ""
+    # but its crop is still captured for debugging
+    assert len(debug_out["recog_bucket_crops"]["failed"]) == 1
+    assert debug_out["recog_bucket_crops"]["failed"][0][1] == ""
     assert len(debug_out["ocr_blank_boxes"]) == 1  # and its page-space bbox is recorded for debug rendering
     assert debug_out["rotation"][0]["retry_count"] is None  # never recovered
     assert debug_out["retry_stats"] == {"0": 0, "1": 0, "2": 0, "3": 0, "failed": 1}
 
 
 def test_parse_ocr_crop_reflects_post_flip_rotation(page_meta, vector, monkeypatch):
-    """`ocr_crops` must store the crop PaddleOCR actually recognised from --
-    when the angle classifier decides a crop is upside-down (`flip_deg=180`),
-    recognition itself runs on the rotated pixels, so the stashed debug crop
-    should be rotated the same way, not the raw pre-flip crop."""
+    """`recog_bucket_crops` must store the crop PaddleOCR actually recognised
+    from -- when the angle classifier decides a crop is upside-down
+    (`flip_deg=180`), recognition itself runs on the rotated pixels, so the
+    stashed debug crop should be rotated the same way, not the raw pre-flip
+    crop. `paddle_classifier_crops` stores the pre-flip crop, exactly what
+    the classifier itself saw."""
     from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import RotationDebug
 
     v = vector(kind="l", bbox=(10.0, 10.0, 20.0, 20.0), color=(0.0, 0.0, 0.0), seqno=1)
@@ -98,14 +102,13 @@ def test_parse_ocr_crop_reflects_post_flip_rotation(page_meta, vector, monkeypat
         [v], [], _page(page_meta), debug_out=debug_out,
     )
 
-    stored_crop = debug_out["ocr_crops"][0][0]
+    stored_crop = debug_out["recog_bucket_crops"]["0"][0][0]
     pre_flip_crop = raw_crop[:, :, ::-1]  # parse.py's own BGR->RGB reversal
     assert np.array_equal(stored_crop, np.rot90(pre_flip_crop, 2))
     assert not np.array_equal(stored_crop, pre_flip_crop)  # sanity: rotation actually happened
 
-    before_crop, after_crop = debug_out["classifier_crops"][0]
-    assert np.array_equal(before_crop, pre_flip_crop)
-    assert np.array_equal(after_crop, stored_crop)
+    classifier_crop = debug_out["paddle_classifier_crops"][0]
+    assert np.array_equal(classifier_crop, pre_flip_crop)
 
     entry = debug_out["rotation"][0]
     assert entry["minarea_angle_deg"] == 0.0
@@ -162,9 +165,12 @@ def test_parse_blank_recognition_recovers_via_retry_sweep(page_meta, vector, mon
     # [-90, 90)) to -90.0.
     assert entry["best_angle_deg"] == -90.0
     assert debug_out["retry_stats"] == {"0": 0, "1": 1, "2": 0, "3": 0, "failed": 0}
-    # classifier_crops logs pass 1's own before/after plus the +90 retry's
-    # before/after -- 2 entries total for this one detection.
-    assert len(debug_out["classifier_crops"]) == 2
+    # paddle_classifier_crops logs pass 1's own classifier input once per
+    # detection, regardless of which later retry pass actually succeeded.
+    assert len(debug_out["paddle_classifier_crops"]) == 1
+    # the successful +90 retry's own crop lands in the "1 retry" bucket.
+    assert len(debug_out["recog_bucket_crops"]["1"]) == 1
+    assert debug_out["recog_bucket_crops"]["1"][0][1] == "Y"
 
 
 class _FakeComputePool:

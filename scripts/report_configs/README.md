@@ -24,7 +24,8 @@ Every field is optional except that you need at least one of `input_dir` /
 | `iou_edge_min` | `MetricConfig.iou_edge_min` for the benchmark overlays (default `0.1`) |
 | `dpi` | render dpi for the stage crops (default 300) |
 | `output_root` | default `outputs/pipeline_report/` |
-| `debug_images` | write the `paddle_*_images/` / `hough_line_images/` / ... PNG crops, max 100 random per folder per input (default `true`). `false` also stops backends keeping the full-size image arrays those crops come from |
+| `debug_images` | write the `for_paddle_detect/` / `for_rotation_correction/` / `for_paddle_recog/` / `paddle_ocr_images/` PNG crops (max `debug_image_cap` random per leaf folder per input, default `true`). `false` also stops backends keeping the full-size image arrays those crops come from |
+| `debug_image_cap` | per-leaf-folder cap on `debug_images` PNGs (default `100`); `null` = uncapped |
 | `debug_layers` | write the layer PDFs the viewer toggles (default `true`): every backend debug layer (`<stage>__<layer>.pdf`), `phase2`/`reconstructed`, `benchmark__extra_*`, and the benchmark `<type>_{bbox,text}.pdf` overlays. `false` skips all of them **and** the work done only to render them; `dump.json`, ground truth, stats and debug images are still written, so `pipeline_report_benchmark.py` still scores the run (the viewer then shows only the source page). With `p2: "Junction"`, also set `debug_images: false` for the fastest run |
 
 ## Faster runs

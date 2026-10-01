@@ -32,12 +32,11 @@ from scripts.debug_image_savers import (
     _DEBUG_IMAGE_CAP,
     _ImageReservoir,
     _save_legacyrecreation_ocr_images,
-    _save_vectorclassification_classifier_after_images,
-    _save_vectorclassification_classifier_before_images,
     _save_vectorclassification_detect_images,
-    _save_vectorclassification_hough_images,
-    _save_vectorclassification_minarea_images,
-    _save_vectorclassification_recog_images,
+    _save_vectorclassification_recog_bucket_images,
+    _save_vectorclassification_rotation_classifier_images,
+    _save_vectorclassification_rotation_hough_images,
+    _save_vectorclassification_rotation_minarea_images,
 )
 from scripts.report_config import NEW_STEP_NAMES, _layer_slug
 
@@ -197,17 +196,18 @@ def _active_artifacts(config: "ReportConfig", variant) -> list[tuple]:
 
 
 def _image_reservoirs(
-    dirs: "dict[str, Path]", seed_name: str,
+    dirs: "dict[str, Path]", seed_name: str, cap: "int | None" = _DEBUG_IMAGE_CAP,
 ) -> "dict[str, _ImageReservoir]":
     """One `_ImageReservoir` per debug-image folder (`dirs`, keyed by the
     same short name `_accumulate_page`'s per-`p3` dispatch below uses) for
-    one input document -- each folder ends up with at most
-    `_DEBUG_IMAGE_CAP` images sampled at random across every page. Seeded
-    from `seed_name` (the document's folder name, offset by each folder's
-    own stable sort position) so a rerun picks the same crops."""
+    one input document -- each folder ends up with at most `cap` images
+    (`ReportConfig.debug_image_cap`, default `_DEBUG_IMAGE_CAP`) sampled at
+    random across every page, or uncapped when `cap` is `None`. Seeded from
+    `seed_name` (the document's folder name, offset by each folder's own
+    stable sort position) so a rerun picks the same crops."""
     seed = zlib.crc32(seed_name.encode("utf-8"))
     return {
-        name: _ImageReservoir(path, _DEBUG_IMAGE_CAP, seed + i)
+        name: _ImageReservoir(path, cap, seed + i)
         for i, (name, path) in enumerate(sorted(dirs.items()))
     }
 
@@ -258,15 +258,22 @@ def _accumulate_page(
     with clock("debug_images"):
         if p3 == "VectorClassification":
             _save_vectorclassification_detect_images(p3_debug, reservoirs["detect"], page_index)
-            _save_vectorclassification_recog_images(p3_debug, reservoirs["recog"], page_index)
-            _save_vectorclassification_hough_images(p3_debug, reservoirs["hough"], page_index)
-            _save_vectorclassification_minarea_images(p3_debug, reservoirs["minarea"], page_index)
-            _save_vectorclassification_classifier_before_images(
-                p3_debug, reservoirs["classifier_before"], page_index,
+            _save_vectorclassification_rotation_hough_images(
+                p3_debug, reservoirs["rotation_hough"], page_index,
             )
-            _save_vectorclassification_classifier_after_images(
-                p3_debug, reservoirs["classifier_after"], page_index,
+            _save_vectorclassification_rotation_minarea_images(
+                p3_debug, reservoirs["rotation_minarea"], page_index,
             )
+            _save_vectorclassification_rotation_classifier_images(
+                p3_debug, reservoirs["rotation_classifier"], page_index,
+            )
+            for bucket, key in (
+                ("0", "recog_0"), ("1", "recog_1"), ("2", "recog_2"),
+                ("3", "recog_3"), ("failed", "recog_failed"),
+            ):
+                _save_vectorclassification_recog_bucket_images(
+                    p3_debug, reservoirs[key], page_index, bucket,
+                )
         elif p3 == "LegacyRecreation":
             _save_legacyrecreation_ocr_images(p3_debug, reservoirs["ocr"], page_index)
 

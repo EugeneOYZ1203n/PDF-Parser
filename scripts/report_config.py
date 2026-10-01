@@ -58,10 +58,16 @@ class ReportConfig(BaseModel):
     iou_edge_min: float = metrics.MetricConfig().iou_edge_min
     dpi: int = 300
     output_root: Path | None = None
-    # Per-page PNG dumps of what PaddleOCR's detector/recognizer saw
-    # (`paddle_detect_images/`, `paddle_recog_images/`, `paddle_ocr_images/`)
-    # -- one file per cluster / word crop, so the bulk of a report's files.
+    # Per-page PNG dumps of what PaddleOCR's detector/recognizer/classifier
+    # actually received (VectorClassification's `for_paddle_detect/`,
+    # `for_rotation_correction/`, `for_paddle_recog/`; LegacyRecreation's
+    # `paddle_ocr_images/`) -- one file per cluster/detection, so the bulk of
+    # a report's files.
     debug_images: bool = True
+    # Per-leaf-folder cap on how many debug images `debug_images` writes
+    # (uniform reservoir sample across every page, not the first N). Applies
+    # independently to every debug-image folder/subfolder. None = uncapped.
+    debug_image_cap: int | None = 100
     # Every layer PDF (`<stage>__<layer>.pdf` -- each backend's own debug
     # layers + phase2/reconstructed + `benchmark__extra_*` -- and the
     # benchmark `<text_type>_{bbox,text}.pdf` GT overlays), plus the work

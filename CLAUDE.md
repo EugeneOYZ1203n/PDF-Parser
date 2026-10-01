@@ -991,16 +991,20 @@ generic parallel-pool mechanics), never phase-specific business logic.
   There is no per-stage `.txt` stats file for the `current` engine (the old engine's
   `Evaluation/Report/stage_stats.py` numeric-stats convention doesn't generalize across backends
   with genuinely different internals) — `dump.json` is the reloadable source of truth instead.
-  `paddle_detect_images/`/`paddle_recog_images/`/`paddle_ocr_images/` (PNG debug crops — what
-  PaddleOCR's detector/recognizer actually saw, per-P3-backend savers in
+  VectorClassification's own debug PNGs — `for_paddle_detect/`, `for_rotation_correction/
+  {hough_line,minarea_rect,paddle_classifier}/`, `for_paddle_recog/
+  {0_retry,1_retry,2_retry,3_retry,failed}/` — plus LegacyRecreation's single `paddle_ocr_images/`,
+  organized by which model/algorithm call each saved image was the exact input to (never an
+  overlay/annotation — only a BGR/RGB channel reorder for display; per-P3-backend savers in
   `scripts/debug_image_savers.py`) are written unless the config sets `debug_images: false`
   (`ReportConfig`, default `true`; it's also passed to `run_pipeline(keep_debug_arrays=...)`,
   which backends that declare it use to decide whether a `debug_out` keeps full-size image arrays
   at all). `debug_layers: false` (default `true`) likewise skips *every* layer PDF — no
   `on_debug_layer` sink, no `phase2`/`reconstructed`/`benchmark__extra_*` layers, no
   `<type>_{bbox,text}.pdf` overlays — leaving `dump.json`/ground truth/debug images, which is all
-  `pipeline_report_benchmark.py` needs. Debug images are capped at `_DEBUG_IMAGE_CAP` (100) per folder per input
-  document — an `_ImageReservoir` reservoir-samples uniformly across every page (seeded from the
+  `pipeline_report_benchmark.py` needs. Debug images are capped at `ReportConfig.debug_image_cap`
+  (default `_DEBUG_IMAGE_CAP`, 100; `None` uncapped) per leaf folder per input document — an
+  `_ImageReservoir` reservoir-samples uniformly across every page (seeded from the
   document name, so reruns pick the same crops; rejected crops are never encoded);
   `pipeline_report_benchmark.py` links the first 5 of each folder into `report.html` in place
   (never copied). Every P3 backend's debug layers render **lazily** — `_emit(lambda: ...)`

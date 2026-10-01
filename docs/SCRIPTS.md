@@ -47,16 +47,21 @@ raster-stage layers) -- see
 backend actually renders. A layer that came out blank on every page (e.g.
 `phase2` under `p2: "Stub"`) is not written at all. Unless the config sets
 `debug_images: false`, each `p3` backend also gets its own distinct pre-OCR
-debug image folder set, read from `res.extra["p3_debug"]`, each folder
-holding at most 100 images sampled at random (fixed seed) across all of the
-input's pages:
-`p3: "VectorClassification"` writes
-`paddle_detect_images/` + `paddle_recog_images/` (what PaddleOCR's
-detector/recognizer actually saw); `p3: "LegacyRecreation"` writes a single
-`paddle_ocr_images/` folder (one padded/DPI-boosted render per word
-group). There are no per-stage `.txt` stats for the `current` engine --
-`dump.json` is the reloadable source of truth. `pipeline: "legacy"` still
-only ever emits the single `reconstructed` row.
+debug image folder set, read from `res.extra["p3_debug"]`, each leaf folder
+holding at most `debug_image_cap` images (default 100, `null` uncapped)
+sampled at random (fixed seed) across all of the input's pages, and every
+saved image exactly (channel order aside, never an overlay) what that
+model/algorithm call actually received: `p3: "VectorClassification"` writes
+`for_paddle_detect/` (PaddleDetectBackend.detect's own input),
+`for_rotation_correction/{hough_line,minarea_rect,paddle_classifier}/` (the
+two raster angle-estimation masks and the recognizer's own angle-classifier
+input), and `for_paddle_recog/{0_retry,1_retry,2_retry,3_retry,failed}/`
+(bucketed by which recognize pass decided each detection's outcome);
+`p3: "LegacyRecreation"` writes a single `paddle_ocr_images/` folder (one
+padded/DPI-boosted render per word group). There are no per-stage `.txt`
+stats for the `current` engine -- `dump.json` is the reloadable source of
+truth. `pipeline: "legacy"` still only ever emits the single `reconstructed`
+row.
 
 ```
 .venv/Scripts/python.exe scripts/generate_pipeline_report.py \
