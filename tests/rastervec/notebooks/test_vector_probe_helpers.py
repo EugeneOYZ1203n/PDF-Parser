@@ -195,3 +195,64 @@ def test_parallel_tolerates_angle_jitter_beyond_one_tolerance(vector):
         a = math.radians(134.0 + 0.1 * i)
         segs.append(((0, 5 * i), (6 * math.cos(a), 5 * i + 6 * math.sin(a))))
     assert [len(g) for g in h.group_parallel(_straight(vector, *segs), angle_tol=1.0)] == [21]
+
+
+# ---- crossing segments ---------------------------------------------------
+
+def test_segment_count_line_through_rect(vector):
+    rect = vector(kind="re", bbox=(0, 0, 10, 10))
+    line = _line(vector, (-5, 5), (15, 5))  # crosses left + right edges
+    assert h.crossing_segment_counts([rect, line]) == [1, 2]
+
+
+def test_segment_count_one_foreign_segment_counts_once(vector):
+    zigzag = _poly(vector, (0, -5), (2, 5), (4, -5), (6, 5))
+    axis = _line(vector, (-1, 0), (7, 0))
+    # axis is crossed by 3 zigzag segments; zigzag only by the one axis segment
+    assert h.crossing_segment_counts([zigzag, axis]) == [1, 3]
+
+
+def test_segment_count_ignores_touching_and_self(vector):
+    bar = _line(vector, (0, 0), (10, 0))
+    stem = _line(vector, (5, 0), (5, 10))
+    corner = _line(vector, (10, 0), (10, 10))
+    assert h.crossing_segment_counts([bar, stem, corner]) == [0, 0, 0]
+    bowtie = _poly(vector, (0, 0), (10, 10), (10, 0), (0, 10))
+    assert h.crossing_segment_counts([bowtie]) == [0]
+
+
+def test_segment_count_sums_over_partners(vector):
+    axis = _line(vector, (0, 5), (20, 5))
+    verticals = [_line(vector, (x, 0), (x, 10)) for x in (2, 6, 10)]
+    assert h.crossing_segment_counts([axis, *verticals]) == [3, 1, 1, 1]
+
+
+# ---- percentile buckets / ramp4 -----------------------------------------
+
+def test_percentile_buckets_even_split():
+    values = list(range(1, 11))
+    buckets = h.percentile_buckets(values, 5)
+    assert [(lo, hi) for lo, hi, _ in buckets] == [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10)]
+    assert sorted(i for _, _, m in buckets for i in m) == list(range(10))
+
+
+def test_percentile_buckets_keep_ties_together_and_drop_empty():
+    values = [1] * 8 + [2, 9]
+    buckets = h.percentile_buckets(values, 5)
+    ranges = [(lo, hi) for lo, hi, _ in buckets]
+    assert ranges[0] == (1, 1) and len(buckets[0][2]) == 8
+    assert len(buckets) < 5
+    for lo, hi, m in buckets:
+        assert all(lo <= values[i] <= hi for i in m)
+
+
+def test_percentile_buckets_empty():
+    assert h.percentile_buckets([], 5) == []
+
+
+def test_ramp4_anchor_colours():
+    cols = [c for _, c in h._CROSSING_ANCHORS]
+    assert h.ramp4(0.0) == pytest.approx(cols[0])
+    assert h.ramp4(1 / 3) == pytest.approx(cols[1])
+    assert h.ramp4(2 / 3) == pytest.approx(cols[2])
+    assert h.ramp4(1.0) == pytest.approx(cols[3])

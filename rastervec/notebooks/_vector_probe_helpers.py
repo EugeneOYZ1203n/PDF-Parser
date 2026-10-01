@@ -6,9 +6,10 @@ kept out of `P3_Vector_Parsing/` until one of them proves useful.
 The unit everywhere is one whole `Vector` (one `get_drawings()` drawing),
 never an individual item:
 
-- **crossings** -- `crossing_partner_counts(cluster)`: per Vector, how many
-  *other* Vectors of the same cluster have at least one *proper* (interior,
-  X-shaped) crossing against it. Items are flattened to straight segments
+- **crossings** -- `crossing_segment_counts(cluster)`: per Vector, how many
+  segments of *other* Vectors in the same cluster *properly* (interior,
+  X-shaped) cross at least one of its own segments
+  (`crossing_partner_counts` is the older per-partner variant). Items are flattened to straight segments
   for the test (`vector_segments`: "l" as-is, "re"/"qu" as their 4 edges,
   "c" as a `curve_steps`-segment polyline); touching endpoints, corners and
   T-junctions don't count, and a Vector crossing its own items doesn't
@@ -153,14 +154,16 @@ def _signed_dist(seg: np.ndarray, px: np.ndarray, py: np.ndarray) -> np.ndarray:
     return (dx * (py - seg[..., 1]) - dy * (px - seg[..., 0])) / length
 
 
-def segments_properly_cross(a: np.ndarray, b: np.ndarray, eps: float = 0.01) -> bool:
-    """True if any segment of `a` (n, 4) properly crosses any segment of
-    `b` (m, 4): each segment's endpoints lie strictly on opposite sides of
-    the other's line, each by more than `eps` pt. So an endpoint touching
-    the other segment (T-junction, shared corner, a dash end resting on a
-    line) is never a crossing, and neither is collinear overlap."""
+def _crossing_matrix(a: np.ndarray, b: np.ndarray, eps: float = 0.01) -> np.ndarray:
+    """Bool (n, m): `[i, j]` is True when segment `a[i]` properly crosses
+    segment `b[j]` -- each segment's endpoints lie strictly on opposite
+    sides of the other's line, each by more than `eps` pt. So an endpoint
+    touching the other segment (T-junction, shared corner, a dash end
+    resting on a line) is never a crossing, and neither is collinear
+    overlap."""
+    out = np.zeros((len(a), len(b)), dtype=bool)
     if len(a) == 0 or len(b) == 0:
-        return False
+        return out
     A = a[:, None, :]  # (n, 1, 4)
     B = b[None, :, :]  # (1, m, 4)
     # Cheap per-pair bbox reject first.
@@ -171,18 +174,24 @@ def segments_properly_cross(a: np.ndarray, b: np.ndarray, eps: float = 0.01) -> 
         & (np.minimum(B[..., 1], B[..., 3]) <= np.maximum(A[..., 1], A[..., 3]))
     )
     if not overlap.any():
-        return False
+        return out
     ia, ib = np.nonzero(overlap)
     sa, sb = a[ia], b[ib]
     d1 = _signed_dist(sa, sb[:, 0], sb[:, 1])
     d2 = _signed_dist(sa, sb[:, 2], sb[:, 3])
     d3 = _signed_dist(sb, sa[:, 0], sa[:, 1])
     d4 = _signed_dist(sb, sa[:, 2], sa[:, 3])
-    cross = (
+    out[ia, ib] = (
         (d1 * d2 < 0) & (np.abs(d1) > eps) & (np.abs(d2) > eps)
         & (d3 * d4 < 0) & (np.abs(d3) > eps) & (np.abs(d4) > eps)
     )
-    return bool(cross.any())
+    return out
+
+
+def segments_properly_cross(a: np.ndarray, b: np.ndarray, eps: float = 0.01) -> bool:
+    """True if any segment of `a` (n, 4) properly crosses any segment of
+    `b` (m, 4) -- see `_crossing_matrix`."""
+    return bool(_crossing_matrix(a, b, eps).any())
 
 
 def _overlapping_pairs(bboxes: list[tuple[float, float, float, float]]):
@@ -198,12 +207,9 @@ def _overlapping_pairs(bboxes: list[tuple[float, float, float, float]]):
         active.append(i)
 
 
-def crossing_partner_counts(
-    cluster: list[Vector], *, eps: float = 0.01, curve_steps: int = 8,
-) -> list[int]:
-    """Per Vector of `cluster` (same order), the number of *other* Vectors
-    in `cluster` it properly crosses at least once (see
-    `segments_properly_cross`)."""
+def _cluster_segments(cluster: list[Vector], curve_steps: int) -> tuple[list[np.ndarray], list[tuple]]:
+    """Per Vector: its (n, 4) segment array and that array's bbox (an
+    inverted, never-overlapping bbox for a Vector with no segments)."""
     segs = [np.asarray(vector_segments(v, curve_steps), dtype=float).reshape(-1, 4) for v in cluster]
     bboxes = []
     for s in segs:
@@ -212,11 +218,39 @@ def crossing_partner_counts(
             bboxes.append((xs.min(), ys.min(), xs.max(), ys.max()))
         else:
             bboxes.append((math.inf, math.inf, -math.inf, -math.inf))
+    return segs, bboxes
+
+
+def crossing_partner_counts(
+    cluster: list[Vector], *, eps: float = 0.01, curve_steps: int = 8,
+) -> list[int]:
+    """Per Vector of `cluster` (same order), the number of *other* Vectors
+    in `cluster` it properly crosses at least once (see
+    `segments_properly_cross`)."""
+    segs, bboxes = _cluster_segments(cluster, curve_steps)
     counts = [0] * len(cluster)
     for i, j in _overlapping_pairs(bboxes):
         if segments_properly_cross(segs[i], segs[j], eps):
             counts[i] += 1
             counts[j] += 1
+    return counts
+
+
+def crossing_segment_counts(
+    cluster: list[Vector], *, eps: float = 0.01, curve_steps: int = 8,
+) -> list[int]:
+    """Per Vector of `cluster` (same order), the number of distinct
+    segments (`vector_segments` pieces -- so a curve contributes up to
+    `curve_steps`) belonging to *other* Vectors in `cluster` that properly
+    cross at least one of its own segments. One foreign segment crossing
+    two of this Vector's segments counts once; its own segments never
+    count."""
+    segs, bboxes = _cluster_segments(cluster, curve_steps)
+    counts = [0] * len(cluster)
+    for i, j in _overlapping_pairs(bboxes):
+        m = _crossing_matrix(segs[i], segs[j], eps)
+        counts[i] += int(m.any(axis=0).sum())  # distinct j-segments crossing i
+        counts[j] += int(m.any(axis=1).sum())  # distinct i-segments crossing j
     return counts
 
 
@@ -380,6 +414,36 @@ def green_red(t: float) -> RGB:
     midpoint is a clean yellow rather than linear-RGB olive."""
     t = min(1.0, max(0.0, t))
     return colorsys.hsv_to_rgb((1.0 - t) * 120.0 / 360.0, 1.0, 0.9)
+
+
+def ramp4(t: float) -> RGB:
+    """The crossing ramp's 4 colours (red, yellow, green, blue) as a
+    continuous t in [0, 1] -> colour scale, evenly spaced at 0, 1/3, 2/3, 1."""
+    t = min(1.0, max(0.0, t))
+    colours = [c for _, c in _CROSSING_ANCHORS]
+    pos = t * (len(colours) - 1)
+    k = min(int(pos), len(colours) - 2)
+    f = pos - k
+    return tuple(a + (b - a) * f for a, b in zip(colours[k], colours[k + 1]))
+
+
+def percentile_buckets(values: list[float], k: int = 5) -> list[tuple[float, float, list[int]]]:
+    """`k` percentile buckets over `values` as `(lo, hi, indices)`, `lo`/
+    `hi` the actual min/max of the members. Edges are
+    `np.percentile(values, linspace(0, 100, k + 1))`; each value goes into
+    the first bucket whose upper edge is >= it, so tied values never split
+    across buckets. Buckets left empty by duplicate edges (heavy ties) are
+    dropped, so fewer than `k` can come back."""
+    if not values:
+        return []
+    edges = np.percentile(values, np.linspace(0, 100, k + 1))[1:]
+    members: list[list[int]] = [[] for _ in range(k)]
+    for i, v in enumerate(values):
+        members[min(int(np.searchsorted(edges, v, side="left")), k - 1)].append(i)
+    return [
+        (min(values[i] for i in m), max(values[i] for i in m), m)
+        for m in members if m
+    ]
 
 
 def normalise(x: float, lo: float, hi: float) -> float:

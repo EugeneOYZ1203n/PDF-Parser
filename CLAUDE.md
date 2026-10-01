@@ -721,8 +721,10 @@ generic parallel-pool mechanics), never phase-specific business logic.
   the bank (from any prior session, not just the current one) — the same cell to re-run later as a
   regression check.
 - **Vector-geometry probe notebooks** *(experimental, not wired into P3)*:
-  `notebooks/vector_intersection_lab.ipynb` (per whole `Vector`, distinct *proper*-crossing
-  partners within its P3 VectorClassification cluster; ramp 0 red / 3 yellow / 5 green / 7+ blue),
+  `notebooks/vector_intersection_lab.ipynb` (per whole `Vector`, the number of distinct flattened
+  segments of *other* Vectors in its P3 VectorClassification cluster that properly cross it —
+  `crossing_segment_counts`; a linear min..max gradient layer + a zero layer + 5 percentile
+  buckets over the >0 counts, ties never split so heavy ties leave fewer),
   `dashed_line_collinear_lab.ipynb` (straight Vectors grouped by same infinite line within each
   layer/color/width bucket — dashed-line detection), `parallel_groups_lab.ipynb` (straight Vectors
   grouped by angle within each cluster; hue = cluster, value = angle). Each takes `PDF_PATH`/`PAGE`
