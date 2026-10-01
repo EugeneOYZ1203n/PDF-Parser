@@ -125,3 +125,28 @@ def test_conserves_vectors_extracted_from_reference_pdf(pdf_path):
         page = reader.get_page(0)
         vectors = extract_vectors(page)
         _assert_conserved(vectors, page)
+
+
+def _bucket_keys(vectors: list, page) -> set:
+    return set(classify_vectors(vectors, page).clustering)
+
+
+def test_stroked_vectors_with_different_widths_get_separate_buckets(vector):
+    thin = vector(kind="l", type="s", bbox=(0, 0, 10, 0), width=0.25, seqno=0)
+    thick = vector(kind="l", type="s", bbox=(0, 2, 10, 2), width=0.5, seqno=1)
+    keys = _bucket_keys([thin, thick], _Page())
+    assert {k[2] for k in keys} == {0.25, 0.5}
+
+
+def test_stroke_width_float_noise_shares_a_bucket(vector):
+    a = vector(kind="l", type="s", bbox=(0, 0, 10, 0), width=0.2500001, seqno=0)
+    b = vector(kind="l", type="s", bbox=(0, 2, 10, 2), width=0.2499999, seqno=1)
+    assert len(_bucket_keys([a, b], _Page())) == 1
+
+
+def test_fill_only_vectors_ignore_width(vector):
+    a = vector(kind="re", type="f", bbox=(0, 0, 2, 3), color=None, fill=(0, 0, 0), width=0.1, seqno=0)
+    b = vector(kind="re", type="f", bbox=(3, 0, 5, 3), color=None, fill=(0, 0, 0), width=0.7, seqno=1)
+    keys = _bucket_keys([a, b], _Page())
+    assert len(keys) == 1
+    assert next(iter(keys))[2] is None

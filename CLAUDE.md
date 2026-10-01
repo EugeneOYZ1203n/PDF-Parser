@@ -403,7 +403,9 @@ generic parallel-pool mechanics), never phase-specific business logic.
     pattern, but with **no FAST filtering stage and no merge-across-buckets/re-grouping step in
     between** — every classification cluster goes straight to OCR as-is, and is itself the OCR
     unit, not re-clustered first. `parse.py` combines `vectors_p1 + vectors_p2` into one flat
-    pool, then: `classify_vectors.py`'s per-`(layer,color)`-bucket `_classify_bucket` —
+    pool, then: `classify_vectors.py`'s per-`(layer, color, width)`-bucket `_classify_bucket`
+    (width key = `layer_color_separation.width_key`: stroke width rounded to 0.01 pt, `None` for
+    fill-only `"f"` vectors so a glyph's leftover graphics-state width never splits text) —
     `group_filters.py::combine_overlapping_seq` (seqno-overlap merge) then `cluster_filters.py::
     cluster_spatial_groups` (constrained single-linkage spatial clustering via
     `commons.helpers.clustering.cluster_spatial`); a `StepResult`/`CategoryResult` per step,
@@ -460,7 +462,8 @@ generic parallel-pool mechanics), never phase-specific business logic.
   **Clustering/filtering always operates within one `(layer, color)` bucket, never across
   buckets**, in every P3 backend that separates by layer/color at all — two vectors in different
   layers, or with different stroke/fill colors, are never spatially merged together regardless of
-  page proximity.
+  page proximity. `VectorClassification` additionally splits each bucket by stroke width
+  (`(layer, color, width)`, see above).
 - **`P4_Output_Organization/`** — the one, always-run output-organization phase (not pluggable,
   same style as `P1_Reading_Native/` — no reason for this to vary by backend):
   `organize.py::organize_outputs(texts_p1, texts_p2, texts_p3, vectors_p3, page) -> (texts,
@@ -717,6 +720,17 @@ generic parallel-pool mechanics), never phase-specific business logic.
   **Replay** section (`run_regression` + `format_regression_report`) that re-checks every case in
   the bank (from any prior session, not just the current one) — the same cell to re-run later as a
   regression check.
+- **Vector-geometry probe notebooks** *(experimental, not wired into P3)*:
+  `notebooks/vector_intersection_lab.ipynb` (per whole `Vector`, distinct *proper*-crossing
+  partners within its P3 VectorClassification cluster; ramp 0 red / 3 yellow / 5 green / 7+ blue),
+  `dashed_line_collinear_lab.ipynb` (straight Vectors grouped by same infinite line within each
+  layer/color/width bucket — dashed-line detection), `parallel_groups_lab.ipynb` (straight Vectors
+  grouped by angle within each cluster; hue = cluster, value = angle). Each takes `PDF_PATH`/`PAGE`
+  and writes `outputs/<notebook>/<ts>__<stem>_p<N>/` — one layer PDF per toggle + `manifest.json`
+  that `scripts/pipeline_report_viewer.py` opens directly — plus histogram PNGs. Shared logic lives
+  in `notebooks/_vector_probe_helpers.py` (tests: `tests/rastervec/notebooks/`); angle grouping is
+  single-linkage, perpendicular-offset grouping is *anchored* (span ≤ tol), since dense hatching
+  chains offsets under single-linkage.
 - **`Evaluation/Evaluate/variants.py`** *(implemented)*: `PipelineVariant` (name, `engine`
   current/legacy, `p2`, `p3`, `enable_fast`) + the `VARIANTS` registry (`current` [default p2/p3],
   `legacy`, plus named presets for benchmark comparisons across P3 backends —

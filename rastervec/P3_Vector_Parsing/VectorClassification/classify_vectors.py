@@ -3,7 +3,8 @@ candidates + drawing content.
 
 Read `_classify_bucket` to see the reduced 2-step chain (seqno-overlap
 merge + spatial clustering) as one named call per step. `classify_vectors`
-wraps it with the per-`(layer, color)`-bucket loop and the drop collection.
+wraps it with the per-`(layer, color, width)`-bucket loop and the drop
+collection.
 Whole-page similarity grouping no longer happens here -- it runs later, on
 post-Radon `Segment`s (see `OCR/radon.py` / `pipelines/_steps.py`).
 
@@ -20,7 +21,9 @@ from rastervec.P3_Vector_Parsing.VectorClassification.config import (
     SPATIAL_SIZE_TOLERANCE,
 )
 from rastervec.commons.models import Page, Vector
-from rastervec.P3_Vector_Parsing.VectorClassification.layer_color_separation import separate_by_color, separate_by_layer
+from rastervec.P3_Vector_Parsing.VectorClassification.layer_color_separation import (
+    separate_by_color, separate_by_layer, separate_by_width,
+)
 from rastervec.P3_Vector_Parsing.VectorClassification import cluster_filters as clf
 from rastervec.P3_Vector_Parsing.VectorClassification import group_filters as grf
 from rastervec.P3_Vector_Parsing.VectorClassification.classification import CategoryResult, StepResult
@@ -28,7 +31,7 @@ from rastervec.P3_Vector_Parsing.VectorClassification.classification import Cate
 
 @dataclass
 class ClusteringStageResult:
-    """One (layer, color) bucket's Vector Classification result: `steps` is
+    """One (layer, color, width) bucket's Vector Classification result: `steps` is
     exactly `_classify_bucket()`'s return value. `steps[-1].categories
     ["kept"]` is the final surviving (tiered) clusters; every
     `role="dropped"` category across every step is drawing content."""
@@ -49,10 +52,11 @@ class ClassificationResult:
     clustering: dict
     vectors_by_layer: dict | None = None
     vectors_by_layer_color: dict | None = None
+    vectors_by_layer_color_width: dict | None = None
 
 
 def _classify_bucket(vectors: list[Vector], page: Page) -> list[StepResult]:
-    """The reduced classification chain for one (layer, color) bucket: only
+    """The reduced classification chain for one (layer, color, width) bucket: only
     the seqno-overlap merge and the constrained spatial clustering step
     remain (every other filter from the original 12-step chain has been
     removed -- see git history for the full chain if it's ever needed
@@ -77,11 +81,12 @@ def _classify_bucket(vectors: list[Vector], page: Page) -> list[StepResult]:
     return steps
 
 
-def _iter_buckets(vectors_by_layer_color: dict):
+def _iter_buckets(vectors_by_layer_color_width: dict):
     return [
-        ((layer, color), vectors)
-        for layer, color_groups in vectors_by_layer_color.items()
-        for color, vectors in color_groups.items()
+        ((layer, color, width), vectors)
+        for layer, color_groups in vectors_by_layer_color_width.items()
+        for color, width_groups in color_groups.items()
+        for width, vectors in width_groups.items()
     ]
 
 
@@ -103,7 +108,7 @@ def _collect_dropped(clustering: dict) -> list[Vector]:
 def classify_vectors(
     vectors: list[Vector], page: Page, *, verbose: bool = False,
 ) -> ClassificationResult:
-    """Separate by (layer, color), run `_classify_bucket` per bucket, gather
+    """Separate by (layer, color, width), run `_classify_bucket` per bucket, gather
     every bucket's surviving "kept" clusters (tiered, real nested
     structure -- no lineage side-channel), and collect every dropped
     Vector as drawing content."""
@@ -111,9 +116,13 @@ def classify_vectors(
     vectors_by_layer_color = {
         layer: separate_by_color(vs) for layer, vs in vectors_by_layer.items()
     }
+    vectors_by_layer_color_width = {
+        layer: {color: separate_by_width(vs) for color, vs in color_groups.items()}
+        for layer, color_groups in vectors_by_layer_color.items()
+    }
 
     clustering: dict = {}
-    for key, bucket in _iter_buckets(vectors_by_layer_color):
+    for key, bucket in _iter_buckets(vectors_by_layer_color_width):
         clustering[key] = ClusteringStageResult(steps=_classify_bucket(bucket, page))
 
     text_clusters: list[list[list[Vector]]] = []
@@ -130,4 +139,5 @@ def classify_vectors(
         clustering=clustering,
         vectors_by_layer=vectors_by_layer if verbose else None,
         vectors_by_layer_color=vectors_by_layer_color if verbose else None,
+        vectors_by_layer_color_width=vectors_by_layer_color_width if verbose else None,
     )
