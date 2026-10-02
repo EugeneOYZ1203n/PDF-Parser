@@ -25,6 +25,11 @@ never an individual item:
   `_anchored_1d` for why offsets can't be single-linkage). "Same infinite
   line", no gap limit.
 
+Colour scales use one shared low -> high gradient, `gradient4` (green ->
+yellow -> red -> purple). `summarise_groups`/`add_gradient_layers`/
+`group_histograms` are the group stats, gradient layers and histograms
+shared by the collinear/parallel notebooks.
+
 `DebugReport` writes a folder `scripts/pipeline_report_viewer.py` opens
 directly: one single-page PDF per layer plus a `manifest.json` in the exact
 shape the viewer's `_Panel` reads.
@@ -390,41 +395,23 @@ RGB = tuple[float, float, float]
 GREY: RGB = (0.55, 0.55, 0.55)
 LIGHT_GREY: RGB = (0.8, 0.8, 0.8)
 
-_CROSSING_ANCHORS: list[tuple[int, RGB]] = [
-    (0, (1.0, 0.0, 0.0)),    # red
-    (3, (1.0, 0.85, 0.0)),   # yellow
-    (5, (0.0, 0.7, 0.0)),    # green
-    (7, (0.0, 0.25, 1.0)),   # blue (7+)
+_GRADIENT_STOPS: list[RGB] = [
+    (0.0, 0.7, 0.0),     # green  (t = 0)
+    (1.0, 0.85, 0.0),    # yellow (t = 1/3)
+    (1.0, 0.0, 0.0),     # red    (t = 2/3)
+    (0.55, 0.0, 0.75),   # purple (t = 1)
 ]
 
 
-def ramp_crossings(n: int) -> RGB:
-    """0 red -> 3 yellow -> 5 green -> 7+ blue, linear RGB in between."""
-    if n >= _CROSSING_ANCHORS[-1][0]:
-        return _CROSSING_ANCHORS[-1][1]
-    for (n0, c0), (n1, c1) in zip(_CROSSING_ANCHORS, _CROSSING_ANCHORS[1:]):
-        if n0 <= n <= n1:
-            t = (n - n0) / (n1 - n0)
-            return tuple(a + (b - a) * t for a, b in zip(c0, c1))
-    return _CROSSING_ANCHORS[0][1]
-
-
-def green_red(t: float) -> RGB:
-    """t=0 green -> t=1 red, through yellow (HSV hue 120 -> 0), so the
-    midpoint is a clean yellow rather than linear-RGB olive."""
+def gradient4(t: float) -> RGB:
+    """The one shared low -> high colour scale: green -> yellow -> red ->
+    purple, stops evenly spaced at t = 0, 1/3, 2/3, 1, linear RGB in
+    between; t is clamped to [0, 1]."""
     t = min(1.0, max(0.0, t))
-    return colorsys.hsv_to_rgb((1.0 - t) * 120.0 / 360.0, 1.0, 0.9)
-
-
-def ramp4(t: float) -> RGB:
-    """The crossing ramp's 4 colours (red, yellow, green, blue) as a
-    continuous t in [0, 1] -> colour scale, evenly spaced at 0, 1/3, 2/3, 1."""
-    t = min(1.0, max(0.0, t))
-    colours = [c for _, c in _CROSSING_ANCHORS]
-    pos = t * (len(colours) - 1)
-    k = min(int(pos), len(colours) - 2)
+    pos = t * (len(_GRADIENT_STOPS) - 1)
+    k = min(int(pos), len(_GRADIENT_STOPS) - 2)
     f = pos - k
-    return tuple(a + (b - a) * f for a, b in zip(colours[k], colours[k + 1]))
+    return tuple(a + (b - a) * f for a, b in zip(_GRADIENT_STOPS[k], _GRADIENT_STOPS[k + 1]))
 
 
 def percentile_buckets(values: list[float], k: int = 5) -> list[tuple[float, float, list[int]]]:
@@ -469,6 +456,101 @@ def hsv_cluster_angle(hue: float, angle: float) -> RGB:
 
 def to_hex(rgb: RGB) -> str:
     return "#{:02x}{:02x}{:02x}".format(*(round(c * 255) for c in rgb))
+
+
+# --------------------------------------------------------------------------
+# Group summaries shared by the collinear/parallel notebooks' passes
+# --------------------------------------------------------------------------
+
+@dataclass
+class GroupSummary:
+    """`multi` = groups with >= 2 members (with per-group `counts`/`stds`
+    and their page-wide `c_lo..c_hi` / `s_lo..s_hi` ranges), `singles` =
+    the 1-member groups."""
+
+    multi: list
+    singles: list
+    counts: list[int]
+    stds: list[float]
+    c_lo: int
+    c_hi: int
+    s_lo: float
+    s_hi: float
+
+    def describe(self, n_excluded: int, excluded_what: str) -> str:
+        return (
+            f"{len(self.multi) + len(self.singles)} group(s): {len(self.multi)} with >=2 members, "
+            f"{len(self.singles)} singleton(s); {n_excluded} {excluded_what} excluded\n"
+            f"count range {self.c_lo}..{self.c_hi}, "
+            f"length-std range {self.s_lo:.3f}..{self.s_hi:.3f} pt"
+        )
+
+
+def summarise_groups(groups: list[list[tuple[Vector, LineFit]]]) -> GroupSummary:
+    multi = [g for g in groups if len(g) >= 2]
+    stats = [group_stats(g) for g in multi]
+    counts = [c for c, _ in stats]
+    stds = [sd for _, sd in stats]
+    return GroupSummary(
+        multi=multi,
+        singles=[g for g in groups if len(g) == 1],
+        counts=counts,
+        stds=stds,
+        c_lo=min(counts, default=0), c_hi=max(counts, default=0),
+        s_lo=min(stds, default=0.0), s_hi=max(stds, default=0.0),
+    )
+
+
+def add_gradient_layers(
+    report: "DebugReport", summary: GroupSummary, excluded: list[Vector], *,
+    prefix: str = "", excluded_label: str = "excluded (non-straight)",
+) -> None:
+    """`<prefix>gradient` count + length-std layers (every multi-member
+    group's members coloured `gradient4` from the page-wide min..max, drawn
+    low-to-high so the extremes end up on top), then `<prefix>other`
+    singletons (grey) + excluded (light grey)."""
+
+    def _layer(label: str, values: list[float], lo: float, hi: float) -> None:
+        colour, vecs = {}, []
+        for i in sorted(range(len(summary.multi)), key=values.__getitem__):
+            rgb = gradient4(normalise(values[i], lo, hi))
+            for v, _ in summary.multi[i]:
+                colour[id(v)] = rgb
+                vecs.append(v)
+        report.add_vectors(f"{prefix}gradient", label, gradient4(1.0), vecs, lambda v: colour[id(v)])
+
+    _layer(f"vector count ({summary.c_lo}-{summary.c_hi})", summary.counts, summary.c_lo, summary.c_hi)
+    _layer(f"length std ({summary.s_lo:.2f}-{summary.s_hi:.2f} pt)", summary.stds, summary.s_lo, summary.s_hi)
+    report.add_vectors(f"{prefix}other", "singletons", GREY,
+                       [v for g in summary.singles for v, _ in g], lambda v: GREY)
+    report.add_vectors(f"{prefix}other", excluded_label, LIGHT_GREY, excluded, lambda v: LIGHT_GREY)
+
+
+def group_histograms(summary: GroupSummary, title: str):
+    """Two-panel figure: group size and group length std (>= 2 members),
+    bars coloured with `gradient4` along their own axis."""
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    size_bins = (
+        np.arange(2, max(summary.counts, default=2) + 2) - 0.5
+        if max(summary.counts, default=0) < 60 else 40
+    )
+    for ax, values, bins in ((axes[0], summary.counts, size_bins), (axes[1], summary.stds, 40)):
+        if not values:
+            continue
+        _, edges, patches = ax.hist(values, bins=bins, edgecolor="white")
+        lo, hi = edges[0], edges[-1]
+        for left, right, patch in zip(edges[:-1], edges[1:], patches):
+            patch.set_facecolor(gradient4(normalise((left + right) / 2, lo, hi)))
+    axes[0].set_title(f"{title} group size (>=2 members; {len(summary.singles)} singletons not shown)")
+    axes[0].set_xlabel("members in group")
+    axes[0].set_ylabel("groups")
+    axes[1].set_title(f"{title} group length std (>=2 members)")
+    axes[1].set_xlabel("population std of member lengths (pt)")
+    axes[1].set_ylabel("groups")
+    fig.tight_layout()
+    return fig
 
 
 # --------------------------------------------------------------------------

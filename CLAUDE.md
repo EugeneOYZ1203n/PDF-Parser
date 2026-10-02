@@ -727,7 +727,8 @@ generic parallel-pool mechanics), never phase-specific business logic.
   buckets over the >0 counts, ties never split so heavy ties leave fewer),
   `dashed_line_collinear_lab.ipynb` (straight Vectors grouped by same infinite line within each
   layer/color/width bucket — dashed-line detection), `parallel_groups_lab.ipynb` (straight Vectors
-  grouped by angle within each cluster; hue = cluster, value = angle). Each takes `PDF_PATH`/`PAGE`
+  grouped by angle within each cluster; hue = cluster, value = angle). Every count/std/crossing
+  colour scale is `gradient4` (green → yellow → red → purple). Each takes `PDF_PATH`/`PAGE`
   and writes `outputs/<notebook>/<ts>__<stem>_p<N>/` — one layer PDF per toggle + `manifest.json`
   that `scripts/pipeline_report_viewer.py` opens directly — plus histogram PNGs. Shared logic lives
   in `notebooks/_vector_probe_helpers.py` (tests: `tests/rastervec/notebooks/`); angle grouping is

@@ -142,22 +142,9 @@ def test_group_stats(vector):
 
 # ---- colour ------------------------------------------------------------
 
-def test_crossing_ramp_anchors():
-    assert h.ramp_crossings(0) == (1.0, 0.0, 0.0)
-    assert h.ramp_crossings(3) == h._CROSSING_ANCHORS[1][1]
-    assert h.ramp_crossings(5) == h._CROSSING_ANCHORS[2][1]
-    assert h.ramp_crossings(7) == h.ramp_crossings(12) == h._CROSSING_ANCHORS[3][1]
-
-
 @pytest.mark.parametrize("angle,value", [(0, 0.25), (45, 0.5), (90, 0.75), (135, 0.5), (179.999, 0.25)])
 def test_angle_value_triangle_wave(angle, value):
     assert h.angle_value(angle) == pytest.approx(value, abs=1e-4)
-
-
-def test_green_red_endpoints():
-    g, r = h.green_red(0.0), h.green_red(1.0)
-    assert g[1] > g[0] and g[2] == 0
-    assert r[0] > r[1] and r[2] == 0
 
 
 # ---- report ------------------------------------------------------------
@@ -227,7 +214,7 @@ def test_segment_count_sums_over_partners(vector):
     assert h.crossing_segment_counts([axis, *verticals]) == [3, 1, 1, 1]
 
 
-# ---- percentile buckets / ramp4 -----------------------------------------
+# ---- percentile buckets -----------------------------------------
 
 def test_percentile_buckets_even_split():
     values = list(range(1, 11))
@@ -250,9 +237,46 @@ def test_percentile_buckets_empty():
     assert h.percentile_buckets([], 5) == []
 
 
-def test_ramp4_anchor_colours():
-    cols = [c for _, c in h._CROSSING_ANCHORS]
-    assert h.ramp4(0.0) == pytest.approx(cols[0])
-    assert h.ramp4(1 / 3) == pytest.approx(cols[1])
-    assert h.ramp4(2 / 3) == pytest.approx(cols[2])
-    assert h.ramp4(1.0) == pytest.approx(cols[3])
+# ---- gradient4 -----------------------------------------------------------
+
+def test_gradient4_anchor_colours():
+    stops = h._GRADIENT_STOPS
+    assert h.gradient4(0.0) == pytest.approx(stops[0])          # green
+    assert h.gradient4(1 / 3) == pytest.approx(stops[1])        # yellow
+    assert h.gradient4(2 / 3) == pytest.approx(stops[2])        # red
+    assert h.gradient4(1.0) == pytest.approx(stops[3])          # purple
+
+
+def test_gradient4_clamps_and_interpolates():
+    assert h.gradient4(-1.0) == pytest.approx(h._GRADIENT_STOPS[0])
+    assert h.gradient4(2.0) == pytest.approx(h._GRADIENT_STOPS[3])
+    mid = h.gradient4(1 / 6)  # halfway green -> yellow
+    expected = tuple((a + b) / 2 for a, b in zip(h._GRADIENT_STOPS[0], h._GRADIENT_STOPS[1]))
+    assert mid == pytest.approx(expected)
+
+
+# ---- group summaries -----------------------------------------------------
+
+def test_summarise_groups(vector):
+    straight = _straight(vector, ((0, 0), (2, 0)), ((5, 0), (9, 0)), ((0, 9), (3, 9)))
+    groups = [straight[:2], straight[2:]]
+    summary = h.summarise_groups(groups)
+    assert len(summary.multi) == 1 and len(summary.singles) == 1
+    assert (summary.c_lo, summary.c_hi) == (2, 2)
+    assert summary.s_lo == pytest.approx(1.0) and summary.s_hi == pytest.approx(1.0)
+
+
+def test_add_gradient_layers_writes_gradient_and_other_stages(vector, tmp_path, monkeypatch):
+    monkeypatch.setattr(h, "output_dir", lambda *parts: tmp_path)
+    meta = PageMeta(index=0, number=1, mediabox=(0, 0, 100, 100), rotation=0, width=100, height=100)
+    rep = h.DebugReport("probe", str(tmp_path / "src.pdf"), meta)
+    straight = _straight(vector, ((0, 0), (2, 0)), ((5, 0), (9, 0)), ((0, 9), (3, 9)))
+    excluded = [vector(kind="re", bbox=(50, 50, 60, 60))]
+    h.add_gradient_layers(rep, h.summarise_groups([straight[:2], straight[2:]]), excluded,
+                          excluded_label="excluded (non-straight)")
+    assert [(e["stage"], e["layer"].split(" (")[0]) for e in rep.layers] == [
+        ("gradient", "vector count"),
+        ("gradient", "length std"),
+        ("other", "singletons"),
+        ("other", "excluded"),
+    ]
