@@ -240,7 +240,7 @@ raster→vector backends), `P3_Vector_Parsing/` (pluggable vector-parsing/OCR ba
 `P4_Output_Organization/` (the one, always-run output-combination + coordinate-space-guard
 phase) — plus `Evaluation/`, `notebooks/`, `weights/` alongside them (benchmarking/dev tooling,
 not phase code). **Sibling P2 backends (`Stub`/`Junction`) and sibling P3 backends
-(`VectorClassification`/`LegacyRecreation`) import nothing from each other** —
+(`VectorClassification`/`CollinearVectorClass`/`LegacyRecreation`) import nothing from each other** —
 each is fully self-contained, duplicating its own copy of any infra it needs (a PaddleOCR engine
 wrapper, layer/color/width separation, a raster→vector tracer, ...) rather than sharing one. This
 is deliberate: it lets each backend be rewritten or torn out without ever
@@ -443,6 +443,30 @@ generic parallel-pool mechanics), never phase-specific business logic.
     (`cluster_detections`'s raw per-cluster bgr arrays are only accumulated into `debug_out` at
     all when a caller actually passed one, for the same memory reason as the render chunking
     above).
+  - **`CollinearVectorClass/`** *(experimental)* — `VectorClassification`'s pipeline (own
+    copied files) plus the probe notebooks' vector-geometry signals (`line_geometry.py`, ported
+    from `notebooks/_vector_probe_helpers.py`; tunables in its `config.py`).
+    `classify_vectors.py` runs five steps per `(layer, color, width)` bucket: **collinear
+    drawing** (a same-infinite-line group of straight Vectors with > 50 members and length std
+    < 5 pt → drawing), seqno merge, spatial cluster, **length outliers** (per cluster, pool the
+    lengths of every stroke in a parallel group — ≥ 2 same-angle straight Vectors — and drop
+    those > 2 std from the mean), **crossings** (per cluster, drop Vectors properly crossed by
+    > 10 distinct foreign segments). It also returns the page's **global potential angles**
+    (every collinear group's angle, singletons included, deduped within 1°). `parse.py` rotates
+    each cluster render *before* detect by its dominant parallel-group direction
+    (`rotation.pre_detect_direction`: 1 group → its angle, 0 → 0, several → longest total
+    length), detects on the rotated render, and maps quads back through the inverse affine
+    (`paddle_engine.rotate_image`/`unrotate_points`). Per quad, `rotation.final_direction` picks
+    the pre-recognition direction from the vectors under it: 1 connected component → the same
+    rules; several → 1 group → its angle, 0 groups → Hough (mod 180, no minAreaRect, no 10° grid)
+    snapped to the nearest global angle, several → Hough snapped to the nearest group angle. The
+    crop (out of the rotated render) is rotated by the difference; the 0/180 classifier, the
+    +90/180/270 retry sweep and the drawing fold-in are unchanged. Its `debug_out` keeps
+    `VectorClassification`'s shape (so the report's debug-image savers and `retry_stats`
+    accept it; `minarea_mask` is always `None`), plus `global_angles`/`cluster_rotation`; debug
+    layers add per-step `dropped <category>` vectors, `rotation/pre-detect angle`/
+    `final angle` arrows and one bbox layer per rotation rule (`rotation_rule_cluster`/
+    `rotation_rule_quad`).
   - **`LegacyRecreation/`** — a genuine from-scratch port (not a wrapper) of
     `archive/raster_parser`'s own Type-2 algorithm onto `commons.models` types, selectable as a
     normal P3 backend (distinct from the separate `legacy`/`legacy_adapter.py` engine axis, which
@@ -462,7 +486,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
   **Clustering/filtering always operates within one `(layer, color)` bucket, never across
   buckets**, in every P3 backend that separates by layer/color at all — two vectors in different
   layers, or with different stroke/fill colors, are never spatially merged together regardless of
-  page proximity. `VectorClassification` additionally splits each bucket by stroke width
+  page proximity. `VectorClassification` and `CollinearVectorClass` additionally split each bucket by stroke width
   (`(layer, color, width)`, see above).
 - **`P4_Output_Organization/`** — the one, always-run output-organization phase (not pluggable,
   same style as `P1_Reading_Native/` — no reason for this to vary by backend):

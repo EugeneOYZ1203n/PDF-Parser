@@ -401,7 +401,7 @@ def _retry_stats(res, p3: str) -> "dict | None":
     present on a `verbose=True` run) -- `None` for any other P3 backend (no
     such concept) or a run without debug data. Mirrors `_fast_cluster_stats`
     exactly."""
-    if p3 != "VectorClassification":
+    if p3 not in ("VectorClassification", "CollinearVectorClass"):
         return None
     p3_debug = (getattr(res, "extra", None) or {}).get("p3_debug") or {}
     return p3_debug.get("retry_stats")

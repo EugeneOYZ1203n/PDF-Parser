@@ -256,7 +256,9 @@ def _accumulate_page(
         return
     p3_debug = (res.extra or {}).get("p3_debug") or {}
     with clock("debug_images"):
-        if p3 == "VectorClassification":
+        # CollinearVectorClass keeps VectorClassification's debug_out shape
+        # (its minarea masks are always None, so that folder stays empty).
+        if p3 in ("VectorClassification", "CollinearVectorClass"):
             _save_vectorclassification_detect_images(p3_debug, reservoirs["detect"], page_index)
             _save_vectorclassification_rotation_hough_images(
                 p3_debug, reservoirs["rotation_hough"], page_index,
