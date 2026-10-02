@@ -19,6 +19,10 @@ def _whole_image_quad(bgr):
     return [np.array([[0.0, 0.0], [w - 1.0, 0.0], [w - 1.0, h - 1.0], [0.0, h - 1.0]])]
 
 
+def _const_rec(text, conf=1.0):
+    return lambda self, crops: [OcrBox(text=text, confidence=conf) for _ in crops]
+
+
 def _strokes(vector):
     """Three vertical strokes, 2 pt apart -- one parallel group at 90 deg,
     three connected components."""
@@ -47,7 +51,7 @@ def test_parse_rotates_cluster_before_detect_and_maps_quads_back(page_meta, vect
 
     monkeypatch.setattr(PaddleDetectBackend, "detect", _detect)
     monkeypatch.setattr(
-        PaddleRecBackend, "recognize_crops",
+        PaddleRecBackend, "recognize_crops_raw",
         lambda self, crops: [OcrBox(text="III", confidence=1.0, flip_deg=0) for _ in crops],
     )
     strokes = _strokes(vector)
@@ -63,9 +67,12 @@ def test_parse_rotates_cluster_before_detect_and_maps_quads_back(page_meta, vect
     assert w > h
 
     (entry,) = debug_out["rotation"]
-    assert entry["rule"] == "multi-cc 1 parallel group"
+    # Three components -> real Hough on the crop, snapped to the global angle
+    # (the three vertical lines are three collinear groups at 90 deg).
+    assert debug_out["global_angles"] == pytest.approx([90.0])
+    assert entry["rule"] == "multi-cc hough snapped to global angle"
+    assert entry["hough_angle_deg"] == pytest.approx(90.0, abs=3.0)
     assert entry["final_angle_deg"] == -90.0
-    assert entry["hough_angle_deg"] is None
     # The quad covering the whole rotated render maps back onto the cluster
     # bbox grown by the render padding.
     x0, y0, x1, y1 = entry["bbox"]
@@ -85,7 +92,7 @@ def test_parse_hough_branch_snaps_to_global_angle(page_meta, vector, monkeypatch
     monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: _whole_image_quad(bgr))
     monkeypatch.setattr(cvc, "hough_angle_deg", lambda crop: (2.0, np.zeros((1, 1), bool)))
     monkeypatch.setattr(
-        PaddleRecBackend, "recognize_crops",
+        PaddleRecBackend, "recognize_crops_raw",
         lambda self, crops: [OcrBox(text="T", confidence=1.0, flip_deg=0) for _ in crops],
     )
     debug_out: dict = {}
@@ -97,28 +104,72 @@ def test_parse_hough_branch_snaps_to_global_angle(page_meta, vector, monkeypatch
     assert entry["final_angle_deg"] == pytest.approx(0.0)
 
 
-def test_parse_blank_recognition_recovers_via_retry_sweep(page_meta, vector, monkeypatch):
-    v = vector(bbox=(10.0, 10.0, 20.0, 20.0), width=0.5, seqno=1)
-    monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: _whole_image_quad(bgr))
-    monkeypatch.setattr(
-        PaddleRecBackend, "recognize_crops",
-        lambda self, crops: [OcrBox(text="", confidence=0.0, flip_deg=0) for _ in crops],
-    )
-    raw_calls: list[int] = []
+def _scripted_rec(monkeypatch, by_pass):
+    """Patch `recognize_crops_raw` to return `by_pass[n]` (text, conf) on
+    its n-th call (pass 1, then the +90/+180/+270 retries); records each
+    call's batch size."""
+    calls: list[int] = []
 
     def _raw(self, crops):
-        raw_calls.append(len(crops))
-        return [OcrBox(text="Y", confidence=1.0, flip_deg=0) for _ in crops]
+        text, conf = by_pass[len(calls)]
+        calls.append(len(crops))
+        return [OcrBox(text=text, confidence=conf) for _ in crops]
 
     monkeypatch.setattr(PaddleRecBackend, "recognize_crops_raw", _raw)
+    return calls
+
+
+def _one_vector_run(page_meta, vector, monkeypatch):
+    v = vector(bbox=(10.0, 10.0, 20.0, 20.0), width=0.5, seqno=1)
+    monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: _whole_image_quad(bgr))
     debug_out: dict = {}
     _drawing, texts = cvc.parse([v], [], _page(page_meta), debug_out=debug_out)
-    assert raw_calls == [1]
-    assert [t.text for t in texts] == ["Y"]
+    return texts, debug_out
+
+
+def test_parse_low_confidence_retries_all_rotations_and_keeps_best(page_meta, vector, monkeypatch):
+    calls = _scripted_rec(monkeypatch, [("AB", 0.5), ("CD", 0.7), ("EF", 0.95), ("GH", 0.9)])
+    texts, debug_out = _one_vector_run(page_meta, vector, monkeypatch)
+    assert calls == [1, 1, 1, 1]  # pass 1 + all three retries, even after a good one
+    assert [t.text for t in texts] == ["EF"]
     entry = debug_out["rotation"][0]
-    assert entry["retry_count"] == 1
-    assert entry["best_angle_deg"] == -90.0  # final 0 + the +90 retry, normalised
-    assert len(debug_out["recog_bucket_crops"]["1"]) == 1
+    assert entry["retry_count"] == 2 and entry["retried"] and entry["score"] == 0.95
+    assert entry["best_angle_deg"] == 0.0  # final 0 + 180, normalised
+    assert debug_out["retry_stats"] == {"0": 0, "1": 0, "2": 1, "3": 0, "failed": 0}
+    assert debug_out["paddle_classifier_crops"] == []
+
+
+def test_parse_single_character_is_penalised(page_meta, vector, monkeypatch):
+    _scripted_rec(monkeypatch, [("I", 0.95), ("AB", 0.6), ("", 0.0), ("", 0.0)])
+    texts, debug_out = _one_vector_run(page_meta, vector, monkeypatch)
+    assert [t.text for t in texts] == ["AB"]  # 0.6 beats 0.95 * 0.5
+    assert texts[0].confidence == 0.6  # raw confidence, not the score
+    assert debug_out["rotation"][0]["best_angle_deg"] == -90.0  # final 0 + 90
+
+
+def test_parse_confident_pass_one_is_not_retried(page_meta, vector, monkeypatch):
+    calls = _scripted_rec(monkeypatch, [("AB", 0.8)])
+    texts, debug_out = _one_vector_run(page_meta, vector, monkeypatch)
+    assert calls == [1] and [t.text for t in texts] == ["AB"]
+    assert debug_out["rotation"][0]["retried"] is False
+
+
+def test_parse_retry_keeps_pass_one_when_nothing_beats_it(page_meta, vector, monkeypatch):
+    _scripted_rec(monkeypatch, [("AB", 0.5), ("", 0.0), ("X", 0.9), ("CD", 0.5)])
+    texts, debug_out = _one_vector_run(page_meta, vector, monkeypatch)
+    assert [t.text for t in texts] == ["AB"]  # X scores 0.45; CD ties and loses to pass 1
+    entry = debug_out["rotation"][0]
+    assert entry["retry_count"] == 0 and entry["retried"]
+
+
+def test_parse_all_blank_is_failed(page_meta, vector, monkeypatch):
+    _scripted_rec(monkeypatch, [("", 0.0)] * 4)
+    texts, debug_out = _one_vector_run(page_meta, vector, monkeypatch)
+    assert texts == []
+    assert debug_out["rotation"][0]["retry_count"] is None
+    assert debug_out["retry_stats"]["failed"] == 1
+    assert len(debug_out["ocr_blank_boxes"]) == 1
+    assert len(debug_out["recog_bucket_crops"]["failed"]) == 1
 
 
 class _FakeComputePool:
@@ -139,20 +190,20 @@ def test_parse_dispatches_detect_and_recognize_through_compute(page_meta, vector
     v = vector(bbox=(10.0, 10.0, 20.0, 20.0), width=0.5, seqno=1)
     monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: _whole_image_quad(bgr))
     monkeypatch.setattr(
-        PaddleRecBackend, "recognize_crops",
+        PaddleRecBackend, "recognize_crops_raw",
         lambda self, crops: [OcrBox(text="X", confidence=1.0, flip_deg=0) for _ in crops],
     )
     compute = _FakeComputePool()
     _drawing, texts = cvc.parse([v], [], _page(page_meta), compute=compute)
     assert [t.text for t in texts] == ["X"]
     assert compute.starmap_calls[0][0] is cvc._detect_job
-    assert compute.apply_calls[0][0] is cvc._recognize_crops_job
+    assert compute.apply_calls[0][0] is cvc._recognize_crops_raw_job
 
 
 def test_parse_streaming_matches_batch_render_debug(page_meta, vector, monkeypatch):
     monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: _whole_image_quad(bgr))
     monkeypatch.setattr(
-        PaddleRecBackend, "recognize_crops",
+        PaddleRecBackend, "recognize_crops_raw",
         lambda self, crops: [OcrBox(text="X", confidence=1.0, flip_deg=0) for _ in crops],
     )
     page = _page(page_meta)
@@ -165,6 +216,7 @@ def test_parse_streaming_matches_batch_render_debug(page_meta, vector, monkeypat
     assert [(s, l) for s, l, _h, _p in streamed] == [(s, l) for s, l, _h, _p in batch]
     stages = {s for s, *_ in streamed}
     assert {"rotation", "rotation_rule_cluster", "rotation_rule_quad", "ocr", "drawing"} <= stages
+    assert ("rotation", "flip angle") not in {(st, lb) for st, lb, _h, _p in streamed}
     for _stage, _label, hexcolor, pdf_bytes in streamed:
         assert pdf_bytes[:4] == b"%PDF" and hexcolor.startswith("#")
 
@@ -199,3 +251,21 @@ def test_component_count(vector):
     c = vector(bbox=(20.0, 20.0, 25.0, 25.0))
     assert cvc._component_count([a, b]) == 1
     assert cvc._component_count([a, b, c]) == 2
+
+
+def test_classification_layers_intersection_stage(page_meta, vector):
+    from types import SimpleNamespace as NS
+
+    crossed = vector(bbox=(0.0, 0.0, 5.0, 0.0))
+    kept = vector(bbox=(10.0, 10.0, 20.0, 20.0))
+    cls = NS(clustering={"b": NS(steps=[
+        NS(label="Collinear drawing", categories={"kept": NS(role="kept", groups=[[kept]])}),
+        NS(label="Crossings", categories={
+            "kept": NS(role="kept", groups=[[[kept]]]),
+            "crossed": NS(role="dropped", groups=[[crossed]]),
+        }),
+    ])})
+    layers = cvc._render_classification_layers(page_meta(), cls)
+    labels = [(s, l) for s, l, _h, _p in layers]
+    assert ("intersection", "dropped to drawing (1)") in labels
+    assert not any(l == "dropped crossed" for _s, l in labels)

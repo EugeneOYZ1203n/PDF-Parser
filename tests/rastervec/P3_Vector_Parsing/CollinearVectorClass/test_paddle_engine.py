@@ -57,3 +57,9 @@ def test_normalize_rotation_range():
     assert pe.normalize_rotation(90.0) == -90.0
     assert pe.normalize_rotation(179.0) == -1.0
     assert pe.normalize_rotation(-91.0) == 89.0
+
+
+def test_score_penalises_single_characters_and_zeroes_blanks():
+    assert pe.score(pe.OcrBox(text="", confidence=0.9)) == 0.0
+    assert pe.score(pe.OcrBox(text="I", confidence=0.9)) == pytest.approx(0.45)
+    assert pe.score(pe.OcrBox(text="IN", confidence=0.9)) == 0.9

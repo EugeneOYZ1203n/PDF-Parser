@@ -16,8 +16,10 @@ signals from the three probe notebooks (collinear, parallel, intersection):
    angle, only when there are several components and not exactly one
    group); the quad's crop out of the rotated render is rotated by the
    remaining difference.
-4. Page-wide batched recognition with the 0/180 classifier, then the
-   +90/180/270 blank-retry sweep -- unchanged from VectorClassification.
+4. Page-wide batched recognition with **no angle classifier**; every crop
+   whose score (confidence, halved for a single character, 0 when blank) is
+   below `RETRY_CONFIDENCE_THRESHOLD` is also recognised at +90/180/270 and
+   the best-scoring attempt wins.
 5. Drawing = everything classification dropped + every OCR'd vector not
    connected to a recognised quad.
 
@@ -38,7 +40,10 @@ from rastervec.commons.helpers.geometry import (
 from rastervec.commons.models import Page, Vector, Text
 from rastervec.commons.renderer import ocr_prep, pixel_to_page_bbox
 from rastervec.commons.step_timing import StepClock
-from rastervec.P3_Vector_Parsing.CollinearVectorClass.classify_vectors import classify_vectors
+from rastervec.P3_Vector_Parsing.CollinearVectorClass.classify_vectors import (
+    CROSSED_CATEGORY,
+    classify_vectors,
+)
 from rastervec.P3_Vector_Parsing.CollinearVectorClass.config import (
     DETECT_RENDER_CHUNK_SIZE,
     MAX_RENDER_DPI,
@@ -48,18 +53,19 @@ from rastervec.P3_Vector_Parsing.CollinearVectorClass.config import (
     OCR_LANG,
     OCR_VERSION,
     RENDER_PADDING_EXTRA_PT,
+    RETRY_CONFIDENCE_THRESHOLD,
 )
 from rastervec.P3_Vector_Parsing.CollinearVectorClass.paddle_engine import (
     PaddleDetectBackend,
     PaddleRecBackend,
     _detect_job,
     _normalize_bgr,
-    _recognize_crops_job,
     _recognize_crops_raw_job,
     axis_aligned_crop,
     hough_angle_deg,
     normalize_rotation,
     rotate_image,
+    score,
     unrotate_points,
 )
 from rastervec.P3_Vector_Parsing.CollinearVectorClass.rotation import (
@@ -127,8 +133,11 @@ def parse(
     and `keep_debug_arrays` contract as VectorClassification's `parse`;
     `debug_out` additionally carries `global_angles` and `cluster_rotation`
     (per rendered cluster: bbox, pre-detect angle and rule), and each
-    `rotation` entry carries the pre-detect/hough/final angles and the
-    deciding `rule`."""
+    `rotation` entry carries the pre-detect/hough/final angles, the
+    deciding `rule`, the winning `score` and whether it was `retried`.
+    There is no angle classifier: `paddle_classifier_crops` is always empty
+    and `retry_count` is the winning rotation (0 = pass 1, `None` = every
+    attempt blank)."""
     all_vectors = list(vectors_p1) + list(vectors_p2)
     page_meta = page.meta
     clock = StepClock(step_durations)
@@ -225,8 +234,8 @@ def parse(
                     )
                     final_angle = normalize_rotation(decision.angle)
                     crop, _m = rotate_image(base, normalize_rotation(final_angle - c["pre_angle"]))
-                    # Crops come out of the BGR render; recognize_crops does
-                    # its own RGB->BGR flip, so hand it RGB.
+                    # Crops come out of the BGR render; recognize_crops_raw
+                    # does its own RGB->BGR flip, so hand it RGB.
                     page_quads.append({
                         "group_vectors": c["group_vectors"], "crop": crop[:, :, ::-1], "bbox": bbox,
                         "pre_angle": c["pre_angle"], "final_angle": final_angle,
@@ -236,50 +245,42 @@ def parse(
                     })
 
     with clock("ocr_recognize"):
-        # Stage 4: recognize, OCR_BATCH_SIZE batches across the whole page.
-        def _recognize_batches(crops: list[np.ndarray], job, local_fn) -> list:
+        # Stage 4: pass-1 recognition, no angle classifier, OCR_BATCH_SIZE
+        # batches across the whole page.
+        def _recognize_batches(crops: list[np.ndarray]) -> list:
             out: list = []
             for start in range(0, len(crops), OCR_BATCH_SIZE):
                 batch = crops[start:start + OCR_BATCH_SIZE]
                 if compute is not None:
-                    out.extend(compute.apply(job, (batch, OCR_VERSION, OCR_LANG)))
+                    out.extend(compute.apply(_recognize_crops_raw_job, (batch, OCR_VERSION, OCR_LANG)))
                 else:
-                    out.extend(local_fn(batch))
+                    out.extend(rec_backend.recognize_crops_raw(batch))
             return out
 
-        crops_all = [pq["crop"] for pq in page_quads]
-        boxes = _recognize_batches(crops_all, _recognize_crops_job, rec_backend.recognize_crops)
-        classifier_inputs: list[np.ndarray] = list(crops_all) if keep_cluster_detections else []
-
-        flip_angle_degs = [float(box.flip_deg) for box in boxes]
-        recog_crops = [
-            np.rot90(pq["crop"], 2) if box.flip_deg else pq["crop"]
-            for pq, box in zip(page_quads, boxes)
-        ]
+        boxes = _recognize_batches([pq["crop"] for pq in page_quads])
+        scores = [score(box) for box in boxes]
+        recog_crops = [pq["crop"] for pq in page_quads]
         last_attempt_crop: dict[int, np.ndarray] = (
-            {i: c for i, c in enumerate(recog_crops)} if keep_cluster_detections else {}
+            dict(enumerate(recog_crops)) if keep_cluster_detections else {}
         )
-        retry_counts: list = [0 if box.text else None for box in boxes]
-        retry_extra_degs: list = [None] * len(boxes)
+        winning_k = [0] * len(boxes)
 
-        # Stage 5: blank-recognition retry sweep, +90 -> 180 -> 270 relative
-        # to each crop's own rotated base, batched page-wide per pass.
-        for k, extra_deg in ((1, 90.0), (2, 180.0), (3, 270.0)):
-            blank_idx = [i for i, box in enumerate(boxes) if not box.text]
-            if not blank_idx:
+        # Stage 5: every crop whose pass-1 score is below
+        # RETRY_CONFIDENCE_THRESHOLD is also recognised at +90, +180 and +270
+        # (all three, batched page-wide per rotation); the highest score
+        # wins, ties to the earlier attempt -- so pass 1 is always a
+        # candidate and a retry can never make a result worse.
+        retry_idx = [i for i, s in enumerate(scores) if s < RETRY_CONFIDENCE_THRESHOLD]
+        for k in (1, 2, 3):
+            if not retry_idx:
                 break
-            retry_crops = [np.rot90(page_quads[i]["crop"], k) for i in blank_idx]
-            retry_boxes = _recognize_batches(
-                retry_crops, _recognize_crops_raw_job, rec_backend.recognize_crops_raw,
-            )
-            for i, rbox, rcrop in zip(blank_idx, retry_boxes, retry_crops):
+            retry_crops = [np.rot90(page_quads[i]["crop"], k) for i in retry_idx]
+            for i, rbox, rcrop in zip(retry_idx, _recognize_batches(retry_crops), retry_crops):
                 if keep_cluster_detections:
                     last_attempt_crop[i] = rcrop
-                if rbox.text:
-                    boxes[i] = rbox
-                    recog_crops[i] = rcrop
-                    retry_counts[i] = k
-                    retry_extra_degs[i] = extra_deg
+                if score(rbox) > scores[i]:
+                    boxes[i], scores[i], recog_crops[i], winning_k[i] = rbox, score(rbox), rcrop, k
+        retried = set(retry_idx)
 
     # Stage 6: assemble output, page-wide, in original cluster/quad order.
     texts: list[Text] = []
@@ -288,27 +289,24 @@ def parse(
     }
     blank_boxes: list[tuple] = []
     rotation_entries: list[dict] = []
-    for idx, (pq, box, recog_crop, flip_a, retry_n, retry_extra) in enumerate(zip(
-        page_quads, boxes, recog_crops, flip_angle_degs, retry_counts, retry_extra_degs,
-    )):
+    for idx, (pq, box, recog_crop, k) in enumerate(zip(page_quads, boxes, recog_crops, winning_k)):
+        retry_n = k if box.text else None
         if keep_cluster_detections:
             if box.text:
-                recog_bucket_crops[str(retry_n)].append((recog_crop, box.text))
+                recog_bucket_crops[str(k)].append((recog_crop, box.text))
             else:
                 recog_bucket_crops["failed"].append((last_attempt_crop[idx], box.text))
         bbox = pq["bbox"]
-        best_angle = None
-        if box.text:
-            effective_extra = retry_extra if retry_extra is not None else flip_a
-            best_angle = normalize_rotation(pq["final_angle"] + effective_extra)
+        best_angle = normalize_rotation(pq["final_angle"] + 90.0 * k) if box.text else None
         rotation_entries.append({
             "bbox": bbox,
             "rule": pq["rule"],
             "pre_detect_angle_deg": pq["pre_angle"],
             "hough_angle_deg": pq["hough_angle"],
             "final_angle_deg": pq["final_angle"],
-            "flip_angle_deg": flip_a,
             "retry_count": retry_n,
+            "retried": idx in retried,
+            "score": scores[idx],
             "best_angle_deg": best_angle,
             "base_crop": pq["base_crop"],
             "dilated_ink_mask": pq["hough_mask"],
@@ -347,7 +345,7 @@ def parse(
         debug_out["global_angles"] = global_angles
         debug_out["cluster_rotation"] = cluster_rotation
         debug_out["texts"] = texts
-        debug_out["paddle_classifier_crops"] = classifier_inputs
+        debug_out["paddle_classifier_crops"] = []  # no angle classifier
         debug_out["recog_bucket_crops"] = recog_bucket_crops
         debug_out["cluster_detections"] = cluster_detections
         debug_out["ocr_blank_boxes"] = blank_boxes
@@ -377,11 +375,11 @@ _C_DROPPED = "#dc2626"
 _C_ANGLE_PRE = "#0891b2"
 _C_ANGLE_HOUGH = "#ea580c"
 _C_ANGLE_FINAL = "#65a30d"
-_C_ANGLE_FLIP = "#9333ea"
 _C_ANGLE_BEST = "#dc2626"
 _C_RETRY_1 = "#f59e0b"
 _C_RETRY_2 = "#ea580c"
 _C_RETRY_3 = "#b91c1c"
+_C_RETRY_KEPT = "#64748b"
 _RULE_COLORS = ("#2563eb", "#16a34a", "#d97706", "#9333ea", "#0891b2", "#be185d", "#4d7c0f", "#7c2d12")
 
 
@@ -427,7 +425,8 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
     differ from the previous step's (skipped for step 1, whose kept entries
     are single Vectors the inspector already shows), plus one `dropped
     <category>` vector layer per dropped category with any content
-    (collinear drawing groups, length outliers, crossed Vectors)."""
+    (collinear drawing groups, length outliers) -- except the crossings
+    step's, which is its own `intersection / dropped to drawing (N)` layer."""
     from rastervec.commons.renderer import render_boxes_pdf, render_vectors_pdf
 
     out: "list[DebugLayer]" = []
@@ -453,6 +452,12 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
                     dropped.setdefault(name, []).extend(cat.groups)
         for name, entries in dropped.items():
             vectors = _flatten_entries(entries)
+            if name == CROSSED_CATEGORY:
+                # Its own stage, always emitted (empty on a page where the
+                # crossings step dropped nothing).
+                out.append(("intersection", f"dropped to drawing ({len(vectors)})", _C_DROPPED,
+                            render_vectors_pdf(page_meta, vectors, color_of=lambda _v: _hex_rgb(_C_DROPPED))))
+                continue
             if vectors:
                 out.append((stage, f"dropped {name}", _C_DROPPED, render_vectors_pdf(
                     page_meta, vectors, color_of=lambda _v: _hex_rgb(_C_DROPPED),
@@ -550,8 +555,8 @@ def _render_rotation_layers(
 ) -> "list[DebugLayer]":
     """Arrow layers: the per-cluster pre-detect rotation (at each cluster's
     bbox), then per detected quad the page-space Hough reading (only where
-    Hough ran), the final pre-recognition direction, the classifier's 0/180
-    flip and the resolved best angle of a non-blank result."""
+    Hough ran), the final pre-recognition direction and the resolved best
+    angle of a non-blank result (final + the winning retry rotation)."""
     entries = rotation_entries or []
     return [
         ("rotation", "pre-detect angle", _C_ANGLE_PRE,
@@ -560,8 +565,6 @@ def _render_rotation_layers(
          _render_angle_arrows_pdf(page_meta, entries, "hough_angle_deg", _C_ANGLE_HOUGH)),
         ("rotation", "final angle", _C_ANGLE_FINAL,
          _render_angle_arrows_pdf(page_meta, entries, "final_angle_deg", _C_ANGLE_FINAL)),
-        ("rotation", "flip angle", _C_ANGLE_FLIP,
-         _render_angle_arrows_pdf(page_meta, entries, "flip_angle_deg", _C_ANGLE_FLIP)),
         ("rotation", "best angle", _C_ANGLE_BEST,
          _render_angle_arrows_pdf(page_meta, entries, "best_angle_deg", _C_ANGLE_BEST)),
     ]
@@ -592,10 +595,9 @@ def _render_rule_layers(
 
 
 def _render_retry_layers(page_meta, rotation_entries: "list[dict] | None") -> "list[DebugLayer]":
-    """Three bbox-highlight layers (not arrows) -- one per blank-recognition
-    retry count (1, 2, 3), each showing the bboxes of detections that only
-    recovered non-blank text after that many extra +90-degree passes (see
-    `parse.py`'s per-quad loop's retry sweep)."""
+    """Bbox layers for the low-confidence retry sweep: `N retry` -- the
+    detections whose winning read came from the +N*90-degree rotation --
+    and `retried, kept pass 1` -- retried, but pass 1 still scored best."""
     from rastervec.commons.renderer import render_boxes_pdf
 
     entries = rotation_entries or []
@@ -606,6 +608,11 @@ def _render_retry_layers(page_meta, rotation_entries: "list[dict] | None") -> "l
             "retry", f"{n} retry", color,
             render_boxes_pdf(page_meta, [(b, _hex_rgb(color)) for b in boxes]),
         ))
+    kept = [e["bbox"] for e in entries if e.get("retried") and e.get("retry_count") == 0]
+    layers.append((
+        "retry", "retried, kept pass 1", _C_RETRY_KEPT,
+        render_boxes_pdf(page_meta, [(b, _hex_rgb(_C_RETRY_KEPT)) for b in kept]),
+    ))
     return layers
 
 

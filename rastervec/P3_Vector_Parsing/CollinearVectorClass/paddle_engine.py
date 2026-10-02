@@ -7,8 +7,8 @@ cluster's dominant parallel-group direction; detected quads are mapped back
 to the unrotated render with `unrotate_points`. Each quad's crop
 (`axis_aligned_crop`, out of the rotated render) is rotated by whatever
 extra correction `rotation.py` decides, then `PaddleRecBackend.
-recognize_crops` classifies 0/180 and recognises; a blank result is retried
-at +90/180/270 via `recognize_crops_raw`. `hough_angle_deg` is the only
+recognize_crops_raw` recognises it with no angle classifier; a crop whose
+`score` is low is retried at +90/180/270 and the best-scoring read wins. `hough_angle_deg` is the only
 raster angle estimate left -- a plain Hough line angle mod 180 (no
 minAreaRect agreement, no 10-degree grid), snapped to a vector-derived
 angle by `rotation.py`.
@@ -34,6 +34,7 @@ from rastervec.P3_Vector_Parsing.CollinearVectorClass.config import (
     OCR_BATCH_SIZE,
     OCR_LANG,
     OCR_VERSION,
+    SINGLE_CHAR_PENALTY,
 )
 
 # PaddleOCR's own DB detector's det_limit_side_len -- a per-word-group render
@@ -51,16 +52,26 @@ _CROP_BORDER_PX = 5
 
 @dataclass
 class OcrBox:
-    """One recognised crop: text, confidence, and the classifier's own
-    0/180 flip decision (degrees, 0 or 180)."""
+    """One recognised crop: text, raw confidence, and `flip_deg` (always 0
+    here -- there is no angle classifier; kept for shape parity)."""
 
     text: str
     confidence: float
     flip_deg: int = 0
 
 
+def score(box: OcrBox) -> float:
+    """Retry/selection score: 0 for a blank read, `confidence *
+    SINGLE_CHAR_PENALTY` for a single-character read, else `confidence`."""
+    if not box.text:
+        return 0.0
+    if len(box.text) == 1:
+        return box.confidence * SINGLE_CHAR_PENALTY
+    return box.confidence
+
+
 class PaddleRecBackend:
-    """paddleocr 2.x recognition + angle classification. One engine per
+    """paddleocr 2.x recognition (no angle classifier). One engine per
     `(ocr_version, lang)`, cached at class scope -- every instance shares
     it."""
 
@@ -89,45 +100,17 @@ class PaddleRecBackend:
             PaddleRecBackend._ENGINE_CACHE[self.key] = PaddleOCR(
                 ocr_version=ocr_version,
                 lang=lang,
-                use_angle_cls=True,  # PaddleOCR's own classifier resolves the 0/180 flip
+                use_angle_cls=False,  # no 0/180 classifier -- parse.py's retry sweep covers flips
                 show_log=False,
                 rec_batch_num=OCR_BATCH_SIZE,
-                cls_batch_num=OCR_BATCH_SIZE,
             )
         return PaddleRecBackend._ENGINE_CACHE[self.key]
 
-    def recognize_crops(self, crops: list[np.ndarray]) -> list[OcrBox]:
-        """One `OcrBox` per crop, in input order: classify each crop's
-        orientation (0/180), rotate the ones flagged 180, then recognise
-        the whole (now-upright) batch in a single `text_recognizer` pass --
-        one recognition call total, not the old upright-and-flipped double
-        call. Each crop is used as handed over, only converted to BGR --
-        `text_recognizer` does its own resize."""
-        if not crops:
-            return []
-        bgr = [_normalize_bgr(c) for c in crops]
-
-        engine = self._engine()
-        _, cls_results, _ = engine.text_classifier(bgr)
-        flips = [180 if str(label) == "180" else 0 for label, _score in cls_results]
-        upright = [np.rot90(img, 2) if flip else img for img, flip in zip(bgr, flips)]
-
-        rec = engine.text_recognizer(upright)
-        rows = rec[0] if isinstance(rec, tuple) else rec
-        out: list[OcrBox] = []
-        for row, flip in zip(rows, flips):
-            text = str(row[0] or "").strip()
-            score = float(row[1] or 0.0)
-            out.append(OcrBox(text=text, confidence=score if text else 0.0, flip_deg=flip))
-        return out
-
     def recognize_crops_raw(self, crops: list[np.ndarray]) -> list[OcrBox]:
-        """Recognise `crops` as-is, with no `text_classifier` call -- used by
-        `parse.py`'s blank-recognition retry sweep, where the caller has
-        already rotated each crop to a specific quarter-turn it wants tried
-        directly (there is no 0/180 decision left to make). `flip_deg` is
-        always 0 on the returned boxes; the caller tracks whatever extra
-        rotation it applied itself."""
+        """Recognise `crops` as-is, one `OcrBox` per crop in input order --
+        no `text_classifier` call. `parse.py` uses it for pass 1 and for
+        every +90/180/270 retry, tracking the rotation it applied itself;
+        `flip_deg` is always 0."""
         if not crops:
             return []
         bgr = [_normalize_bgr(c) for c in crops]
@@ -184,9 +167,7 @@ class PaddleDetectBackend:
 # Top-level, picklable Pool-2 jobs -- fitz-free, plain numpy/dataclasses in
 # and out, each building/caching its own engine per Pool-2 worker process via
 # the classes' own `_ENGINE_CACHE` (keyed by `(ocr_version, lang)`, same as a
-# local call). Mirrors `FastIntoPaddle/paddle_engine.py`'s identical pattern
-# (`_recognize_crops_job`) before that module was removed -- `parse.py`
-# dispatches these via `compute.starmap`/`compute.apply` when a caller passes
+# local call). `parse.py` dispatches these via `compute.starmap`/`compute.apply` when a caller passes
 # a Pool-2 `compute` proxy, and calls the backend directly otherwise.
 # ---------------------------------------------------------------------------
 def _detect_job(
@@ -199,19 +180,11 @@ def _detect_job(
     return PaddleDetectBackend(ocr_version, lang).detect(bgr)
 
 
-def _recognize_crops_job(
-    crops: list[np.ndarray], ocr_version: str = OCR_VERSION, lang: str = OCR_LANG,
-) -> list[OcrBox]:
-    """One page-wide recognize batch as a Pool-2 job (see `parse.py`'s
-    `OCR_BATCH_SIZE`-chunked dispatch)."""
-    return PaddleRecBackend(ocr_version, lang).recognize_crops(crops)
-
-
 def _recognize_crops_raw_job(
     crops: list[np.ndarray], ocr_version: str = OCR_VERSION, lang: str = OCR_LANG,
 ) -> list[OcrBox]:
-    """`recognize_crops_raw`'s counterpart to `_recognize_crops_job`, for
-    `parse.py`'s page-wide blank-recognition retry sweep."""
+    """One page-wide `recognize_crops_raw` batch as a Pool-2 job (pass 1
+    and every retry rotation in `parse.py`)."""
     return PaddleRecBackend(ocr_version, lang).recognize_crops_raw(crops)
 
 

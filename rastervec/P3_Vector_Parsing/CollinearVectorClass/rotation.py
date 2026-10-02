@@ -5,7 +5,7 @@ PaddleOCR.
 All angles are page space (y down), axial, folded to [0, 180) -- a line
 direction, with up/down the same. `parse.py` turns a chosen angle into an
 image rotation and leaves the remaining 0/180 (and 90) ambiguity to
-PaddleOCR's classifier and the blank-retry sweep.
+the low-confidence retry sweep (+90/180/270).
 
 - `pre_detect_direction` -- the rotation applied to a whole cluster render
   before PaddleOCR detect: one parallel group -> its angle; none -> 0;
@@ -13,9 +13,9 @@ PaddleOCR's classifier and the blank-retry sweep.
 - `final_direction` -- the per-detected-quad correction before recognition,
   from the parallel groups among the vectors under that quad:
   * one connected component: same rules as `pre_detect_direction`;
-  * more than one: one parallel group -> its angle; none -> the Hough line
-    angle snapped to the closest global potential angle; several -> the
-    Hough angle snapped to the closest parallel-group angle.
+  * more than one: the Hough line angle (mod 180) snapped to the closest
+    global potential angle, whatever the parallel groups are; when Hough
+    finds no line, the parallel-group rules above.
 """
 from __future__ import annotations
 
@@ -99,25 +99,15 @@ def final_direction(
     global_angles: list[float],
 ) -> RotationDecision:
     """Per-quad direction before recognition (see module docstring).
-    `hough` is called lazily -- only on the multi-component branches that
-    need it -- and returns the quad's page-space Hough angle or `None`.
-    Fallbacks the rules leave open: no Hough reading with no parallel group
-    -> 0; no Hough reading with several groups -> the longest group; no
-    global angles at all -> the raw Hough angle."""
+    `hough` is called lazily -- only for more than one component -- and
+    returns the quad's page-space Hough angle or `None`. With no global
+    angles at all, the raw Hough angle is used."""
     if n_components <= 1:
         return _by_groups(groups, "1cc")
-    if len(groups) == 1:
-        return RotationDecision(groups[0].angle, "multi-cc 1 parallel group")
     h = hough()
     if h is None:
-        if not groups:
-            return RotationDecision(0.0, "multi-cc no hough, default 0")
-        best = max(groups, key=lambda g: g.total_length)
-        return RotationDecision(best.angle, "multi-cc no hough, longest parallel group", None)
-    if not groups:
-        snapped = snap_axial(h, global_angles)
-        if snapped is None:
-            return RotationDecision(h % 180.0, "multi-cc hough, no global angles", h)
-        return RotationDecision(snapped, "multi-cc hough snapped to global angle", h)
-    snapped = snap_axial(h, [g.angle for g in groups])
-    return RotationDecision(snapped, "multi-cc hough snapped to parallel group", h)
+        return _by_groups(groups, "multi-cc no hough,")
+    snapped = snap_axial(h, global_angles)
+    if snapped is None:
+        return RotationDecision(h % 180.0, "multi-cc hough, no global angles", h)
+    return RotationDecision(snapped, "multi-cc hough snapped to global angle", h)

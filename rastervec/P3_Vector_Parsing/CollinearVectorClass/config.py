@@ -25,9 +25,9 @@ SPATIAL_SIZE_TOLERANCE = 0.30
 STRAIGHT_TOL_PT = 0.25
 # Single-linkage angle tolerance (deg, folded to [0, 180)) for both
 # collinear and parallel grouping, and for deduping global potential angles.
-ANGLE_TOL_DEG = 1.0
+ANGLE_TOL_DEG = 2.0
 # Anchored perpendicular-offset tolerance (pt) for collinear grouping.
-COLLINEAR_OFFSET_TOL_PT = 0.5
+COLLINEAR_OFFSET_TOL_PT = 1.0
 # A collinear group becomes drawing when its member-length std (pt) is below
 # this AND it has more than COLLINEAR_DRAWING_MIN_COUNT members -- a long
 # dashed/repeated line, never text.
@@ -90,3 +90,12 @@ DETECT_RENDER_CHUNK_SIZE = 8
 # LegacyRecreation/config.py's own RENDER_PADDING_EXTRA_PT=5.0pt (which still
 # matches archive's original PngRenderer.render_word_group flat padding).
 RENDER_PADDING_EXTRA_PT = 15.0
+
+# Recognition retry (parse.py): a crop whose pass-1 score is below
+# RETRY_CONFIDENCE_THRESHOLD is also recognised at +90/180/270 and the
+# best-scoring attempt wins. Score = confidence, 0 for a blank read, and
+# confidence * SINGLE_CHAR_PENALTY for a single-character read (a lone glyph
+# is the typical misread of a sideways/upside-down word). The threshold only
+# triggers retries -- a non-blank winner is always kept.
+RETRY_CONFIDENCE_THRESHOLD = 0.8
+SINGLE_CHAR_PENALTY = 0.5

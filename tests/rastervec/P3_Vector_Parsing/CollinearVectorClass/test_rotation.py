@@ -35,26 +35,27 @@ def test_final_direction_single_component_never_runs_hough():
     assert d.angle == 80.0 and d.rule == "1cc longest parallel group"
 
 
-def test_final_direction_multi_component_one_group_skips_hough():
-    d = rot.final_direction(3, [PG(20.0, 1.0, 2)], _no_hough, [])
-    assert d.angle == 20.0 and d.hough_angle is None
+def test_final_direction_multi_component_snaps_hough_to_global_even_with_groups():
+    one = rot.final_direction(3, [PG(20.0, 1.0, 2)], lambda: 88.0, [0.0, 90.0])
+    assert one.angle == 90.0 and one.hough_angle == 88.0
+    groups = [PG(10.0, 100.0, 2), PG(85.0, 1.0, 2)]
+    several = rot.final_direction(2, groups, lambda: 70.0, [0.0, 60.0])
+    assert several.angle == 60.0  # the global angle, not a group angle
+    assert several.rule == "multi-cc hough snapped to global angle"
 
 
 def test_final_direction_multi_component_no_group_snaps_hough_to_global():
     d = rot.final_direction(2, [], lambda: 178.0, [0.0, 45.0, 90.0])
     assert d.angle == 0.0 and d.hough_angle == 178.0  # axial: 178 is 2 deg from 0
-    assert d.rule == "multi-cc hough snapped to global angle"
 
 
-def test_final_direction_multi_component_groups_snap_hough_to_group():
-    groups = [PG(10.0, 100.0, 2), PG(85.0, 1.0, 2)]
-    d = rot.final_direction(2, groups, lambda: 70.0, [0.0])
-    assert d.angle == 85.0  # nearest group wins, not the longest
-    assert d.rule == "multi-cc hough snapped to parallel group"
-
-
-def test_final_direction_fallbacks_without_hough_or_globals():
+def test_final_direction_without_hough_falls_back_to_group_rules():
     assert rot.final_direction(2, [], lambda: None, [10.0]).angle == 0.0
+    assert rot.final_direction(2, [PG(30.0, 1.0, 2)], lambda: None, [10.0]).angle == 30.0
     groups = [PG(10.0, 100.0, 2), PG(85.0, 1.0, 2)]
-    assert rot.final_direction(2, groups, lambda: None, []).angle == 10.0
+    d = rot.final_direction(2, groups, lambda: None, [])
+    assert d.angle == 10.0 and d.rule == "multi-cc no hough, longest parallel group"
+
+
+def test_final_direction_without_global_angles_uses_raw_hough():
     assert rot.final_direction(2, [], lambda: 33.0, []).angle == 33.0

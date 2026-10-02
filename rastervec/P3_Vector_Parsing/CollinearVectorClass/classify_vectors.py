@@ -59,6 +59,7 @@ from rastervec.P3_Vector_Parsing.CollinearVectorClass.line_geometry import (
     split_straight,
 )
 
+CROSSED_CATEGORY = "crossed"  # step 5's dropped category (parse.py's `intersection` layer)
 STEP_LABELS = ("Collinear drawing", "Seq overlap merge", "Spatial cluster", "Length outliers", "Crossings")
 
 
@@ -179,7 +180,7 @@ def _classify_bucket(vectors: list[Vector]) -> tuple[list[StepResult], list[floa
     clusters, crossed = _remove_from_clusters(clusters, heavily_crossed)
     steps.append(StepResult(STEP_LABELS[4], {
         "kept": CategoryResult(clusters, "kept"),
-        "crossed": CategoryResult(crossed, "dropped"),
+        CROSSED_CATEGORY: CategoryResult(crossed, "dropped"),
     }))
     return steps, angles
 

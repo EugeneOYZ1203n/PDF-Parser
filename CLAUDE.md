@@ -458,15 +458,18 @@ generic parallel-pool mechanics), never phase-specific business logic.
     length), detects on the rotated render, and maps quads back through the inverse affine
     (`paddle_engine.rotate_image`/`unrotate_points`). Per quad, `rotation.final_direction` picks
     the pre-recognition direction from the vectors under it: 1 connected component → the same
-    rules; several → 1 group → its angle, 0 groups → Hough (mod 180, no minAreaRect, no 10° grid)
-    snapped to the nearest global angle, several → Hough snapped to the nearest group angle. The
-    crop (out of the rotated render) is rotated by the difference; the 0/180 classifier, the
-    +90/180/270 retry sweep and the drawing fold-in are unchanged. Its `debug_out` keeps
+    rules; several → always Hough (mod 180, no minAreaRect, no 10° grid) snapped to the nearest
+    global angle (no Hough line → the group rules). The crop (out of the rotated render) is
+    rotated by the difference. Recognition has **no angle classifier**; a crop whose score
+    (`paddle_engine.score`: confidence, × 0.5 for a single character, 0 when blank) is < 0.8 is
+    also read at +90/180/270 and the best score wins (a non-blank winner is always kept).
+    Grouping tolerances: angle 2°, collinear offset 1.0 pt, straightness 0.25 pt. Its `debug_out` keeps
     `VectorClassification`'s shape (so the report's debug-image savers and `retry_stats`
-    accept it; `minarea_mask` is always `None`), plus `global_angles`/`cluster_rotation`; debug
-    layers add per-step `dropped <category>` vectors, `rotation/pre-detect angle`/
-    `final angle` arrows and one bbox layer per rotation rule (`rotation_rule_cluster`/
-    `rotation_rule_quad`).
+    accept it; `minarea_mask` and `paddle_classifier_crops` stay empty), plus `global_angles`/
+    `cluster_rotation`; debug layers add per-step `dropped <category>` vectors (the crossings
+    step's as its own `intersection / dropped to drawing (N)` layer), `rotation/pre-detect
+    angle`/`final angle` arrows (no `flip angle`), `retry / retried, kept pass 1`, and one bbox
+    layer per rotation rule (`rotation_rule_cluster`/`rotation_rule_quad`).
   - **`LegacyRecreation/`** — a genuine from-scratch port (not a wrapper) of
     `archive/raster_parser`'s own Type-2 algorithm onto `commons.models` types, selectable as a
     normal P3 backend (distinct from the separate `legacy`/`legacy_adapter.py` engine axis, which
