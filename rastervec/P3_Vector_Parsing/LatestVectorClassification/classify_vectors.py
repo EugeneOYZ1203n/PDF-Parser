@@ -1,19 +1,23 @@
 """LatestVectorClassification classification: turn raw vectors into text-candidate
 clusters + drawing content.
 
-Per `(layer, color, width)` bucket, `_classify_bucket` runs five named steps:
+Per `(layer, color, width)` bucket, `_classify_bucket` runs six named steps:
 
 1. **Collinear drawing** -- group the bucket's straight Vectors by same
    infinite line (`line_geometry.group_collinear`); a group with more than
    `COLLINEAR_DRAWING_MIN_COUNT` members whose length std is below
    `COLLINEAR_DRAWING_MAX_STD_PT` (a long dashed/repeated line) is dropped
    to drawing.
-2. **Seq overlap merge** (`group_filters.combine_overlapping_seq`).
-3. **Spatial cluster** (`cluster_filters.cluster_spatial_groups`).
-4. **Length outliers** -- per cluster, pool the lengths of every straight
+2. **Pattern lattice** (`pattern_lattice.pattern_drawing`) -- similar
+   Vectors (same item kinds + per-item lengths) repeated on a regular
+   translation lattice; a lattice group with more than `PATTERN_MAX_GROUP`
+   members is dropped to drawing.
+3. **Seq overlap merge** (`group_filters.combine_overlapping_seq`).
+4. **Spatial cluster** (`cluster_filters.cluster_spatial_groups`).
+5. **Length outliers** -- per cluster, pool the lengths of every straight
    Vector in a parallel group (>= `MIN_PARALLEL_GROUP_SIZE` same-angle
    members); drop the ones more than `LENGTH_OUTLIER_STD` std from the mean.
-5. **Crossings** -- per cluster (`crossed_grid`): flag every Vector made
+6. **Crossings** -- per cluster (`crossed_grid`): flag every Vector made
    only of "l" items that at least `MIN_CROSSINGS` distinct foreign pieces
    properly cross (`line_geometry.line_crossing_counts` -- no flattening;
    segments and rect/quad edges count once each, every curve crossing
@@ -31,7 +35,7 @@ each detect quad's long-edge angle to the nearest one within
 `QUAD_ANGLE_SNAP_TOL_DEG`.
 
 Every step is timed through an optional `StepClock` (summed across
-buckets): `classify_separate`, `classify_collinear`, `classify_seqno`,
+buckets): `classify_separate`, `classify_collinear`, `classify_pattern`, `classify_seqno`,
 `classify_spatial`, `classify_outliers`, `classify_crossings`,
 `classify_collect`.
 """
@@ -45,6 +49,7 @@ from rastervec.commons.models import Page, Vector
 from rastervec.commons.step_timing import StepClock
 from rastervec.P3_Vector_Parsing.LatestVectorClassification import cluster_filters as clf
 from rastervec.P3_Vector_Parsing.LatestVectorClassification import group_filters as grf
+from rastervec.P3_Vector_Parsing.LatestVectorClassification.pattern_lattice import pattern_drawing
 from rastervec.P3_Vector_Parsing.LatestVectorClassification.classification import CategoryResult, StepResult
 from rastervec.P3_Vector_Parsing.LatestVectorClassification.config import (
     ANGLE_TOL_DEG,
@@ -77,9 +82,10 @@ from rastervec.P3_Vector_Parsing.LatestVectorClassification.line_geometry import
     split_straight,
 )
 
-CROSSED_CATEGORY = "crossed"  # step 5's dropped category (parse.py's `intersection` layer)
-FLAGGED_KEPT_CATEGORY = "crossed_off_grid"  # step 5's flagged-but-kept Vectors (role "info")
-STEP_LABELS = ("Collinear drawing", "Seq overlap merge", "Spatial cluster", "Length outliers", "Crossings")
+PATTERN_CATEGORY = "pattern"  # step 2's dropped category (one entry per lattice group)
+CROSSED_CATEGORY = "crossed"  # step 6's dropped category (parse.py's `intersection` layer)
+FLAGGED_KEPT_CATEGORY = "crossed_off_grid"  # step 6's flagged-but-kept Vectors (role "info")
+STEP_LABELS = ("Collinear drawing", "Pattern lattice", "Seq overlap merge", "Spatial cluster", "Length outliers", "Crossings")
 
 
 @dataclass
@@ -129,7 +135,7 @@ def collinear_drawing(
 
 
 def length_outliers(cluster_vectors: list[Vector]) -> list[Vector]:
-    """Step 4 for one cluster: straight Vectors in parallel groups whose
+    """Step 5 for one cluster: straight Vectors in parallel groups whose
     length is more than `LENGTH_OUTLIER_STD` pooled std from the pooled mean
     (pooled over every parallel group in the cluster). Nothing when fewer
     than two such strokes or a zero std."""
@@ -148,7 +154,7 @@ def length_outliers(cluster_vectors: list[Vector]) -> list[Vector]:
 
 
 def crossed_grid(cluster_vectors: list[Vector]) -> tuple[list[Vector], list[Vector]]:
-    """Step 5 for one cluster: `(dropped, flagged_kept)`. Flagged = "l"-only
+    """Step 6 for one cluster: `(dropped, flagged_kept)`. Flagged = "l"-only
     Vectors with at least `MIN_CROSSINGS` foreign crossings; dropped = the
     flagged Vectors on the dominant grid (see the module docstring)."""
     counts = line_crossing_counts(cluster_vectors, eps=CROSS_EPS_PT)
@@ -185,7 +191,7 @@ def _remove_from_clusters(
 def _classify_bucket(
     vectors: list[Vector], clock: "StepClock | None" = None,
 ) -> tuple[list[StepResult], list[float]]:
-    """The five-step chain for one bucket (see module docstring), plus the
+    """The six-step chain for one bucket (see module docstring), plus the
     bucket's collinear-group angles; each step is timed on `clock` (a
     private one when `None`)."""
     clock = clock or StepClock()
@@ -198,17 +204,24 @@ def _classify_bucket(
             "drawing": CategoryResult(drawing_groups, "dropped"),
         }))
 
+    with clock("classify_pattern"):
+        kept, pattern_groups = pattern_drawing(kept)
+        steps.append(StepResult(STEP_LABELS[1], {
+            "kept": CategoryResult([[v] for v in kept], "kept"),
+            PATTERN_CATEGORY: CategoryResult(pattern_groups, "dropped"),
+        }))
+
     with clock("classify_seqno"):
         groups, _ = grf.combine_overlapping_seq([[v] for v in kept], SEQ_OVERLAP_TOLERANCE_PX)
-        steps.append(StepResult(STEP_LABELS[1], {"kept": CategoryResult(groups, "kept")}))
+        steps.append(StepResult(STEP_LABELS[2], {"kept": CategoryResult(groups, "kept")}))
 
     with clock("classify_spatial"):
         clusters = clf.cluster_spatial_groups(groups, SPATIAL_CLUSTER_THRESHOLD, SPATIAL_SIZE_TOLERANCE)
-        steps.append(StepResult(STEP_LABELS[2], {"kept": CategoryResult(clusters, "kept")}))
+        steps.append(StepResult(STEP_LABELS[3], {"kept": CategoryResult(clusters, "kept")}))
 
     with clock("classify_outliers"):
         clusters, outliers = _remove_from_clusters(clusters, length_outliers)
-        steps.append(StepResult(STEP_LABELS[3], {
+        steps.append(StepResult(STEP_LABELS[4], {
             "kept": CategoryResult(clusters, "kept"),
             "outliers": CategoryResult(outliers, "dropped"),
         }))
@@ -223,7 +236,7 @@ def _classify_bucket(
 
     with clock("classify_crossings"):
         clusters, crossed = _remove_from_clusters(clusters, _crossed)
-        steps.append(StepResult(STEP_LABELS[4], {
+        steps.append(StepResult(STEP_LABELS[5], {
             "kept": CategoryResult(clusters, "kept"),
             CROSSED_CATEGORY: CategoryResult(crossed, "dropped"),
             FLAGGED_KEPT_CATEGORY: CategoryResult(flagged_kept, "info"),

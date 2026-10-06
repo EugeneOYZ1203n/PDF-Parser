@@ -43,6 +43,22 @@ MIN_PARALLEL_GROUP_SIZE = 2
 # QUAD_ANGLE_SNAP_TOL_DEG (parse.py), else stays as detected.
 GLOBAL_ANGLE_MIN_GROUP_SIZE = 2
 QUAD_ANGLE_SNAP_TOL_DEG = 5.0
+# Pattern-lattice step (pattern_lattice.py), per bucket after collinear
+# drawing: Vectors are "similar" when they have the same item kinds in order
+# and the same per-item lengths, rounded to PATTERN_SIM_LENGTH_TOL_PT
+# (rotation-invariant). Only similarity buckets with more than
+# PATTERN_MIN_BUCKET members are searched for lattices; a lattice group
+# (flood-filled from a seed along +-v1/+-v2, each step matched within
+# PATTERN_LATTICE_TOL_FRAC of its own length) with more than
+# PATTERN_MAX_GROUP members is dropped to drawing. Neighbours closer than
+# PATTERN_MIN_STEP_PT (coincident duplicates) never define a lattice step;
+# PATTERN_KNN neighbours are searched per seed for v1/v2.
+PATTERN_SIM_LENGTH_TOL_PT = 0.1
+PATTERN_MIN_BUCKET = 20
+PATTERN_MAX_GROUP = 10
+PATTERN_LATTICE_TOL_FRAC = 0.2
+PATTERN_MIN_STEP_PT = 0.05
+PATTERN_KNN = 16
 # Per cluster, strokes in parallel groups whose length is more than this many
 # (pooled) standard deviations from the pooled mean are removed to drawing.
 LENGTH_OUTLIER_STD = 2.0

@@ -2,7 +2,8 @@
 VectorClassification + CollinearVectorClass backend:
 
 1. `classify_vectors` -- layer/color/width buckets; collinear drawing
-   removal (long, regular dashed/repeated lines); seqno merge + spatial
+   removal (long, regular dashed/repeated lines); pattern-lattice removal
+   (similar Vectors repeated on a regular lattice); seqno merge + spatial
    clustering; per cluster, parallel-group length outliers and the
    crossed-grid removal -> drawing. Also the page's global potential
    angles (every >= 2-member collinear group's angle, page-wide, deduped).
@@ -48,6 +49,8 @@ from rastervec.commons.step_timing import StepClock
 from rastervec.P3_Vector_Parsing.LatestVectorClassification.classify_vectors import (
     CROSSED_CATEGORY,
     FLAGGED_KEPT_CATEGORY,
+    PATTERN_CATEGORY,
+    STEP_LABELS,
     classify_vectors,
 )
 from rastervec.P3_Vector_Parsing.LatestVectorClassification.config import (
@@ -171,7 +174,7 @@ def parse(
     `render_debug`; `on_debug_layer` streams each stage's layers as soon as
     it runs. `keep_debug_arrays=False` keeps image arrays out of
     `debug_out`. `step_durations` receives per-step seconds
-    (`classify_separate`/`_collinear`/`_seqno`/`_spatial`/`_outliers`/
+    (`classify_separate`/`_collinear`/`_pattern`/`_seqno`/`_spatial`/`_outliers`/
     `_crossings`/`_collect`, `ocr_render`/`ocr_detect`/`ocr_crop`/
     `ocr_recognize`/`ocr_assemble`, `quad_ownership`, `drawing`,
     `debug_render`)."""
@@ -460,12 +463,14 @@ def _entry_bbox(entry):
 
 def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
     """Per classification step: a `kept bbox` layer when the kept boxes
-    differ from the previous step's (skipped for step 1, whose kept entries
-    are single Vectors the inspector already shows), plus one `dropped
-    <category>` vector layer per dropped category with any content --
-    except the crossings step's, which is its own `intersection` stage:
-    `dropped to drawing (N)` (the dominant-grid Vectors) and `flagged, kept
-    (off-grid) (N)` (crossed often enough, but not on the dominant grid)."""
+    differ from the previous step's (skipped for the collinear and pattern
+    steps, whose kept entries are single Vectors the inspector already
+    shows), plus one `dropped <category>` vector layer per dropped category
+    with any content -- the pattern step's colours each lattice group with
+    its own hue -- except the crossings step's, which is its own
+    `intersection` stage: `dropped to drawing (N)` (the dominant-grid
+    Vectors) and `flagged, kept (off-grid) (N)` (crossed often enough, but
+    not on the dominant grid)."""
     from rastervec.commons.renderer import render_boxes_pdf, render_vectors_pdf
 
     out: "list[DebugLayer]" = []
@@ -504,11 +509,17 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
                             render_vectors_pdf(page_meta, flagged_vectors,
                                                color_of=lambda _v: _hex_rgb(_C_FLAGGED))))
                 continue
+            if name == PATTERN_CATEGORY and vectors:
+                colors = _group_colors(entries)
+                out.append((stage, f"dropped {name} ({len(entries)} groups)", _C_DROPPED, render_vectors_pdf(
+                    page_meta, vectors, color_of=lambda v, c=colors: c[id(v)],
+                )))
+                continue
             if vectors:
                 out.append((stage, f"dropped {name}", _C_DROPPED, render_vectors_pdf(
                     page_meta, vectors, color_of=lambda _v: _hex_rgb(_C_DROPPED),
                 )))
-        if i == 0:
+        if label in STEP_LABELS[:2]:
             continue
         kept_boxes = sorted(
             tuple(b) for b in (_entry_bbox(g) for g in kept_groups if g) if b is not None
@@ -520,6 +531,16 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
             page_meta, [(b, _hex_rgb(_C_KEPT)) for b in kept_boxes],
         )))
     return out
+
+
+def _group_colors(groups: "list[list[Vector]]") -> "dict[int, tuple]":
+    """One golden-ratio hue per group: color by `id(v)`."""
+    import colorsys
+
+    return {
+        id(v): colorsys.hsv_to_rgb(hue, 0.9, 0.85)
+        for hue, group in zip(golden_hues(len(groups)), groups) for v in group
+    }
 
 
 def _geometry_colors(clusters: "list[list[Vector]]", grouper) -> "tuple[dict[int, tuple], list[Vector], list[Vector]]":

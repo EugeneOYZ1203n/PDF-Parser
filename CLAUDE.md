@@ -450,10 +450,17 @@ generic parallel-pool mechanics), never phase-specific business logic.
   - **`LatestVectorClassification/`** *(the default)* — the merge of the former
     `VectorClassification` and experimental `CollinearVectorClass` backends (Collinear was the
     base). `parse.py` combines `vectors_p1 + vectors_p2` into one flat pool, then
-    `classify_vectors.py` runs five steps per `(layer, color, width)` bucket (width key =
+    `classify_vectors.py` runs six steps per `(layer, color, width)` bucket (width key =
     `layer_color_separation.width_key`: stroke width rounded to 0.01 pt, `None` for fill-only
     `"f"` vectors): **collinear drawing** (a same-infinite-line group of straight Vectors with
-    > 50 members and length std < 5 pt → drawing), **seqno merge**
+    > 50 members and length std < 5 pt → drawing), **pattern lattice** (`pattern_lattice.py`:
+    Vectors bucketed by similarity — same item kinds in order + same per-item lengths, rounded to
+    `PATTERN_SIM_LENGTH_TOL_PT`, rotation-invariant; in a similarity bucket of > `PATTERN_MIN_BUCKET`
+    (20), seeds in `seqno` order take v1 = nearest unassigned neighbour's anchor offset (anchor =
+    first point of the first item), v2 = nearest one not parallel to it (none → 1D), and
+    *flood-fill* a connected lattice patch along ±v1/±v2 (each step within
+    `PATTERN_LATTICE_TOL_FRAC` of its length) — never a global `p + n1·v1 + n2·v2` fit; a group of >
+    `PATTERN_MAX_GROUP` (10) → drawing; O(N log N) via `cKDTree`), **seqno merge**
     (`group_filters.combine_overlapping_seq`), **spatial cluster** (`cluster_filters.
     cluster_spatial_groups`), **length outliers** (per cluster, pool the lengths of every stroke in
     a parallel group — ≥ 2 same-angle straight Vectors — and drop those > 2 std from the mean),
@@ -497,7 +504,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
     `TEXT_INK_INSIDE_FRAC` (50%) of its ink (path length, curves sampled only for this measure)
     lies inside (Cyrus–Beck, `line_geometry.ink_fraction_in_quad`). Nothing transitive; everything else
     in the OCR'd clusters is drawing. Sub-step timing keys (`StepClock`, summed, never nested —
-    so they partition `phase3` minus glue): `classify_separate`/`_collinear`/`_seqno`/`_spatial`/
+    so they partition `phase3` minus glue): `classify_separate`/`_collinear`/`_pattern`/`_seqno`/`_spatial`/
     `_outliers`/`_crossings`/`_collect` (no outer `classify` key), `ocr_render`/`ocr_detect`/
     `ocr_crop` (quad mapping + `upright_crop`)/`ocr_recognize` (recognition + retries only)/
     `ocr_assemble`, `quad_ownership`, `drawing`, plus `debug_render`. `render_debug` (`P3_RENDER_DEBUG["LatestVectorClassification"]`)
