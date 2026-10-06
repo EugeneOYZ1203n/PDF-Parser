@@ -36,6 +36,13 @@ COLLINEAR_DRAWING_MIN_COUNT = 50
 # "parallel group" (length-outlier pooling, `geometry` debug layers).
 # Singletons don't.
 MIN_PARALLEL_GROUP_SIZE = 2
+# Page-wide "global potential angles" (classify_vectors.py): the mean angle
+# of every collinear group with at least this many members, across every
+# bucket (drawing groups included), deduped within ANGLE_TOL_DEG. A detect
+# quad's long-edge angle snaps to the nearest one within
+# QUAD_ANGLE_SNAP_TOL_DEG (parse.py), else stays as detected.
+GLOBAL_ANGLE_MIN_GROUP_SIZE = 2
+QUAD_ANGLE_SNAP_TOL_DEG = 5.0
 # Per cluster, strokes in parallel groups whose length is more than this many
 # (pooled) standard deviations from the pooled mean are removed to drawing.
 LENGTH_OUTLIER_STD = 2.0

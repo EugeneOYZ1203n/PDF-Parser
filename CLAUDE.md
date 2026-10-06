@@ -95,6 +95,8 @@ its own copy of the classical pipeline instead).
 .venv/Scripts/python.exe scripts/pipeline_report_viewer.py <run>/<stem> [<run2>/<stem>]  # Tkinter viewer: source page + toggleable stage-PDF overlays (1-2 folders side by side)
 .venv/Scripts/python.exe scripts/pipeline_report_benchmark.py --run DIR1 [--run DIR2]  # multiclass-score + chart benchmark report folders (1 or 2) on shared inputs
 .venv/Scripts/python.exe -m pytest tests/ -v                                        # run rastervec's test suite
+.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.prep_dataset --pdf A.pdf [--pdf B.pdf] --out data/deepvec  # DeepVectoriser training set (run once)
+.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.train --data data/deepvec [--device cuda --amp] [--resume]  # train -> rastervec/weights/deep_vectoriser.pth
 .venv/Scripts/python.exe scripts/rasterize_pdf.py SRC [DST] --dpi 300               # flatten a PDF to pure raster (DST defaults to outputs/rasterize/)
 .venv/Scripts/python.exe scripts/label/master_label.py PDF [--dpi 300]              # full native+vector+raster label workflow, one outputs/labels/<stem>_label/ folder per PDF
 .venv/Scripts/python.exe scripts/label/native_label.py PDF --page N [--out ...]     # auto-derive native-text ground truth (GUI-free)
@@ -248,7 +250,7 @@ terminology used throughout this section. `rastervec/` is organized into six buc
 raster→vector backends), `P3_Vector_Parsing/` (pluggable vector-parsing/OCR backends),
 `P4_Output_Organization/` (the one, always-run output-combination + coordinate-space-guard
 phase) — plus `Evaluation/`, `notebooks/`, `weights/` alongside them (benchmarking/dev tooling,
-not phase code). **Sibling P2 backends (`Stub`/`Junction`) and sibling P3 backends
+not phase code). **Sibling P2 backends (`Stub`/`Junction`/`DeepVectoriser`) and sibling P3 backends
 (`LatestVectorClassification`/`OldVectorClassification`/`LegacyRecreation`) import nothing from each other** —
 each is fully self-contained, duplicating its own copy of any infra it needs (a PaddleOCR engine
 wrapper, layer/color/width separation, a raster→vector tracer, ...) rather than sharing one. This
@@ -410,6 +412,39 @@ generic parallel-pool mechanics), never phase-specific business logic.
     `TileBox.quad`/`_PageState.quads`; OCR `Text`s carry theirs as `quad_points`) and tracing point/line layers (`graph_build/chains|junctions|endpoints`, `vectorize/polylines|polyline endpoints` -- real geometry, not bboxes);
     each (stage, label) appears once per page. `debug_out["diff_codes"]` keeps the raw uint8
     code canvases. Tunables in `Junction/config.py`.
+  - **`DeepVectoriser/`** — learned raster→stroke vectorizer: a from-scratch PyTorch
+    implementation of **Liu et al., "End-to-End Line Drawing Vectorization", AAAI-22**
+    (`references/00052-LiuH.pdf`, no public code). `adapter.py` runs, per embedded `Image`,
+    Junction's color separation → tiled OCR → text removal (**copied** files, not imported:
+    `color_separation.py`/`text_ocr.py`/`paddle_engine.py`/`text_removal.py`/`diff.py`; no
+    enhancement — the model reads binary masks), then per ink color layer: the layer's
+    **binary mask** (`adapter.layer_image`, ink 0 — so a pale line is as visible as a black one)
+    resampled to the canonical 300 dpi (`TARGET_PX_PER_PT`) → `inference.vectorize_layer`:
+    128 px tiles / 16 px overlap, empty tiles skipped, batched through the model, a
+    *saturated* tile (≥ 90 % of the `n_stroke` queries confident) re-split once into 64 px
+    sub-tiles → `geometry.merge_tiles` (each tile's strokes **clipped to its core rect**, ends
+    from different tiles within `MERGE_SNAP_PX` snapped + joined). Output: one `Vector` per
+    stroke, `"c"` items (`"l"` where a piece is flat, `FLAT_TOL_PX`), layer color, width from
+    the mask's distance transform. Model (`model/`): Stroke Encoder (in-repo ResNet + DETR-style
+    decoder over 1D sine queries → F_i = (P0, P1, emb, p)), shared CoordConv UNet with F_i at the
+    bottleneck, Stroke Decoder head (raster stroke, training only), auto-regressive Stroke
+    Vectorizer (partial-format cubic Beziers + EOS, reads the UNet at 1/8 res); losses Eq. 3-10
+    (`model/losses.py`); paper-unspecified sizes in `config.MODEL_DEFAULTS`, stored in the
+    checkpoint. Weights: `rastervec/weights/deep_vectoriser.pth` (gitignored) or
+    `$DEEPVEC_WEIGHTS_PATH`; missing → `FileNotFoundError`. Training (never imported by the
+    pipeline, the only files allowed to import `Evaluation.Labelling`): **`prep_dataset.py`**
+    (run once; `--pdf ...`: per page render at `--dpi` + `raster_geometry_for_page` GT mapped via
+    `rotation_matrix` — the same vector→raster labelling method as `master_label.py` — chained
+    into strokes (`train_data.chain_annotations`, duplicate/retraced pieces dropped), the same
+    OCR + erase (GT under erased ink cut out), color layers (a stroke goes to every layer
+    covering ≥ 50 % of it), one `layers/<key>.gray.npy` + `.strokes.npz` per (page, layer),
+    resumable via `pages/<key>.json`, `index.json` split by page) and **`train.py`** (`--data
+    DIR`: the paper's bootstrap → supervise → joint schedule, three Adam optimizers, AMP,
+    `--accum`, `--grad-checkpoint`; random 64-256 px crops; tqdm + `train_log.csv`;
+    `<out>.last.ckpt` per epoch / `--resume`; best joint val Chamfer → `--out`; `--tiny` for
+    smoke runs). Debug layers: `color_separation`, `ocr/*`, `text_removal`, `tiles/vectorizer
+    tile grid` + `re-split tiles`, `strokes/raw tile strokes` + `raw endpoints`, `merge/merged
+    vectors` + `merged endpoints`, `vector_diff/total`.
 - **`P3_Vector_Parsing/`** — pluggable vector-parsing/OCR backends, selected by `p3=`, each
   implementing `parse(vectors_p1, vectors_p2, page, **kwargs) -> (vectors, texts)`:
   - **`LatestVectorClassification/`** *(the default)* — the merge of the former
@@ -797,7 +832,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
   current/legacy, `p2`, `p3`, `enable_fast`) + the `VARIANTS` registry (`current` [default p2/p3],
   `legacy`, plus named presets for benchmark comparisons across P3 backends —
   `current_latestvectorclassification`, `current_oldvectorclassification`, `current_legacyrecreation`,
-  `current_junction`) +
+  `current_junction`, `current_deepvectoriser`) +
   `DEFAULT_VARIANTS` + `resolve_variant`. `engine="current"` threads `p2`/`p3`/`enable_fast` into
   `rastervec.core.pipeline.run_pipeline` (the pluggable P1→P2_REGISTRY[p2]→P3_REGISTRY[p3]
   orchestrator, see the `core/` section below); `engine="legacy"` ignores `p2`/`p3` entirely.

@@ -51,6 +51,9 @@ VARIANTS: dict[str, PipelineVariant] = {
     "current_junction": PipelineVariant(
         "current_junction", "current", "Junction", DEFAULT_P3, True,
     ),
+    "current_deepvectoriser": PipelineVariant(
+        "current_deepvectoriser", "current", "DeepVectoriser", DEFAULT_P3, True,
+    ),
 }
 
 # Default selection for the CLI / notebook when none is given.
