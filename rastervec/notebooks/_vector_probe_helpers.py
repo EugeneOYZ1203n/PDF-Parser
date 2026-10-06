@@ -433,6 +433,36 @@ def percentile_buckets(values: list[float], k: int = 5) -> list[tuple[float, flo
     ]
 
 
+def exact_value_layers(values: list[int], tail_frac: float = 0.05) -> list[tuple[int, int, list[int]]]:
+    """One `(lo, hi, indices)` layer per distinct value of `values`,
+    ascending, except the high tail: walking down from the largest value,
+    values join one merged `(lo, hi)` layer while that layer's combined
+    member count stays < `tail_frac` of `len(values)`. Everything below the
+    tail keeps its own `lo == hi` layer."""
+    if not values:
+        return []
+    by_value: dict[int, list[int]] = {}
+    for i, v in enumerate(values):
+        by_value.setdefault(v, []).append(i)
+    distinct = sorted(by_value)
+    limit = tail_frac * len(values)
+    tail_start, tail_count = len(distinct), 0
+    while tail_start > 0 and tail_count + len(by_value[distinct[tail_start - 1]]) < limit:
+        tail_start -= 1
+        tail_count += len(by_value[distinct[tail_start]])
+    layers = [(v, v, by_value[v]) for v in distinct[:tail_start]]
+    if tail_start < len(distinct):
+        tail = distinct[tail_start:]
+        layers.append((tail[0], tail[-1], [i for v in tail for i in by_value[v]]))
+    return layers
+
+
+def is_all_lines(v: Vector) -> bool:
+    """True if `v` has items and every one is a straight `"l"` (a polyline,
+    not necessarily collinear -- no "re"/"qu"/"c")."""
+    return bool(v.items) and all(item[0] == "l" for item in v.items)
+
+
 def normalise(x: float, lo: float, hi: float) -> float:
     """`(x - lo) / (hi - lo)`, 0 when the range is empty."""
     return 0.0 if hi <= lo else (x - lo) / (hi - lo)
