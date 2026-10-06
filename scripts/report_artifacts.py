@@ -33,6 +33,7 @@ from scripts.debug_image_savers import (
     _ImageReservoir,
     _save_legacyrecreation_ocr_images,
     _save_vectorclassification_detect_images,
+    _save_vectorclassification_fast_images,
     _save_vectorclassification_recog_bucket_images,
     _save_vectorclassification_rotation_classifier_images,
     _save_vectorclassification_rotation_hough_images,
@@ -286,6 +287,9 @@ def _accumulate_page(
                 _save_vectorclassification_recog_bucket_images(
                     p3_debug, reservoirs[key], page_index, bucket,
                 )
+            _save_vectorclassification_fast_images(
+                p3_debug, reservoirs["fast_input"], reservoirs["fast_heatmap"], page_index,
+            )
         elif p3 == "LegacyRecreation":
             _save_legacyrecreation_ocr_images(p3_debug, reservoirs["ocr"], page_index)
 

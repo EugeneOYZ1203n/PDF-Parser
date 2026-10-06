@@ -17,10 +17,10 @@ def test_parse_empty_input_returns_empty_output(page_meta):
     assert texts == []
 
 
-def test_parse_debug_out_has_no_fast_keys(page_meta):
-    """FAST was removed entirely from this backend -- `debug_out` should
-    never contain `fast_result`/`fast_passed`/`fast_dropped` (a regression
-    guard against accidentally re-introducing them)."""
+def test_parse_debug_out_has_no_old_fast_keys(page_meta):
+    """The old pre-OCR FAST filtering stage's `debug_out` keys
+    (`fast_result`/`fast_passed`/`fast_dropped`) must not come back -- FAST
+    now only runs after recognition, under `debug_out["fast"]`."""
     debug_out: dict = {}
     vectorclassification.parse([], [], _page(page_meta), verbose=True, debug_out=debug_out)
     assert "fast_result" not in debug_out
@@ -32,6 +32,8 @@ def test_parse_debug_out_has_no_fast_keys(page_meta):
     assert debug_out["cluster_detections"] == []
     assert debug_out["rotation"] == []
     assert debug_out["retry_stats"] == {"0": 0, "1": 0, "2": 0, "3": 0, "failed": 0}
+    assert debug_out["fast"] == {"groups": [], "kept": [], "dropped": []}
+    assert debug_out["fast_images"] == []
 
 
 def test_parse_keeps_ocr_crop_for_blank_recognition(page_meta, vector, monkeypatch):
@@ -196,8 +198,9 @@ class _FakeComputePool:
 
 def test_parse_dispatches_detect_and_recognize_through_compute(page_meta, vector, monkeypatch):
     """When `compute` is given, detect is dispatched per-cluster via
-    `compute.starmap(_detect_job, ...)` and recognize via
-    `compute.apply(_recognize_crops_job, ...)` -- not called in-process
+    `compute.starmap(_detect_job, ...)`, recognize via
+    `compute.apply(_recognize_crops_job, ...)` and FAST per accepted detect
+    group via `compute.starmap(_fast_job, ...)` -- not called in-process
     directly on the backend instances. Regression test for the Pool-2
     OCR-batching optimization (this codepath had no coverage before)."""
     v = vector(kind="l", bbox=(10.0, 10.0, 20.0, 20.0), color=(0.0, 0.0, 0.0), seqno=1)
@@ -215,10 +218,13 @@ def test_parse_dispatches_detect_and_recognize_through_compute(page_meta, vector
     )
 
     assert len(texts) == 1 and texts[0].text == "X"
-    assert len(compute.starmap_calls) == 1
+    assert len(compute.starmap_calls) == 2
     fn, args_list = compute.starmap_calls[0]
     assert fn is vectorclassification._detect_job
     assert len(args_list) == 1  # one cluster
+    fn, args_list = compute.starmap_calls[1]
+    assert fn is vectorclassification._fast_job
+    assert len(args_list) == 1  # one accepted detect group
     assert len(compute.apply_calls) == 1
     fn, args = compute.apply_calls[0]
     assert fn is vectorclassification._recognize_crops_job
@@ -400,3 +406,111 @@ def test_parse_keeps_the_detectors_rotated_quad(page_meta, vector, monkeypatch):
     assert len({round(x, 6) for x in xs}) == 3  # a diamond, not an axis-aligned box
     assert debug_out["ocr_detect_quads"] == [t.quad_points]
     assert debug_out["ocr_blank_quads"] == []
+
+
+def _label_with_leader(vector, monkeypatch):
+    """A small filled "glyph" plus a long leader line touching it, forced
+    into one classification cluster, with a detect quad around the glyph
+    only and a non-blank recognition. Returns `(glyph, line)`."""
+    from types import SimpleNamespace as NS
+
+    from rastervec.commons.renderer import ocr_prep, page_points_to_pixel
+    from rastervec.P3_Vector_Parsing.VectorClassification.config import (
+        MAX_RENDER_DPI, MIN_RENDER_SIDE_PX, OCR_DPI,
+    )
+
+    glyph = vector(kind="re", type="f", fill=(0.0, 0.0, 0.0), color=None, bbox=(20.0, 20.0, 26.0, 28.0), seqno=1)
+    line = vector(kind="l", bbox=(26.0, 24.0, 150.0, 24.0), width=1.0, seqno=2)
+    cluster = [glyph, line]
+    monkeypatch.setattr(
+        vectorclassification, "classify_vectors",
+        lambda vectors, page, verbose=False: NS(text_clusters=[[cluster]], drawing_vectors=[], clustering={}),
+    )
+    padding = vectorclassification._cluster_render_padding(cluster)
+    dpi = ocr_prep.dpi_for_cluster(cluster, OCR_DPI, padding, MIN_RENDER_SIDE_PX, MAX_RENDER_DPI)
+    corners = [(19.0, 19.0), (27.0, 19.0), (27.0, 29.0), (19.0, 29.0)]
+    quad = np.array(page_points_to_pixel(cluster, dpi, corners, padding))
+    monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: [quad])
+    monkeypatch.setattr(
+        PaddleRecBackend, "recognize_crops",
+        lambda self, crops: [OcrBox(text="A", confidence=1.0, flip_deg=0) for _ in crops],
+    )
+    return glyph, line
+
+
+def test_parse_fast_sends_leader_line_touching_a_label_to_drawing(page_meta, vector, monkeypatch):
+    """FAST highlights the crop around the label (stub: everything in the
+    crop is hot) -- the glyph's ink is all inside it, but most of the
+    leader line's ink lies outside the crop and counts as cold, so the line
+    goes to drawing even though it touches the recognized box."""
+    glyph, line = _label_with_leader(vector, monkeypatch)
+    debug_out: dict = {}
+    drawing, texts = vectorclassification.parse([glyph, line], [], _page(page_meta), debug_out=debug_out)
+
+    assert [t.text for t in texts] == ["A"]
+    assert drawing == [line]
+    [group] = debug_out["fast"]["groups"]
+    assert group["accepted"] and group["heat"] is not None
+    assert debug_out["fast"]["kept"] == [glyph] and debug_out["fast"]["dropped"] == [line]
+    assert len(debug_out["fast_images"]) == 1
+
+
+def test_parse_fast_cold_heatmap_sends_everything_to_drawing(page_meta, vector, monkeypatch):
+    from rastervec.P3_Vector_Parsing.VectorClassification.fast_detect import FastDetector
+
+    glyph, line = _label_with_leader(vector, monkeypatch)
+    monkeypatch.setattr(
+        FastDetector, "detect", lambda self, image: np.zeros((image.height, image.width), np.float32),
+    )
+    drawing, texts = vectorclassification.parse([glyph, line], [], _page(page_meta))
+    assert [t.text for t in texts] == ["A"]  # recognition itself is unaffected by FAST
+    assert drawing == [glyph, line]
+
+
+def test_parse_fast_disabled_keeps_old_connectivity_rule(page_meta, vector, monkeypatch):
+    from rastervec.P3_Vector_Parsing.VectorClassification.fast_detect import FastDetector
+
+    glyph, line = _label_with_leader(vector, monkeypatch)
+    monkeypatch.setattr(vectorclassification, "FAST_FILTER_ENABLED", False)
+    monkeypatch.setattr(
+        FastDetector, "detect", lambda self, image: (_ for _ in ()).throw(AssertionError("FAST ran")),
+    )
+    debug_out: dict = {}
+    drawing, texts = vectorclassification.parse([glyph, line], [], _page(page_meta), debug_out=debug_out)
+    assert [t.text for t in texts] == ["A"]
+    assert drawing == []  # the line touches the accepted box -> text, as before
+    assert debug_out["fast"] is None
+
+
+def test_parse_emits_fast_and_geometry_debug_layers(page_meta, vector, monkeypatch):
+    glyph, line = _label_with_leader(vector, monkeypatch)
+    streamed: list[tuple] = []
+    vectorclassification.parse(
+        [glyph, line], [], _page(page_meta), on_debug_layer=lambda *layer: streamed.append(layer),
+    )
+    names = [(stage, label) for stage, label, _hex, _pdf in streamed]
+    for expected in [
+        ("geometry", "collinear groups"), ("geometry", "collinear singletons"),
+        ("geometry", "parallel groups"), ("geometry", "parallel singletons"),
+        ("fast", "group crop bbox"), ("fast", "group member quads"), ("fast", "heatmap"),
+        ("fast", "kept as text"), ("fast", "dropped to drawing"),
+    ]:
+        assert expected in names
+    assert all(pdf[:4] == b"%PDF" for *_rest, pdf in streamed)
+
+
+def test_geometry_layers_color_each_group(page_meta, vector):
+    import pymupdf as fitz
+
+    a = vector(kind="l", items=[("l", (0.0, 0.0), (10.0, 0.0))], bbox=(0.0, 0.0, 10.0, 0.0), seqno=1)
+    b = vector(kind="l", items=[("l", (20.0, 0.0), (30.0, 0.0))], bbox=(20.0, 0.0, 30.0, 0.0), seqno=2)
+    c = vector(kind="l", items=[("l", (0.0, 9.0), (0.0, 19.0))], bbox=(0.0, 9.0, 0.0, 19.0), seqno=3)
+    layers = {
+        (stage, label): pdf
+        for stage, label, _hex, pdf in vectorclassification._render_geometry_layers(page_meta(), [[a, b, c]])
+    }
+    collinear = fitz.open("pdf", layers[("geometry", "collinear groups")])[0].get_drawings()
+    singles = fitz.open("pdf", layers[("geometry", "collinear singletons")])[0].get_drawings()
+    assert len(collinear) == 2  # a + b, one shared colour
+    assert len({d["color"] for d in collinear}) == 1
+    assert len(singles) == 1  # c

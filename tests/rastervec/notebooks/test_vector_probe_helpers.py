@@ -237,6 +237,38 @@ def test_percentile_buckets_empty():
     assert h.percentile_buckets([], 5) == []
 
 
+# ---- exact value layers -------------------------------------------------
+
+def test_exact_value_layers_merges_high_tail_under_fraction():
+    counts = {1: 50, 2: 30, 3: 10, 4: 3, 7: 2, 12: 1}  # 96 total; 5% = 4.8
+    values = [v for v, n in counts.items() for _ in range(n)]
+    layers = h.exact_value_layers(values, 0.05)
+    # tail {7, 12} = 3 < 4.8; adding 4 -> 6 >= 4.8, so 4 keeps its own layer
+    assert [(lo, hi) for lo, hi, _ in layers] == [(1, 1), (2, 2), (3, 3), (4, 4), (7, 12)]
+    assert len(layers[-1][2]) == 3
+    assert sorted(i for _, _, m in layers for i in m) == list(range(len(values)))
+    for lo, hi, m in layers:
+        assert all(lo <= values[i] <= hi for i in m)
+
+
+def test_exact_value_layers_single_value_and_no_merge():
+    assert [(lo, hi) for lo, hi, _ in h.exact_value_layers([3, 3, 3])] == [(3, 3)]
+    values = [1] * 50 + [2, 5]
+    assert [(lo, hi) for lo, hi, _ in h.exact_value_layers(values, 0.0)] == [(1, 1), (2, 2), (5, 5)]
+
+
+def test_exact_value_layers_empty():
+    assert h.exact_value_layers([]) == []
+
+
+def test_is_all_lines(vector):
+    assert h.is_all_lines(_poly(vector, (0, 0), (5, 5), (10, 0)))
+    assert not h.is_all_lines(vector(kind="re", bbox=(0, 0, 10, 10)))
+    assert not h.is_all_lines(vector(items=[("l", (0, 0), (1, 1)), ("c", (1, 1), (2, 2), (3, 3), (4, 4))],
+                                     bbox=(0, 0, 4, 4)))
+    assert not h.is_all_lines(vector(items=[], bbox=(0, 0, 1, 1)))
+
+
 # ---- gradient4 -----------------------------------------------------------
 
 def test_gradient4_anchor_colours():

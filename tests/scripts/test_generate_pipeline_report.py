@@ -460,3 +460,27 @@ def test_extra_prediction_layers_only_with_content(tmp_path):
     assert set(writer.meta) == {
         "benchmark__extra_text.pdf", "benchmark__extra_vectors.pdf", "benchmark__missed_vectors.pdf",
     }
+
+
+def test_save_vectorclassification_fast_images_pairs_input_and_heatmap(tmp_path):
+    from PIL import Image
+
+    rgb = np.full((12, 30, 3), 200, dtype=np.uint8)
+    heat = np.zeros((6, 30), dtype=np.float32)
+    heat[2, 3] = 1.0
+    p3_debug = {"fast_images": [(rgb, heat)]}
+    dirs = gpr._image_dirs(tmp_path)
+    n = gpr._save_vectorclassification_fast_images(p3_debug, dirs["fast_input"], dirs["fast_heatmap"], 0)
+    assert n == 1
+    [inp] = list(dirs["fast_input"].glob("*.png"))
+    [hm] = list(dirs["fast_heatmap"].glob("*.png"))
+    assert inp.name == hm.name
+    assert np.array_equal(np.asarray(Image.open(inp)), rgb)
+    saved_heat = np.asarray(Image.open(hm))
+    assert saved_heat.shape == (6, 30) and saved_heat[2, 3] == 255 and saved_heat.sum() == 255
+
+
+def test_save_vectorclassification_fast_images_missing_key_no_crash(tmp_path):
+    dirs = gpr._image_dirs(tmp_path)
+    assert gpr._save_vectorclassification_fast_images({}, dirs["fast_input"], dirs["fast_heatmap"], 0) == 0
+    assert not dirs["fast_input"].exists()

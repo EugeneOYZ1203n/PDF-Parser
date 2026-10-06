@@ -10,9 +10,13 @@ run_ocr_extraction's `paddle_engine.py::PaddleDetectBackend`/
 Detect still runs once per cluster (each cluster's render is independent),
 but recognize (and the blank-retry sweep) batches across every cluster's
 quads at once -- see `parse()`'s own docstring for the exact staging and
-Pool-2 dispatch. Fully self-contained (own paddle_engine.py/
+Pool-2 dispatch. After recognition, an optional FAST pass
+(`config.FAST_FILTER_ENABLED`, `fast_filter.py`) decides which vectors under
+a recognized detect box are really text -- the rest go to `drawing`. Fully
+self-contained (own paddle_engine.py/fast_detect.py/line_geometry.py/
 layer_color_separation.py/config.py) -- imports nothing from
-P3_Vector_Parsing/LegacyRecreation or P2_Raster_To_Vec.
+P3_Vector_Parsing/LegacyRecreation, CollinearVectorClass, P2_Raster_To_Vec
+or the deprecated top-level OCR/.
 """
 from __future__ import annotations
 
@@ -28,15 +32,33 @@ from rastervec.commons.models import Page, Vector, Text
 from rastervec.commons.renderer import ocr_prep, pixel_to_page_bbox, pixel_to_page_points
 from rastervec.commons.step_timing import StepClock
 from rastervec.P3_Vector_Parsing.VectorClassification.classify_vectors import classify_vectors
+from rastervec.P3_Vector_Parsing.VectorClassification import fast_filter
 from rastervec.P3_Vector_Parsing.VectorClassification.config import (
+    ANGLE_TOL_DEG,
+    COLLINEAR_OFFSET_TOL_PT,
     DETECT_RENDER_CHUNK_SIZE,
+    FAST_CROP_MAX_ASPECT,
+    FAST_CROP_PADDING_PX,
+    FAST_DEBUG_HEATMAP_MAX_SIDE,
+    FAST_FILTER_ENABLED,
+    FAST_GROUP_CENTER_DIST_PT,
+    FAST_HEAT_THRESHOLD,
+    FAST_INK_FRACTION,
+    FAST_INK_GRAY_THRESHOLD,
     MAX_RENDER_DPI,
     MIN_RENDER_SIDE_PX,
     OCR_BATCH_SIZE,
     OCR_DPI,
     OCR_LANG,
     OCR_VERSION,
+    MIN_GROUP_SIZE,
     RENDER_PADDING_EXTRA_PT,
+    STRAIGHT_TOL_PT,
+)
+from rastervec.P3_Vector_Parsing.VectorClassification.fast_detect import (
+    FastDetector,
+    _fast_job,
+    default_weights_path,
 )
 from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import (
     PaddleDetectBackend,
@@ -49,7 +71,7 @@ from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import (
     hough_deskew,
 )
 
-STEP_NAMES = ["classify", "ocr", "drawing"]
+STEP_NAMES = ["classify", "ocr", "fast_filter", "drawing"]
 
 DebugLayer = "tuple[str, str, str, bytes]"
 OnDebugLayer = "Callable[[str, str, str, bytes], None]"
@@ -111,6 +133,69 @@ def _drawing_extra_vectors(
             continue
         drawing_vecs.extend(ocr_vectors[i] for kind, i in component if kind == "vec")
     return drawing_vecs
+
+
+def _dedupe_by_id(vectors) -> list[Vector]:
+    seen: set[int] = set()
+    out: list[Vector] = []
+    for v in vectors:
+        if id(v) not in seen:
+            seen.add(id(v))
+            out.append(v)
+    return out
+
+
+def _run_fast(groups: "list[fast_filter.FastGroup]", compute, *, keep_inputs: bool) -> None:
+    """Sets each group's `heat` (FAST's score map, cut back to its crop),
+    then drops its `fast_input` unless `keep_inputs` (debug images)."""
+    if not groups:
+        return
+    if compute is not None:
+        weights = default_weights_path()
+        masks = compute.starmap(_fast_job, [(weights, g.fast_input) for g in groups])
+    else:
+        from PIL import Image
+
+        detector = FastDetector()
+        masks = [detector.detect(Image.fromarray(g.fast_input)) for g in groups]
+    for g, mask in zip(groups, masks):
+        g.heat = fast_filter.crop_heat(g, mask)
+        if not keep_inputs:
+            g.fast_input = None
+
+
+def _fast_debug_record(
+    groups: "list[fast_filter.FastGroup]", page_quads: list[dict], text_ids: "set[int]",
+) -> dict:
+    """The cheap, render-ready part of the FAST stage for its debug layers
+    (`_render_fast_layers`): per group its page bbox, member quads,
+    acceptance and a downscaled uint8 heatmap; plus the vectors kept as
+    text and the scored-but-dropped ones (scored under an accepted group,
+    failed the ink-fraction test everywhere)."""
+    kept: list[Vector] = []
+    dropped: list[Vector] = []
+    seen: set[int] = set()
+    for g in groups:
+        for v, _frac in g.scores:
+            if id(v) in seen:
+                continue
+            seen.add(id(v))
+            (kept if id(v) in text_ids else dropped).append(v)
+    return {
+        "groups": [{
+            "page_bbox": g.page_bbox,
+            "crop_page_bbox": g.crop_page_bbox,
+            "quads": [page_quads[i]["quad_pts"] for i in g.quad_idxs],
+            "accepted": g.accepted,
+            "heat": (
+                fast_filter.downscale_heat(g.heat, FAST_DEBUG_HEATMAP_MAX_SIDE)
+                if g.heat is not None else None
+            ),
+            "scores": [frac for _v, frac in g.scores],
+        } for g in groups],
+        "kept": kept,
+        "dropped": dropped,
+    }
 
 
 def parse(
@@ -189,6 +274,7 @@ def parse(
     _emit(lambda: _render_classification_layers(page_meta, cls))
 
     ocr_clusters = [g for g in flat_clusters if g]
+    _emit(lambda: _render_geometry_layers(page_meta, ocr_clusters))
 
     rec_backend = PaddleRecBackend()
     det_backend = PaddleDetectBackend()
@@ -216,6 +302,11 @@ def parse(
     # `detect_boxes` is only their axis-aligned envelope, used for logic.
     detect_quads: list[tuple] = []
     page_quads: list[dict] = []
+    # FAST input (used in stage 7): one crop per anchored group of a
+    # cluster's detect quads, cut out of the cluster render here (inside the
+    # chunk loop) so only the small crops -- never the full renders --
+    # outlive the chunk.
+    fast_groups: list[fast_filter.FastGroup] = []
     for chunk_start in range(0, len(ocr_clusters), DETECT_RENDER_CHUNK_SIZE):
         chunk = ocr_clusters[chunk_start:chunk_start + DETECT_RENDER_CHUNK_SIZE]
 
@@ -262,6 +353,7 @@ def parse(
         # time -- only `clusters_render`'s own bgr arrays are chunk-scoped
         # (freed once this chunk's iteration ends), the much smaller crops
         # they produce are not.
+        fast_pending: list[tuple] = []
         with clock("ocr_recognize"):
             for c, quads in zip(clusters_render, quads_per_cluster):
                 if keep_cluster_detections:
@@ -280,6 +372,8 @@ def parse(
                 ]
                 detect_boxes.extend(quad_bboxes)
                 detect_quads.extend(quad_pts)
+                if FAST_FILTER_ENABLED:
+                    fast_pending.append((c, quads, quad_bboxes, len(page_quads)))
                 for quad, bbox, qpts in zip(quads, quad_bboxes, quad_pts):
                     # hough_deskew's crop is cropped straight out of `bgr`,
                     # so it's already BGR -- reverse channels back before
@@ -295,6 +389,15 @@ def parse(
                         "group_vectors": c["group_vectors"], "crop": crop[:, :, ::-1],
                         "rd": rd, "bbox": bbox, "quad_pts": qpts,
                     })
+
+        with clock("fast_filter"):
+            for c, quads, quad_bboxes, first_idx in fast_pending:
+                fast_groups.extend(fast_filter.build_groups(
+                    c["group_vectors"], c["bgr"], c["dpi_used"], c["padding"],
+                    quads, quad_bboxes, first_idx,
+                    center_dist_pt=FAST_GROUP_CENTER_DIST_PT,
+                    pad_px=FAST_CROP_PADDING_PX, max_aspect=FAST_CROP_MAX_ASPECT,
+                ))
 
     with clock("ocr_recognize"):
         # Stage 4: recognize, chunked by OCR_BATCH_SIZE across the whole
@@ -430,10 +533,41 @@ def parse(
     _emit(lambda: _render_rotation_layers(page_meta, rotation_entries))
     _emit(lambda: _render_retry_layers(page_meta, rotation_entries))
 
+    # Stage 7: FAST text/drawing split. A group is accepted when any of its
+    # quads recognized non-blank text; only accepted groups go through FAST
+    # (one call per group, page-wide; dispatched to Pool 2 via `_fast_job`
+    # when `compute` is given) -- a blank-only group's vectors are drawing
+    # whatever FAST says, so it's never run for them. Then every vector
+    # under an accepted group is scored against that group's heatmap (see
+    # `fast_filter.split_text_vectors`). Recognition above is unaffected.
+    fast_debug: "dict | None" = None
+    text_ids: "set[int] | None" = None
+    if FAST_FILTER_ENABLED:
+        with clock("fast_filter"):
+            for g in fast_groups:
+                g.accepted = any(boxes[i].text for i in g.quad_idxs)
+                if not g.accepted and not keep_cluster_detections:
+                    g.fast_input = None
+            _run_fast(
+                [g for g in fast_groups if g.accepted], compute,
+                keep_inputs=keep_cluster_detections,
+            )
+            text_ids = fast_filter.split_text_vectors(
+                fast_groups, heat_threshold=FAST_HEAT_THRESHOLD,
+                ink_fraction=FAST_INK_FRACTION, gray_threshold=FAST_INK_GRAY_THRESHOLD,
+            )
+        if on_debug_layer is not None or debug_out is not None:
+            fast_debug = _fast_debug_record(fast_groups, page_quads, text_ids)
+        _emit(lambda: _render_fast_layers(page_meta, fast_debug))
+
     with clock("drawing"):
         ocr_vectors = [v for cluster in ocr_clusters for v in cluster]
-        accepted_boxes = [txt.bbox for txt in texts]
-        drawing = list(cls.drawing_vectors) + _drawing_extra_vectors(ocr_vectors, accepted_boxes)
+        if text_ids is not None:
+            extra = _dedupe_by_id(v for v in ocr_vectors if id(v) not in text_ids)
+        else:
+            accepted_boxes = [txt.bbox for txt in texts]
+            extra = _drawing_extra_vectors(ocr_vectors, accepted_boxes)
+        drawing = list(cls.drawing_vectors) + extra
     _emit(lambda: _render_drawing_layers(page_meta, drawing))
 
     if debug_out is not None:
@@ -449,6 +583,13 @@ def parse(
         debug_out["rotation"] = rotation_entries
         debug_out["retry_stats"] = retry_stats
         debug_out["drawing"] = drawing
+        debug_out["fast"] = fast_debug
+        # Full-size FAST inputs + heatmaps, one (rgb, heat) per group, for
+        # the `for_fast/` debug images -- only with keep_debug_arrays.
+        debug_out["fast_images"] = [
+            (g.fast_input, g.heat) for g in fast_groups
+            if keep_cluster_detections and g.fast_input is not None and g.heat is not None
+        ]
 
     return drawing, texts
 
@@ -475,6 +616,14 @@ _C_ANGLE_BEST = "#dc2626"
 _C_RETRY_1 = "#f59e0b"
 _C_RETRY_2 = "#ea580c"
 _C_RETRY_3 = "#b91c1c"
+_C_FAST_CROP = "#7c3aed"
+_C_FAST_CROP_REJECTED = "#9ca3af"
+_C_FAST_HEAT = "#dc2626"
+_C_FAST_KEPT = "#16a34a"
+_C_FAST_DROPPED = "#e11d48"
+_C_GEOM_COLLINEAR = "#0ea5e9"
+_C_GEOM_PARALLEL = "#f97316"
+_C_GEOM_SINGLETON = "#9ca3af"
 
 
 def _hex_rgb(h: str) -> tuple[float, float, float]:
@@ -641,6 +790,102 @@ def _render_retry_layers(page_meta, rotation_entries: "list[dict] | None") -> "l
     return layers
 
 
+def _render_fast_layers(page_meta, fast_debug: "dict | None") -> "list[DebugLayer]":
+    """FAST text/drawing split (`parse()` stage 7): the crops FAST saw
+    (accepted groups purple, groups whose quads all recognized blank gray --
+    those are never scored), the detect quads grouped into them, each
+    group's heatmap as a red overlay (alpha = heat) over its crop, and the
+    vectors FAST kept as text vs. the scored ones it sent to drawing."""
+    from rastervec.commons.renderer import render_boxes_pdf, render_quads_pdf, render_vectors_pdf
+    from rastervec.commons.renderer.draw import image_spec, render_specs_pdf
+
+    fast_debug = fast_debug or {"groups": [], "kept": [], "dropped": []}
+    groups = fast_debug["groups"]
+    crop_boxes = [
+        (g["crop_page_bbox"], _hex_rgb(_C_FAST_CROP if g["accepted"] else _C_FAST_CROP_REJECTED))
+        for g in groups
+    ]
+    member_quads = [
+        (q, _hex_rgb(_C_FAST_CROP if g["accepted"] else _C_FAST_CROP_REJECTED), "[2 2] 0")
+        for g in groups for q in g["quads"]
+    ]
+    r, gr, b = (int(c * 255) for c in _hex_rgb(_C_FAST_HEAT))
+    heat_specs = []
+    for g in groups:
+        heat = g["heat"]
+        if heat is None or heat.size == 0:
+            continue
+        rgba = np.empty(heat.shape + (4,), dtype=np.uint8)
+        rgba[..., 0], rgba[..., 1], rgba[..., 2] = r, gr, b
+        rgba[..., 3] = heat
+        heat_specs.append(image_spec(rgba, g["crop_page_bbox"]))
+    return [
+        ("fast", "group crop bbox", _C_FAST_CROP, render_boxes_pdf(page_meta, crop_boxes)),
+        ("fast", "group member quads", _C_FAST_CROP, render_quads_pdf(page_meta, member_quads, width=0.75)),
+        ("fast", "heatmap", _C_FAST_HEAT, render_specs_pdf(page_meta, heat_specs)),
+        ("fast", "kept as text", _C_FAST_KEPT, render_vectors_pdf(
+            page_meta, fast_debug["kept"], color_of=lambda _v: _hex_rgb(_C_FAST_KEPT),
+        )),
+        ("fast", "dropped to drawing", _C_FAST_DROPPED, render_vectors_pdf(
+            page_meta, fast_debug["dropped"], color_of=lambda _v: _hex_rgb(_C_FAST_DROPPED),
+        )),
+    ]
+
+
+def _geometry_colors(clusters: "list[list[Vector]]", grouper) -> "tuple[dict[int, tuple], list[Vector], list[Vector]]":
+    """Per cluster, `grouper(straight)` -> groups; every group of at least
+    `MIN_GROUP_SIZE` gets its own golden-ratio hue (restarting per cluster,
+    so neighbouring groups within a cluster always differ), every smaller
+    group is a singleton. Returns `(color by id(v), grouped, singletons)`."""
+    import colorsys
+
+    from rastervec.P3_Vector_Parsing.VectorClassification.line_geometry import (
+        golden_hues, split_straight,
+    )
+
+    colors: dict[int, tuple] = {}
+    grouped: list[Vector] = []
+    singles: list[Vector] = []
+    for cluster in clusters:
+        straight, _other = split_straight(cluster, STRAIGHT_TOL_PT)
+        groups = grouper(straight)
+        big = [g for g in groups if len(g) >= MIN_GROUP_SIZE]
+        for hue, group in zip(golden_hues(len(big)), big):
+            rgb = colorsys.hsv_to_rgb(hue, 0.9, 0.85)
+            for v, _fit in group:
+                colors[id(v)] = rgb
+                grouped.append(v)
+        singles.extend(v for g in groups if len(g) < MIN_GROUP_SIZE for v, _fit in g)
+    return colors, grouped, singles
+
+
+def _render_geometry_layers(page_meta, clusters: "list[list[Vector]] | None") -> "list[DebugLayer]":
+    """Collinear and parallel groups of straight vectors within each
+    classification cluster (`line_geometry.group_collinear`/
+    `group_parallel`), one hue per group; size-1 groups in their own gray
+    layer. Debug-only -- these groups don't affect output."""
+    from rastervec.commons.renderer import render_vectors_pdf
+    from rastervec.P3_Vector_Parsing.VectorClassification.line_geometry import (
+        group_collinear, group_parallel,
+    )
+
+    clusters = clusters or []
+    out: "list[DebugLayer]" = []
+    for name, hexcolor, grouper in (
+        ("collinear", _C_GEOM_COLLINEAR,
+         lambda st: group_collinear(st, ANGLE_TOL_DEG, COLLINEAR_OFFSET_TOL_PT)),
+        ("parallel", _C_GEOM_PARALLEL, lambda st: group_parallel(st, ANGLE_TOL_DEG)),
+    ):
+        colors, grouped, singles = _geometry_colors(clusters, grouper)
+        out.append(("geometry", f"{name} groups", hexcolor, render_vectors_pdf(
+            page_meta, grouped, color_of=lambda v, c=colors: c[id(v)],
+        )))
+        out.append(("geometry", f"{name} singletons", _C_GEOM_SINGLETON, render_vectors_pdf(
+            page_meta, singles, color_of=lambda _v: _hex_rgb(_C_GEOM_SINGLETON),
+        )))
+    return out
+
+
 def _render_drawing_layers(page_meta, drawing) -> "list[DebugLayer]":
     from rastervec.commons.renderer import render_vectors_pdf
 
@@ -658,12 +903,20 @@ def render_debug(debug_out: "dict | None", page_meta) -> "list[DebugLayer]":
     if not debug_out:
         return []
     out: "list[DebugLayer]" = []
-    out += _render_classification_layers(page_meta, debug_out.get("classification"))
+    cls = debug_out.get("classification")
+    out += _render_classification_layers(page_meta, cls)
+    out += _render_geometry_layers(page_meta, [
+        flat for flat in (
+            [v for group in cluster for v in group] for cluster in (cls.text_clusters if cls else [])
+        ) if flat
+    ])
     out += _render_ocr_layers(
         page_meta, debug_out.get("texts"), debug_out.get("ocr_blank_quads"),
         debug_out.get("ocr_detect_quads"),
     )
     out += _render_rotation_layers(page_meta, debug_out.get("rotation"))
     out += _render_retry_layers(page_meta, debug_out.get("rotation"))
+    if debug_out.get("fast") is not None:
+        out += _render_fast_layers(page_meta, debug_out["fast"])
     out += _render_drawing_layers(page_meta, debug_out.get("drawing"))
     return out

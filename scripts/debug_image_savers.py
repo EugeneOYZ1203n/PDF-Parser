@@ -220,6 +220,29 @@ def _save_vectorclassification_recog_bucket_images(
     return n
 
 
+def _save_vectorclassification_fast_images(
+    p3_debug: dict, input_target, heatmap_target, page_index: int,
+) -> int:
+    """Per FAST detect group (post-recognition FAST text/drawing split,
+    accepted groups only): `input_target` gets exactly the RGB array
+    `FastDetector.detect` saw (the group crop, white-padded to
+    `FAST_CROP_MAX_ASPECT`), `heatmap_target` its score map cut back to the
+    unpadded crop as grayscale (white = 1.0). Same file name in both
+    folders, so a pair lines up. Reads `p3_debug["fast_images"]`
+    (`list[tuple[np.ndarray, np.ndarray]]`, only filled with
+    `keep_debug_arrays`). The two folders sample independently when capped."""
+    entries = p3_debug.get("fast_images") or []
+    if not entries:
+        return 0
+    inputs, heatmaps = _as_reservoir(input_target), _as_reservoir(heatmap_target)
+    n = 0
+    for i, (rgb, heat) in enumerate(entries):
+        name = f"p{page_index}_group_{i:03d}.png"
+        n += inputs.offer(name, lambda rgb=rgb: Image.fromarray(np.asarray(rgb)))
+        heatmaps.offer(name, lambda heat=heat: _mask_to_image(np.clip(heat, 0.0, 1.0)))
+    return n
+
+
 def _save_legacyrecreation_ocr_images(p3_debug: dict, target, page_index: int) -> int:
     """One PNG per word group's own padded/DPI-boosted OCR render -- exactly
     what PaddleOCR's (recognition-only) engine saw, recognised text in the

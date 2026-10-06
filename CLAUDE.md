@@ -148,8 +148,10 @@ replacing the old `OCR/Paddle_OCR/ink_segment.py`. There is one OCR backend in t
 `PaddleOcrBackend` full-detection path are gone. Each P3 backend under `P3_Vector_Parsing/` has
 its own independent, duplicated copy of the OCR machinery this paragraph describes (see that
 section) — neither current P3 backend has a Radon module (deskewing is done differently, or not
-at all) or a FAST detector (`VectorClassification`'s FAST filtering stage was removed entirely;
-`LegacyRecreation` never had one) — this paragraph is about the original, shared `OCR/` copy only.
+at all), and FAST is used differently (`VectorClassification` has its own trimmed FAST copy,
+run only *after* recognition to split text from drawing vectors — its old pre-OCR FAST filter
+stage is gone; `LegacyRecreation` never had one) — this paragraph is about the original, shared
+`OCR/` copy only.
 
 ## `rastervec/Evaluation/inspector/` architecture
 
@@ -413,8 +415,8 @@ generic parallel-pool mechanics), never phase-specific business logic.
     every filter beyond the two below has since been removed; see `classify_vectors.py`'s own
     module docstring), followed by a full-PaddleOCR-per-cluster stage matching
     `archive/raster_parser/scripts/type2_dump_extraction_pipeline.py::run_ocr_extraction`'s
-    pattern, but with **no FAST filtering stage and no merge-across-buckets/re-grouping step in
-    between** — every classification cluster goes straight to OCR as-is, and is itself the OCR
+    pattern, but with **no pre-OCR FAST filtering stage and no merge-across-buckets/re-grouping
+    step in between** — every classification cluster goes straight to OCR as-is, and is itself the OCR
     unit, not re-clustered first. `parse.py` combines `vectors_p1 + vectors_p2` into one flat
     pool, then: `classify_vectors.py`'s per-`(layer, color, width)`-bucket `_classify_bucket`
     (width key = `layer_color_separation.width_key`: stroke width rounded to 0.01 pt, `None` for
@@ -444,15 +446,28 @@ generic parallel-pool mechanics), never phase-specific business logic.
     blank-recognition retry sweep (+90/180/270 via `recognize_crops_raw`/
     `_recognize_crops_raw_job`, same page-wide batching) before giving up on a detection. No Radon
     deskew and no whole-page similarity dedup (both removed — every cluster still gets its own
-    independent detect pass, just batched recognition). Every vector that OCR rejects (only
-    connects, by bbox overlap, to a detected-but-blank quad) or never detects at all (no quad over
-    it whatsoever) is folded into `drawing` output via `parse.py::_drawing_extra_vectors` — this
-    is FAST's former role (deciding what reaches `drawing`), now decided downstream of OCR's own
-    detect+recognize results instead of upstream of them; a vector that does connect (directly or
-    transitively) to a successfully recognized quad is excluded from `drawing`, same as before.
-    `parse.py::render_debug` (`P3_RENDER_DEBUG["VectorClassification"]`) renders one `kept bbox`
+    independent detect pass, just batched recognition). **Text vs. drawing is then decided by a
+    post-recognition FAST pass** (`config.FAST_FILTER_ENABLED`, default on; `fast_filter.py` +
+    this folder's own trimmed `fast_detect.py` copy — FAST-Tiny weights at
+    `rastervec/weights/fast_tiny_ic17mlt_640.pth` or `FAST_WEIGHTS_PATH`, a missing file raises):
+    per cluster, detect quads are grouped *anchored, no chaining* (a quad joins a seed quad only if
+    their page bboxes overlap AND centers are < `FAST_GROUP_CENTER_DIST_PT`), each group's padded
+    crop of the cluster render (white-padded to `FAST_CROP_MAX_ASPECT`, since FAST rescales to a
+    640 px short side) is cut out inside the chunk loop; after recognition, only groups with a
+    non-blank quad ("accepted") go through FAST (`_fast_job` on Pool 2 with `compute`). Every
+    vector bbox-intersecting an accepted group is rendered alone at the cluster's dpi and scored
+    by the fraction of its *whole* ink that lands on heat ≥ `FAST_HEAT_THRESHOLD` (ink outside the
+    crop counts as cold); ≥ `FAST_INK_FRACTION` in any accepted group → text, everything else in
+    the OCR'd clusters → `drawing`. Recognition itself is unaffected by FAST. With the flag off the
+    old rule applies (`parse.py::_drawing_extra_vectors`: anything connected, transitively by bbox
+    overlap, to a non-blank quad is text — which absorbed leader/dimension lines touching labels).
+    Sub-step timing key `fast_filter`. `parse.py::render_debug`
+    (`P3_RENDER_DEBUG["VectorClassification"]`) renders one `kept bbox`
     layer per classification step whose kept boxes differ from the previous step's, plus
-    ocr/rotation/retry/drawing layers, from whatever `parse()` stashed into `debug_out`
+    `geometry` layers (debug-only collinear/parallel groups of straight vectors per cluster,
+    `line_geometry.py` — own copy of CollinearVectorClass's grouping, one golden-ratio hue per
+    group, singletons gray), ocr/rotation/retry layers, `fast` layers (group crop bbox, member
+    quads, heatmap as an RGBA `draw.image_spec`, kept as text, dropped to drawing) and drawing, from whatever `parse()` stashed into `debug_out`
     (`cluster_detections`'s raw per-cluster bgr arrays are only accumulated into `debug_out` at
     all when a caller actually passed one, for the same memory reason as the render chunking
     above).
@@ -527,9 +542,9 @@ generic parallel-pool mechanics), never phase-specific business logic.
   its own duplicated `paddle_engine.py` (no Radon module, deskewing was dropped in favor of seqno
   clustering + PaddleOCR's own detector/angle-classifier — see the `P3_Vector_Parsing/` bullet
   above for what each backend actually does now), so no *new* P3 backend should import this
-  folder. `fast_detect.py` specifically is now this module's own copy alone — no current P3
-  backend duplicates a FAST detector any more (`VectorClassification`'s copy was removed
-  entirely, its FAST filtering stage gone with it; `LegacyRecreation` never had one). This whole
+  folder. `fast_detect.py` here is the full original (incl. `detect_tiled`);
+  `VectorClassification` keeps its own trimmed copy for its post-recognition text/drawing split
+  (`LegacyRecreation` has none). This whole
   folder is still genuinely imported by `core/parallel/pool.py::warmup()`, `commons/renderer/
   stages.py`, the Junction P2 backend, and the old `pipelines/current.py`+`_steps.py` — see the
   top-of-file "not dead" note and
@@ -807,8 +822,9 @@ generic parallel-pool mechanics), never phase-specific business logic.
   worker), `default_worker_count`, `warmup` (builds the PaddleOCR rec + FAST caches in the
   *calling* process, so a spawn pool started next finds the models on disk and no worker races
   the first-run download — each P3 backend's own `PaddleRecBackend.warmup()` classmethod forces
-  the existing lazy `_engine()` path; `FastDetector.warmup()` only applies to the deprecated
-  top-level `OCR/` module now, since no current P3 backend has its own FAST detector), and
+  the existing lazy `_engine()` path; `FastDetector.warmup()` is called for both the deprecated
+  top-level `OCR/` copy and `VectorClassification`'s own, each best-effort — a missing weights
+  file is skipped), and
   `run_parallel(items, fn, *, workers, desc)` — an input-order map that is a plain serial loop
   when `workers <= 1` and a spawn `ProcessPoolExecutor` otherwise. Processes not threads: the
   PaddleOCR engine + FAST model module caches are unlocked shared singletons and PyMuPDF is not
@@ -1062,7 +1078,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
   with genuinely different internals) — `dump.json` is the reloadable source of truth instead.
   VectorClassification's own debug PNGs — `for_paddle_detect/`, `for_rotation_correction/
   {hough_line,minarea_rect,paddle_classifier}/`, `for_paddle_recog/
-  {0_retry,1_retry,2_retry,3_retry,failed}/` — plus LegacyRecreation's single `paddle_ocr_images/`,
+  {0_retry,1_retry,2_retry,3_retry,failed}/`, `for_fast/{input,heatmap}/` — plus LegacyRecreation's single `paddle_ocr_images/`,
   organized by which model/algorithm call each saved image was the exact input to (never an
   overlay/annotation — only a BGR/RGB channel reorder for display; per-P3-backend savers in
   `scripts/debug_image_savers.py`) are written unless the config sets `debug_images: false`

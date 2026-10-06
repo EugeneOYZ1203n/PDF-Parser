@@ -55,6 +55,10 @@ timestamped run folder:
                                        rotation variant tried before giving
                                        up; recognised text in the filename
                                        where available)
+                for_fast/
+                  input/ heatmap/      (one PNG pair per accepted detect
+                                       group -- exactly the crop FAST saw,
+                                       and its score map, grayscale)
               p3=LegacyRecreation (no FAST stage):
                 paddle_ocr_images/     (one PNG per word group's own padded/
                                        DPI-boosted render, recognised text
@@ -125,6 +129,7 @@ from scripts.debug_image_savers import (  # noqa: F401 -- re-exported for caller
     _save_crop_text_images,
     _save_legacyrecreation_ocr_images,
     _save_vectorclassification_detect_images,
+    _save_vectorclassification_fast_images,
     _save_vectorclassification_recog_bucket_images,
     _save_vectorclassification_rotation_classifier_images,
     _save_vectorclassification_rotation_hough_images,
@@ -215,6 +220,8 @@ def _image_dirs(doc_dir: Path) -> "dict[str, Path]":
         "recog_2": doc_dir / "for_paddle_recog" / "2_retry",
         "recog_3": doc_dir / "for_paddle_recog" / "3_retry",
         "recog_failed": doc_dir / "for_paddle_recog" / "failed",
+        "fast_input": doc_dir / "for_fast" / "input",
+        "fast_heatmap": doc_dir / "for_fast" / "heatmap",
         "ocr": doc_dir / "paddle_ocr_images",
     }
 

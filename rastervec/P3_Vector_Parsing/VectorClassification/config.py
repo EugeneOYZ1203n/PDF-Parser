@@ -1,7 +1,7 @@
 """Tunable thresholds for the VectorClassification P3 backend (a reduced
 2-step Vector_Classification chain + PaddleOCR detect+recognize, page-wide
-batched -- there is no FAST filtering stage; every classification cluster
-goes straight to OCR). Self-contained -- not shared with LegacyRecreation's
+batched, then an optional post-recognition FAST text/drawing split --
+every classification cluster still goes straight to OCR). Self-contained -- not shared with LegacyRecreation's
 own config.py, per the phase-isolation rule (see CLAUDE.md's "sibling
 backends share zero code" rule)."""
 from __future__ import annotations
@@ -71,3 +71,48 @@ DETECT_RENDER_CHUNK_SIZE = 8
 # LegacyRecreation/config.py's own RENDER_PADDING_EXTRA_PT=5.0pt (which still
 # matches archive's original PngRenderer.render_word_group flat padding).
 RENDER_PADDING_EXTRA_PT = 15.0
+
+# ======================================================================
+# FAST text/drawing split (fast_filter.py, fast_detect.py) -- after
+# recognition, which vectors under a detect box are really text.
+# ======================================================================
+
+# Off -> the old rule: every vector connected (bbox overlap, transitively)
+# to a non-blank quad is text (`parse._drawing_extra_vectors`).
+FAST_FILTER_ENABLED = True
+# Detect quads of one cluster are grouped into one FAST crop, anchored on a
+# seed quad (no chaining): a quad joins a seed only if their page bboxes
+# overlap AND their centers are closer than this (pt).
+FAST_GROUP_CENTER_DIST_PT = 10.0
+# White margin (px, cluster-render pixels) around a group's union rect.
+FAST_CROP_PADDING_PX = 8
+# FAST rescales its input's short side to 640 px; a one-line label crop
+# (e.g. 30x600 px) would be upscaled ~20x, far past the text sizes FAST was
+# trained on. The crop is white-padded (not resized) so its long side is at
+# most this many times its short side before FAST sees it.
+FAST_CROP_MAX_ASPECT = 4.0
+# A pixel is "highlighted" when FAST's score there is >= this.
+FAST_HEAT_THRESHOLD = 0.5
+# A vector stays text when at least this fraction of its own ink pixels
+# (the whole vector, pixels outside the group crop count as cold) is
+# highlighted; otherwise it goes to drawing.
+FAST_INK_FRACTION = 0.5
+# Grayscale value (0-255) below which a single-vector render pixel is ink.
+FAST_INK_GRAY_THRESHOLD = 250
+# Heatmap downscale cap (px, longest side) kept for the `fast / heatmap`
+# debug layer -- full-size heatmaps are only kept with keep_debug_arrays.
+FAST_DEBUG_HEATMAP_MAX_SIDE = 256
+
+# ======================================================================
+# Line geometry (line_geometry.py) -- debug-only collinear/parallel group
+# layers per classification cluster. Same values as CollinearVectorClass.
+# ======================================================================
+
+# Max point distance (pt) from the fitted line for a Vector to be straight.
+STRAIGHT_TOL_PT = 0.25
+# Single-linkage angle tolerance (deg, folded to [0, 180)).
+ANGLE_TOL_DEG = 2.0
+# Anchored perpendicular-offset tolerance (pt) for collinear grouping.
+COLLINEAR_OFFSET_TOL_PT = 1.0
+# Groups smaller than this are drawn as singletons (gray).
+MIN_GROUP_SIZE = 2
