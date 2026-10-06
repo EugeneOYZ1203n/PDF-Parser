@@ -445,7 +445,9 @@ generic parallel-pool mechanics), never phase-specific business logic.
     recognizes (`_recognize_crops_job`); a crop whose `paddle_engine.score` (confidence, × 0.5 for a
     single character, 0 when blank) is < `RETRY_CONFIDENCE_THRESHOLD` (0.8) is also read at
     +90/180/270 (`recognize_crops_raw`, no classifier) and the best score wins (pass 1 always a
-    candidate). `Text.angle` = long-edge angle + classifier flip + 90° × winning retry;
+    candidate) — attempts are compared on `english_words.selection_score` = score ×
+    `ENGLISH_WORD_MULTIPLIER` (1.20) per pyenchant `en_US` word (alpha-only, ≥ 2 letters, uncapped);
+    the retry trigger itself stays on the raw score. `Text.angle` = long-edge angle + classifier flip + 90° × winning retry;
     `Text.quad_points` = the detect quad reordered so p0→p1 is the reading direction
     (`reorder_quad_reading`). **Text vs. drawing has no FAST**: `_text_vectors_by_quad` makes a
     vector of an OCR'd cluster text when a **non-blank** quad detected in **its own cluster** —

@@ -187,6 +187,26 @@ def test_parse_retry_keeps_pass_one_when_nothing_beats_it(page_meta, vector, mon
     assert entry["retry_count"] == 0 and entry["retried"]
 
 
+def test_parse_english_words_boost_the_retry_winner(page_meta, vector, monkeypatch):
+    _scripted_rec(monkeypatch, [("XQZV", 0.7), ("DOOR FRAME", 0.6), ("", 0.0), ("", 0.0)])
+    texts, debug_out = _one_vector_run(page_meta, vector, monkeypatch)
+    assert [t.text for t in texts] == ["DOOR FRAME"]  # 0.6 * 1.2**2 = 0.864 beats 0.7
+    assert texts[0].confidence == 0.6
+    entry = debug_out["rotation"][0]
+    assert entry["retry_count"] == 1
+    assert entry["score"] == pytest.approx(0.864)
+    assert entry["raw_score"] == 0.6 and entry["english_words"] == 2
+
+
+def test_parse_english_words_do_not_skip_the_retry(page_meta, vector, monkeypatch):
+    # Boosted 0.75 * 1.2 = 0.9 would clear the threshold -- the trigger uses the raw score.
+    calls = _scripted_rec(monkeypatch, [("DOOR", 0.75), ("XQZV", 0.85), ("", 0.0), ("", 0.0)])
+    texts, debug_out = _one_vector_run(page_meta, vector, monkeypatch)
+    assert calls == [1, 1, 1, 1]
+    assert [t.text for t in texts] == ["DOOR"]  # 0.9 beats 0.85
+    assert debug_out["rotation"][0]["retry_count"] == 0
+
+
 def test_parse_all_blank_is_failed_and_its_vectors_are_drawing(page_meta, vector, monkeypatch):
     _scripted_rec(monkeypatch, [("", 0.0)] * 4)
     v = vector(bbox=(10.0, 10.0, 30.0, 15.0), width=0.5, seqno=1)

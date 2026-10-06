@@ -14,8 +14,9 @@ VectorClassification + CollinearVectorClass backend:
 4. Page-wide batched recognition: PaddleOCR's 0/180 angle classifier, then
    recognise; every crop whose score (confidence, halved for a single
    character, 0 when blank) is below `RETRY_CONFIDENCE_THRESHOLD` is also
-   recognised at +90/180/270 (no classifier) and the best-scoring attempt
-   wins. Text angle = long-edge angle + classifier flip + retry rotation.
+   recognised at +90/180/270 (no classifier) and the best attempt wins --
+   compared on score x `ENGLISH_WORD_MULTIPLIER` ** (dictionary English
+   words in the read, `english_words.selection_score`). Text angle = long-edge angle + classifier flip + retry rotation.
 5. Text/drawing split (`_text_vectors_by_quad`): a vector of an OCR'd
    cluster is text when some non-blank quad (the rotated quad itself)
    detected in its own cluster owns it -- tiered, cheapest first: bbox
@@ -62,6 +63,9 @@ from rastervec.P3_Vector_Parsing.LatestVectorClassification.config import (
     STRAIGHT_TOL_PT,
     TEXT_INK_INSIDE_FRAC,
     TEXT_SEGMENT_OVERLAP_FRAC,
+)
+from rastervec.P3_Vector_Parsing.LatestVectorClassification.english_words import (
+    selection_score,
 )
 from rastervec.P3_Vector_Parsing.LatestVectorClassification.line_geometry import (
     bbox_inside_quad,
@@ -264,11 +268,14 @@ def parse(
         last_attempt_crop: dict[int, np.ndarray] = dict(enumerate(crops)) if keep_arrays else {}
         winning_k: list[int] = [0] * len(boxes)
 
-        # Stage 5: every crop scoring below RETRY_CONFIDENCE_THRESHOLD is
-        # also read at +90, +180, +270 (no classifier, batched page-wide per
-        # rotation); the highest score wins, ties to the earlier attempt --
-        # pass 1 is always a candidate, so a retry can never make it worse.
+        # Stage 5: every crop whose raw score is below
+        # RETRY_CONFIDENCE_THRESHOLD is also read at +90, +180, +270 (no
+        # classifier, batched page-wide per rotation). Attempts are compared
+        # on `selection_score` (raw score x 1.2 per dictionary English word);
+        # the highest wins, ties to the earlier attempt -- pass 1 is always a
+        # candidate. `scores` keeps the winner's raw score.
         retry_idx = [i for i, s in enumerate(scores) if s < RETRY_CONFIDENCE_THRESHOLD]
+        selected = [selection_score(box) for box in boxes]
         for k in (1, 2, 3):
             if not retry_idx:
                 break
@@ -279,8 +286,10 @@ def parse(
             for i, rbox, rcrop in zip(retry_idx, retry_boxes, retry_crops):
                 if keep_arrays:
                     last_attempt_crop[i] = rcrop
-                if score(rbox) > scores[i]:
+                rsel = selection_score(rbox)
+                if rsel[0] > selected[i][0]:
                     boxes[i], scores[i], recog_crops[i], winning_k[i] = rbox, score(rbox), rcrop, k
+                    selected[i] = rsel
         retried = set(retry_idx)
 
     # Stage 6: assemble output, page-wide, in original cluster/quad order.
@@ -307,7 +316,9 @@ def parse(
             "cls_flip_deg": boxes[idx].flip_deg if k == 0 else None,
             "retry_count": k if box.text else None,
             "retried": idx in retried,
-            "score": scores[idx],
+            "score": selected[idx][0] if idx in retried else scores[idx],
+            "raw_score": scores[idx],
+            "english_words": selected[idx][1],
             "final_angle_deg": final_angle,
         })
         if not box.text:

@@ -103,6 +103,16 @@ CROP_BORDER_PX = 5
 RETRY_CONFIDENCE_THRESHOLD = 0.8
 SINGLE_CHAR_PENALTY = 0.5
 
+# Retry winner selection only (english_words.py::selection_score): among a
+# retried crop's attempts (pass 1 included), each attempt's score is
+# multiplied by ENGLISH_WORD_MULTIPLIER ** n, n = the number of whitespace
+# tokens (edge punctuation stripped) that are purely alphabetic, at least
+# ENGLISH_WORD_MIN_LEN letters long, and in pyenchant's ENGLISH_DICT_LANG
+# dictionary. Uncapped. The retry trigger above still uses the raw score.
+ENGLISH_WORD_MULTIPLIER = 1.20
+ENGLISH_WORD_MIN_LEN = 2
+ENGLISH_DICT_LANG = "en_US"
+
 # Text/drawing split (parse.py::_quad_owns): a vector in an OCR'd cluster is
 # text when a non-blank detect quad (the rotated quad, not its envelope) from
 # its own cluster owns it -- tiered, cheapest first: its bbox fully inside the

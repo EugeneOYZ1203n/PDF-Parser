@@ -26,3 +26,6 @@ opencv-python-headless>=4.9
 # DBSCAN color separation in P2_Raster_To_Vec/Junction/color_separation.py.
 # <1.6 keeps it on numpy-1.x-compatible wheels (paddleocr 2.x needs numpy<2).
 scikit-learn>=1.3,<1.6
+# English-word count boosting the OCR retry winner in P3 LatestVectorClassification
+# (english_words.py). The Windows wheel bundles Enchant + the en_US dictionary.
+pyenchant>=3.2,<4
