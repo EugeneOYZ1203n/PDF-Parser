@@ -4,7 +4,7 @@ per-component tracing -> vector/ink diff). The tracing stage's own knobs
 stay on `junction_test.pipeline.Params`.
 
 Self-contained -- the OCR padding/deskew values below are *copied* from
-`P3_Vector_Parsing/VectorClassification/config.py` + `paddle_engine.py`
+`P3_Vector_Parsing/OldVectorClassification/config.py` + `paddle_engine.py`
 (not imported), per CLAUDE.md's "sibling backends share zero code" rule;
 keep them in step by hand if you want the two backends to pad identically."""
 from __future__ import annotations
@@ -44,17 +44,17 @@ OCR_TILE_OVERLAP_FRAC = 0.20
 # this many pixels of each other.
 TILE_MERGE_GAP_PX = 2
 
-# Pad 1 (before the second, per-box detect) -- VectorClassification's
+# Pad 1 (before the second, per-box detect) -- OldVectorClassification's
 # RENDER_PADDING_EXTRA_PT, in page points, converted with each image's own
 # px-per-pt scale.
 RENDER_PADDING_EXTRA_PT = 15.0
 # The padded box is upscaled until its short side is at least this many px
-# (VectorClassification's MIN_RENDER_SIDE_PX / dynamic-dpi analogue), but
+# (OldVectorClassification's MIN_RENDER_SIDE_PX / dynamic-dpi analogue), but
 # never by more than MAX_UPSCALE (the MAX_RENDER_DPI analogue: 4800 / 300 dpi
 # would be 16x; 8x is plenty for a raster that has no more detail to give).
 MIN_RENDER_SIDE_PX = 100
 MAX_UPSCALE = 8.0
-# Pad 2 (before recognition) -- VectorClassification/paddle_engine.py's
+# Pad 2 (before recognition) -- OldVectorClassification/paddle_engine.py's
 # _CROP_EXPAND_FRACTION / _CROP_BORDER_PX.
 CROP_EXPAND_FRACTION = 0.05
 CROP_BORDER_PX = 5

@@ -112,7 +112,7 @@ def _normalize_rotation(angle_deg: float) -> float:
     """Wrap to `[-90, 90)` -- text direction is a line, not an arrow, so a
     0/180 ambiguity always remains mod 180 (resolved separately by the
     cls-flip term this is added to before calling this). Own duplicated copy
-    of FastIntoPaddle/VectorClassification's `paddle_engine.py::
+    of FastIntoPaddle/OldVectorClassification's `paddle_engine.py::
     _normalize_rotation`."""
     return ((angle_deg + 90.0) % 180.0) - 90.0
 
@@ -124,7 +124,7 @@ def _quad_rotation_deg(quad: np.ndarray) -> float:
     (clockwise from top-left); the longer of the top edge (0->1) and left
     edge (0->3) is taken as the text's own baseline direction, so this is
     robust to a quad that's taller than it is wide (vertical/rotated text).
-    Own duplicated copy of FastIntoPaddle/VectorClassification's
+    Own duplicated copy of FastIntoPaddle/OldVectorClassification's
     `paddle_engine.py::_quad_rotation_deg`."""
     top = quad[1] - quad[0]
     left = quad[3] - quad[0]
@@ -139,7 +139,7 @@ def _rotate_crop(bgr: np.ndarray, quad: np.ndarray) -> np.ndarray:
     rectangle sized to the quad's own edge lengths -- the standard PaddleOCR
     "get_rotate_crop_image" step, reimplemented with `skimage` (no cv2, per
     this project's convention). Own duplicated copy of FastIntoPaddle/
-    VectorClassification's `paddle_engine.py::_rotate_crop`."""
+    OldVectorClassification's `paddle_engine.py::_rotate_crop`."""
     width = max(1, int(round(max(np.hypot(*(quad[1] - quad[0])), np.hypot(*(quad[2] - quad[3]))))))
     height = max(1, int(round(max(np.hypot(*(quad[3] - quad[0])), np.hypot(*(quad[2] - quad[1]))))))
     rect = np.array([(0, 0), (width, 0), (width, height), (0, height)], dtype=np.float64)

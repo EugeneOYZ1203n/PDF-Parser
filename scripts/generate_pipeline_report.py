@@ -28,23 +28,22 @@ timestamped run folder:
             `parse.py`). Every saved image is exactly (channel order aside,
             never an overlay) the array that model/algorithm call actually
             received:
-              p3=VectorClassification (classify clusters, then run
-              PaddleOCR's full detect+recognize per cluster, page-wide
-              batched -- see that backend's own parse.py), organized by
-              which call each image was the input to:
-                for_paddle_detect/     (one PNG per seqno-cluster's own
-                                       rendered+padded image -- exactly what
+              p3=LatestVectorClassification (classify clusters, then run
+              PaddleOCR's detect, quad-angle upright crop, classifier +
+              recognize per cluster, page-wide batched -- see that backend's
+              own parse.py), organized by which call each image was the
+              input to:
+                for_paddle_detect/     (one PNG per cluster's own rendered
+                                       image -- exactly what
                                        PaddleDetectBackend.detect saw)
                 for_rotation_correction/
-                  hough_line/          (one PNG per detection's own dilated
-                                       ink mask -- exactly what the Hough
-                                       line estimator ran on)
-                  minarea_rect/        (one PNG per detection's own
-                                       non-dilated ink mask -- exactly what
-                                       cv2.minAreaRect ran on)
+                  quad_rotation/       (one PNG per detection -- exactly the
+                                       region around the quad that the
+                                       quad-angle rotation ran on)
                   paddle_classifier/   (one PNG per detection -- exactly the
-                                       crop handed to the recognizer's own
-                                       internal text_classifier call, pass 1
+                                       upright crop handed to the
+                                       recognizer's own internal
+                                       text_classifier call, pass 1
                                        pre-flip)
                 for_paddle_recog/
                   0_retry/ 1_retry/ 2_retry/ 3_retry/ failed/
@@ -55,11 +54,14 @@ timestamped run folder:
                                        rotation variant tried before giving
                                        up; recognised text in the filename
                                        where available)
-                for_fast/
-                  input/ heatmap/      (one PNG pair per accepted detect
-                                       group -- exactly the crop FAST saw,
-                                       and its score map, grayscale)
-              p3=LegacyRecreation (no FAST stage):
+              p3=OldVectorClassification (frozen 2026-09-29 snapshot; the
+              savers and folder names that report used on that date, which
+              draw quads/angle lines on top):
+                paddle_detect_images/ paddle_recog_images/
+                hough_line_images/ minarea_rect_images/
+                paddle_classifier_before_images/
+                paddle_classifier_after_images/
+              p3=LegacyRecreation:
                 paddle_ocr_images/     (one PNG per word group's own padded/
                                        DPI-boosted render, recognised text
                                        in the filename)
@@ -128,12 +130,16 @@ from scripts.debug_image_savers import (  # noqa: F401 -- re-exported for caller
     _safe_slug,
     _save_crop_text_images,
     _save_legacyrecreation_ocr_images,
-    _save_vectorclassification_detect_images,
-    _save_vectorclassification_fast_images,
-    _save_vectorclassification_recog_bucket_images,
-    _save_vectorclassification_rotation_classifier_images,
-    _save_vectorclassification_rotation_hough_images,
-    _save_vectorclassification_rotation_minarea_images,
+    _save_latestvectorclassification_detect_images,
+    _save_latestvectorclassification_quad_rotation_images,
+    _save_latestvectorclassification_recog_bucket_images,
+    _save_latestvectorclassification_rotation_classifier_images,
+    _save_oldvectorclassification_classifier_after_images,
+    _save_oldvectorclassification_classifier_before_images,
+    _save_oldvectorclassification_detect_images,
+    _save_oldvectorclassification_hough_images,
+    _save_oldvectorclassification_minarea_images,
+    _save_oldvectorclassification_recog_images,
 )
 from scripts.report_artifacts import (  # noqa: F401 -- re-exported for callers/tests
     _ARTIFACTS,
@@ -204,7 +210,7 @@ def _image_dirs(doc_dir: Path) -> "dict[str, Path]":
     short name `report_artifacts._accumulate_page`'s per-`p3` dispatch
     uses. Not every backend populates every folder (a folder no saver ever
     calls `.offer()` on is simply never created) -- see that dispatch for
-    which backend writes which. VectorClassification's own folders are
+    which backend writes which. LatestVectorClassification's own folders are
     organized by which model/algorithm call the saved image was the actual
     input to (see `scripts/debug_image_savers.py`'s module docstring);
     `for_rotation_correction`/`for_paddle_recog` fan out into subfolders,
@@ -212,17 +218,21 @@ def _image_dirs(doc_dir: Path) -> "dict[str, Path]":
     top-level folder (`Path.mkdir(parents=True, ...)`)."""
     return {
         "detect": doc_dir / "for_paddle_detect",
-        "rotation_hough": doc_dir / "for_rotation_correction" / "hough_line",
-        "rotation_minarea": doc_dir / "for_rotation_correction" / "minarea_rect",
+        "rotation_quad": doc_dir / "for_rotation_correction" / "quad_rotation",
         "rotation_classifier": doc_dir / "for_rotation_correction" / "paddle_classifier",
         "recog_0": doc_dir / "for_paddle_recog" / "0_retry",
         "recog_1": doc_dir / "for_paddle_recog" / "1_retry",
         "recog_2": doc_dir / "for_paddle_recog" / "2_retry",
         "recog_3": doc_dir / "for_paddle_recog" / "3_retry",
         "recog_failed": doc_dir / "for_paddle_recog" / "failed",
-        "fast_input": doc_dir / "for_fast" / "input",
-        "fast_heatmap": doc_dir / "for_fast" / "heatmap",
         "ocr": doc_dir / "paddle_ocr_images",
+        # OldVectorClassification's 2026-09-29 folders.
+        "old_detect": doc_dir / "paddle_detect_images",
+        "old_recog": doc_dir / "paddle_recog_images",
+        "old_hough": doc_dir / "hough_line_images",
+        "old_minarea": doc_dir / "minarea_rect_images",
+        "old_classifier_before": doc_dir / "paddle_classifier_before_images",
+        "old_classifier_after": doc_dir / "paddle_classifier_after_images",
     }
 
 
@@ -388,11 +398,12 @@ def _substeps(res) -> dict:
 
 
 def _fast_cluster_stats(res, p3: str) -> "dict | None":
-    """`{"total": N, "passed": P}` cluster counts off the VectorClassification
-    P3 backend's own `FastPageResult` (`res.extra["p3_debug"]["fast_result"]`,
-    only present on a `verbose=True` run) -- `None` for any other P3 backend
-    (no such concept) or a run without debug data."""
-    if p3 != "VectorClassification":
+    """`{"total": N, "passed": P}` cluster counts off the
+    OldVectorClassification P3 backend's own pre-OCR `FastPageResult`
+    (`res.extra["p3_debug"]["fast_result"]`, only present on a
+    `verbose=True` run) -- `None` for any other P3 backend (no such concept)
+    or a run without debug data."""
+    if p3 != "OldVectorClassification":
         return None
     p3_debug = (getattr(res, "extra", None) or {}).get("p3_debug") or {}
     fast_result = p3_debug.get("fast_result")
@@ -403,12 +414,12 @@ def _fast_cluster_stats(res, p3: str) -> "dict | None":
 
 def _retry_stats(res, p3: str) -> "dict | None":
     """`{"0": N, "1": N, "2": N, "3": N, "failed": N}` blank-recognition
-    retry counts off the VectorClassification P3 backend's own
+    retry counts off the Latest/OldVectorClassification P3 backend's own
     `debug_out["retry_stats"]` (`res.extra["p3_debug"]["retry_stats"]`, only
     present on a `verbose=True` run) -- `None` for any other P3 backend (no
     such concept) or a run without debug data. Mirrors `_fast_cluster_stats`
     exactly."""
-    if p3 not in ("VectorClassification", "CollinearVectorClass"):
+    if p3 not in ("LatestVectorClassification", "OldVectorClassification"):
         return None
     p3_debug = (getattr(res, "extra", None) or {}).get("p3_debug") or {}
     return p3_debug.get("retry_stats")

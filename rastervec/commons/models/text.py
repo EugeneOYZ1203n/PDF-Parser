@@ -11,7 +11,7 @@ built; an elected representative's own canonicalizing rotation is layered on
 top of that afterward when restoring onto each real word occurrence. (Each
 P3 backend's own OCR-recognition + word-restoration step does this itself --
 see the current P3 backend's `paddle_engine.py`/`ocr.py`, e.g.
-`P3_Vector_Parsing/VectorClassification/{paddle_engine,ocr}.py` -- this
+`P3_Vector_Parsing/LatestVectorClassification/paddle_engine.py` -- this
 dataclass has no dependency on any one backend's implementation.)
 
 `origin` is a baseline leading-edge point for both native and OCR text

@@ -6,7 +6,7 @@ per-page report plus cross-variant accuracy + timing comparison tables.
     .venv/Scripts/python.exe -m rastervec.Evaluation.Evaluate.benchmark \
         --pdf path/to.pdf --pages 0,1,2 [--iou-threshold 0.3] \
         [--reconstruct-dir DIR] [--workers N] [--compute-workers N] \
-        [--variants current,current_vectorclassification,legacy]
+        [--variants current,current_oldvectorclassification,legacy]
 
 `--variants` selects which `Evaluation/Evaluate/variants.VARIANTS` to run
 and compare (default `DEFAULT_VARIANTS`).
@@ -334,13 +334,13 @@ def format_vector_aggregate_comparison(
 
 def format_fast_cluster_comparison(
     stats_by_run: "dict[str, dict | None]", *,
-    title: str = "Clusters dropped by FAST (VectorClassification only)",
+    title: str = "Clusters dropped by FAST (OldVectorClassification only)",
 ) -> str:
     """One line per run: how many classification clusters the FAST-filter
-    step (`P3_Vector_Parsing/VectorClassification/fast_filter.py`) kept vs.
+    step (`P3_Vector_Parsing/OldVectorClassification/fast_filter.py`) kept vs.
     dropped to drawing output (`{"total": N, "passed": P}`, summed across
     every page -- see `scripts/benchmark_run_loading.py::
-    _load_fast_cluster_stats`). `None` (a non-VectorClassification P3
+    _load_fast_cluster_stats`). `None` (a non-OldVectorClassification P3
     backend, the legacy engine, or an older dump with no recorded stats)
     shows `n/a`."""
     if not stats_by_run:
@@ -359,13 +359,13 @@ def format_fast_cluster_comparison(
 
 def format_retry_stats_comparison(
     stats_by_run: "dict[str, dict | None]", *,
-    title: str = "Blank-recognition retries (VectorClassification only)",
+    title: str = "Recognition retries (Latest/OldVectorClassification only)",
 ) -> str:
     """One line per run: how many detections needed 0/1/2/3 extra
     +90-degree recognition passes before recovering non-blank text, and how
     many never recovered (`{"0": N, "1": N, "2": N, "3": N, "failed": N}`,
     summed across every page -- see `scripts/benchmark_run_loading.py::
-    _load_retry_stats`). `None` (a non-VectorClassification P3 backend, the
+    _load_retry_stats`). `None` (a non-Latest/OldVectorClassification P3 backend, the
     legacy engine, or an older dump with no recorded stats) shows `n/a`.
     Mirrors `format_fast_cluster_comparison` exactly."""
     if not stats_by_run:

@@ -214,7 +214,7 @@ def _add_text_sections(
 
 
 def _add_fast_cluster_section(builder: ReportBuilder, stats_by_run: "dict[str, dict | None]") -> None:
-    """Clusters dropped by the VectorClassification P3 backend's FAST-filter
+    """Clusters dropped by the OldVectorClassification P3 backend's FAST-filter
     step (`scripts/benchmark_run_loading.py::_load_fast_cluster_stats`,
     `{"total": N, "passed": P}` per run, summed over pages). Skipped
     entirely when no run recorded this stat (every other P3 backend / the
@@ -236,7 +236,7 @@ def _add_fast_cluster_section(builder: ReportBuilder, stats_by_run: "dict[str, d
 
 
 def _add_retry_stats_section(builder: ReportBuilder, stats_by_run: "dict[str, dict | None]") -> None:
-    """Blank-recognition retry counts from the VectorClassification P3
+    """Recognition retry counts from the Latest/OldVectorClassification P3
     backend's rotation retry sweep (`scripts/benchmark_run_loading.py::
     _load_retry_stats`, `{"0": N, "1": N, "2": N, "3": N, "failed": N}` per
     run, summed over pages). Skipped entirely when no run recorded this stat

@@ -35,12 +35,16 @@ from rastervec.core.interfaces import Phase2Backend, Phase3Backend
 from rastervec.P2_Raster_To_Vec.Junction.adapter import extract as _junction_extract
 from rastervec.P2_Raster_To_Vec.Junction.adapter import render_debug as _junction_render_debug
 from rastervec.P2_Raster_To_Vec.Stub.stub import extract as _stub_extract
-from rastervec.P3_Vector_Parsing.CollinearVectorClass.parse import parse as _collinear_vector_class_parse
-from rastervec.P3_Vector_Parsing.CollinearVectorClass.parse import render_debug as _collinear_vector_class_render_debug
+from rastervec.P3_Vector_Parsing.LatestVectorClassification.parse import parse as _latest_vector_classification_parse
+from rastervec.P3_Vector_Parsing.LatestVectorClassification.parse import (
+    render_debug as _latest_vector_classification_render_debug,
+)
 from rastervec.P3_Vector_Parsing.LegacyRecreation.parse import parse as _legacy_recreation_parse
 from rastervec.P3_Vector_Parsing.LegacyRecreation.parse import render_debug as _legacy_recreation_render_debug
-from rastervec.P3_Vector_Parsing.VectorClassification.parse import parse as _vector_classification_parse
-from rastervec.P3_Vector_Parsing.VectorClassification.parse import render_debug as _vector_classification_render_debug
+from rastervec.P3_Vector_Parsing.OldVectorClassification.parse import parse as _old_vector_classification_parse
+from rastervec.P3_Vector_Parsing.OldVectorClassification.parse import (
+    render_debug as _old_vector_classification_render_debug,
+)
 
 P2_REGISTRY: dict[str, Phase2Backend] = {
     "Stub": _stub_extract,
@@ -48,9 +52,10 @@ P2_REGISTRY: dict[str, Phase2Backend] = {
 }
 
 P3_REGISTRY: dict[str, Phase3Backend] = {
-    "VectorClassification": _vector_classification_parse,
+    "LatestVectorClassification": _latest_vector_classification_parse,
+    # Frozen 2026-09-29 snapshot -- see P3_Vector_Parsing/OldVectorClassification/README.md.
+    "OldVectorClassification": _old_vector_classification_parse,
     "LegacyRecreation": _legacy_recreation_parse,
-    "CollinearVectorClass": _collinear_vector_class_parse,
 }
 
 P2_RENDER_DEBUG: dict[str, object] = {
@@ -58,13 +63,13 @@ P2_RENDER_DEBUG: dict[str, object] = {
 }
 
 P3_RENDER_DEBUG: dict[str, object] = {
-    "VectorClassification": _vector_classification_render_debug,
+    "LatestVectorClassification": _latest_vector_classification_render_debug,
+    "OldVectorClassification": _old_vector_classification_render_debug,
     "LegacyRecreation": _legacy_recreation_render_debug,
-    "CollinearVectorClass": _collinear_vector_class_render_debug,
 }
 
 DEFAULT_P2 = "Stub"
-DEFAULT_P3 = "VectorClassification"
+DEFAULT_P3 = "LatestVectorClassification"
 
 
 def resolve_p2(name: str) -> Phase2Backend:

@@ -14,7 +14,8 @@ between two always-the-same phases, behind one shared harness**, not a fixed ste
 **Phase 1** (`P1_Reading_Native/`, always the same) opens the PDF and extracts native text + raw
 vectors + page/embedded images; **Phase 2** (`P2_Raster_To_Vec/`, pluggable — `Stub` no-op, or
 `Junction`, a ported classical raster→vector pipeline) turns Phase 1's images into additional
-vectors; **Phase 3** (`P3_Vector_Parsing/`, pluggable — `VectorClassification` (the default) or
+vectors; **Phase 3** (`P3_Vector_Parsing/`, pluggable — `LatestVectorClassification` (the default),
+`OldVectorClassification` (a frozen 2026-09-29 baseline — never edit it), or
 `LegacyRecreation`) takes Phase 1's + Phase 2's vectors and produces the final vectors + OCR'd
 text; **Phase 4** (`P4_Output_Organization/`, always the same) combines every phase's text/vector
 output into the final `(texts, vectors)` pair and is a coordinate-space consistency backstop (logs
@@ -89,7 +90,7 @@ its own copy of the classical pipeline instead).
 ```
 .venv/Scripts/python.exe -m pip install -r requirements.txt                        # install deps
 .venv/Scripts/python.exe -m rastervec.Evaluation.inspector.inspector [path/to.pdf]  # run the PDF layer inspector
-.venv/Scripts/python.exe -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 VectorClassification]  # run the pluggable pipeline (P1 -> P2_REGISTRY[p2] -> P3_REGISTRY[p3])
+.venv/Scripts/python.exe -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 LatestVectorClassification]  # run the pluggable pipeline (P1 -> P2_REGISTRY[p2] -> P3_REGISTRY[p3])
 .venv/Scripts/python.exe scripts/generate_pipeline_report.py --config run.json      # config-driven per-stage report (PDFs + stats + dump.json per source PDF)
 .venv/Scripts/python.exe scripts/pipeline_report_viewer.py <run>/<stem> [<run2>/<stem>]  # Tkinter viewer: source page + toggleable stage-PDF overlays (1-2 folders side by side)
 .venv/Scripts/python.exe scripts/pipeline_report_benchmark.py --run DIR1 [--run DIR2]  # multiclass-score + chart benchmark report folders (1 or 2) on shared inputs
@@ -148,10 +149,9 @@ replacing the old `OCR/Paddle_OCR/ink_segment.py`. There is one OCR backend in t
 `PaddleOcrBackend` full-detection path are gone. Each P3 backend under `P3_Vector_Parsing/` has
 its own independent, duplicated copy of the OCR machinery this paragraph describes (see that
 section) — neither current P3 backend has a Radon module (deskewing is done differently, or not
-at all), and FAST is used differently (`VectorClassification` has its own trimmed FAST copy,
-run only *after* recognition to split text from drawing vectors — its old pre-OCR FAST filter
-stage is gone; `LegacyRecreation` never had one) — this paragraph is about the original, shared
-`OCR/` copy only.
+at all), and FAST is used differently (`OldVectorClassification` keeps its own pre-OCR FAST
+filter copy; `LatestVectorClassification` and `LegacyRecreation` have none) — this paragraph is
+about the original, shared `OCR/` copy only.
 
 ## `rastervec/Evaluation/inspector/` architecture
 
@@ -249,7 +249,7 @@ raster→vector backends), `P3_Vector_Parsing/` (pluggable vector-parsing/OCR ba
 `P4_Output_Organization/` (the one, always-run output-combination + coordinate-space-guard
 phase) — plus `Evaluation/`, `notebooks/`, `weights/` alongside them (benchmarking/dev tooling,
 not phase code). **Sibling P2 backends (`Stub`/`Junction`) and sibling P3 backends
-(`VectorClassification`/`CollinearVectorClass`/`LegacyRecreation`) import nothing from each other** —
+(`LatestVectorClassification`/`OldVectorClassification`/`LegacyRecreation`) import nothing from each other** —
 each is fully self-contained, duplicating its own copy of any infra it needs (a PaddleOCR engine
 wrapper, layer/color/width separation, a raster→vector tracer, ...) rather than sharing one. This
 is deliberate: it lets each backend be rewritten or torn out without ever
@@ -289,7 +289,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
     (`P4_Output_Organization.render_output_pdf`).
 - **`core/`** — the orchestrator, registry, and stable public API:
   - **`pipeline.py`** — `run_pipeline(pdf_path, page_index=0, *, p2="Stub",
-    p3="VectorClassification", enable_fast=True, verbose=False, compute=None, progress_counter=None,
+    p3="LatestVectorClassification", enable_fast=True, verbose=False, compute=None, progress_counter=None,
     on_debug_layer=None) -> PipelineResult`. Body: `phase1 = P1.read_and_extract(...)` →
     `p2_vectors, p2_texts = P2_REGISTRY[p2](phase1.images, phase1.page)` → `p3_vectors, p3_texts =
     P3_REGISTRY[p3](phase1.vectors, p2_vectors, phase1.page, **forwarded_kwargs)` →
@@ -298,14 +298,14 @@ generic parallel-pool mechanics), never phase-specific business logic.
     `debug_out`/`on_debug_layer` — are only passed to a backend whose own signature declares that
     parameter, via `inspect.signature`; `on_debug_layer` is the streaming counterpart to
     `debug_out`/`render_debug` — see `registry.py`'s docstring. `enable_fast`/`progress_counter`
-    are currently forwarded to nothing — neither P3 backend declares them any more, since
-    `VectorClassification`'s FAST filtering stage was removed entirely and `LegacyRecreation`
-    never had one — but stay on this signature as generic, backend-agnostic plumbing). CLI:
-    `python -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 VectorClassification]
+    are only declared by the frozen `OldVectorClassification` (its 2026-09-29 pre-OCR FAST
+    stage) — `LatestVectorClassification` and `LegacyRecreation` have no FAST — but stay on this
+    signature as generic, backend-agnostic plumbing). CLI:
+    `python -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 LatestVectorClassification]
     [--no-fast] [-v]`. No `stop_after`/partial-run support — always a full Phase1→P2→P3→P4 run.
   - **`registry.py`** — `P2_REGISTRY`/`P3_REGISTRY` (name → backend callable),
     `resolve_p2`/`resolve_p3` (`ValueError` listing valid names on a miss), `DEFAULT_P2="Stub"`,
-    `DEFAULT_P3="VectorClassification"`. Also `P2_RENDER_DEBUG`/`P3_RENDER_DEBUG` — a *separate*,
+    `DEFAULT_P3="LatestVectorClassification"`. Also `P2_RENDER_DEBUG`/`P3_RENDER_DEBUG` — a *separate*,
     optional registry of each backend's own `render_debug(debug_out, page_meta) ->
     list[(stage, label, hex, pdf_bytes)]` function (a backend with nothing to render, e.g. Stub,
     simply isn't in these dicts) — the *batch* debug path: reads a fully-populated `debug_out`
@@ -410,94 +410,75 @@ generic parallel-pool mechanics), never phase-specific business logic.
     code canvases. Tunables in `Junction/config.py`.
 - **`P3_Vector_Parsing/`** — pluggable vector-parsing/OCR backends, selected by `p3=`, each
   implementing `parse(vectors_p1, vectors_p2, page, **kwargs) -> (vectors, texts)`:
-  - **`VectorClassification/`** — a reduced 2-step Vector Classification chain (down from the
-    original 12-step chain restored from the repo's former `Vector_Classification/` package —
-    every filter beyond the two below has since been removed; see `classify_vectors.py`'s own
-    module docstring), followed by a full-PaddleOCR-per-cluster stage matching
-    `archive/raster_parser/scripts/type2_dump_extraction_pipeline.py::run_ocr_extraction`'s
-    pattern, but with **no pre-OCR FAST filtering stage and no merge-across-buckets/re-grouping
-    step in between** — every classification cluster goes straight to OCR as-is, and is itself the OCR
-    unit, not re-clustered first. `parse.py` combines `vectors_p1 + vectors_p2` into one flat
-    pool, then: `classify_vectors.py`'s per-`(layer, color, width)`-bucket `_classify_bucket`
-    (width key = `layer_color_separation.width_key`: stroke width rounded to 0.01 pt, `None` for
-    fill-only `"f"` vectors so a glyph's leftover graphics-state width never splits text) —
-    `group_filters.py::combine_overlapping_seq` (seqno-overlap merge) then `cluster_filters.py::
-    cluster_spatial_groups` (constrained single-linkage spatial clustering via
-    `commons.helpers.clustering.cluster_spatial`); a `StepResult`/`CategoryResult` per step,
-    `role="kept"` only now, since neither remaining step drops anything — → per classification
-    cluster, in bounded chunks of `config.DETECT_RENDER_CHUNK_SIZE` clusters at a time (some
-    clusters render to tens of MB even at the base dpi, so the whole page's clusters are never all
-    held in memory at once): render (`commons.renderer.ocr_prep.render_cluster_with_dynamic_dpi`)
-    → this folder's own `paddle_engine.py::PaddleDetectBackend.detect` (PaddleOCR's own text
-    detector, bare `detect(bgr)` shape; dispatched per cluster across Pool-2 workers via
-    `paddle_engine.py::_detect_job` when a caller passes `compute`) → crop + deskew each detected
-    quad (`paddle_engine.py::hough_deskew` — an axis-aligned crop rotated by a raster-refined
-    Hough-line + `cv2.minAreaRect` combined angle estimate, not a perspective warp, and only
-    applied when the two readings agree within `config.ROTATION_AGREEMENT_TOLERANCE_DEG`, and only
-    attempted at all when `parse.py::_quad_allows_rotation` finds the detected quad's own
-    underlying vectors form more than one connected component by bbox overlap
-    (`commons.helpers.clustering.group_by_overlap`) — a single connected component forces a
-    0-degree correction without even running Hough/minAreaRect). Every chunk's quads accumulate into one
-    flat, page-wide pool, which is then recognized (`paddle_engine.py::
-    PaddleRecBackend.recognize_crops`) in `config.OCR_BATCH_SIZE`-sized batches across the *whole
-    page* at once (dispatched per batch via `paddle_engine.py::_recognize_crops_job` when
-    `compute` is given) rather than one call per cluster — a page with hundreds of small text
-    clusters makes a handful of batched PaddleOCR calls instead of hundreds — with a
-    blank-recognition retry sweep (+90/180/270 via `recognize_crops_raw`/
-    `_recognize_crops_raw_job`, same page-wide batching) before giving up on a detection. No Radon
-    deskew and no whole-page similarity dedup (both removed — every cluster still gets its own
-    independent detect pass, just batched recognition). **Text vs. drawing is then decided by a
-    post-recognition FAST pass** (`config.FAST_FILTER_ENABLED`, default on; `fast_filter.py` +
-    this folder's own trimmed `fast_detect.py` copy — FAST-Tiny weights at
-    `rastervec/weights/fast_tiny_ic17mlt_640.pth` or `FAST_WEIGHTS_PATH`, a missing file raises):
-    per cluster, detect quads are grouped *anchored, no chaining* (a quad joins a seed quad only if
-    their page bboxes overlap AND centers are < `FAST_GROUP_CENTER_DIST_PT`), each group's padded
-    crop of the cluster render (white-padded to `FAST_CROP_MAX_ASPECT`, since FAST rescales to a
-    640 px short side) is cut out inside the chunk loop; after recognition, only groups with a
-    non-blank quad ("accepted") go through FAST (`_fast_job` on Pool 2 with `compute`). Every
-    vector bbox-intersecting an accepted group is rendered alone at the cluster's dpi and scored
-    by the fraction of its *whole* ink that lands on heat ≥ `FAST_HEAT_THRESHOLD` (ink outside the
-    crop counts as cold); ≥ `FAST_INK_FRACTION` in any accepted group → text, everything else in
-    the OCR'd clusters → `drawing`. Recognition itself is unaffected by FAST. With the flag off the
-    old rule applies (`parse.py::_drawing_extra_vectors`: anything connected, transitively by bbox
-    overlap, to a non-blank quad is text — which absorbed leader/dimension lines touching labels).
-    Sub-step timing key `fast_filter`. `parse.py::render_debug`
-    (`P3_RENDER_DEBUG["VectorClassification"]`) renders one `kept bbox`
-    layer per classification step whose kept boxes differ from the previous step's, plus
-    `geometry` layers (debug-only collinear/parallel groups of straight vectors per cluster,
-    `line_geometry.py` — own copy of CollinearVectorClass's grouping, one golden-ratio hue per
-    group, singletons gray), ocr/rotation/retry layers, `fast` layers (group crop bbox, member
-    quads, heatmap as an RGBA `draw.image_spec`, kept as text, dropped to drawing) and drawing, from whatever `parse()` stashed into `debug_out`
-    (`cluster_detections`'s raw per-cluster bgr arrays are only accumulated into `debug_out` at
-    all when a caller actually passed one, for the same memory reason as the render chunking
-    above).
-  - **`CollinearVectorClass/`** *(experimental)* — `VectorClassification`'s pipeline (own
-    copied files) plus the probe notebooks' vector-geometry signals (`line_geometry.py`, ported
-    from `notebooks/_vector_probe_helpers.py`; tunables in its `config.py`).
-    `classify_vectors.py` runs five steps per `(layer, color, width)` bucket: **collinear
-    drawing** (a same-infinite-line group of straight Vectors with > 50 members and length std
-    < 5 pt → drawing), seqno merge, spatial cluster, **length outliers** (per cluster, pool the
-    lengths of every stroke in a parallel group — ≥ 2 same-angle straight Vectors — and drop
-    those > 2 std from the mean), **crossings** (per cluster, drop Vectors properly crossed by
-    > 10 distinct foreign segments). It also returns the page's **global potential angles**
-    (every collinear group's angle, singletons included, deduped within 1°). `parse.py` rotates
-    each cluster render *before* detect by its dominant parallel-group direction
-    (`rotation.pre_detect_direction`: 1 group → its angle, 0 → 0, several → longest total
-    length), detects on the rotated render, and maps quads back through the inverse affine
-    (`paddle_engine.rotate_image`/`unrotate_points`). Per quad, `rotation.final_direction` picks
-    the pre-recognition direction from the vectors under it: 1 connected component → the same
-    rules; several → always Hough (mod 180, no minAreaRect, no 10° grid) snapped to the nearest
-    global angle (no Hough line → the group rules). The crop (out of the rotated render) is
-    rotated by the difference. Recognition has **no angle classifier**; a crop whose score
-    (`paddle_engine.score`: confidence, × 0.5 for a single character, 0 when blank) is < 0.8 is
-    also read at +90/180/270 and the best score wins (a non-blank winner is always kept).
-    Grouping tolerances: angle 2°, collinear offset 1.0 pt, straightness 0.25 pt. Its `debug_out` keeps
-    `VectorClassification`'s shape (so the report's debug-image savers and `retry_stats`
-    accept it; `minarea_mask` and `paddle_classifier_crops` stay empty), plus `global_angles`/
-    `cluster_rotation`; debug layers add per-step `dropped <category>` vectors (the crossings
-    step's as its own `intersection / dropped to drawing (N)` layer), `rotation/pre-detect
-    angle`/`final angle` arrows (no `flip angle`), `retry / retried, kept pass 1`, and one bbox
-    layer per rotation rule (`rotation_rule_cluster`/`rotation_rule_quad`).
+  - **`LatestVectorClassification/`** *(the default)* — the merge of the former
+    `VectorClassification` and experimental `CollinearVectorClass` backends (Collinear was the
+    base). `parse.py` combines `vectors_p1 + vectors_p2` into one flat pool, then
+    `classify_vectors.py` runs five steps per `(layer, color, width)` bucket (width key =
+    `layer_color_separation.width_key`: stroke width rounded to 0.01 pt, `None` for fill-only
+    `"f"` vectors): **collinear drawing** (a same-infinite-line group of straight Vectors with
+    > 50 members and length std < 5 pt → drawing), **seqno merge**
+    (`group_filters.combine_overlapping_seq`), **spatial cluster** (`cluster_filters.
+    cluster_spatial_groups`), **length outliers** (per cluster, pool the lengths of every stroke in
+    a parallel group — ≥ 2 same-angle straight Vectors — and drop those > 2 std from the mean),
+    **crossings** (`crossed_grid`, per cluster: a Vector made only of `"l"` items is *flagged* when
+    ≥ `MIN_CROSSINGS` (4) distinct foreign pieces properly cross it — `line_geometry.
+    line_crossing_counts`, **no flattening**: each `"l"` segment / `"re"`-`"qu"` edge counts once,
+    each `"c"` curve counts every exact crossing (`line_cubic_crossings`, the bezier substituted
+    into the line equation and solved with `numpy.roots`; tangents don't count); the crossings
+    themselves have no angle limit. Then, among the flagged Vectors, each one whose own segments
+    are all within `GRID_ANGLE_TOL_DEG` (2°, mod 90) of one direction belongs to that grid;
+    the grid holding more than `GRID_DOMINANCE` (50%) of *all* flagged `"l"` length is dropped to
+    drawing (`dominant_grid`; a lone flagged Vector is its own 100% grid; a mixed-direction one
+    never drops). The rest stay, recorded in a `role="info"` `crossed_off_grid` category).
+    Then per cluster, in chunks of `DETECT_RENDER_CHUNK_SIZE`: render (unrotated,
+    `ocr_prep.render_cluster_with_dynamic_dpi`) → `PaddleDetectBackend.detect` (Pool 2 via
+    `_detect_job` with `compute`). **Rotation comes from the detect quad alone** — there is no
+    Hough, no minAreaRect, no parallel-group/vector-direction rule and no pre-detect rotation:
+    `paddle_engine.quad_long_edge_angle` (direction of the quad's longer side, `[-90, 90)`) →
+    `upright_crop` (the quad's surrounding region, `quad_region`, is **rotated** by that angle
+    about the quad centre with `cv2.warpAffine` and the quad cut out upright — never a re-boxed
+    axis-aligned bbox and never a perspective warp). Page-wide batched recognition:
+    `PaddleRecBackend.recognize_crops` runs PaddleOCR's own 0/180 angle classifier then
+    recognizes (`_recognize_crops_job`); a crop whose `paddle_engine.score` (confidence, × 0.5 for a
+    single character, 0 when blank) is < `RETRY_CONFIDENCE_THRESHOLD` (0.8) is also read at
+    +90/180/270 (`recognize_crops_raw`, no classifier) and the best score wins (pass 1 always a
+    candidate). `Text.angle` = long-edge angle + classifier flip + 90° × winning retry;
+    `Text.quad_points` = the detect quad reordered so p0→p1 is the reading direction
+    (`reorder_quad_reading`). **Text vs. drawing has no FAST**: `_text_vectors_by_quad` makes a
+    vector of an OCR'd cluster text when more than `TEXT_INK_INSIDE_FRAC` (50%) of its ink (path
+    length; curves sampled only for this measure) lies inside a **non-blank** quad detected in
+    **its own cluster** — the rotated quad polygon itself (Cyrus–Beck clipping,
+    `line_geometry.ink_fraction_in_quad`), not its envelope. Nothing transitive; everything else
+    in the OCR'd clusters is drawing. Sub-step timing keys `ocr_render`/`ocr_detect`/
+    `ocr_recognize`/`quad_ownership`. `render_debug` (`P3_RENDER_DEBUG["LatestVectorClassification"]`)
+    and the streaming `on_debug_layer` render: per-step `kept bbox` / `dropped <category>`,
+    `intersection / dropped to drawing (N)` + `flagged, kept (off-grid) (N)`, `geometry`
+    collinear/parallel groups (the same `line_geometry` grouping the steps use), `ocr` detect/
+    passed/failed quads, `rotation / quad angle` + `final angle` arrows + `cls flipped (N)` quads,
+    `retry` layers, `ownership / text vectors` + `drawing vectors`, and `drawing`. Debug images
+    (`scripts/debug_image_savers.py::_save_latestvectorclassification_*`): `for_paddle_detect/`,
+    `for_rotation_correction/{quad_rotation,paddle_classifier}/`, `for_paddle_recog/
+    {0..3_retry,failed}/`.
+  - **`OldVectorClassification/`** — **FROZEN: never edit anything in this folder, in any way**
+    (not for fixes, refactors, renames or formatting; new work goes in
+    `LatestVectorClassification/`). A recreation of `VectorClassification` exactly as it stood on
+    **2026-09-29** (before any 2026-09-30 commit; folder content = commits `5e195e3`/`0863b0e`):
+    `(layer, color)` buckets → seqno merge + spatial clustering → pre-OCR FAST page-heatmap
+    filter (own `fast_filter.py`/`fast_detect.py`) → detect → Hough + minAreaRect `hough_deskew`
+    → batched recognition with the classifier → blank-only +90/180/270 retry. All its methods are
+    isolated: every non-rendering dependency it had on `commons/` (geometry, clustering, logging,
+    step timing, `ocr_prep`, `png`, `_shapes`) is vendored **in its 2026-09-29 version** under
+    `OldVectorClassification/_vendored/`; the only shared imports allowed are
+    `commons.models` (the P3 interface) and the debug-layer drawers `commons.renderer.
+    render_boxes_pdf`/`render_text_pdf`/`render_vectors_pdf`.
+    `tests/rastervec/P3_Vector_Parsing/OldVectorClassification/test_isolation.py` enforces that
+    (plus a `# FROZEN` header line on every `.py`), alongside the restored 2026-09-29 tests. The
+    only changes ever made to the source were one-time, at recreation (import paths; a dead lazy
+    import of the deleted `pipelines.sub_pipelines` repointed to its own `_classify_bucket`).
+    Tooling adapts to it, never the reverse: its debug images use the restored 2026-09-29
+    savers (`_save_oldvectorclassification_*`, folders `paddle_detect_images/`,
+    `paddle_recog_images/`, `hough_line_images/`, `minarea_rect_images/`,
+    `paddle_classifier_{before,after}_images/`). See its `README.md`.
   - **`LegacyRecreation/`** — a genuine from-scratch port (not a wrapper) of
     `archive/raster_parser`'s own Type-2 algorithm onto `commons.models` types, selectable as a
     normal P3 backend (distinct from the separate `legacy`/`legacy_adapter.py` engine axis, which
@@ -517,8 +498,8 @@ generic parallel-pool mechanics), never phase-specific business logic.
   **Clustering/filtering always operates within one `(layer, color)` bucket, never across
   buckets**, in every P3 backend that separates by layer/color at all — two vectors in different
   layers, or with different stroke/fill colors, are never spatially merged together regardless of
-  page proximity. `VectorClassification` and `CollinearVectorClass` additionally split each bucket by stroke width
-  (`(layer, color, width)`, see above).
+  page proximity. `LatestVectorClassification` additionally splits each bucket by stroke width
+  (`(layer, color, width)`, see above); `OldVectorClassification` uses `(layer, color)` only.
 - **`P4_Output_Organization/`** — the one, always-run output-organization phase (not pluggable,
   same style as `P1_Reading_Native/` — no reason for this to vary by backend):
   `organize.py::organize_outputs(texts_p1, texts_p2, texts_p3, vectors_p3, page) -> (texts,
@@ -543,8 +524,8 @@ generic parallel-pool mechanics), never phase-specific business logic.
   clustering + PaddleOCR's own detector/angle-classifier — see the `P3_Vector_Parsing/` bullet
   above for what each backend actually does now), so no *new* P3 backend should import this
   folder. `fast_detect.py` here is the full original (incl. `detect_tiled`);
-  `VectorClassification` keeps its own trimmed copy for its post-recognition text/drawing split
-  (`LegacyRecreation` has none). This whole
+  `OldVectorClassification` keeps its own trimmed copy for its pre-OCR FAST filter
+  (`LatestVectorClassification`/`LegacyRecreation` have none). This whole
   folder is still genuinely imported by `core/parallel/pool.py::warmup()`, `commons/renderer/
   stages.py`, the Junction P2 backend, and the old `pipelines/current.py`+`_steps.py` — see the
   top-of-file "not dead" note and
@@ -783,7 +764,8 @@ generic parallel-pool mechanics), never phase-specific business logic.
   regression check.
 - **Vector-geometry probe notebooks** *(experimental, not wired into P3)*:
   `notebooks/vector_intersection_lab.ipynb` (per whole `Vector`, the number of distinct flattened
-  segments of *other* Vectors in its P3 VectorClassification cluster that properly cross it —
+  segments of *other* Vectors in its P3 LatestVectorClassification "Spatial cluster" step cluster
+  that properly cross it —
   `crossing_segment_counts`; a linear min..max gradient layer + a zero layer + 5 percentile
   buckets over the >0 counts, ties never split so heavy ties leave fewer),
   `dashed_line_collinear_lab.ipynb` (straight Vectors grouped by same infinite line within each
@@ -798,7 +780,8 @@ generic parallel-pool mechanics), never phase-specific business logic.
 - **`Evaluation/Evaluate/variants.py`** *(implemented)*: `PipelineVariant` (name, `engine`
   current/legacy, `p2`, `p3`, `enable_fast`) + the `VARIANTS` registry (`current` [default p2/p3],
   `legacy`, plus named presets for benchmark comparisons across P3 backends —
-  `current_vectorclassification`, `current_legacyrecreation`, `current_junction`) +
+  `current_latestvectorclassification`, `current_oldvectorclassification`, `current_legacyrecreation`,
+  `current_junction`) +
   `DEFAULT_VARIANTS` + `resolve_variant`. `engine="current"` threads `p2`/`p3`/`enable_fast` into
   `rastervec.core.pipeline.run_pipeline` (the pluggable P1→P2_REGISTRY[p2]→P3_REGISTRY[p3]
   orchestrator, see the `core/` section below); `engine="legacy"` ignores `p2`/`p3` entirely.
@@ -823,7 +806,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
   *calling* process, so a spawn pool started next finds the models on disk and no worker races
   the first-run download — each P3 backend's own `PaddleRecBackend.warmup()` classmethod forces
   the existing lazy `_engine()` path; `FastDetector.warmup()` is called for both the deprecated
-  top-level `OCR/` copy and `VectorClassification`'s own, each best-effort — a missing weights
+  top-level `OCR/` copy and `OldVectorClassification`'s own, each best-effort — a missing weights
   file is skipped), and
   `run_parallel(items, fn, *, workers, desc)` — an input-order map that is a plain serial loop
   when `workers <= 1` and a spawn `ProcessPoolExecutor` otherwise. Processes not threads: the
@@ -1007,8 +990,9 @@ generic parallel-pool mechanics), never phase-specific business logic.
   **Detect quads.** PaddleOCR 2.x's DB detector returns *rotated* quads (`db_postprocess.
   get_mini_boxes` → `cv2.minAreaRect`, `det_box_type="quad"`; `filter_tag_det_res` orders them
   clockwise and clips to the image, so an edge quad can be slightly non-rectangular). Every OCR
-  backend keeps the page-space quad on `Text.quad_points` (`pixel_to_page_points`; Collinear
-  through `unrotate_points` first) alongside the envelope `bbox`, and its debug `detect`/`passed`/
+  backend keeps the page-space quad on `Text.quad_points` (`pixel_to_page_points`;
+  LatestVectorClassification also reorders it so p0→p1 is the reading direction) alongside the
+  envelope `bbox`, and its debug `detect`/`passed`/
   `failed` layers draw quads (`debug_out["ocr_detect_quads"]`/`["ocr_blank_quads"]`), not
   envelopes. Native text has no quad (`None`) and goes through the bbox inversion.
 
@@ -1068,7 +1052,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
   `PipelineResult`), **plus every backend-specific debug layer** each active P2/P3 backend
   produces — streamed straight into the writer via `on_debug_layer` (`_debug_layer_sink`), passed
   into `run_pipeline` itself, so each layer reaches disk the moment that backend renders it rather
-  than only after the whole page's pipeline run finishes (e.g. `VectorClassification` emits one
+  than only after the whole page's pipeline run finishes (e.g. `LatestVectorClassification` emits one
   `kept bbox` layer per classification step that changed the kept set plus
   ocr/rotation/retry/drawing layers, `Junction` emits its own raster-stage layers —
   see the `P2_Raster_To_Vec/`/`P3_Vector_Parsing/` bullets above for what each backend renders,
@@ -1076,9 +1060,11 @@ generic parallel-pool mechanics), never phase-specific business logic.
   There is no per-stage `.txt` stats file for the `current` engine (the old engine's
   `Evaluation/Report/stage_stats.py` numeric-stats convention doesn't generalize across backends
   with genuinely different internals) — `dump.json` is the reloadable source of truth instead.
-  VectorClassification's own debug PNGs — `for_paddle_detect/`, `for_rotation_correction/
-  {hough_line,minarea_rect,paddle_classifier}/`, `for_paddle_recog/
-  {0_retry,1_retry,2_retry,3_retry,failed}/`, `for_fast/{input,heatmap}/` — plus LegacyRecreation's single `paddle_ocr_images/`,
+  LatestVectorClassification's own debug PNGs — `for_paddle_detect/`, `for_rotation_correction/
+  {quad_rotation,paddle_classifier}/`, `for_paddle_recog/
+  {0_retry,1_retry,2_retry,3_retry,failed}/` — OldVectorClassification's restored 2026-09-29
+  `paddle_*_images/`/`hough_line_images/`/`minarea_rect_images/` folders (those savers draw
+  quads/angle lines on top, as they did then), plus LegacyRecreation's single `paddle_ocr_images/`,
   organized by which model/algorithm call each saved image was the exact input to (never an
   overlay/annotation — only a BGR/RGB channel reorder for display; per-P3-backend savers in
   `scripts/debug_image_savers.py`) are written unless the config sets `debug_images: false`
@@ -1139,7 +1125,7 @@ consumed by anything in `rastervec/` (kept for possible future raster-image work
 
 `tests/rastervec/` mirrors `rastervec/`'s own folder layout (e.g. `tests/rastervec/
 P1_Reading_Native/test_reader.py` for `rastervec/P1_Reading_Native/reader.py`,
-`tests/rastervec/P3_Vector_Parsing/VectorClassification/` for that backend,
+`tests/rastervec/P3_Vector_Parsing/LatestVectorClassification/` for that backend,
 `tests/rastervec/core/` for `core/pipeline.py`/`registry.py`/etc, `tests/rastervec/renderer/
 test_png.py` for `rastervec/commons/renderer/png.py`); modules that stay at
 `rastervec/`'s top level (`output_types.py`) keep their tests at

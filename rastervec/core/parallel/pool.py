@@ -70,7 +70,7 @@ def warmup() -> None:
     page task running any configured P3 backend (e.g. `benchmark_jobs.py`
     dispatching several `variants.VARIANTS` across the same pool), and
     Pool-2 workers receive OCR-crop jobs dispatched from whichever backend's
-    own module-level job function (`VectorClassification`'s OCR detect/
+    own module-level job function (`LatestVectorClassification`'s OCR detect/
     recognize stages dispatch to Pool 2 via their own `paddle_engine.py::
     _detect_job`/`_recognize_crops_job`) -- per the "sibling backends share
     zero code" rule, each backend has its own separate model-class cache, so
@@ -78,15 +78,16 @@ def warmup() -> None:
     # FAST (torch) before PaddleOCR (paddle): on Windows a paddle-first
     # process fails torch's later DLL load (clashing OpenMP runtimes). Warms
     # the deprecated top-level `OCR/` module's FAST detector and
-    # VectorClassification's own copy (its post-recognition FAST split).
+    # OldVectorClassification's own copy (its pre-OCR FAST filter).
     _warm_fast_detectors()
     _warm_paddle_engines()
 
 
 def _warm_fast_detectors() -> None:
     """One `FastDetector().warmup()` per FAST copy: the deprecated top-level
-    `OCR/` module's, and VectorClassification's own (`fast_detect.py`, used
-    by its post-recognition text/drawing split). Each is best-effort."""
+    `OCR/` module's, and OldVectorClassification's own (`fast_detect.py`,
+    its pre-OCR FAST filter). LatestVectorClassification has no FAST. Each
+    is best-effort."""
     try:
         from rastervec.OCR.fast_detect import FastDetector
 
@@ -94,13 +95,13 @@ def _warm_fast_detectors() -> None:
     except Exception as exc:  # noqa: BLE001 -- warmup is best-effort
         _LOG.warning("FAST warmup skipped (legacy OCR): %s", exc)
     try:
-        from rastervec.P3_Vector_Parsing.VectorClassification.fast_detect import (
-            FastDetector as VcFastDetector,
+        from rastervec.P3_Vector_Parsing.OldVectorClassification.fast_detect import (
+            FastDetector as OldFastDetector,
         )
 
-        VcFastDetector().warmup()
+        OldFastDetector().warmup()
     except Exception as exc:  # noqa: BLE001
-        _LOG.warning("FAST warmup skipped (VectorClassification): %s", exc)
+        _LOG.warning("FAST warmup skipped (OldVectorClassification): %s", exc)
 
 
 def _warm_paddle_engines() -> None:
@@ -108,7 +109,7 @@ def _warm_paddle_engines() -> None:
     where the backend has one) per backend that has its own copy -- the
     deprecated top-level `OCR/` module (recognition-only, no detect
     backend), plus every P3 backend's own `paddle_engine.py`
-    (`VectorClassification`, `CollinearVectorClass`, `LegacyRecreation`). Each backend's import+call
+    (`LatestVectorClassification`, `OldVectorClassification`, `LegacyRecreation`). Each backend's import+call
     is its own try/except, same reasoning as `_warm_fast_detectors`."""
     try:
         from rastervec.OCR.Paddle_OCR.ocr_backend import PaddleRecBackend
@@ -117,7 +118,7 @@ def _warm_paddle_engines() -> None:
     except Exception as exc:  # noqa: BLE001
         _LOG.warning("PaddleOCR warmup skipped (legacy OCR): %s", exc)
     try:
-        from rastervec.P3_Vector_Parsing.VectorClassification.paddle_engine import (
+        from rastervec.P3_Vector_Parsing.LatestVectorClassification.paddle_engine import (
             PaddleDetectBackend,
             PaddleRecBackend,
         )
@@ -125,9 +126,9 @@ def _warm_paddle_engines() -> None:
         PaddleRecBackend.warmup()
         PaddleDetectBackend.warmup()
     except Exception as exc:  # noqa: BLE001
-        _LOG.warning("PaddleOCR warmup skipped (VectorClassification): %s", exc)
+        _LOG.warning("PaddleOCR warmup skipped (LatestVectorClassification): %s", exc)
     try:
-        from rastervec.P3_Vector_Parsing.CollinearVectorClass.paddle_engine import (
+        from rastervec.P3_Vector_Parsing.OldVectorClassification.paddle_engine import (
             PaddleDetectBackend,
             PaddleRecBackend,
         )
@@ -135,7 +136,7 @@ def _warm_paddle_engines() -> None:
         PaddleRecBackend.warmup()
         PaddleDetectBackend.warmup()
     except Exception as exc:  # noqa: BLE001
-        _LOG.warning("PaddleOCR warmup skipped (CollinearVectorClass): %s", exc)
+        _LOG.warning("PaddleOCR warmup skipped (OldVectorClassification): %s", exc)
     try:
         from rastervec.P3_Vector_Parsing.LegacyRecreation.paddle_engine import (
             PaddleDetectBackend,

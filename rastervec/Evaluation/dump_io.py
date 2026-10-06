@@ -91,15 +91,15 @@ class PageDump:
     # itself (`generate_pipeline_report.py`): input conversion, fixed stage
     # layers, debug images, extra-prediction layers. `{}` for older dumps.
     debug_durations: dict = dataclasses.field(default_factory=dict)
-    # `{"total": N, "passed": P}` cluster counts from the VectorClassification
-    # P3 backend's FAST-filter step (`P3_Vector_Parsing/VectorClassification/
+    # `{"total": N, "passed": P}` cluster counts from the OldVectorClassification
+    # P3 backend's FAST-filter step (`P3_Vector_Parsing/OldVectorClassification/
     # fast_filter.py::FastPageResult.n_clusters`/`n_passed_clusters`), read
     # off `res.extra["p3_debug"]["fast_result"]` at report-generation time.
     # `None` for any other P3 backend (no such concept) or an older dump.
     fast_cluster_stats: "dict | None" = None
     # `{"0": N, "1": N, "2": N, "3": N, "failed": N}` blank-recognition retry
-    # counts from the VectorClassification P3 backend's rotation retry sweep
-    # (`P3_Vector_Parsing/VectorClassification/parse.py`'s `retry_stats`),
+    # counts from the Latest/OldVectorClassification P3 backend's retry sweep
+    # (`P3_Vector_Parsing/<backend>/parse.py`'s `retry_stats`),
     # read off `res.extra["p3_debug"]["retry_stats"]` at report-generation
     # time. `None` for any other P3 backend or an older dump.
     retry_stats: "dict | None" = None

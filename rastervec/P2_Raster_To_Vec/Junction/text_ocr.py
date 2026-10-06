@@ -12,12 +12,12 @@
    Boxes from the same tile are never merged with each other -- PaddleOCR
    kept them apart deliberately.
 4. `refine_and_recognize` -- per merged box: pad 1 (`RENDER_PADDING_EXTRA_PT`
-   in page points, VectorClassification's render padding), upscale so the
+   in page points, OldVectorClassification's render padding), upscale so the
    short side is at least `MIN_RENDER_SIDE_PX` (capped at `MAX_UPSCALE`),
    detect again on that small crop; each refined quad is then deskewed and
    cropped with pad 2 (`paddle_engine.hough_deskew`) and recognized in
    page-wide `OCR_BATCH_SIZE` batches, with a +90/180/270 blank-retry sweep
-   -- the same staging as VectorClassification's `parse.py` stages 4-5.
+   -- the same staging as OldVectorClassification's `parse.py` stages 4-5.
 
 Every detect/recognize call goes through Pool 2 when a `compute` proxy is
 given (`paddle_engine._detect_job` / `_recognize_crops_job` /

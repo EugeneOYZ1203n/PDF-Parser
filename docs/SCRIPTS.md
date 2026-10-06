@@ -39,9 +39,9 @@ the fixed `phase2__*.pdf` / `reconstructed__*.pdf` layers (no `phase1`
 or `final` layers -- the inspector shows native words + raw vectors, and
 the backend's own `drawing`/`ocr` layers show the final output), **plus
 every debug layer the active `p2`/`p3` backend's own `render_debug`
-produces** (e.g. `p3: "VectorClassification"` emits one `kept bbox` layer
+produces** (e.g. `p3: "LatestVectorClassification"` emits one `kept bbox` layer
 per classification step that changed the kept set, plus
-fast/ocr/rotation/retry/drawing; `p2: "Junction"` emits its own
+intersection/geometry/ocr/rotation/retry/ownership/drawing; `p2: "Junction"` emits its own
 raster-stage layers) -- see
 `CLAUDE.md`'s `P2_Raster_To_Vec/`/`P3_Vector_Parsing/` bullets for what each
 backend actually renders. A layer that came out blank on every page (e.g.
@@ -51,12 +51,16 @@ debug image folder set, read from `res.extra["p3_debug"]`, each leaf folder
 holding at most `debug_image_cap` images (default 100, `null` uncapped)
 sampled at random (fixed seed) across all of the input's pages, and every
 saved image exactly (channel order aside, never an overlay) what that
-model/algorithm call actually received: `p3: "VectorClassification"` writes
+model/algorithm call actually received: `p3: "LatestVectorClassification"` writes
 `for_paddle_detect/` (PaddleDetectBackend.detect's own input),
-`for_rotation_correction/{hough_line,minarea_rect,paddle_classifier}/` (the
-two raster angle-estimation masks and the recognizer's own angle-classifier
+`for_rotation_correction/{quad_rotation,paddle_classifier}/` (the region the
+quad-angle rotation ran on, and the recognizer's own angle-classifier
 input), and `for_paddle_recog/{0_retry,1_retry,2_retry,3_retry,failed}/`
 (bucketed by which recognize pass decided each detection's outcome);
+`p3: "OldVectorClassification"` (the frozen 2026-09-29 snapshot) writes that
+date's folders with that date's savers (`paddle_detect_images/`,
+`paddle_recog_images/`, `hough_line_images/`, `minarea_rect_images/`,
+`paddle_classifier_{before,after}_images/` -- these draw quads/angle lines on top);
 `p3: "LegacyRecreation"` writes a single `paddle_ocr_images/` folder (one
 padded/DPI-boosted render per word group). There are no per-stage `.txt`
 stats for the `current` engine -- `dump.json` is the reloadable source of
@@ -75,7 +79,7 @@ one of `input_dir` / `input_files`):
 |---|---|
 | `pipeline` | `current` (default, the pluggable `core.pipeline` engine) / `legacy` (archive/raster_parser, unmodified) |
 | `p2` | only meaningful when `pipeline: "current"` -- a `core.registry.P2_REGISTRY` name (`Stub` default, or `Junction`) |
-| `p3` | only meaningful when `pipeline: "current"` -- a `core.registry.P3_REGISTRY` name (`VectorClassification` default, or `LegacyRecreation`) |
+| `p3` | only meaningful when `pipeline: "current"` -- a `core.registry.P3_REGISTRY` name (`LatestVectorClassification` default, `OldVectorClassification` -- frozen 2026-09-29 baseline -- or `LegacyRecreation`) |
 | `enable_fast` | forwarded to `p3` backends that accept it (default `true`) |
 | `final_stage` | one of `core.pipeline`'s short step names (`phase1`/`phase2`/`phase3`); `null` = all. Only trims which of the 4 fixed phase-level artifacts render -- doesn't skip any actual pipeline work, and doesn't gate the per-backend debug layers (those always render in full). Ignored entirely for `pipeline: "legacy"`. |
 | `input_dir` | folder scanned for `*.pdf` |
@@ -367,7 +371,7 @@ don't build new scripts on it.
 
 ```
 .venv/Scripts/python.exe -m rastervec.core.pipeline \
-    --pdf "references/<stem>.pdf" --page 0 --p2 Stub --p3 VectorClassification
+    --pdf "references/<stem>.pdf" --page 0 --p2 Stub --p3 LatestVectorClassification
 ```
 
 | arg | meaning |
@@ -375,7 +379,7 @@ don't build new scripts on it.
 | `--pdf PATH` | input PDF (required) |
 | `--page N` | 0-based page index (default 0) |
 | `--p2 NAME` | `core.registry.P2_REGISTRY` name (default `Stub`) |
-| `--p3 NAME` | `core.registry.P3_REGISTRY` name (default `VectorClassification`) |
+| `--p3 NAME` | `core.registry.P3_REGISTRY` name (default `LatestVectorClassification`) |
 | `--no-fast` | `enable_fast=False`, forwarded to `p3` backends that accept it |
 | `-v` / `--verbose` | DEBUG logging + populate `PipelineResult.extra` (phase1/phase2 intermediates + each backend's `debug_out`) |
 
@@ -411,7 +415,7 @@ per variant, with an aggregate + timing comparison.
 | `--reconstruct-dir DIR` | per-page reconstruction / input / box-overlay PDFs (default `outputs/benchmark_cli/reconstructions/`) |
 | `--workers N` | run pages across a spawn pool of size `N` (>1); default 1 serial |
 | `--compute-workers N` | run FAST tiles + OCR crops on a shared pool of size `N` (>0); default 0 local |
-| `--variants a,b` | `variants.VARIANTS` names to run/compare (default `current,legacy`) -- also `current_vectorclassification`, `current_legacyrecreation`, `current_junction` (named P2/P3 combo presets for benchmark comparisons) |
+| `--variants a,b` | `variants.VARIANTS` names to run/compare (default `current,legacy`) -- also `current_latestvectorclassification`, `current_oldvectorclassification`, `current_legacyrecreation`, `current_junction` (named P2/P3 combo presets for benchmark comparisons) |
 
 `--variants current,legacy` needs LibreOffice (legacy). `main()`'s real
 OCR path is a manual smoke test; the pure formatting/aggregation helpers are

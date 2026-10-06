@@ -39,8 +39,11 @@ VARIANTS: dict[str, PipelineVariant] = {
     # Named presets for benchmark comparisons across P3 backends (all with
     # the default Stub P2, since none of them consume raster-to-vector
     # output today).
-    "current_vectorclassification": PipelineVariant(
-        "current_vectorclassification", "current", DEFAULT_P2, "VectorClassification", True,
+    "current_latestvectorclassification": PipelineVariant(
+        "current_latestvectorclassification", "current", DEFAULT_P2, "LatestVectorClassification", True,
+    ),
+    "current_oldvectorclassification": PipelineVariant(
+        "current_oldvectorclassification", "current", DEFAULT_P2, "OldVectorClassification", True,
     ),
     "current_legacyrecreation": PipelineVariant(
         "current_legacyrecreation", "current", DEFAULT_P2, "LegacyRecreation", True,

@@ -8,18 +8,26 @@ these as top-level attributes (`spatial_clusters`/`cluster_detections`/
 attributes off `res` (as this used to) always returns `None`/`[]` and
 silently writes empty folders. Each backend gets its own distinct folder
 set (see `generate_pipeline_report.py`'s module docstring) since their
-internal pipelines genuinely differ -- LegacyRecreation has no FAST stage.
+internal pipelines genuinely differ.
 
-VectorClassification's own savers are organized by *which model/algorithm
+LatestVectorClassification's savers are organized by *which model/algorithm
 call the image was the actual input to*, not by pipeline stage name, and
 every saved image is exactly that input array (only a BGR<->RGB channel
 reorder for correct PNG display, never an overlay or annotation drawn on
 top): `for_paddle_detect/` (PaddleDetectBackend.detect), `for_rotation_
-correction/{hough_line,minarea_rect,paddle_classifier}/` (the two raster
-angle-estimation masks and the recognizer's own angle-classifier call), and
+correction/quad_rotation/` (the region around each detect quad that the
+quad-angle rotation ran on), `for_rotation_correction/paddle_classifier/`
+(the upright crop the recognizer's own 0/180 angle classifier saw), and
 `for_paddle_recog/{0_retry,1_retry,2_retry,3_retry,failed}/` (whichever
 recognize_crops/recognize_crops_raw pass decided a detection's outcome).
 LegacyRecreation keeps its own single `paddle_ocr_images/` folder.
+
+OldVectorClassification (the frozen 2026-09-29 snapshot) gets the savers
+the report used on that date, restored verbatim apart from their names
+(`_save_oldvectorclassification_*`) and folders (`paddle_detect_images/`,
+`paddle_recog_images/`, `hough_line_images/`, `minarea_rect_images/`,
+`paddle_classifier_{before,after}_images/`) -- they read that backend's own
+`debug_out` shape and draw quads/angle lines on top, as they did then.
 
 Every saver writes through an `_ImageReservoir`: the report generator keeps
 one per leaf folder per input document, so a folder holds at most
@@ -29,6 +37,7 @@ also accepts a plain folder `Path` (uncapped -- every image is written).
 """
 from __future__ import annotations
 
+import math
 import random
 from pathlib import Path
 from typing import Callable
@@ -98,7 +107,7 @@ def _draw_boxes(img: Image.Image, boxes, outline=(220, 30, 30), width=2) -> Imag
 
 
 def _save_crop_text_images(crops: list, target, page_index: int) -> int:
-    """Shared body for LegacyRecreation's/VectorClassification's own
+    """Shared body for LegacyRecreation's/OldVectorClassification's own
     recog-image dumpers -- both hand PaddleOCR recognition a list of
     `(crop, text)` pairs (one per PaddleOCR-detected quad within a
     rendered cluster/word-group), reads `p3_debug["ocr_crops"]`."""
@@ -114,7 +123,7 @@ def _save_crop_text_images(crops: list, target, page_index: int) -> int:
     return n
 
 
-def _save_vectorclassification_detect_images(p3_debug: dict, target, page_index: int) -> int:
+def _save_latestvectorclassification_detect_images(p3_debug: dict, target, page_index: int) -> int:
     """One PNG per seqno-cluster's own rendered+padded image -- exactly
     (channel order aside) what `PaddleDetectBackend.detect` saw, no overlay.
     Reads `p3_debug["cluster_detections"]` (`list[tuple[np.ndarray,
@@ -133,57 +142,30 @@ def _save_vectorclassification_detect_images(p3_debug: dict, target, page_index:
     return n
 
 
-def _mask_to_image(mask) -> Image.Image:
-    """A boolean/0-1 ink mask -> a viewable grayscale PNG -- a dtype
-    conversion for encoding, not an overlay; no pixel's ink/non-ink value is
-    changed."""
-    return Image.fromarray((np.asarray(mask) * 255).astype(np.uint8))
-
-
-def _save_vectorclassification_rotation_hough_images(p3_debug: dict, target, page_index: int) -> int:
-    """One PNG per detection's own dilated ink mask -- exactly what
-    `_hough_angle_deg` ran on, no overlay. Entries with no mask (`parse.py::
-    _quad_allows_rotation` returned `False` for that quad, so the mask was
-    never built) are skipped entirely -- there is no "what Hough saw" image
-    for them. Reads `p3_debug["rotation"]` (see `paddle_engine.py::
-    RotationDebug` / `parse.py`'s per-quad loop)."""
-    entries = p3_debug.get("rotation") or []
-    if not entries:
+def _save_latestvectorclassification_quad_rotation_images(p3_debug: dict, target, page_index: int) -> int:
+    """One PNG per detected quad -- exactly the region around the quad that
+    `paddle_engine.upright_crop` rotated by the quad's long-edge angle
+    (`paddle_engine.quad_region`, pre-rotation). Reads
+    `p3_debug["quad_rotation_regions"]` (`list[np.ndarray]`, RGB)."""
+    regions = p3_debug.get("quad_rotation_regions") or []
+    if not regions:
         return 0
     reservoir = _as_reservoir(target)
     n = 0
-    for i, entry in enumerate(entries):
-        mask = entry.get("dilated_ink_mask")
-        if mask is None:
+    for i, region in enumerate(regions):
+        if region is None:
             continue
-        n += reservoir.offer(f"p{page_index}_det_{i:03d}.png", lambda mask=mask: _mask_to_image(mask))
+        n += reservoir.offer(
+            f"p{page_index}_det_{i:03d}.png", lambda region=region: Image.fromarray(np.asarray(region)),
+        )
     return n
 
 
-def _save_vectorclassification_rotation_minarea_images(p3_debug: dict, target, page_index: int) -> int:
-    """One PNG per detection's own non-dilated ink mask -- exactly what
-    `cv2.minAreaRect` ran on, no overlay. Mirrors
-    `_save_vectorclassification_rotation_hough_images` exactly, reading the
-    same `p3_debug["rotation"]` entries' `minarea_mask` field instead (same
-    skip-if-`None` rule)."""
-    entries = p3_debug.get("rotation") or []
-    if not entries:
-        return 0
-    reservoir = _as_reservoir(target)
-    n = 0
-    for i, entry in enumerate(entries):
-        mask = entry.get("minarea_mask")
-        if mask is None:
-            continue
-        n += reservoir.offer(f"p{page_index}_det_{i:03d}.png", lambda mask=mask: _mask_to_image(mask))
-    return n
-
-
-def _save_vectorclassification_rotation_classifier_images(p3_debug: dict, target, page_index: int) -> int:
+def _save_latestvectorclassification_rotation_classifier_images(p3_debug: dict, target, page_index: int) -> int:
     """One PNG per detected quad -- exactly the crop handed to
     `PaddleRecBackend.recognize_crops`'s own internal `text_classifier` call
-    (pass 1, pre-flip; every detection goes through the classifier exactly
-    once, win or lose). Reads `p3_debug["paddle_classifier_crops"]`
+    (pass 1: the quad-angle upright crop, pre-flip; every detection goes
+    through the classifier exactly once, win or lose). Reads `p3_debug["paddle_classifier_crops"]`
     (`list[np.ndarray]`)."""
     crops = p3_debug.get("paddle_classifier_crops") or []
     if not crops:
@@ -197,7 +179,7 @@ def _save_vectorclassification_rotation_classifier_images(p3_debug: dict, target
     return n
 
 
-def _save_vectorclassification_recog_bucket_images(
+def _save_latestvectorclassification_recog_bucket_images(
     p3_debug: dict, target, page_index: int, bucket: str,
 ) -> int:
     """One PNG per detection whose outcome matches `bucket` -- exactly the
@@ -220,32 +202,176 @@ def _save_vectorclassification_recog_bucket_images(
     return n
 
 
-def _save_vectorclassification_fast_images(
-    p3_debug: dict, input_target, heatmap_target, page_index: int,
-) -> int:
-    """Per FAST detect group (post-recognition FAST text/drawing split,
-    accepted groups only): `input_target` gets exactly the RGB array
-    `FastDetector.detect` saw (the group crop, white-padded to
-    `FAST_CROP_MAX_ASPECT`), `heatmap_target` its score map cut back to the
-    unpadded crop as grayscale (white = 1.0). Same file name in both
-    folders, so a pair lines up. Reads `p3_debug["fast_images"]`
-    (`list[tuple[np.ndarray, np.ndarray]]`, only filled with
-    `keep_debug_arrays`). The two folders sample independently when capped."""
-    entries = p3_debug.get("fast_images") or []
-    if not entries:
-        return 0
-    inputs, heatmaps = _as_reservoir(input_target), _as_reservoir(heatmap_target)
-    n = 0
-    for i, (rgb, heat) in enumerate(entries):
-        name = f"p{page_index}_group_{i:03d}.png"
-        n += inputs.offer(name, lambda rgb=rgb: Image.fromarray(np.asarray(rgb)))
-        heatmaps.offer(name, lambda heat=heat: _mask_to_image(np.clip(heat, 0.0, 1.0)))
-    return n
-
-
 def _save_legacyrecreation_ocr_images(p3_debug: dict, target, page_index: int) -> int:
     """One PNG per word group's own padded/DPI-boosted OCR render -- exactly
     what PaddleOCR's (recognition-only) engine saw, recognised text in the
     filename. Reads `p3_debug["ocr_crops"]` (`list[tuple[np.ndarray,
     str]]`)."""
     return _save_crop_text_images(p3_debug.get("ocr_crops") or [], target, page_index)
+
+
+# ---------------------------------------------------------------------------
+# OldVectorClassification -- the 2026-09-29 savers, restored verbatim (renamed).
+# ---------------------------------------------------------------------------
+def _save_oldvectorclassification_recog_images(p3_debug: dict, target, page_index: int) -> int:
+    """One PNG per PaddleOCR-recognised crop -- exactly what the recognizer
+    saw, recognised text in the filename. Reads `p3_debug["ocr_crops"]`
+    (`list[tuple[np.ndarray, str]]`)."""
+    return _save_crop_text_images(p3_debug.get("ocr_crops") or [], target, page_index)
+
+
+def _save_oldvectorclassification_detect_images(p3_debug: dict, target, page_index: int) -> int:
+    """One PNG per seqno-cluster's own rendered+padded image, with every
+    detected quad drawn on top -- exactly what `PaddleDetectBackend.detect`
+    saw. Quads are already in that image's own pixel space (no page-space
+    round-trip needed -- `parse.py` renders/pads each cluster itself and
+    hands the detector that same array). Reads `p3_debug["cluster_detections"]`
+    (`list[tuple[np.ndarray, list[np.ndarray]]]`, each a `(bgr, quads)`
+    pair)."""
+    entries = p3_debug.get("cluster_detections") or []
+    if not entries:
+        return 0
+    reservoir = _as_reservoir(target)
+
+    def _make(bgr, quads) -> Image.Image:
+        img = Image.fromarray(np.asarray(bgr)[..., ::-1])  # BGR -> RGB
+        draw = ImageDraw.Draw(img)
+        for quad in quads or []:
+            pts = [(float(x), float(y)) for x, y in quad]
+            draw.polygon(pts, outline=(220, 30, 30), width=2)
+        return img
+
+    n = 0
+    for i, (bgr, quads) in enumerate(entries):
+        n += reservoir.offer(
+            f"p{page_index}_cluster_{i:03d}.png", lambda bgr=bgr, quads=quads: _make(bgr, quads),
+        )
+    return n
+
+
+def _old_draw_angle_line(img: Image.Image, angle_deg: "float | None", color) -> Image.Image:
+    """A short line through the image's own center, tilted by `angle_deg`
+    (same sign convention as `paddle_engine.py::_hough_angle_deg`/
+    `_minarea_angle_deg` -- counter-clockwise-positive, the rotation that
+    would bring a line at this angle to horizontal). No-op if `angle_deg` is
+    `None`."""
+    if angle_deg is None:
+        return img
+    out = img.convert("RGB")
+    draw = ImageDraw.Draw(out)
+    w, h = out.size
+    cx, cy = w / 2.0, h / 2.0
+    length = 0.4 * max(w, h)
+    rad = math.radians(-angle_deg)
+    dx, dy = math.cos(rad), math.sin(rad)
+    draw.line(
+        [(cx - dx * length, cy - dy * length), (cx + dx * length, cy + dy * length)],
+        fill=color, width=2,
+    )
+    return out
+
+
+def _save_oldvectorclassification_hough_images(p3_debug: dict, target, page_index: int) -> int:
+    """One PNG per detection's own dilated ink mask (what Hough line
+    detection actually ran on), with a line drawn through it at the
+    detected Hough angle and the hough/minarea/combined angle values in the
+    filename. Reads `p3_debug["rotation"]` (see `paddle_engine.py::
+    RotationDebug` / `parse.py`'s per-quad loop)."""
+    entries = p3_debug.get("rotation") or []
+    if not entries:
+        return 0
+    reservoir = _as_reservoir(target)
+
+    def _make(entry) -> Image.Image:
+        mask = entry.get("dilated_ink_mask")
+        if mask is not None:
+            img = Image.fromarray((np.asarray(mask) * 255).astype(np.uint8)).convert("RGB")
+        else:
+            img = Image.fromarray(np.asarray(entry["base_crop"])[..., ::-1])  # BGR -> RGB
+        return _old_draw_angle_line(img, entry.get("hough_angle_deg"), (220, 30, 30))
+
+    def _fmt(v) -> str:
+        return "na" if v is None else f"{v:.1f}"
+
+    n = 0
+    for i, entry in enumerate(entries):
+        if entry.get("base_crop") is None:
+            continue
+        name = (
+            f"p{page_index}_det_{i:03d}"
+            f"__h{_fmt(entry.get('hough_angle_deg'))}"
+            f"__m{_fmt(entry.get('minarea_angle_deg'))}"
+            f"__c{_fmt(entry.get('combined_angle_deg'))}.png"
+        )
+        n += reservoir.offer(name, lambda entry=entry: _make(entry))
+    return n
+
+
+def _save_oldvectorclassification_minarea_images(p3_debug: dict, target, page_index: int) -> int:
+    """One PNG per detection's own non-dilated ink mask (what
+    `cv2.minAreaRect` actually ran on), with a line drawn through it at the
+    detected minAreaRect angle and the hough/minarea/combined angle values in
+    the filename -- mirrors `_save_oldvectorclassification_hough_images` exactly,
+    reading the same `p3_debug["rotation"]` entries' `minarea_mask`/
+    `minarea_angle_deg` fields instead."""
+    entries = p3_debug.get("rotation") or []
+    if not entries:
+        return 0
+    reservoir = _as_reservoir(target)
+
+    def _make(entry) -> Image.Image:
+        mask = entry.get("minarea_mask")
+        if mask is not None:
+            img = Image.fromarray((np.asarray(mask) * 255).astype(np.uint8)).convert("RGB")
+        else:
+            img = Image.fromarray(np.asarray(entry["base_crop"])[..., ::-1])  # BGR -> RGB
+        return _old_draw_angle_line(img, entry.get("minarea_angle_deg"), (220, 30, 30))
+
+    def _fmt(v) -> str:
+        return "na" if v is None else f"{v:.1f}"
+
+    n = 0
+    for i, entry in enumerate(entries):
+        if entry.get("base_crop") is None:
+            continue
+        name = (
+            f"p{page_index}_det_{i:03d}"
+            f"__h{_fmt(entry.get('hough_angle_deg'))}"
+            f"__m{_fmt(entry.get('minarea_angle_deg'))}"
+            f"__c{_fmt(entry.get('combined_angle_deg'))}.png"
+        )
+        n += reservoir.offer(name, lambda entry=entry: _make(entry))
+    return n
+
+
+def _save_oldvectorclassification_classifier_before_images(p3_debug: dict, target, page_index: int) -> int:
+    """One PNG per detection's own crop exactly as handed to
+    `recognize_crops`, BEFORE its 0/180 classifier's physical flip. Reads
+    `p3_debug["classifier_crops"]` (`list[tuple[np.ndarray, np.ndarray]]`,
+    each a `(before, after)` pair -- see `parse.py`)."""
+    pairs = p3_debug.get("classifier_crops") or []
+    if not pairs:
+        return 0
+    reservoir = _as_reservoir(target)
+    n = 0
+    for i, (before, _after) in enumerate(pairs):
+        n += reservoir.offer(
+            f"p{page_index}_det_{i:03d}.png", lambda before=before: Image.fromarray(np.asarray(before)),
+        )
+    return n
+
+
+def _save_oldvectorclassification_classifier_after_images(p3_debug: dict, target, page_index: int) -> int:
+    """One PNG per detection's own crop AFTER the classifier's 0/180
+    physical flip -- exactly what `text_recognizer` actually saw. Reads
+    `p3_debug["classifier_crops"]`, same pairing as the `_before` saver."""
+    pairs = p3_debug.get("classifier_crops") or []
+    if not pairs:
+        return 0
+    reservoir = _as_reservoir(target)
+    n = 0
+    for i, (_before, after) in enumerate(pairs):
+        n += reservoir.offer(
+            f"p{page_index}_det_{i:03d}.png", lambda after=after: Image.fromarray(np.asarray(after)),
+        )
+    return n

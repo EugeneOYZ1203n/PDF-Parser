@@ -209,7 +209,7 @@ def test_save_legacyrecreation_ocr_images_missing_key_no_crash(tmp_path):
     assert not folder.exists()
 
 
-def test_save_vectorclassification_detect_images_saves_exact_bgr(tmp_path):
+def test_save_latestvectorclassification_detect_images_saves_exact_bgr(tmp_path):
     """No overlay drawn any more -- the saved PNG must equal `bgr` exactly
     (channel order aside)."""
     bgr = np.zeros((20, 20, 3), dtype=np.uint8)
@@ -217,98 +217,44 @@ def test_save_vectorclassification_detect_images_saves_exact_bgr(tmp_path):
     quads = [np.array([(1, 1), (10, 1), (10, 10), (1, 10)], dtype=np.float64)]
     p3_debug = {"cluster_detections": [(bgr, quads)]}
     folder = tmp_path / "for_paddle_detect"
-    n = gpr._save_vectorclassification_detect_images(p3_debug, folder, page_index=0)
+    n = gpr._save_latestvectorclassification_detect_images(p3_debug, folder, page_index=0)
     assert n == 1
     from PIL import Image
     saved = np.asarray(Image.open(list(folder.glob("*.png"))[0]))
     assert np.array_equal(saved[:, :, :3], bgr[:, :, ::-1])
 
 
-def test_save_vectorclassification_detect_images_missing_key_no_crash(tmp_path):
+def test_save_latestvectorclassification_detect_images_missing_key_no_crash(tmp_path):
     folder = tmp_path / "for_paddle_detect"
-    assert gpr._save_vectorclassification_detect_images({}, folder, 0) == 0
+    assert gpr._save_latestvectorclassification_detect_images({}, folder, 0) == 0
     assert not folder.exists()
 
 
-def test_save_vectorclassification_rotation_hough_images_saves_exact_mask(tmp_path):
-    mask = np.zeros((10, 10), dtype=bool)
-    mask[5, :] = True
-    p3_debug = {"rotation": [{"dilated_ink_mask": mask, "minarea_mask": None}]}
-    folder = tmp_path / "hough_line"
-    n = gpr._save_vectorclassification_rotation_hough_images(p3_debug, folder, page_index=0)
-    assert n == 1
-    from PIL import Image
-    saved = np.asarray(Image.open(list(folder.glob("*.png"))[0]))
-    assert np.array_equal(saved > 0, mask)
-
-
-def test_save_vectorclassification_rotation_hough_images_skips_none_mask(tmp_path):
-    """A quad with `allow_rotation=False` never built a mask -- skip it
-    entirely rather than falling back to some other image."""
-    p3_debug = {"rotation": [{"dilated_ink_mask": None, "minarea_mask": None}]}
-    folder = tmp_path / "hough_line"
-    n = gpr._save_vectorclassification_rotation_hough_images(p3_debug, folder, page_index=0)
-    assert n == 0
-    assert not folder.exists()
-
-
-def test_save_vectorclassification_rotation_hough_images_missing_key_no_crash(tmp_path):
-    folder = tmp_path / "hough_line"
-    assert gpr._save_vectorclassification_rotation_hough_images({}, folder, 0) == 0
-    assert not folder.exists()
-
-
-def test_save_vectorclassification_rotation_minarea_images_saves_exact_mask(tmp_path):
-    mask = np.zeros((10, 10), dtype=bool)
-    mask[:, 5] = True
-    p3_debug = {"rotation": [{"dilated_ink_mask": None, "minarea_mask": mask}]}
-    folder = tmp_path / "minarea_rect"
-    n = gpr._save_vectorclassification_rotation_minarea_images(p3_debug, folder, page_index=0)
-    assert n == 1
-    from PIL import Image
-    saved = np.asarray(Image.open(list(folder.glob("*.png"))[0]))
-    assert np.array_equal(saved > 0, mask)
-
-
-def test_save_vectorclassification_rotation_minarea_images_skips_none_mask(tmp_path):
-    p3_debug = {"rotation": [{"dilated_ink_mask": None, "minarea_mask": None}]}
-    folder = tmp_path / "minarea_rect"
-    n = gpr._save_vectorclassification_rotation_minarea_images(p3_debug, folder, page_index=0)
-    assert n == 0
-    assert not folder.exists()
-
-
-def test_save_vectorclassification_rotation_minarea_images_missing_key_no_crash(tmp_path):
-    folder = tmp_path / "minarea_rect"
-    assert gpr._save_vectorclassification_rotation_minarea_images({}, folder, 0) == 0
-    assert not folder.exists()
-
-
-def test_save_vectorclassification_rotation_classifier_images_saves_exact_crop(tmp_path):
+def test_save_latestvectorclassification_rotation_classifier_images_saves_exact_crop(tmp_path):
     crop = np.zeros((4, 4, 3), dtype=np.uint8)
     crop[0, 0] = [9, 8, 7]
     p3_debug = {"paddle_classifier_crops": [crop]}
     folder = tmp_path / "paddle_classifier"
-    n = gpr._save_vectorclassification_rotation_classifier_images(p3_debug, folder, page_index=0)
+    n = gpr._save_latestvectorclassification_rotation_classifier_images(p3_debug, folder, page_index=0)
     assert n == 1
     from PIL import Image
     saved = np.asarray(Image.open(list(folder.glob("*.png"))[0]))
     assert np.array_equal(saved[:, :, :3], crop)
 
 
-def test_save_vectorclassification_rotation_classifier_images_missing_key_no_crash(tmp_path):
+def test_save_latestvectorclassification_rotation_classifier_images_missing_key_no_crash(tmp_path):
     folder = tmp_path / "paddle_classifier"
-    assert gpr._save_vectorclassification_rotation_classifier_images({}, folder, 0) == 0
+    assert gpr._save_latestvectorclassification_rotation_classifier_images({}, folder, 0) == 0
     assert not folder.exists()
 
 
-def test_save_vectorclassification_recog_bucket_images_saves_exact_crop(tmp_path):
+def test_save_latestvectorclassification_recog_bucket_images_saves_exact_crop(tmp_path):
     crop = np.ones((4, 4, 3), dtype=np.uint8) * 255
     p3_debug = {"recog_bucket_crops": {
         "0": [(crop, "Y")], "1": [], "2": [], "3": [], "failed": [],
     }}
     folder = tmp_path / "0_retry"
-    n = gpr._save_vectorclassification_recog_bucket_images(p3_debug, folder, page_index=0, bucket="0")
+    n = gpr._save_latestvectorclassification_recog_bucket_images(p3_debug, folder, page_index=0, bucket="0")
     assert n == 1
     files = list(folder.glob("*.png"))
     assert len(files) == 1
@@ -318,17 +264,17 @@ def test_save_vectorclassification_recog_bucket_images_saves_exact_crop(tmp_path
     assert np.array_equal(saved[:, :, :3], crop)
 
 
-def test_save_vectorclassification_recog_bucket_images_empty_bucket_no_crash(tmp_path):
+def test_save_latestvectorclassification_recog_bucket_images_empty_bucket_no_crash(tmp_path):
     p3_debug = {"recog_bucket_crops": {"0": [], "1": [], "2": [], "3": [], "failed": []}}
     folder = tmp_path / "1_retry"
-    n = gpr._save_vectorclassification_recog_bucket_images(p3_debug, folder, page_index=0, bucket="1")
+    n = gpr._save_latestvectorclassification_recog_bucket_images(p3_debug, folder, page_index=0, bucket="1")
     assert n == 0
     assert not folder.exists()
 
 
-def test_save_vectorclassification_recog_bucket_images_missing_key_no_crash(tmp_path):
+def test_save_latestvectorclassification_recog_bucket_images_missing_key_no_crash(tmp_path):
     folder = tmp_path / "failed"
-    n = gpr._save_vectorclassification_recog_bucket_images({}, folder, page_index=0, bucket="failed")
+    n = gpr._save_latestvectorclassification_recog_bucket_images({}, folder, page_index=0, bucket="failed")
     assert n == 0
     assert not folder.exists()
 
@@ -353,7 +299,7 @@ def test_layer_writer_skips_all_blank_layers(tmp_path):
 
 
 def test_new_engine_artifacts_skip_phase1_and_final():
-    variant = gpr.PipelineVariant(name="x", engine="current", p2="Stub", p3="VectorClassification")
+    variant = gpr.PipelineVariant(name="x", engine="current", p2="Stub", p3="LatestVectorClassification")
     stems = [row[0] for row in gpr._active_artifacts(gpr.ReportConfig(), variant)]
     assert stems == ["phase2", "reconstructed"]
 
@@ -462,25 +408,54 @@ def test_extra_prediction_layers_only_with_content(tmp_path):
     }
 
 
-def test_save_vectorclassification_fast_images_pairs_input_and_heatmap(tmp_path):
-    from PIL import Image
-
-    rgb = np.full((12, 30, 3), 200, dtype=np.uint8)
-    heat = np.zeros((6, 30), dtype=np.float32)
-    heat[2, 3] = 1.0
-    p3_debug = {"fast_images": [(rgb, heat)]}
-    dirs = gpr._image_dirs(tmp_path)
-    n = gpr._save_vectorclassification_fast_images(p3_debug, dirs["fast_input"], dirs["fast_heatmap"], 0)
+def test_save_latestvectorclassification_quad_rotation_images_saves_exact_region(tmp_path):
+    region = np.zeros((6, 6, 3), dtype=np.uint8)
+    region[1, 2] = [40, 50, 60]
+    folder = tmp_path / "quad_rotation"
+    n = gpr._save_latestvectorclassification_quad_rotation_images(
+        {"quad_rotation_regions": [region]}, folder, page_index=0,
+    )
     assert n == 1
-    [inp] = list(dirs["fast_input"].glob("*.png"))
-    [hm] = list(dirs["fast_heatmap"].glob("*.png"))
-    assert inp.name == hm.name
-    assert np.array_equal(np.asarray(Image.open(inp)), rgb)
-    saved_heat = np.asarray(Image.open(hm))
-    assert saved_heat.shape == (6, 30) and saved_heat[2, 3] == 255 and saved_heat.sum() == 255
+    from PIL import Image
+    saved = np.asarray(Image.open(list(folder.glob("*.png"))[0]))
+    assert np.array_equal(saved[:, :, :3], region)
+    assert gpr._save_latestvectorclassification_quad_rotation_images({}, tmp_path / "none", 0) == 0
 
 
-def test_save_vectorclassification_fast_images_missing_key_no_crash(tmp_path):
+def test_image_dirs_has_no_fast_or_hough_folders_for_latest(tmp_path):
     dirs = gpr._image_dirs(tmp_path)
-    assert gpr._save_vectorclassification_fast_images({}, dirs["fast_input"], dirs["fast_heatmap"], 0) == 0
-    assert not dirs["fast_input"].exists()
+    assert "fast_input" not in dirs and "rotation_hough" not in dirs and "rotation_minarea" not in dirs
+    assert dirs["rotation_quad"] == tmp_path / "for_rotation_correction" / "quad_rotation"
+
+
+def test_old_vectorclassification_savers_use_its_own_folders(tmp_path):
+    """OldVectorClassification's 2026-09-29 savers read that backend's own
+    debug_out shape (detect quads drawn on top, hough/minarea masks with an
+    angle line, before/after classifier pairs)."""
+    from types import SimpleNamespace
+
+    bgr = np.full((20, 20, 3), 255, dtype=np.uint8)
+    quads = [np.array([(1, 1), (10, 1), (10, 10), (1, 10)], dtype=np.float64)]
+    mask = np.zeros((10, 10), dtype=bool)
+    mask[5, :] = True
+    crop = np.zeros((4, 4, 3), dtype=np.uint8)
+    p3_debug = {
+        "cluster_detections": [(bgr, quads)],
+        "ocr_crops": [(crop, "AB")],
+        "rotation": [{
+            "base_crop": bgr, "dilated_ink_mask": mask, "minarea_mask": mask,
+            "hough_angle_deg": 0.0, "minarea_angle_deg": 0.0, "combined_angle_deg": 0.0,
+        }],
+        "classifier_crops": [(crop, crop)],
+    }
+    reservoirs = gpr._image_reservoirs(gpr._image_dirs(tmp_path), seed_name="doc")
+    gpr._accumulate_page(
+        SimpleNamespace(extra={"p3_debug": p3_debug}), 0, [], gpr._LayerWriter(), {}, reservoirs,
+        p3="OldVectorClassification",
+    )
+    for folder in (
+        "paddle_detect_images", "paddle_recog_images", "hough_line_images", "minarea_rect_images",
+        "paddle_classifier_before_images", "paddle_classifier_after_images",
+    ):
+        assert len(list((tmp_path / folder).glob("*.png"))) == 1, folder
+    assert not (tmp_path / "for_paddle_detect").exists()

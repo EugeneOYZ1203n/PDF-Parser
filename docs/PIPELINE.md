@@ -1,5 +1,12 @@
 # The `VectorClassification` P3 backend, end to end
 
+**SUPERSEDED (2026-10-06): the `VectorClassification` P3 backend no longer exists.** It was merged
+with `CollinearVectorClass` into `P3_Vector_Parsing/LatestVectorClassification/` (the default), and
+its 2026-09-29 state is preserved, frozen and never to be edited, as
+`P3_Vector_Parsing/OldVectorClassification/` -- see `CLAUDE.md`'s `P3_Vector_Parsing/` bullets.
+Every path below that says `VectorClassification/` refers to the old backend; this document is
+kept only as history.
+
 **STALE (2026-09): this document describes the `classify → fast → segment → similarity → ocr →
 restore → drawing` chain as it existed before `VectorClassification` was reworked to merge every
 FAST-surviving cluster across `(layer,color)` buckets, cluster by content-stream draw order

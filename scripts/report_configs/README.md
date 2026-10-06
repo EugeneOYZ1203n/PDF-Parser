@@ -11,8 +11,8 @@ Every field is optional except that you need at least one of `input_dir` /
 |---|---|
 | `pipeline` | `current` (default, the pluggable `core.pipeline` engine) / `legacy` |
 | `p2` | only meaningful when `pipeline: "current"` — a `core.registry.P2_REGISTRY` name (`Stub` default, or `Junction`) |
-| `p3` | only meaningful when `pipeline: "current"` — a `core.registry.P3_REGISTRY` name (`VectorClassification` default, or `LegacyRecreation`) |
-| `enable_fast` | forwarded to `p3` backends that accept it (default `true`). Currently a no-op — no P3 backend declares it since FAST was removed from VectorClassification; kept so older configs still validate |
+| `p3` | only meaningful when `pipeline: "current"` — a `core.registry.P3_REGISTRY` name (`LatestVectorClassification` default, `OldVectorClassification` -- the frozen 2026-09-29 snapshot -- or `LegacyRecreation`) |
+| `enable_fast` | forwarded to `p3` backends that accept it (default `true`). Currently a no-op — no P3 backend declares it (LatestVectorClassification has no FAST; OldVectorClassification always runs its own FAST filter); kept so older configs still validate |
 | `final_stage` | one of `core.pipeline`'s short step names (`phase1`/`phase2`/`phase3`); `null` = all. Trims which of the fixed phase-level artifacts render — doesn't skip any actual pipeline work or gate per-backend debug layers. Ignored for `pipeline: "legacy"`. |
 | `input_dir` | folder scanned for `*.pdf` |
 | `input_files` | explicit list of PDF paths (merged with `input_dir`, deduped) |
@@ -34,7 +34,7 @@ For timing or benchmark-only runs, turn off both kinds of debug output:
 
 ```json
 {
-  "p3": "VectorClassification",
+  "p3": "LatestVectorClassification",
   "input_files": ["references/some.pdf"],
   "pages": [0],
   "debug_layers": false,

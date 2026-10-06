@@ -3,7 +3,7 @@ port of archive/raster_parser's own Type-2 fill-glyph classification +
 seqno word-grouping + PaddleOCR recognition algorithm
 (archive/raster_parser/rendering/pdf_render/reconstruct.py::filter_text_vectors
 + archive/raster_parser/ocr/wordgrouping.py), onto commons.models types.
-Self-contained -- not shared with VectorClassification/FastIntoPaddle."""
+Self-contained -- not shared with OldVectorClassification/FastIntoPaddle."""
 from __future__ import annotations
 
 # filter_out_white_vectors: a vector filled exactly this color is page
@@ -26,7 +26,7 @@ OCR_DPI = 300
 # word group's own render frame, on top of half its own max stroke width --
 # archive's original PngRenderer.render_word_group used a flat padding=5.0pt,
 # so this is that same value rather than the smaller "extra" constant
-# VectorClassification/FastIntoPaddle use for their own stroke-derived margin.
+# OldVectorClassification/FastIntoPaddle use for their own stroke-derived margin.
 RENDER_PADDING_EXTRA_PT = 5.0
 
 # ocr_prep.dpi_for_cluster (parse.py, via commons.renderer.ocr_prep): never-

@@ -32,12 +32,16 @@ from scripts.debug_image_savers import (
     _DEBUG_IMAGE_CAP,
     _ImageReservoir,
     _save_legacyrecreation_ocr_images,
-    _save_vectorclassification_detect_images,
-    _save_vectorclassification_fast_images,
-    _save_vectorclassification_recog_bucket_images,
-    _save_vectorclassification_rotation_classifier_images,
-    _save_vectorclassification_rotation_hough_images,
-    _save_vectorclassification_rotation_minarea_images,
+    _save_latestvectorclassification_detect_images,
+    _save_latestvectorclassification_quad_rotation_images,
+    _save_latestvectorclassification_recog_bucket_images,
+    _save_latestvectorclassification_rotation_classifier_images,
+    _save_oldvectorclassification_classifier_after_images,
+    _save_oldvectorclassification_classifier_before_images,
+    _save_oldvectorclassification_detect_images,
+    _save_oldvectorclassification_hough_images,
+    _save_oldvectorclassification_minarea_images,
+    _save_oldvectorclassification_recog_images,
 )
 from scripts.report_config import NEW_STEP_NAMES, _layer_slug
 
@@ -267,28 +271,32 @@ def _accumulate_page(
         return
     p3_debug = (res.extra or {}).get("p3_debug") or {}
     with clock("debug_images"):
-        # CollinearVectorClass keeps VectorClassification's debug_out shape
-        # (its minarea masks are always None, so that folder stays empty).
-        if p3 in ("VectorClassification", "CollinearVectorClass"):
-            _save_vectorclassification_detect_images(p3_debug, reservoirs["detect"], page_index)
-            _save_vectorclassification_rotation_hough_images(
-                p3_debug, reservoirs["rotation_hough"], page_index,
+        if p3 == "LatestVectorClassification":
+            _save_latestvectorclassification_detect_images(p3_debug, reservoirs["detect"], page_index)
+            _save_latestvectorclassification_quad_rotation_images(
+                p3_debug, reservoirs["rotation_quad"], page_index,
             )
-            _save_vectorclassification_rotation_minarea_images(
-                p3_debug, reservoirs["rotation_minarea"], page_index,
-            )
-            _save_vectorclassification_rotation_classifier_images(
+            _save_latestvectorclassification_rotation_classifier_images(
                 p3_debug, reservoirs["rotation_classifier"], page_index,
             )
             for bucket, key in (
                 ("0", "recog_0"), ("1", "recog_1"), ("2", "recog_2"),
                 ("3", "recog_3"), ("failed", "recog_failed"),
             ):
-                _save_vectorclassification_recog_bucket_images(
+                _save_latestvectorclassification_recog_bucket_images(
                     p3_debug, reservoirs[key], page_index, bucket,
                 )
-            _save_vectorclassification_fast_images(
-                p3_debug, reservoirs["fast_input"], reservoirs["fast_heatmap"], page_index,
+        elif p3 == "OldVectorClassification":
+            # The frozen backend's own 2026-09-29 savers and folders.
+            _save_oldvectorclassification_detect_images(p3_debug, reservoirs["old_detect"], page_index)
+            _save_oldvectorclassification_recog_images(p3_debug, reservoirs["old_recog"], page_index)
+            _save_oldvectorclassification_hough_images(p3_debug, reservoirs["old_hough"], page_index)
+            _save_oldvectorclassification_minarea_images(p3_debug, reservoirs["old_minarea"], page_index)
+            _save_oldvectorclassification_classifier_before_images(
+                p3_debug, reservoirs["old_classifier_before"], page_index,
+            )
+            _save_oldvectorclassification_classifier_after_images(
+                p3_debug, reservoirs["old_classifier_after"], page_index,
             )
         elif p3 == "LegacyRecreation":
             _save_legacyrecreation_ocr_images(p3_debug, reservoirs["ocr"], page_index)

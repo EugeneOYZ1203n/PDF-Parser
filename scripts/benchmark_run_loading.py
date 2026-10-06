@@ -157,7 +157,7 @@ def _score_vectors(
 def _load_fast_cluster_stats(entry: RunEntry) -> "dict | None":
     """`{"total": N, "passed": P}` summed across every page of this run's
     `dump.json` that recorded a `PageDump.fast_cluster_stats` (the
-    VectorClassification P3 backend's FAST-filter cluster counts, see
+    OldVectorClassification P3 backend's FAST-filter cluster counts, see
     `generate_pipeline_report.py::_fast_cluster_stats`). `None` if no page
     recorded this (a different P3 backend, the legacy engine, or an older
     dump without the field)."""
@@ -180,7 +180,7 @@ _RETRY_BUCKETS = ("0", "1", "2", "3", "failed")
 def _load_retry_stats(entry: RunEntry) -> "dict | None":
     """`{"0": N, "1": N, "2": N, "3": N, "failed": N}` blank-recognition
     retry counts summed across every page of this run's `dump.json` that
-    recorded a `PageDump.retry_stats` (the VectorClassification P3 backend's
+    recorded a `PageDump.retry_stats` (the Latest/OldVectorClassification P3 backend's
     rotation retry sweep, see `generate_pipeline_report.py::_retry_stats`).
     `None` if no page recorded this (a different P3 backend, the legacy
     engine, or an older dump without the field). Mirrors

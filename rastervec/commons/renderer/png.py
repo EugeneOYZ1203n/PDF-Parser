@@ -15,7 +15,7 @@ exactly the members' `union_bbox` -- nothing added on any side, unless a
 caller passes a nonzero `padding`. `render_vector_cluster`,
 `pixel_to_page_bbox` and `page_points_to_pixel` all take an optional
 `padding` (PDF points, expanding the frame equally on every side) that must
-agree for a given render -- see `VectorClassification/radon.py::
+agree for a given render -- see the former `VectorClassification/radon.py::
 render_cluster_for_radon`, which sizes it from a cluster's own max stroke
 width so a thick stroke at the bbox edge doesn't get clipped by the frame.
 This is a render-time, page-space margin, distinct from
@@ -121,7 +121,7 @@ def pixel_to_page_bbox(
     bbox origin minus `padding` -- pass the same `padding` used for that
     render (0 if none).
 
-    A caller working in a *padded* copy of that render (`VectorClassification/
+    A caller working in a *padded* copy of that render (the former `VectorClassification/
     radon.py::segment_clusters`) must subtract `ocr_prep.pad_image_uniform`'s
     own returned pixel offset before calling this."""
     x0, y0, _x1, _y1 = union_bbox([v.bbox for v in vectors])

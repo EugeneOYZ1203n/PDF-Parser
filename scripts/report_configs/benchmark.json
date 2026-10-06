@@ -1,7 +1,7 @@
 {
   "pipeline": "current",
   "p2": "Stub",
-  "p3": "VectorClassification",
+  "p3": "LatestVectorClassification",
   "final_stage": null,
   "benchmark": true,
   "input_files": [

@@ -3,7 +3,7 @@ every P3 backend's own OCR pipeline before a cluster reaches PaddleOCR.
 
 `pad_image_uniform` is the one padding algorithm used everywhere in the
 pipeline now (a second, axis-independent variant used to live in
-`VectorClassification/radon.py`; it's retired, not ported here -- every
+the former `VectorClassification/radon.py`; it's retired, not ported here -- every
 padding call site uses this uniform formula instead). `dpi_for_cluster` /
 `render_cluster_with_dynamic_dpi` compose with `png.render_vector_cluster`
 to render a cluster at a dpi bumped up (never down) so a small cluster
@@ -11,7 +11,7 @@ isn't handed to OCR at a few dozen px.
 
 Rotation-related helpers (perspective rotate-crop, quad-angle estimation)
 and BGR normalization are deliberately **not** here -- they stay duplicated
-in whichever of `VectorClassification`/`LegacyRecreation`'s own
+in whichever of `LatestVectorClassification`/`LegacyRecreation`'s own
 `paddle_engine.py` actually needs them, since this module is scoped to
 padding and rendering
 only.

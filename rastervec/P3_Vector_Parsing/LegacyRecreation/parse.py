@@ -3,7 +3,7 @@ recreation of archive/raster_parser's own Type-2 algorithm: classify filled
 vectors into glyph-ink vs box/panel/rule, group by seqno-adjacency into word
 groups, render + OCR each group, and merge with everything else as drawing
 content. Fully self-contained -- own filters.py/wordgrouping.py/
-paddle_engine.py/config.py, imports nothing from VectorClassification or
+paddle_engine.py/config.py, imports nothing from OldVectorClassification or
 FastIntoPaddle. Unlike `Evaluation/Evaluate/legacy_adapter.py` (which
 shells out to the real archive/raster_parser codebase unmodified, kept for
 benchmark-baseline comparison), this is a genuine from-scratch port onto
@@ -186,7 +186,7 @@ def parse(
 # three generic primitives in `commons/renderer`. Each is called two ways:
 # inline from `parse()` (streaming) and from `render_debug` below (batch,
 # reading the same data back out of `debug_out`). Nothing here is shared
-# with VectorClassification/FastIntoPaddle/Junction.
+# with OldVectorClassification/FastIntoPaddle/Junction.
 # ---------------------------------------------------------------------------
 _C_FILL = "#059669"
 _C_DRAWING = "#111827"

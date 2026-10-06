@@ -1,7 +1,7 @@
 """Junction's own PaddleOCR detect + recognize pair, plus the raster-refined
 deskew used before recognition.
 
-An independent duplicate of `P3_Vector_Parsing/VectorClassification/
+An independent duplicate of `P3_Vector_Parsing/OldVectorClassification/
 paddle_engine.py` (per CLAUDE.md's "sibling backends share zero code" rule
 -- P2 must not import a P3 backend): `PaddleDetectBackend.detect` returns
 text quads in the given image's pixel space; `PaddleRecBackend.
@@ -157,7 +157,7 @@ def _recognize_crops_raw_job(
 
 
 # --------------------------------------------------------------------------
-# Deskew (duplicated from VectorClassification/paddle_engine.py).
+# Deskew (duplicated from OldVectorClassification/paddle_engine.py).
 # --------------------------------------------------------------------------
 def normalize_rotation(angle_deg: float) -> float:
     """Wrap to `[-90, 90)`."""

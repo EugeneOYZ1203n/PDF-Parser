@@ -1,6 +1,6 @@
 """Shared helpers for the three vector-geometry probe notebooks
 (`vector_intersection_lab.ipynb`, `dashed_line_collinear_lab.ipynb`,
-`parallel_groups_lab.ipynb`) -- experimental VectorClassification signals,
+`parallel_groups_lab.ipynb`) -- experimental vector-classification signals,
 kept out of `P3_Vector_Parsing/` until one of them proves useful.
 
 The unit everywhere is one whole `Vector` (one `get_drawings()` drawing),
@@ -51,8 +51,8 @@ from rastervec.commons.paths import output_dir
 from rastervec.commons.renderer.pdf import render_boxes_pdf, render_vectors_pdf
 from rastervec.P1_Reading_Native.reader import Reader
 from rastervec.P1_Reading_Native.vector_extract import extract_vectors
-from rastervec.P3_Vector_Parsing.VectorClassification.classify_vectors import classify_vectors
-from rastervec.P3_Vector_Parsing.VectorClassification.layer_color_separation import (
+from rastervec.P3_Vector_Parsing.LatestVectorClassification.classify_vectors import classify_vectors
+from rastervec.P3_Vector_Parsing.LatestVectorClassification.layer_color_separation import (
     separate_by_color,
     separate_by_layer,
     separate_by_width,
@@ -88,9 +88,12 @@ def bucket_vectors(vectors: list[Vector]) -> dict[BucketKey, list[Vector]]:
 
 
 def cluster_vectors(vectors: list[Vector], page_meta: PageMeta) -> list[tuple[BucketKey, list[Vector]]]:
-    """Run P3 VectorClassification's own classification chain (layer/color/
-    width buckets -> seqno-overlap merge -> constrained spatial clustering)
-    and return every final cluster as `(bucket_key, flat Vector list)`."""
+    """Run P3 LatestVectorClassification's own classification chain
+    (layer/color/width buckets -> collinear drawing removal -> seqno-overlap
+    merge -> constrained spatial clustering) and return every cluster of its
+    "Spatial cluster" step -- before the length-outlier and crossings steps
+    drop anything, so the labs measure the clusters those steps see -- as
+    `(bucket_key, flat Vector list)`."""
 
     class _Page:  # classify_vectors only threads `page` through, never reads it
         meta = page_meta
@@ -100,7 +103,8 @@ def cluster_vectors(vectors: list[Vector], page_meta: PageMeta) -> list[tuple[Bu
     for key, stage in result.clustering.items():
         if not stage.steps:
             continue
-        for cluster in stage.steps[-1].categories["kept"].groups:
+        step = next((s for s in stage.steps if s.label == "Spatial cluster"), stage.steps[-1])
+        for cluster in step.categories["kept"].groups:
             clusters.append((key, [v for group in cluster for v in group]))
     return clusters
 
