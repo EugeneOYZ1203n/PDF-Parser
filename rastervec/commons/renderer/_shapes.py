@@ -150,6 +150,13 @@ def replay_drawing_paths(
     `Shape.finish()` emits a stroke operator whenever `fill` is `None` even
     with `color=None`, falling back to the default black graphics-state
     color instead of staying invisible.
+
+    A stroke of width 0 (a PDF hairline -- what CAD exports use for almost
+    every line) can't go through `Shape.finish(width=0)` either: PyMuPDF
+    then discards the stroke colour and emits no `w`, so an `"s"` path paints
+    in the default black at 1pt (burying small fills like arrowheads) and an
+    `"fs"` path loses its stroke. `0 w` is written into the path's own
+    content instead, with `finish` given width 1.
     """
     for (blendmode, opacity), run in groupby(
         vectors, key=lambda v: (v.blendmode, v.opacity)
@@ -168,8 +175,20 @@ def replay_drawing_paths(
                 continue
             drawn_any = True
 
+            width = v.width
+            if v.color is None:
+                width = 0
+            elif width is None:
+                width = 1  # PDF's default line width
+            elif width == 0:
+                # PDF hairline. `Shape.finish(width=0)` would drop the stroke
+                # colour and write no `w` -- the stroke then paints in the
+                # default black at 1pt. Set `0 w` ourselves ahead of the path
+                # and let `finish` see width 1 (no `w` of its own, colour kept).
+                shape.draw_cont = "0 w\n" + shape.draw_cont
+                width = 1
             kwargs: dict = {
-                "width": v.width or 0,
+                "width": width,
                 "closePath": True if v.closePath is None else bool(v.closePath),
                 "even_odd": bool(v.even_odd),
                 "lineJoin": v.lineJoin or 0,

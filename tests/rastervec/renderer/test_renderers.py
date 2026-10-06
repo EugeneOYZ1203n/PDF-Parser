@@ -217,6 +217,70 @@ def test_render_output_pdf_reproduces_blend_mode(vector):
         doc.close()
 
 
+def _page_content(pdf: bytes) -> str:
+    doc = fitz.open("pdf", pdf)
+    try:
+        return b"".join(doc.xref_stream(x) for x in doc[0].get_contents()).decode()
+    finally:
+        doc.close()
+
+
+def _reextract(pdf: bytes) -> list[dict]:
+    doc = fitz.open("pdf", pdf)
+    try:
+        return doc[0].get_drawings()
+    finally:
+        doc.close()
+
+
+def test_hairline_stroke_keeps_its_colour_and_zero_width(vector):
+    # A `0 w` hairline (CAD exports draw nearly every line this way) must not
+    # fall through `Shape.finish(width=0)`, which drops the colour and paints
+    # the stroke in the default black at 1pt.
+    magenta = vector(kind="l", bbox=(10, 50, 190, 50), color=(1, 0, 1), width=0.0)
+
+    pdf = render_output_pdf(_meta(), [], [magenta])
+
+    content = _page_content(pdf)
+    assert "0 w" in content
+    assert "1 0 1 RG" in content
+    [d] = _reextract(pdf)
+    assert d["type"] == "s"
+    assert d["width"] == 0
+    assert tuple(d["color"]) == (1.0, 0.0, 1.0)
+
+
+def test_hairline_fill_and_stroke_keeps_its_stroke(vector):
+    tri = vector(
+        type="fs", color=(0, 0, 0), fill=(0, 1, 1), width=0.0, closePath=True,
+        items=[("l", (10, 10), (40, 10)), ("l", (40, 10), (10, 40)), ("l", (10, 40), (10, 10))],
+        bbox=(10, 10, 40, 40),
+    )
+
+    pdf = render_output_pdf(_meta(), [], [tri])
+
+    ops = _page_content(pdf).split()
+    assert "B" in ops and "f" not in ops
+    [d] = _reextract(pdf)
+    assert d["type"] == "fs"
+    assert d["width"] == 0
+    assert [tuple(p) for it in d["items"] for p in it[1:]] == [
+        (10, 10), (40, 10), (40, 10), (10, 40), (10, 40), (10, 10),
+    ]
+
+
+def test_nonzero_width_and_fill_only_unchanged(vector):
+    thin = vector(kind="l", bbox=(10, 50, 190, 50), color=(0, 0, 1), width=0.5)
+    fill_only = vector(kind="re", type="f", bbox=(10, 60, 50, 90), color=None, fill=(1, 0, 0))
+
+    pdf = render_output_pdf(_meta(), [], [thin, fill_only])
+
+    ops = _page_content(pdf).split()
+    assert ".5" in ops and ops[ops.index(".5") + 1] == "w"
+    assert "0" not in [ops[i - 1] for i, op in enumerate(ops) if op == "w"]
+    assert [d["type"] for d in _reextract(pdf)] == ["s", "f"]
+
+
 def test_render_output_page_skips_blank_text(text):
     blank_word = text(text="   ")
 
