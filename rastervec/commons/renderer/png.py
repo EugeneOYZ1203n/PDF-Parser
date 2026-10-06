@@ -6,7 +6,11 @@ small PyMuPDF page and rasterizes it (OCR input); `render_page_paths` is
 the whole-page counterpart (FAST detection input). Both replay each
 drawing's items as one composite path via
 `_shapes.replay_drawing_paths`, so multi-contour filled glyphs render with
-their counters as holes rather than filled solid. `pixel_to_page_bbox`
+their counters as holes rather than filled solid. Both render
+**black-and-white** (`monochrome=True`: every stroke/fill solid black, no
+opacity/blend) with the real stroke widths -- colour only belongs in the
+final reconstruction (`P4_Output_Organization.render_output_pdf`), never in
+a detector's input. `pixel_to_page_bbox`
 inverts `render_vector_cluster`'s own isolated-canvas transform to map a
 detected-in-pixel-space bbox back into PDF page space.
 
@@ -102,7 +106,7 @@ def render_vector_cluster(
     doc = _get_render_doc()
     cluster_page = doc.new_page(width=width, height=height)
     try:
-        replay_drawing_paths(cluster_page, vectors, dx=dx, dy=dy)
+        replay_drawing_paths(cluster_page, vectors, dx=dx, dy=dy, monochrome=True)
         return _rasterize(cluster_page, dpi)
     finally:
         doc.delete_page(cluster_page.number)
@@ -180,7 +184,7 @@ def render_page_paths(
     doc = _get_render_doc()
     page = doc.new_page(width=page_meta.width, height=page_meta.height)
     try:
-        replay_drawing_paths(page, vectors)
+        replay_drawing_paths(page, vectors, monochrome=True)
         return _rasterize(page, dpi)
     finally:
         doc.delete_page(page.number)

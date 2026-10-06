@@ -126,12 +126,29 @@ def _wrap_run_gstate(
         doc.update_stream(xref, prefix + stream + b"\nQ")
 
 
+_BLACK = (0.0, 0.0, 0.0)
+
+
+def _paint(v: Vector, monochrome: bool) -> tuple:
+    """`(color, fill, stroke_opacity, fill_opacity)` to finish `v` with --
+    its real paint, or (monochrome) solid black wherever it has any stroke /
+    fill at all, opacities dropped."""
+    if not monochrome:
+        return v.color, v.fill, v.stroke_opacity, v.fill_opacity
+    return (
+        _BLACK if v.color is not None else None,
+        _BLACK if v.fill is not None else None,
+        None, None,
+    )
+
+
 def replay_drawing_paths(
     page: "fitz.Page",
     vectors: list[Vector],
     *,
     dx: float = 0.0,
     dy: float = 0.0,
+    monochrome: bool = False,
 ) -> None:
     """Replay `vectors` onto `page`: every item of a `Vector` is drawn (in
     its own stored order), then a single `shape.finish()` for that `Vector`
@@ -157,9 +174,15 @@ def replay_drawing_paths(
     in the default black at 1pt (burying small fills like arrowheads) and an
     `"fs"` path loses its stroke. `0 w` is written into the path's own
     content instead, with `finish` given width 1.
+
+    `monochrome=True` (OCR / FAST inputs -- `png.py`) paints every stroke and
+    fill solid black and drops opacity, blend mode and group opacity, so the
+    image is black ink on white; geometry, widths (hairlines included),
+    dashes, caps/joins and the fill rule are unchanged. Colour only belongs
+    in the final reconstruction.
     """
     for (blendmode, opacity), run in groupby(
-        vectors, key=lambda v: (v.blendmode, v.opacity)
+        vectors, key=lambda v: (None, None) if monochrome else (v.blendmode, v.opacity)
     ):
         run = list(run)
         shape = page.new_shape()
@@ -175,8 +198,9 @@ def replay_drawing_paths(
                 continue
             drawn_any = True
 
+            color, fill, stroke_opacity, fill_opacity = _paint(v, monochrome)
             width = v.width
-            if v.color is None:
+            if color is None:
                 width = 0
             elif width is None:
                 width = 1  # PDF's default line width
@@ -194,16 +218,16 @@ def replay_drawing_paths(
                 "lineJoin": v.lineJoin or 0,
                 "lineCap": v.lineCap or 0,
             }
-            if v.color is not None:
-                kwargs["color"] = v.color
-            if v.fill is not None:
-                kwargs["fill"] = v.fill
+            if color is not None:
+                kwargs["color"] = color
+            if fill is not None:
+                kwargs["fill"] = fill
             if v.dashes:
                 kwargs["dashes"] = v.dashes
-            if v.stroke_opacity is not None:
-                kwargs["stroke_opacity"] = v.stroke_opacity
-            if v.fill_opacity is not None:
-                kwargs["fill_opacity"] = v.fill_opacity
+            if stroke_opacity is not None:
+                kwargs["stroke_opacity"] = stroke_opacity
+            if fill_opacity is not None:
+                kwargs["fill_opacity"] = fill_opacity
             shape.finish(**kwargs)
 
         if not drawn_any:
