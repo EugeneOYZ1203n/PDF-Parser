@@ -388,13 +388,12 @@ generic parallel-pool mechanics), never phase-specific business logic.
     (a generator — one crop alive at a time) splits the layer into components at
     `COMPONENT_TOLERANCE_PT` (10 pt) and each is traced by `junction_test.pipeline.run`
     at **native resolution** (no downscale): `binarize` (Otsu | gray<245, specks removed by
-    connected-component area — *not* a 2×2 open, which erased 1-px lines) → `skeletonize` +
-    distance transform → `skeleton_graph.build_graph` (chain walk + barb pruning) →
-    `simplify.approximate_rdp` per chain (closed loops re-anchored at their farthest-from-
-    centroid point first) → `regularize` (cKDTree: endpoint snap, min length, isolated-spur drop,
-    collinear merge — the original spike's merge compared both headings *away* from the shared
-    point, so it never merged real straight continuations; fixed). Width = `2·median(DT) − 1`.
-    Output is straight segments only. The vendored spike (branch `junction-classification`,
+    connected-component area — *not* a 2×2 open, which erased 1-px lines) → `skeletonize` →
+    `skeleton_graph.build_graph` (chain walk + barb pruning) → `vectorize` — each chain becomes
+    **one raw polyline through every skeleton pixel** (`types_.Polyline`; no Douglas-Peucker fit, no
+    regularisation — snapping/collinear-merging 1 px steps would wreck them — and no stroke-width
+    estimate: width is always 1.0). One output `Vector` per chain, an `"l"` item per pixel step;
+    `simplify.approximate_rdp` survives only to thin the debug chain display. The vendored spike (branch `junction-classification`,
     Dosch et al. 2000) originally also had F&K text/graphics separation, dashed reclaim,
     thick/thin, junction repair, LSD/Hough alternatives, Rosin-West + arc fitting, dashed-line /
     staircase / symbol recognition, remainder extraction and junction classification — all
@@ -408,7 +407,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
     `diff.py`: red = ink with no vector within `DIFF_TOLERANCE_PX` (missed), blue = vector with no
     ink (spurious), for future missed-line recovery) plus ocr/component box layers (`tile detect
     bbox`/`passed bbox`/`failed bbox` drawn as the detector's own rotated quads, kept on
-    `TileBox.quad`/`_PageState.quads`; OCR `Text`s carry theirs as `quad_points`) and tracing point/line layers (`graph_build/chains|junctions|endpoints`, `polyline_fit/segments|segment endpoints` -- real geometry, not bboxes);
+    `TileBox.quad`/`_PageState.quads`; OCR `Text`s carry theirs as `quad_points`) and tracing point/line layers (`graph_build/chains|junctions|endpoints`, `vectorize/polylines|polyline endpoints` -- real geometry, not bboxes);
     each (stage, label) appears once per page. `debug_out["diff_codes"]` keeps the raw uint8
     code canvases. Tunables in `Junction/config.py`.
 - **`P3_Vector_Parsing/`** — pluggable vector-parsing/OCR backends, selected by `p3=`, each

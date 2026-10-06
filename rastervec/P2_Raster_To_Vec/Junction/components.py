@@ -2,7 +2,7 @@
 spatially separate components and hand them to the tracer one at a time.
 
 Junction runs at full native resolution (no downscale), and its skeleton
-graph / regularizer are pure Python, so tracing a whole multi-megapixel
+graph walk is pure Python, so tracing a whole multi-megapixel
 layer in one call is slow and holds every intermediate mask for the whole
 image at once. Instead each layer's ink is grouped into components -- ink
 pixels closer than `COMPONENT_TOLERANCE_PT` (converted to px by the caller)
@@ -10,8 +10,7 @@ join, via one rectangular dilation + connected-component labelling -- and
 `iter_layer_components` is a generator: it yields one tight crop at a time,
 so only that crop and its own tracing intermediates are alive while it's
 traced. Components at least the tolerance apart never share an endpoint
-or junction, so tracing them separately loses nothing the regularizer
-could have joined (its `snap_px` is far smaller).
+or junction, so tracing them separately loses nothing.
 
 The yielded crop is the *enhanced* grayscale where the pixel belongs to
 this layer (dilated 1 px, so antialiased stroke edges stay part of the

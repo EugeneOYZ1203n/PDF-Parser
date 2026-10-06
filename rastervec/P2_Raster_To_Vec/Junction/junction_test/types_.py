@@ -9,9 +9,8 @@ Point = tuple[float, float]
 
 
 @dataclass
-class Segment:
-    p0: Point
-    p1: Point
+class Polyline:
+    points: list[Point]                # ordered (x, y), one per skeleton pixel
     width: float = 1.0
 
 
@@ -26,7 +25,6 @@ class PipelineResult:
     params: "object"
     ink: np.ndarray
     skeleton: np.ndarray
-    dist_map: np.ndarray
     graph: Graph
-    segments: list[Segment]
+    polylines: list[Polyline]
     timings: dict[str, float] = field(default_factory=dict)

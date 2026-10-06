@@ -11,9 +11,9 @@ over goes through, in order,
   5. tracing               per ink color layer, per 10 pt-tolerance spatial
                            component, one at a time (`components.py`),
                            `junction_test.pipeline.run` at native resolution:
-                           binarize -> skeleton + distance transform ->
-                           chains (barb pruning) -> Douglas-Peucker ->
-                           regularize; output is straight segments only
+                           binarize -> skeleton -> chains (barb pruning) ->
+                           each chain as a raw polyline (one vertex per
+                           skeleton pixel), width 1.0
   6. diff (debug only)     traced vectors rasterized and compared back
                            against their own ink (`diff.py`)
 
@@ -31,7 +31,7 @@ cleaned image, enhanced image, rendered vectors, total + per-layer diff)
 become full-resolution PNGs embedded in page-sized PDFs -- each layer label
 appears once per page even with several images, the images composed onto
 it; OCR and component stages become box / text layers, and the tracing
-stages (skeleton chains, junction / end nodes, fitted segments) become
+stages (skeleton chains, junction / end nodes, output polylines) become
 point / line layers drawn on the real geometry. On the streaming path
 each raster debug image is PNG-encoded into its layer's page right away and
 the array dropped, so no full-size debug array outlives its own step;
@@ -60,7 +60,7 @@ from rastervec.P2_Raster_To_Vec.Junction.config import COMPONENT_TOLERANCE_PT, D
 from rastervec.P2_Raster_To_Vec.Junction.enhance import enhance, to_gray
 from rastervec.P2_Raster_To_Vec.Junction.junction_test.pipeline import Params, run
 from rastervec.P2_Raster_To_Vec.Junction.junction_test.simplify import approximate_rdp
-from rastervec.P2_Raster_To_Vec.Junction.junction_test.types_ import Segment
+from rastervec.P2_Raster_To_Vec.Junction.junction_test.types_ import Polyline
 from rastervec.P2_Raster_To_Vec.Junction.text_ocr import run_ocr
 from rastervec.P2_Raster_To_Vec.Junction.text_removal import erase_text
 
@@ -146,7 +146,7 @@ class _PageState:
     })
     # page-space tracing geometry for the point / line debug layers
     geom: dict = field(default_factory=lambda: {
-        "chains": [], "junctions": [], "endpoints": [], "segments": [], "segment_ends": [],
+        "chains": [], "junctions": [], "endpoints": [], "polylines": [], "polyline_ends": [],
     })
 
     def next_seqno(self) -> int:
@@ -286,19 +286,19 @@ def _process_image(
             def mapper(pt, _x0=comp.x0, _y0=comp.y0):
                 return to_page((pt[0] + _x0, pt[1] + _y0))
 
-            for seg in result.segments:
-                state.vectors.append(_segment_to_vector(seg, mapper, meta.index, state.next_seqno(), color))
+            for pl in result.polylines:
+                state.vectors.append(_polyline_to_vector(pl, mapper, meta.index, state.next_seqno(), color))
             _accumulate_trace_geometry(state, result, mapper, (comp.x0, comp.y0), comp.gray.shape, to_page)
 
             if sink.active:
-                codes, rendered = diff_mod.diff_codes(result.ink, result.segments, DIFF_TOLERANCE_PX)
+                codes, rendered = diff_mod.diff_codes(result.ink, result.polylines, DIFF_TOLERANCE_PX)
                 diff_mod.paste_codes(layer_codes, codes, comp.x0, comp.y0)
                 diff_mod.paste_codes(total_codes, codes, comp.x0, comp.y0)
                 region = rendered_canvas[comp.y0:comp.y0 + rendered.shape[0], comp.x0:comp.x0 + rendered.shape[1]]
                 region |= rendered[:region.shape[0], :region.shape[1]]
-            bar.set_postfix(segments=len(state.vectors) - n_vec, refresh=False)
+            bar.set_postfix(polylines=len(state.vectors) - n_vec, refresh=False)
         bar.close()
-        _LOG.info("  trace layer %s: %d component(s) -> %d segment(s) (%.1fs)", hexcolor, n_comp,
+        _LOG.info("  trace layer %s: %d component(s) -> %d polyline(s) (%.1fs)", hexcolor, n_comp,
                   len(state.vectors) - n_vec, time.perf_counter() - t0)
         if sink.active:
             sink.add("vector_diff", f"layer {hexcolor}", hexcolor,
@@ -416,10 +416,12 @@ def _bbox_of(points: list[tuple[float, float]]) -> tuple[float, float, float, fl
     return (min(xs), min(ys), max(xs), max(ys))
 
 
-def _segment_to_vector(seg: Segment, to_page: Mapper, page_index: int, seqno: int, color) -> Vector:
-    p0, p1 = to_page(seg.p0), to_page(seg.p1)
+def _polyline_to_vector(pl: Polyline, to_page: Mapper, page_index: int, seqno: int, color) -> Vector:
+    """One `Vector` per polyline: an `"l"` item per consecutive vertex pair."""
+    pts = [to_page(p) for p in pl.points]
     return Vector(
-        type="s", items=[("l", p0, p1)], width=seg.width, rect=_bbox_of([p0, p1]),
+        type="s", items=[("l", a, b) for a, b in zip(pts, pts[1:])], width=pl.width,
+        rect=_bbox_of(pts),
         **_base_vector_kwargs(page_index, seqno, color),
     )
 
@@ -449,11 +451,11 @@ def _accumulate_trace_geometry(state: _PageState, result, mapper: Mapper, offset
                 ends[p] = ends.get(p, 0) + 1
     for node in result.graph.nodes:
         geom["endpoints" if ends.get(node, 0) == 1 else "junctions"].append(mapper(node))
-    seg_ends: set = set()
-    for seg in result.segments:
-        geom["segments"].append([mapper(seg.p0), mapper(seg.p1)])
-        seg_ends.update((seg.p0, seg.p1))
-    geom["segment_ends"].extend(mapper(p) for p in seg_ends)
+    pl_ends: set = set()
+    for pl in result.polylines:
+        geom["polylines"].append([mapper(p) for p in pl.points])
+        pl_ends.update((pl.points[0], pl.points[-1]))
+    geom["polyline_ends"].extend(mapper(p) for p in pl_ends)
 
 
 # ---------------------------------------------------------------------------
@@ -545,9 +547,9 @@ def _page_layers(page_meta, raster_layers: "list[DebugLayer]", state: _PageState
         _geometry_layer(page_meta, "graph_build", "chains", _C_GRAPH_CHAIN, polylines=geom["chains"]),
         _geometry_layer(page_meta, "graph_build", "junctions", _C_JUNCTION, points=geom["junctions"]),
         _geometry_layer(page_meta, "graph_build", "endpoints", _C_ENDPOINT, points=geom["endpoints"]),
-        _geometry_layer(page_meta, "polyline_fit", "segments", _C_SEGMENT, polylines=geom["segments"]),
-        _geometry_layer(page_meta, "polyline_fit", "segment endpoints", _C_SEGMENT_END,
-                        points=geom["segment_ends"]),
+        _geometry_layer(page_meta, "vectorize", "polylines", _C_SEGMENT, polylines=geom["polylines"]),
+        _geometry_layer(page_meta, "vectorize", "polyline endpoints", _C_SEGMENT_END,
+                        points=geom["polyline_ends"]),
         ("final_vectors", "vectors", _C_SEGMENT, render_vectors_pdf(
             page_meta, state.vectors, color_of=lambda v: tuple(v.color or (0, 0, 0)),
         )),

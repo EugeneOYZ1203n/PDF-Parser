@@ -1,7 +1,7 @@
 """Step 10 (debug): compare the traced vectors back against the ink they
 were traced from, pixel by pixel.
 
-`diff_codes` rasterizes a component's segments at their measured widths
+`diff_codes` rasterizes a component's polylines at 1 px
 (`render_geometry`) and compares them with that component's binarized, text-removed ink, each
 side dilated by `tol_px` so a 1-2 px width/position slop isn't flagged:
 
@@ -29,20 +29,19 @@ _PALETTE = np.array([
 ], dtype=np.uint8)
 
 
-def render_geometry(shape: tuple[int, int], segments) -> np.ndarray:
-    """Segments drawn at their own (rounded) widths onto a bool canvas."""
+def render_geometry(shape: tuple[int, int], polylines) -> np.ndarray:
+    """Polylines drawn at their own (rounded) width -- always 1.0 now -- onto a bool canvas."""
     canvas = np.zeros(shape[:2], np.uint8)
-    for s in segments:
-        p0 = (int(round(s.p0[0])), int(round(s.p0[1])))
-        p1 = (int(round(s.p1[0])), int(round(s.p1[1])))
-        cv2.line(canvas, p0, p1, 255, max(1, int(round(s.width))))
+    for pl in polylines:
+        pts = np.round(np.asarray(pl.points, float)).astype(np.int32).reshape(-1, 1, 2)
+        cv2.polylines(canvas, [pts], False, 255, max(1, int(round(pl.width))))
     return canvas > 0
 
 
-def diff_codes(ink: np.ndarray, segments, tol_px: int) -> "tuple[np.ndarray, np.ndarray]":
+def diff_codes(ink: np.ndarray, polylines, tol_px: int) -> "tuple[np.ndarray, np.ndarray]":
     """`(codes uint8, rendered bool)` in `ink`'s own pixel frame."""
     ink = np.asarray(ink, dtype=bool)
-    rendered = render_geometry(ink.shape, segments)
+    rendered = render_geometry(ink.shape, polylines)
     if tol_px > 0:
         k = np.ones((2 * tol_px + 1, 2 * tol_px + 1), np.uint8)
         rendered_near = cv2.dilate(rendered.astype(np.uint8), k) > 0

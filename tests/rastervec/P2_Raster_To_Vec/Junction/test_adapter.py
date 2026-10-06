@@ -142,13 +142,13 @@ def test_tracing_debug_layers_draw_points_and_lines_not_boxes(page_meta):
             return doc[0].get_drawings()
 
     for key in [("graph_build", "chains"), ("graph_build", "junctions"), ("graph_build", "endpoints"),
-                ("polyline_fit", "segments"), ("polyline_fit", "segment endpoints")]:
+                ("vectorize", "polylines"), ("vectorize", "polyline endpoints")]:
         ds = drawings(key)
         assert ds, key
         assert all(item[0] != "re" for d in ds for item in d["items"]), key
-    assert any(item[0] == "l" for d in drawings(("polyline_fit", "segments")) for item in d["items"])
+    assert any(item[0] == "l" for d in drawings(("vectorize", "polylines")) for item in d["items"])
     # dots are filled circles (bezier items); a T has 3 free ends and >= 1 junction
     endpoint_dots = [d for d in drawings(("graph_build", "endpoints")) if d.get("fill")]
     assert sum(1 for d in endpoint_dots for it in d["items"] if it[0] == "c") >= 3 * 4
     assert ("graph_build", "chain bbox") not in seen
-    assert ("polyline_fit", "segment bbox") not in seen
+    assert ("vectorize", "polyline bbox") not in seen

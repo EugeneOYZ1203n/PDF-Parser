@@ -1,4 +1,6 @@
-"""Douglas-Peucker simplification of one skeleton chain into a polyline.
+"""Douglas-Peucker simplification of one skeleton chain into a polyline --
+used only to thin the debug chain display (`adapter._accumulate_trace_geometry`);
+the tracer itself does no polyline fit.
 
 Both chain ends are always kept, so a chain's junction/end nodes never move
 -- the same contract as `Evaluation/CadFont/graph.py::_rdp_chain` (not

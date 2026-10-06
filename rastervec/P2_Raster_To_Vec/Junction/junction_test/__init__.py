@@ -1,6 +1,6 @@
 """junction_test: the classical raster->vector tracer Junction runs per
-component -- binarize -> skeleton + distance transform -> chains (barb
-pruning) -> Douglas-Peucker -> regularize.
+component -- binarize -> skeleton -> chains (barb pruning) -> each chain
+as a raw polyline.
 
 Originally a spike reproducing Dosch, Tombre, Ah-Soon, Masini, "A complete
 system for the analysis of architectural drawings", IJDAR 3(2):102-116, 2000
