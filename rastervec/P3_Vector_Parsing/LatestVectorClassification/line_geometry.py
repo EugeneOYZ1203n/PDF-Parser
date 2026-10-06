@@ -23,8 +23,11 @@ The unit is always one whole `Vector` (one `get_drawings()` drawing):
 - **grid** -- `dominant_grid(flagged)`: the flagged Vectors whose segments
   are all parallel/perpendicular to one shared direction, when that
   direction holds a majority of the flagged "l" length.
-- **ink ownership** -- `ink_fraction_in_quad(v, quad)`: the fraction of a
-  Vector's path length inside a convex quad.
+- **ink ownership** -- the tiered quad test's pieces: `bbox_inside_quad`
+  (all bbox corners inside), `quad_area`, `piece_overlap_fraction` (share of
+  a Vector's pieces touching the quad, curves as chords) and
+  `ink_fraction_in_quad` (the fraction of a Vector's path length inside a
+  convex quad -- the expensive last resort).
 
 Angles are page space (y down), `atan2(dy, dx)` folded to [0, 180) -- the
 same convention as `Text.angle()`.
@@ -502,3 +505,59 @@ def ink_fraction_in_quad(v: Vector, quad, *, curve_samples: int) -> float:
         return 1.0 if _point_in_convex(((x0 + x1) / 2.0, (y0 + y1) / 2.0), poly) else 0.0
     inside = sum(_clip_length_convex(s, poly) for s in segs)
     return min(1.0, inside / total)
+
+
+def quad_area(quad) -> float:
+    """Unsigned area of the polygon `quad` (shoelace)."""
+    poly = np.asarray(quad, dtype=float).reshape(-1, 2)
+    x, y = poly[:, 0], poly[:, 1]
+    return abs(float(np.dot(x, np.roll(y, -1)) - np.dot(np.roll(x, -1), y))) / 2.0
+
+
+def bbox_inside_quad(bbox, quad) -> bool:
+    """True when all 4 corners of `bbox` lie inside (or on) the convex
+    `quad`. Plain floats, no numpy -- it runs once per (vector, quad) pair
+    and decides most of them, where numpy's per-call overhead dominates."""
+    pts = [(float(p[0]), float(p[1])) for p in quad]
+    edges = [(ax, ay, bx - ax, by - ay) for (ax, ay), (bx, by) in zip(pts, pts[1:] + pts[:1])]
+    x0, y0, x1, y1 = bbox
+    pos = neg = False
+    for px, py in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
+        for ax, ay, ex, ey in edges:
+            cross = ex * (py - ay) - ey * (px - ax)
+            pos |= cross > 0.0
+            neg |= cross < 0.0
+            if pos and neg:
+                return False
+    return True
+
+
+def piece_overlap_fraction(v: Vector, quad) -> float:
+    """Fraction (0..1) of `v`'s pieces that touch the convex `quad` -- "l"
+    segments, "re"/"qu" edges, and each "c" as its chord p0->p3 (no curve
+    sampling: a cheap gate, not a length measure). One vectorised
+    Cyrus-Beck test over every piece. `nan` when `v` has no pieces; 0 for a
+    degenerate (zero-area) quad."""
+    segs, cubics = item_pieces(v)
+    rows = segs + [(c[0][0], c[0][1], c[3][0], c[3][1]) for c in cubics]
+    if not rows:
+        return math.nan
+    poly = np.asarray(quad, dtype=float).reshape(-1, 2)
+    x, y = poly[:, 0], poly[:, 1]
+    area = float(np.dot(x, np.roll(y, -1)) - np.dot(np.roll(x, -1), y))
+    if area == 0.0:
+        return 0.0
+    edges = np.roll(poly, -1, axis=0) - poly
+    normals = math.copysign(1.0, area) * np.stack([-edges[:, 1], edges[:, 0]], axis=1)
+    arr = np.asarray(rows, dtype=float)
+    p0 = arr[:, :2]
+    d = arr[:, 2:] - p0
+    num = np.einsum("sek,ek->se", p0[:, None, :] - poly[None, :, :], normals)  # >= 0 inside
+    den = d @ normals.T
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = -num / den
+    t_lo = np.maximum(np.where(den > 0.0, t, -np.inf).max(axis=1), 0.0)
+    t_hi = np.minimum(np.where(den < 0.0, t, np.inf).min(axis=1), 1.0)
+    parallel_out = ((den == 0.0) & (num < 0.0)).any(axis=1)
+    overlap = (t_lo <= t_hi) & ~parallel_out
+    return float(overlap.mean())

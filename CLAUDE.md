@@ -448,10 +448,13 @@ generic parallel-pool mechanics), never phase-specific business logic.
     candidate). `Text.angle` = long-edge angle + classifier flip + 90° × winning retry;
     `Text.quad_points` = the detect quad reordered so p0→p1 is the reading direction
     (`reorder_quad_reading`). **Text vs. drawing has no FAST**: `_text_vectors_by_quad` makes a
-    vector of an OCR'd cluster text when more than `TEXT_INK_INSIDE_FRAC` (50%) of its ink (path
-    length; curves sampled only for this measure) lies inside a **non-blank** quad detected in
-    **its own cluster** — the rotated quad polygon itself (Cyrus–Beck clipping,
-    `line_geometry.ink_fraction_in_quad`), not its envelope. Nothing transitive; everything else
+    vector of an OCR'd cluster text when a **non-blank** quad detected in **its own cluster** —
+    the rotated quad polygon itself, not its envelope — owns it (`_quad_owns`, tiered, cheapest
+    first): bbox fully inside the quad → owned; bbox area larger than the quad → not; fewer than
+    `TEXT_SEGMENT_OVERLAP_FRAC` (50%) of its pieces (`"l"`/edges, `"c"` as chords) touching the
+    quad (`line_geometry.piece_overlap_fraction`) → not; else owned when more than
+    `TEXT_INK_INSIDE_FRAC` (50%) of its ink (path length, curves sampled only for this measure)
+    lies inside (Cyrus–Beck, `line_geometry.ink_fraction_in_quad`). Nothing transitive; everything else
     in the OCR'd clusters is drawing. Sub-step timing keys `ocr_render`/`ocr_detect`/
     `ocr_recognize`/`quad_ownership`. `render_debug` (`P3_RENDER_DEBUG["LatestVectorClassification"]`)
     and the streaming `on_debug_layer` render: per-step `kept bbox` / `dropped <category>`,

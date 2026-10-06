@@ -17,10 +17,13 @@ VectorClassification + CollinearVectorClass backend:
    recognised at +90/180/270 (no classifier) and the best-scoring attempt
    wins. Text angle = long-edge angle + classifier flip + retry rotation.
 5. Text/drawing split (`_text_vectors_by_quad`): a vector of an OCR'd
-   cluster is text when more than `TEXT_INK_INSIDE_FRAC` of its ink lies
-   inside a non-blank quad (the rotated quad itself) detected in its own
-   cluster. Drawing = everything classification dropped + every other
-   OCR'd-cluster vector. No FAST, nothing transitive.
+   cluster is text when some non-blank quad (the rotated quad itself)
+   detected in its own cluster owns it -- tiered, cheapest first: bbox
+   fully inside the quad -> owned; bbox area larger than the quad -> not;
+   fewer than `TEXT_SEGMENT_OVERLAP_FRAC` of its pieces touching the quad
+   -> not; else more than `TEXT_INK_INSIDE_FRAC` of its ink inside.
+   Drawing = everything classification dropped + every other OCR'd-cluster
+   vector. No FAST, nothing transitive.
 
 Fully self-contained (own paddle_engine.py/config.py/line geometry) --
 imports nothing from a sibling P3 backend or P2.
@@ -58,12 +61,16 @@ from rastervec.P3_Vector_Parsing.LatestVectorClassification.config import (
     RETRY_CONFIDENCE_THRESHOLD,
     STRAIGHT_TOL_PT,
     TEXT_INK_INSIDE_FRAC,
+    TEXT_SEGMENT_OVERLAP_FRAC,
 )
 from rastervec.P3_Vector_Parsing.LatestVectorClassification.line_geometry import (
+    bbox_inside_quad,
     golden_hues,
     group_collinear,
     group_parallel,
     ink_fraction_in_quad,
+    piece_overlap_fraction,
+    quad_area,
     split_straight,
 )
 from rastervec.P3_Vector_Parsing.LatestVectorClassification.paddle_engine import (
@@ -98,24 +105,44 @@ def _quad_envelope(quad) -> tuple[float, float, float, float]:
     return (min(xs), min(ys), max(xs), max(ys))
 
 
+def _quad_owns(v: Vector, quad, env, area: float) -> bool:
+    """Whether the detect `quad` (envelope `env`, area `area`) owns `v` --
+    tiered, cheapest test first, the first decisive one wins:
+
+    0. bbox misses the envelope -> no.
+    1. bbox fully inside the quad -> yes.
+    2. bbox area larger than the quad's -> no.
+    3. fewer than `TEXT_SEGMENT_OVERLAP_FRAC` of `v`'s pieces touch the quad
+       (`line_geometry.piece_overlap_fraction`, curves as chords) -> no;
+       otherwise more than `TEXT_INK_INSIDE_FRAC` of its ink (path length)
+       inside the quad (`line_geometry.ink_fraction_in_quad`). A vector with
+       no pieces goes straight to the ink test (its bbox-centre fallback).
+    """
+    if not bboxes_intersect(v.bbox, env):
+        return False
+    if bbox_inside_quad(v.bbox, quad):
+        return True
+    x0, y0, x1, y1 = v.bbox
+    if (x1 - x0) * (y1 - y0) > area:
+        return False
+    if piece_overlap_fraction(v, quad) < TEXT_SEGMENT_OVERLAP_FRAC:  # nan -> False
+        return False
+    return ink_fraction_in_quad(v, quad, curve_samples=INK_CURVE_SAMPLES) > TEXT_INK_INSIDE_FRAC
+
+
 def _text_vectors_by_quad(
     clusters: list[list[Vector]], quads_by_cluster: dict[int, list[tuple]],
 ) -> tuple[list[Vector], list[Vector]]:
     """`(text, drawing)` over every vector of `clusters`: a vector is text
-    when, for some quad in `quads_by_cluster[its cluster index]` (only
-    non-blank recognitions are passed in), more than `TEXT_INK_INSIDE_FRAC`
-    of its ink lies inside that quad (`line_geometry.ink_fraction_in_quad`
-    -- the rotated quad polygon, not its envelope)."""
+    when some quad in `quads_by_cluster[its cluster index]` (only non-blank
+    recognitions are passed in -- the rotated quad polygon, not its
+    envelope) owns it per `_quad_owns`."""
     text: list[Vector] = []
     drawing: list[Vector] = []
     for ci, cluster in enumerate(clusters):
-        quads = [(q, _quad_envelope(q)) for q in quads_by_cluster.get(ci, [])]
+        quads = [(q, _quad_envelope(q), quad_area(q)) for q in quads_by_cluster.get(ci, [])]
         for v in cluster:
-            owned = any(
-                bboxes_intersect(v.bbox, env)
-                and ink_fraction_in_quad(v, q, curve_samples=INK_CURVE_SAMPLES) > TEXT_INK_INSIDE_FRAC
-                for q, env in quads
-            )
+            owned = any(_quad_owns(v, q, env, area) for q, env, area in quads)
             (text if owned else drawing).append(v)
     return text, drawing
 

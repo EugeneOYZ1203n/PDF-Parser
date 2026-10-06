@@ -348,3 +348,34 @@ def test_parse_text_carries_its_page_space_detect_quad(page_meta, vector, monkey
     ys = [p[1] for p in t.quad_points]
     assert t.bbox == pytest.approx((min(xs), min(ys), max(xs), max(ys)))
     assert set(debug_out["ocr_detect_quads"][0]) == set(t.quad_points)
+
+
+_SQUARE = ((0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (0.0, 10.0))
+
+
+def test_quad_owns_bbox_fully_inside(vector):
+    glyph = vector(bbox=(2, 2, 8, 8), items=[("re", (2, 2, 8, 8))])
+    assert lvc._quad_owns(glyph, _SQUARE, (0, 0, 20, 10), 200.0)
+
+
+def test_quad_owns_rejects_bbox_larger_than_the_quad(vector):
+    # Centred on the quad, but its bbox (30x30) is bigger than the quad (20x10).
+    frame = vector(bbox=(-5, -10, 25, 20), items=[("re", (-5, -10, 25, 20))])
+    assert not lvc._quad_owns(frame, _SQUARE, (0, 0, 20, 10), 200.0)
+
+
+def test_quad_owns_rejects_when_few_pieces_touch(vector):
+    # 1 of 3 pieces touches the quad (< 50%), small bbox.
+    v = vector(bbox=(15, 5, 26, 9), items=[
+        ("l", (15, 5), (19, 5)), ("l", (22, 5), (26, 5)), ("l", (22, 9), (26, 9)),
+    ])
+    assert not lvc._quad_owns(v, _SQUARE, (0, 0, 20, 10), 200.0)
+
+
+def test_quad_owns_falls_back_to_ink_fraction(vector):
+    # Both pieces touch (100%); ink 8 of 10 inside -> owned.
+    mostly = vector(bbox=(12, 2, 22, 8), items=[("l", (12, 2), (22, 2)), ("l", (12, 8), (22, 8))])
+    assert lvc._quad_owns(mostly, _SQUARE, (0, 0, 20, 10), 200.0)
+    # Both pieces touch; ink 3 of 10 inside -> not owned.
+    barely = vector(bbox=(17, 2, 27, 8), items=[("l", (17, 2), (27, 2)), ("l", (17, 8), (27, 8))])
+    assert not lvc._quad_owns(barely, _SQUARE, (0, 0, 20, 10), 200.0)

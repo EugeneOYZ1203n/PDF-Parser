@@ -136,3 +136,33 @@ def test_ink_fraction_zero_length_vector_uses_bbox_centre(vector):
     far = vector(bbox=(50, 5, 50, 5), items=[("l", (50, 5), (50, 5))])
     assert lg.ink_fraction_in_quad(dot, quad, curve_samples=16) == 1.0
     assert lg.ink_fraction_in_quad(far, quad, curve_samples=16) == 0.0
+
+
+def test_quad_area_and_bbox_inside_rotated_quad():
+    c, s = math.cos(math.radians(30)), math.sin(math.radians(30))
+    quad = [(x * c - y * s, x * s + y * c) for x, y in ((-20, -5), (20, -5), (20, 5), (-20, 5))]
+    assert lg.quad_area(quad) == pytest.approx(400.0)
+    assert lg.bbox_inside_quad((-1, -1, 1, 1), quad)
+    # Inside the envelope (corner region), outside the rotated quad.
+    assert not lg.bbox_inside_quad((-16, 4, -14, 6), quad)
+
+
+def test_piece_overlap_fraction_counts_pieces_touching_the_quad(vector):
+    quad = ((0, 0), (10, 0), (10, 10), (0, 10))
+    v = vector(bbox=(1, 1, 30, 5), items=[
+        ("l", (1, 1), (5, 1)),     # inside
+        ("l", (5, 5), (15, 5)),    # crosses the edge
+        ("l", (20, 5), (30, 5)),   # outside
+        ("l", (-5, 5), (15, 5)),   # passes through, no endpoint inside
+    ])
+    assert lg.piece_overlap_fraction(v, quad) == pytest.approx(0.75)
+    outside = _line(vector, 20, 5, 30, 5)
+    assert lg.piece_overlap_fraction(outside, quad) == 0.0
+
+
+def test_piece_overlap_fraction_uses_cubic_chord_and_nan_when_empty(vector):
+    quad = ((0, 0), (10, 0), (10, 10), (0, 10))
+    curve = vector(bbox=(2, 2, 8, 8), items=[("c", (2, 2), (2, 8), (8, 8), (8, 2))])
+    assert lg.piece_overlap_fraction(curve, quad) == 1.0
+    dot = vector(bbox=(5, 5, 5, 5), items=[("l", (5, 5), (5, 5))])
+    assert math.isnan(lg.piece_overlap_fraction(dot, quad))

@@ -103,10 +103,14 @@ CROP_BORDER_PX = 5
 RETRY_CONFIDENCE_THRESHOLD = 0.8
 SINGLE_CHAR_PENALTY = 0.5
 
-# Text/drawing split (parse.py::_text_vectors_by_quad): a vector in an OCR'd
-# cluster is text when more than TEXT_INK_INSIDE_FRAC of its ink (path
-# length) lies inside a non-blank detect quad (the rotated quad, not its
-# envelope) from its own cluster. Curves are sampled at INK_CURVE_SAMPLES
-# points for this length measure only.
+# Text/drawing split (parse.py::_quad_owns): a vector in an OCR'd cluster is
+# text when a non-blank detect quad (the rotated quad, not its envelope) from
+# its own cluster owns it -- tiered, cheapest first: its bbox fully inside the
+# quad -> owned; its bbox area larger than the quad's -> not; fewer than
+# TEXT_SEGMENT_OVERLAP_FRAC of its pieces ("l" segments, "re"/"qu" edges,
+# "c" chords) touching the quad -> not; otherwise owned when more than
+# TEXT_INK_INSIDE_FRAC of its ink (path length) lies inside the quad. Curves
+# are sampled at INK_CURVE_SAMPLES points for that length measure only.
+TEXT_SEGMENT_OVERLAP_FRAC = 0.5
 TEXT_INK_INSIDE_FRAC = 0.5
 INK_CURVE_SAMPLES = 32
