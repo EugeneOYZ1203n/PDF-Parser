@@ -773,7 +773,13 @@ generic parallel-pool mechanics), never phase-specific business logic.
   buckets over the >0 counts, ties never split so heavy ties leave fewer),
   `dashed_line_collinear_lab.ipynb` (straight Vectors grouped by same infinite line within each
   layer/color/width bucket — dashed-line detection), `parallel_groups_lab.ipynb` (straight Vectors
-  grouped by angle within each cluster; hue = cluster, value = angle). Every count/std/crossing
+  grouped by angle within each cluster; hue = cluster, value = angle), `pattern_texture_lab.ipynb`
+  (texture fills: stipple dot fields and dense hatching, per layer/color/width bucket, over *elements*
+  — each Vector's pen-down sub-paths, since one CAD fill drawing holds hundreds of them; stipple =
+  NN-spacing CV / PCA isotropy / size CV per dot + Clark–Evans R per linked region; hatching =
+  collinear pieces merged into tracks, tracks chained side by side (gap ≤ max *and* along-line
+  overlap, which keeps end-to-end dashed lines out) → spacing CV / spacing÷length / orientation
+  dominance per run, cross-hatch pairing; logic in `notebooks/_pattern_probe_helpers.py`). Every count/std/crossing
   colour scale is `gradient4` (green → yellow → red → purple). Each takes `PDF_PATH`/`PAGE`
   and writes `outputs/<notebook>/<ts>__<stem>_p<N>/` — one layer PDF per toggle + `manifest.json`
   that `scripts/pipeline_report_viewer.py` opens directly — plus histogram PNGs. Shared logic lives
