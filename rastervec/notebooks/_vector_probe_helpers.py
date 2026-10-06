@@ -24,6 +24,16 @@ never an individual item:
   group's smallest offset, so a group never spans more than `tol`; see
   `_anchored_1d` for why offsets can't be single-linkage). "Same infinite
   line", no gap limit.
+- **curved chains** -- `chain_curves`: good-continuation chains of `Piece`s
+  (`as_piece`: a straight Vector, or an all-"l" open polyline with every
+  internal turn <= `max_turn_deg`). Greedy from the longest seeds; a link
+  needs only a bounded turn (piece direction and connector) within
+  `reach_factor` x the last piece's length -- no gap-consistency test.
+  Optional `max_len_ratio` also caps each piece's length vs the chain's
+  running median member length.
+- **corner merge** -- `merge_at_corners`: union-find over >= 2-member
+  collinear groups whose infinite lines cross where both have an endpoint
+  (or where an L-shaped polyline bridges the corner).
 
 Colour scales use one shared low -> high gradient, `gradient4` (green ->
 yellow -> red -> purple). `summarise_groups`/`add_gradient_layers`/
@@ -389,6 +399,394 @@ def group_stats(group: list[tuple[Vector, LineFit]]) -> tuple[int, float]:
     """`(member count, population std of member lengths in pt)`."""
     lengths = [fit.length for _, fit in group]
     return len(lengths), float(np.std(lengths)) if lengths else 0.0
+
+
+# --------------------------------------------------------------------------
+# Curved chains: good continuation, direction drifts slowly
+# --------------------------------------------------------------------------
+
+_JOIN_EPS = 0.01  # pt: endpoints closer than this are the same point
+
+
+def _turn(a: float, b: float) -> float:
+    """Signed turn from direction `a` to direction `b` (degrees, full
+    circle), in [-180, 180)."""
+    return (b - a + 180.0) % 360.0 - 180.0
+
+
+def _direction(p: Point, q: Point) -> float:
+    """Direction of travel p -> q in degrees, [0, 360)."""
+    return math.degrees(math.atan2(q[1] - p[1], q[0] - p[0])) % 360.0
+
+
+@dataclass(frozen=True)
+class Piece:
+    """One chainable Vector: a straight line or a smooth open polyline.
+    `start_dir`/`end_dir` point *out of* the piece at that end (so the
+    travel direction entering at `start` is `start_dir + 180`); `length` is
+    the path length; `angle` the folded [0, 180) chord angle."""
+
+    start: Point
+    end: Point
+    start_dir: float
+    end_dir: float
+    length: float
+    angle: float
+
+    def reversed(self) -> "Piece":
+        return Piece(self.end, self.start, self.end_dir, self.start_dir, self.length, self.angle)
+
+
+def _order_polyline(segments: list[tuple[Point, Point]]) -> list[Point] | None:
+    """Vertices of one open, unbranched path through every segment (any
+    item order/orientation), or `None` if the segments don't form one."""
+    rest = list(segments)
+    path = list(rest.pop(0))
+
+    def same(p: Point, q: Point) -> bool:
+        return math.hypot(p[0] - q[0], p[1] - q[1]) <= _JOIN_EPS
+
+    while rest:
+        for i, (p, q) in enumerate(rest):
+            if same(p, path[-1]):
+                path.append(q)
+            elif same(q, path[-1]):
+                path.append(p)
+            elif same(q, path[0]):
+                path.insert(0, p)
+            elif same(p, path[0]):
+                path.insert(0, q)
+            else:
+                continue
+            rest.pop(i)
+            break
+        else:
+            return None  # disconnected, or a branch off an interior vertex
+    if same(path[0], path[-1]):
+        return None  # closed
+    return path
+
+
+def as_piece(v: Vector, max_turn_deg: float = 15.0, straight_tol: float = 0.25) -> Piece | None:
+    """`Piece` for a straight Vector (`straight_line`) or an all-"l" open
+    polyline whose every internal turn is <= `max_turn_deg`; else `None`."""
+    fit = straight_line(v, straight_tol)
+    if fit is not None:
+        ux, uy = math.cos(math.radians(fit.angle)), math.sin(math.radians(fit.angle))
+        h = fit.length / 2.0
+        start = (fit.midpoint[0] - h * ux, fit.midpoint[1] - h * uy)
+        end = (fit.midpoint[0] + h * ux, fit.midpoint[1] + h * uy)
+        return Piece(start, end, (fit.angle + 180.0) % 360.0, fit.angle % 360.0, fit.length, fit.angle)
+    if not is_all_lines(v):
+        return None
+    segs = [(tuple(item[1]), tuple(item[2])) for item in v.items]
+    segs = [(p, q) for p, q in segs if math.hypot(q[0] - p[0], q[1] - p[1]) > _JOIN_EPS]
+    if not segs:
+        return None
+    path = _order_polyline(segs)
+    if path is None:
+        return None
+    dirs = [_direction(path[i], path[i + 1]) for i in range(len(path) - 1)]
+    if any(abs(_turn(a, b)) > max_turn_deg for a, b in zip(dirs, dirs[1:])):
+        return None
+    length = sum(math.hypot(path[i + 1][0] - path[i][0], path[i + 1][1] - path[i][1])
+                 for i in range(len(path) - 1))
+    return Piece(
+        path[0], path[-1], (dirs[0] + 180.0) % 360.0, dirs[-1], length,
+        _direction(path[0], path[-1]) % 180.0,
+    )
+
+
+def split_pieces(
+    vectors: list[Vector], max_turn_deg: float = 15.0, straight_tol: float = 0.25,
+) -> tuple[list[tuple[Vector, Piece]], list[Vector]]:
+    """`(pieces, excluded)` -- the `split_straight` shape, over `as_piece`."""
+    pieces, excluded = [], []
+    for v in vectors:
+        p = as_piece(v, max_turn_deg, straight_tol)
+        if p is None:
+            excluded.append(v)
+        else:
+            pieces.append((v, p))
+    return pieces, excluded
+
+
+def _link_cost(tip: Point, tip_dir: float, near: Point, b_in: float,
+               max_turn_deg: float, reach: float) -> tuple[float, float] | None:
+    """`(gap, turn)` cost (compared as a tuple: nearest wins, smoother
+    breaks ties -- skipping a nearer valid piece would orphan it) of continuing a chain whose free end is `tip` (travelling in
+    `tip_dir`) into a piece entered at `near` travelling `b_in`; `None` when
+    rejected. No gap test beyond `reach`: the piece's own direction, and the
+    connector tip -> near (skipped for touching ends), must each turn by at
+    most `max_turn_deg` -- the connector check stops a hop sideways onto a
+    parallel neighbour."""
+    gap = math.hypot(near[0] - tip[0], near[1] - tip[1])
+    if gap > reach:
+        return None
+    turn = abs(_turn(tip_dir, b_in))
+    if turn > max_turn_deg:
+        return None
+    if gap < _JOIN_EPS:
+        return (gap, turn)
+    conn = _direction(tip, near)
+    t1, t2 = abs(_turn(tip_dir, conn)), abs(_turn(conn, b_in))
+    if t1 > max_turn_deg or t2 > max_turn_deg:
+        return None
+    return (gap, turn + t1)
+
+
+def chain_curves(
+    pieces: list[tuple[Vector, Piece]], max_turn_deg: float = 15.0, reach_factor: float = 3.0,
+    *, max_len_ratio: float | None = None,
+) -> list[list[tuple[Vector, Piece]]]:
+    """Greedy good-continuation chains. Seeds in descending length; each
+    grows from both ends, at every step taking the lowest-`_link_cost`
+    (nearest, then smoothest) unclaimed piece with an end within `reach_factor` x the last piece's
+    length. Each piece joins at most one chain. Returned pieces are
+    oriented in walk order (so `chain_total_turn` is meaningful);
+    singletons are returned too.
+
+    `max_len_ratio` (None = off): a candidate is also skipped when its
+    length and the chain's running median member length (seed included,
+    both growth directions) differ by more than that factor. Seeds go
+    longest-first, so a long solid line rejects short dashes and stays a
+    singleton; the dashes then chain from their own seeds."""
+    from scipy.spatial import cKDTree
+
+    if not pieces:
+        return []
+    ends = np.asarray([pt for _, p in pieces for pt in (p.start, p.end)], dtype=float)
+    tree = cKDTree(ends)
+    claimed = [False] * len(pieces)
+
+    def len_ok(length: float, lengths: list[float]) -> bool:
+        if max_len_ratio is None:
+            return True
+        med = float(np.median(lengths))
+        return max(length, med) / max(min(length, med), 1e-9) <= max_len_ratio
+
+    def grow(last: Piece, lengths: list[float]) -> list[tuple[Vector, Piece]]:
+        out = []
+        while True:
+            reach = reach_factor * last.length
+            tip, tip_dir = last.end, last.end_dir
+            best = None
+            for k in tree.query_ball_point(tip, reach + _JOIN_EPS):
+                j, at_end = divmod(k, 2)
+                if claimed[j]:
+                    continue
+                cand = pieces[j][1].reversed() if at_end else pieces[j][1]
+                if not len_ok(cand.length, lengths):
+                    continue
+                cost = _link_cost(tip, tip_dir, cand.start, (cand.start_dir + 180.0) % 360.0,
+                                  max_turn_deg, reach)
+                if cost is not None and (best is None or cost < best[0]):
+                    best = (cost, j, cand)
+            if best is None:
+                return out
+            _, j, last = best
+            claimed[j] = True
+            lengths.append(last.length)
+            out.append((pieces[j][0], last))
+
+    chains = []
+    for i in sorted(range(len(pieces)), key=lambda i: -pieces[i][1].length):
+        if claimed[i]:
+            continue
+        claimed[i] = True
+        v, seed = pieces[i]
+        lengths = [seed.length]
+        forward = grow(seed, lengths)
+        backward = grow(seed.reversed(), lengths)
+        chains.append([(bv, bp.reversed()) for bv, bp in reversed(backward)] + [(v, seed)] + forward)
+    return chains
+
+
+def chain_total_turn(chain: list[tuple[Vector, Piece]]) -> float:
+    """Signed total turn (degrees) along a walk-ordered chain: within each
+    piece (entry -> exit direction) plus every link (exit -> next entry)."""
+    total, prev_exit = 0.0, None
+    for _, p in chain:
+        entry = (p.start_dir + 180.0) % 360.0
+        if prev_exit is not None:
+            total += _turn(prev_exit, entry)
+        total += _turn(entry, p.end_dir)
+        prev_exit = p.end_dir
+    return total
+
+
+# --------------------------------------------------------------------------
+# Corner merge: collinear groups whose lines meet at their intersection
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class GroupLine:
+    """A collinear group's line: folded mean `angle`, unit normal `normal`,
+    offset `rho` (= p . normal for points on it), and every member
+    endpoint (`ends`, (n, 2))."""
+
+    angle: float
+    normal: Point
+    rho: float
+    ends: np.ndarray
+
+    @property
+    def bbox(self) -> tuple[float, float, float, float]:
+        return (float(self.ends[:, 0].min()), float(self.ends[:, 1].min()),
+                float(self.ends[:, 0].max()), float(self.ends[:, 1].max()))
+
+
+def group_line(group: list[tuple[Vector, LineFit]]) -> GroupLine:
+    angle = _mean_axis_angle([fit.angle for _, fit in group])
+    nx, ny = -math.sin(math.radians(angle)), math.cos(math.radians(angle))
+    ends = []
+    for _, fit in group:
+        ux, uy = math.cos(math.radians(fit.angle)), math.sin(math.radians(fit.angle))
+        h = fit.length / 2.0
+        ends.append((fit.midpoint[0] - h * ux, fit.midpoint[1] - h * uy))
+        ends.append((fit.midpoint[0] + h * ux, fit.midpoint[1] + h * uy))
+    ends_arr = np.asarray(ends, dtype=float)
+    rho = float(np.mean(ends_arr @ np.asarray([nx, ny])))
+    return GroupLine(angle, (nx, ny), rho, ends_arr)
+
+
+def _axis_diff(a: float, b: float) -> float:
+    """Unsigned difference of two folded [0, 180) angles, in [0, 90]."""
+    d = abs(a - b) % 180.0
+    return min(d, 180.0 - d)
+
+
+def _line_intersection(g1: GroupLine, g2: GroupLine, min_angle: float) -> Point | None:
+    """Where the two infinite lines cross; `None` when they're within
+    `min_angle` of parallel (ill-conditioned / far away)."""
+    if _axis_diff(g1.angle, g2.angle) < min_angle:
+        return None
+    a = np.asarray([g1.normal, g2.normal], dtype=float)
+    x, y = np.linalg.solve(a, np.asarray([g1.rho, g2.rho]))
+    return (float(x), float(y))
+
+
+def _min_dist(points: np.ndarray, p: Point) -> float:
+    return float(np.min(np.hypot(points[:, 0] - p[0], points[:, 1] - p[1])))
+
+
+def _point_seg_dist(points: np.ndarray, a: Point, b: Point) -> float:
+    """Min distance from any of `points` (n, 2) to segment a-b."""
+    ax, ay = a
+    dx, dy = b[0] - ax, b[1] - ay
+    ll = dx * dx + dy * dy
+    t = np.zeros(len(points)) if ll == 0 else np.clip(
+        ((points[:, 0] - ax) * dx + (points[:, 1] - ay) * dy) / ll, 0.0, 1.0)
+    return float(np.min(np.hypot(points[:, 0] - (ax + t * dx), points[:, 1] - (ay + t * dy))))
+
+
+def _on_line(seg: tuple[Point, Point], g: GroupLine, angle_tol: float, offset_tol: float) -> bool:
+    p, q = seg
+    if _axis_diff(_direction(p, q) % 180.0, g.angle) > angle_tol:
+        return False
+    nx, ny = g.normal
+    return all(abs(pt[0] * nx + pt[1] * ny - g.rho) <= offset_tol for pt in seg)
+
+
+@dataclass
+class CornerMerge:
+    """`groups`: merged components (>= 2 source collinear groups), each a
+    flat `(Vector, LineFit | None)` list -- bridging polylines carry
+    `None`. `points`: every accepted intersection. `bridges`: the polylines
+    that bridged a corner."""
+
+    groups: list[list[tuple[Vector, LineFit | None]]]
+    source_counts: list[int]
+    points: list[Point]
+    bridges: list[Vector]
+
+
+def merge_at_corners(
+    groups: list[list[tuple[Vector, LineFit]]], polylines: list[Vector], *,
+    angle_tol: float = 1.0, offset_tol: float = 0.5, corner_tol: float = 1.0, min_angle: float = 10.0,
+) -> CornerMerge:
+    """Union-find merge of >= 2-member collinear `groups` (one bucket) whose
+    lines meet, by either rule:
+
+    - **endpoint**: each group has a member endpoint within `corner_tol` of
+      the lines' intersection;
+    - **corner piece**: a `polylines` Vector has a segment on each group's
+      line (`angle_tol`/`offset_tol`), sharing a vertex within `corner_tol`
+      of the intersection, and each group has an endpoint within
+      `corner_tol` of its arm. The polyline joins the merged group.
+    """
+    multi = [g for g in groups if len(g) >= 2]
+    lines = [group_line(g) for g in multi]
+    parent = list(range(len(multi)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    points: list[Point] = []
+    padded = [(x0 - corner_tol, y0 - corner_tol, x1 + corner_tol, y1 + corner_tol)
+              for x0, y0, x1, y1 in (ln.bbox for ln in lines)]
+    for i, j in _overlapping_pairs(padded):
+        x = _line_intersection(lines[i], lines[j], min_angle)
+        if x is None:
+            continue
+        if _min_dist(lines[i].ends, x) <= corner_tol and _min_dist(lines[j].ends, x) <= corner_tol:
+            parent[find(i)] = find(j)
+            points.append(x)
+
+    bridge_of: dict[int, list[Vector]] = {}
+    bridges: list[Vector] = []
+    boxes = np.asarray(padded, dtype=float).reshape(-1, 4)
+    for v in polylines:
+        segs = [(tuple(it[1]), tuple(it[2])) for it in v.items if it[0] == "l"]
+        bridged = False
+        for a in range(len(segs)):
+            for b in range(a + 1, len(segs)):
+                sa, sb = segs[a], segs[b]
+                vertex = next((p for p in sa for q in sb
+                               if math.hypot(p[0] - q[0], p[1] - q[1]) <= _JOIN_EPS), None)
+                if vertex is None:
+                    continue
+
+                def near(seg):
+                    xs, ys = [seg[0][0], seg[1][0]], [seg[0][1], seg[1][1]]
+                    hit = ((boxes[:, 0] <= max(xs)) & (min(xs) <= boxes[:, 2])
+                           & (boxes[:, 1] <= max(ys)) & (min(ys) <= boxes[:, 3]))
+                    return [k for k in np.nonzero(hit)[0]
+                            if _on_line(seg, lines[k], angle_tol, offset_tol)
+                            and _point_seg_dist(lines[k].ends, *seg) <= corner_tol]
+
+                for i in near(sa):
+                    for j in near(sb):
+                        x = _line_intersection(lines[i], lines[j], min_angle)
+                        if x is None or math.hypot(vertex[0] - x[0], vertex[1] - x[1]) > corner_tol:
+                            continue
+                        parent[find(i)] = find(j)
+                        points.append(x)
+                        bridge_of.setdefault(i, []).append(v)
+                        bridged = True
+        if bridged:
+            bridges.append(v)
+
+    comps: dict[int, list[int]] = {}
+    for i in range(len(multi)):
+        comps.setdefault(find(i), []).append(i)
+    out, counts = [], []
+    for members in comps.values():
+        if len(members) < 2:
+            continue
+        merged: list[tuple[Vector, LineFit | None]] = [m for i in members for m in multi[i]]
+        seen = set()
+        for i in members:
+            for v in bridge_of.get(i, []):
+                if id(v) not in seen:
+                    seen.add(id(v))
+                    merged.append((v, None))
+        out.append(merged)
+        counts.append(len(members))
+    return CornerMerge(out, counts, points, bridges)
 
 
 # --------------------------------------------------------------------------

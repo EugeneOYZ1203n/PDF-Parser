@@ -312,3 +312,145 @@ def test_add_gradient_layers_writes_gradient_and_other_stages(vector, tmp_path, 
         ("other", "singletons"),
         ("other", "excluded"),
     ]
+
+
+# ---- curved chains -----------------------------------------------------
+
+def _arc_chords(vector, n=10, step_deg=10.0, r=50.0, cx=0.0, cy=0.0, gap_deg=2.0, flip=()):
+    import math
+    out = []
+    for k in range(n):
+        a0 = math.radians(k * step_deg)
+        a1 = math.radians(k * step_deg + step_deg - gap_deg)
+        p0 = (cx + r * math.cos(a0), cy + r * math.sin(a0))
+        p1 = (cx + r * math.cos(a1), cy + r * math.sin(a1))
+        out.append(_line(vector, *((p1, p0) if k in flip else (p0, p1))))
+    return out
+
+
+def _chains(vectors, **kw):
+    pieces, excluded = h.split_pieces(vectors)
+    return h.chain_curves(pieces, **kw), excluded
+
+
+def test_dashed_arc_is_one_chain(vector):
+    chains, _ = _chains(_arc_chords(vector))
+    assert [len(c) for c in chains] == [10]
+    assert abs(h.chain_total_turn(chains[0])) > 80
+
+
+def test_flipped_chord_still_links(vector):
+    chains, _ = _chains(_arc_chords(vector, flip={4, 5}))
+    assert [len(c) for c in chains] == [10]
+
+
+def test_straight_dashes_chain(vector):
+    vs = [_line(vector, (x, 0), (x + 2, 0)) for x in range(0, 30, 3)]
+    chains, _ = _chains(vs)
+    assert [len(c) for c in chains] == [10]
+    assert abs(h.chain_total_turn(chains[0])) < 1e-6
+
+
+def test_parallel_arcs_stay_separate(vector):
+    vs = _arc_chords(vector, r=50.0) + _arc_chords(vector, r=52.0)
+    chains, _ = _chains(vs)
+    assert sorted(len(c) for c in chains) == [10, 10]
+    for c in chains:
+        radii = {round((p.start[0] ** 2 + p.start[1] ** 2) ** 0.5) for _, p in c}
+        assert len(radii) == 1
+
+
+def test_right_angle_corner_does_not_chain(vector):
+    chains, _ = _chains([_line(vector, (0, 0), (10, 0)), _line(vector, (10, 0), (10, 10))])
+    assert sorted(len(c) for c in chains) == [1, 1]
+
+
+def test_out_of_reach_not_linked(vector):
+    vs = [_line(vector, (0, 0), (2, 0)), _line(vector, (9, 0), (11, 0))]  # gap 7 > 3 x 2
+    chains, _ = _chains(vs, reach_factor=3.0)
+    assert sorted(len(c) for c in chains) == [1, 1]
+
+
+def test_polyline_pieces(vector):
+    sharp = _poly(vector, (0, 0), (10, 0), (15, 8.66))           # 60 deg corner
+    smooth = _poly(vector, (0, 0), (10, 0), (19.9, 1.0), (29.6, 3.4))
+    assert h.as_piece(sharp) is None
+    piece = h.as_piece(smooth)
+    assert piece is not None
+    assert piece.start == (0, 0) and piece.end == (29.6, 3.4)
+
+
+def test_polyline_in_any_item_order(vector):
+    v = vector(items=[("l", (19.9, 1.0), (10, 0)), ("l", (0, 0), (10, 0))], bbox=(0, 0, 19.9, 1))
+    piece = h.as_piece(v)
+    assert piece is not None and {piece.start, piece.end} == {(0, 0), (19.9, 1.0)}
+
+
+# ---- corner merge ------------------------------------------------------
+
+def _groups(vector, segments):
+    straight = _straight(vector, *segments)
+    return h.group_collinear(straight)
+
+
+def _dashes(p0, p1, n=4):
+    (x0, y0), (x1, y1) = p0, p1
+    out = []
+    step = 1.0 / (n - 0.4)  # first dash starts at p0, last ends at p1
+    for k in range(n):
+        a, b = k * step, (k + 0.6) * step
+        out.append(((x0 + a * (x1 - x0), y0 + a * (y1 - y0)), (x0 + b * (x1 - x0), y0 + b * (y1 - y0))))
+    return out
+
+
+def test_dashed_rectangle_merges_into_one(vector):
+    # each side's first dash starts at a corner, so every corner has >= 1 endpoint on it
+    sides = (_dashes((0, 0), (40, 0)) + _dashes((40, 0), (40, 20)) + _dashes((40, 20), (0, 20))
+             + _dashes((0, 20), (0, 0)))
+    res = h.merge_at_corners(_groups(vector, sides), [])
+    assert res.source_counts == [4]
+    assert len(res.groups[0]) == 16
+
+
+def test_crossing_in_middle_not_merged(vector):
+    segs = _dashes((0, 10), (40, 10)) + _dashes((21, -10), (21, 30), n=5)  # gap at the crossing
+    res = h.merge_at_corners(_groups(vector, segs), [])
+    assert res.groups == []
+
+
+def test_polyline_bridges_corner(vector):
+    # dashes stop 4 pt short of the (0, 0) corner; an L dash bridges it
+    segs = [((4, 0), (8, 0)), ((10, 0), (14, 0)), ((0, 4), (0, 8)), ((0, 10), (0, 14))]
+    bridge = _poly(vector, (3.5, 0), (0, 0), (0, 3.5))
+    res = h.merge_at_corners(_groups(vector, segs), [bridge])
+    assert res.source_counts == [2]
+    assert res.bridges == [bridge]
+    assert any(fit is None for _, fit in res.groups[0])
+    assert h.merge_at_corners(_groups(vector, segs), []).groups == []
+
+
+def test_near_parallel_not_merged(vector):
+    import math
+    a = math.radians(5)
+    segs = [((0, 0), (5, 0)), ((6, 0), (10, 0)),
+            ((0, 0), (5 * math.cos(a), 5 * math.sin(a))), ((6 * math.cos(a), 6 * math.sin(a)), (10 * math.cos(a), 10 * math.sin(a)))]
+    res = h.merge_at_corners(_groups(vector, segs), [], min_angle=10.0)
+    assert res.groups == []
+
+
+def test_len_ratio_splits_long_line_from_dashes(vector):
+    vs = [_line(vector, (0, 0), (20, 0))] + [_line(vector, (x, 0), (x + 2, 0)) for x in range(21, 41, 3)]
+    chains, _ = _chains(vs)
+    assert [len(c) for c in chains] == [8]
+    chains, _ = _chains(vs, max_len_ratio=2.0)
+    assert sorted(len(c) for c in chains) == [1, 7]
+
+
+def test_len_ratio_tolerates_alternating_lengths(vector):
+    vs, x = [], 0.0
+    for k in range(8):
+        n = 2.0 if k % 2 else 3.0
+        vs.append(_line(vector, (x, 0), (x + n, 0)))
+        x += n + 1.0
+    chains, _ = _chains(vs, max_len_ratio=2.0)
+    assert [len(c) for c in chains] == [8]
