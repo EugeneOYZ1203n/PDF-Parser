@@ -399,3 +399,33 @@ def test_quad_owns_falls_back_to_ink_fraction(vector):
     # Both pieces touch; ink 3 of 10 inside -> not owned.
     barely = vector(bbox=(17, 2, 27, 8), items=[("l", (17, 2), (27, 2)), ("l", (17, 8), (27, 8))])
     assert not lvc._quad_owns(barely, _SQUARE, (0, 0, 20, 10), 200.0)
+
+
+_TIMED_STEPS = {
+    "classify_separate", "classify_collinear", "classify_seqno", "classify_spatial",
+    "classify_outliers", "classify_crossings", "classify_collect",
+    "ocr_render", "ocr_detect", "ocr_crop", "ocr_recognize", "ocr_assemble",
+    "quad_ownership", "drawing",
+}
+
+
+def test_parse_times_every_step_without_nesting(page_meta, vector, monkeypatch):
+    from rastervec.Evaluation.Evaluate.timing import flatten_page_timing
+
+    monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: _whole_image_quad(bgr))
+    _patch_rec(monkeypatch, "III")
+    page = _page(page_meta)
+
+    steps: dict = {}
+    lvc.parse(_strokes(vector), [], page, step_durations=steps)
+    assert set(steps) == _TIMED_STEPS  # no outer `classify`, no `debug_render`
+    assert all(secs >= 0.0 for secs in steps.values())
+
+    steps = {}
+    lvc.parse(_strokes(vector), [], page, step_durations=steps, on_debug_layer=lambda *layer: None)
+    assert set(steps) == _TIMED_STEPS | {"debug_render"}
+
+    # The sub-steps partition phase3: none is nested inside another, so a
+    # phase3 just above their sum leaves only that margin in `other`.
+    row = flatten_page_timing({"phase3": sum(steps.values()) + 0.01}, steps)
+    assert row["phase3.other"] == pytest.approx(0.01)

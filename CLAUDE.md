@@ -456,8 +456,11 @@ generic parallel-pool mechanics), never phase-specific business logic.
     quad (`line_geometry.piece_overlap_fraction`) → not; else owned when more than
     `TEXT_INK_INSIDE_FRAC` (50%) of its ink (path length, curves sampled only for this measure)
     lies inside (Cyrus–Beck, `line_geometry.ink_fraction_in_quad`). Nothing transitive; everything else
-    in the OCR'd clusters is drawing. Sub-step timing keys `ocr_render`/`ocr_detect`/
-    `ocr_recognize`/`quad_ownership`. `render_debug` (`P3_RENDER_DEBUG["LatestVectorClassification"]`)
+    in the OCR'd clusters is drawing. Sub-step timing keys (`StepClock`, summed, never nested —
+    so they partition `phase3` minus glue): `classify_separate`/`_collinear`/`_seqno`/`_spatial`/
+    `_outliers`/`_crossings`/`_collect` (no outer `classify` key), `ocr_render`/`ocr_detect`/
+    `ocr_crop` (quad mapping + `upright_crop`)/`ocr_recognize` (recognition + retries only)/
+    `ocr_assemble`, `quad_ownership`, `drawing`, plus `debug_render`. `render_debug` (`P3_RENDER_DEBUG["LatestVectorClassification"]`)
     and the streaming `on_debug_layer` render: per-step `kept bbox` / `dropped <category>`,
     `intersection / dropped to drawing (N)` + `flagged, kept (off-grid) (N)`, `geometry`
     collinear/parallel groups (the same `line_geometry` grouping the steps use), `ocr` detect/

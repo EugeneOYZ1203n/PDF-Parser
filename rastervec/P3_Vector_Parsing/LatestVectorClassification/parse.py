@@ -164,8 +164,10 @@ def parse(
     recognition jobs. `debug_out` stashes each stage's data for
     `render_debug`; `on_debug_layer` streams each stage's layers as soon as
     it runs. `keep_debug_arrays=False` keeps image arrays out of
-    `debug_out`. `step_durations` receives per-step seconds (`classify`,
-    `ocr_render`/`ocr_detect`/`ocr_recognize`, `quad_ownership`, `drawing`,
+    `debug_out`. `step_durations` receives per-step seconds
+    (`classify_separate`/`_collinear`/`_seqno`/`_spatial`/`_outliers`/
+    `_crossings`/`_collect`, `ocr_render`/`ocr_detect`/`ocr_crop`/
+    `ocr_recognize`/`ocr_assemble`, `quad_ownership`, `drawing`,
     `debug_render`)."""
     all_vectors = list(vectors_p1) + list(vectors_p2)
     page_meta = page.meta
@@ -178,8 +180,10 @@ def parse(
             for layer in render():
                 on_debug_layer(*layer)
 
-    with clock("classify"):
-        cls = classify_vectors(all_vectors, page, verbose=verbose)
+    # `classify_vectors` times its own steps (`classify_*`) on this clock;
+    # no outer `classify` block, or `phase3.other` would subtract it twice.
+    cls = classify_vectors(all_vectors, page, verbose=verbose, clock=clock)
+    with clock("classify_collect"):
         flat_clusters = [
             [v for group in cluster for v in group] for cluster in cls.text_clusters
         ]
@@ -226,7 +230,7 @@ def parse(
 
         # Stage 3: per quad -- page-space bbox + quad, long-edge angle, and
         # the upright crop (region rotated by that angle, quad cut out).
-        with clock("ocr_recognize"):
+        with clock("ocr_crop"):
             for c, quads in zip(clusters_render, quads_per_cluster):
                 if keep_arrays:
                     cluster_detections.append((c["bgr"], quads))
@@ -293,54 +297,55 @@ def parse(
         retried = set(retry_idx)
 
     # Stage 6: assemble output, page-wide, in original cluster/quad order.
-    texts: list[Text] = []
-    recog_bucket_crops: dict[str, list[tuple[np.ndarray, str]]] = {
-        "0": [], "1": [], "2": [], "3": [], "failed": [],
-    }
-    blank_boxes: list[tuple] = []
-    blank_quads: list[tuple] = []
-    rotation_entries: list[dict] = []
-    owner_quads: dict[int, list[tuple]] = {}
-    for idx, (pq, box, recog_crop, k) in enumerate(zip(page_quads, boxes, recog_crops, winning_k)):
-        if keep_arrays:
-            if box.text:
-                recog_bucket_crops[str(k)].append((recog_crop, box.text))
-            else:
-                recog_bucket_crops["failed"].append((last_attempt_crop[idx], box.text))
-        flip = box.flip_deg if k == 0 else 0
-        final_angle = (pq["quad_angle"] + flip + 90.0 * k) % 360.0 if box.text else None
-        rotation_entries.append({
-            "bbox": pq["bbox"],
-            "quad_pts": pq["quad_pts"],
-            "quad_angle_deg": pq["quad_angle"],
-            "cls_flip_deg": boxes[idx].flip_deg if k == 0 else None,
-            "retry_count": k if box.text else None,
-            "retried": idx in retried,
-            "score": selected[idx][0] if idx in retried else scores[idx],
-            "raw_score": scores[idx],
-            "english_words": selected[idx][1],
-            "final_angle_deg": final_angle,
-        })
-        if not box.text:
-            blank_boxes.append(pq["bbox"])
-            blank_quads.append(pq["quad_pts"])
-            continue
-        owner_quads.setdefault(pq["cluster_idx"], []).append(pq["quad_pts"])
-        direction = transform_direction((1.0, 0.0), final_angle)
-        texts.append(Text(
-            text=box.text, bbox=pq["bbox"], direction=direction,
-            origin=compute_origin(pq["bbox"], direction),
-            font="", font_size=0.0, color=None, flags=0,
-            ascender=None, descender=None, wmode=0,
-            block_no=0, line_no=0, word_no=0,
-            page_index=page_meta.index, seqno=min(v.seqno for v in pq["group_vectors"]),
-            confidence=box.confidence, source="ocr", orientation_source="ocr",
-            quad_points=reorder_quad_reading(pq["quad_pts"], final_angle),
-        ))
-    retry_stats: dict = {"0": 0, "1": 0, "2": 0, "3": 0, "failed": 0}
-    for entry in rotation_entries:
-        key = "failed" if entry["retry_count"] is None else str(entry["retry_count"])
-        retry_stats[key] = retry_stats.get(key, 0) + 1
+    with clock("ocr_assemble"):
+        texts: list[Text] = []
+        recog_bucket_crops: dict[str, list[tuple[np.ndarray, str]]] = {
+            "0": [], "1": [], "2": [], "3": [], "failed": [],
+        }
+        blank_boxes: list[tuple] = []
+        blank_quads: list[tuple] = []
+        rotation_entries: list[dict] = []
+        owner_quads: dict[int, list[tuple]] = {}
+        for idx, (pq, box, recog_crop, k) in enumerate(zip(page_quads, boxes, recog_crops, winning_k)):
+            if keep_arrays:
+                if box.text:
+                    recog_bucket_crops[str(k)].append((recog_crop, box.text))
+                else:
+                    recog_bucket_crops["failed"].append((last_attempt_crop[idx], box.text))
+            flip = box.flip_deg if k == 0 else 0
+            final_angle = (pq["quad_angle"] + flip + 90.0 * k) % 360.0 if box.text else None
+            rotation_entries.append({
+                "bbox": pq["bbox"],
+                "quad_pts": pq["quad_pts"],
+                "quad_angle_deg": pq["quad_angle"],
+                "cls_flip_deg": boxes[idx].flip_deg if k == 0 else None,
+                "retry_count": k if box.text else None,
+                "retried": idx in retried,
+                "score": selected[idx][0] if idx in retried else scores[idx],
+                "raw_score": scores[idx],
+                "english_words": selected[idx][1],
+                "final_angle_deg": final_angle,
+            })
+            if not box.text:
+                blank_boxes.append(pq["bbox"])
+                blank_quads.append(pq["quad_pts"])
+                continue
+            owner_quads.setdefault(pq["cluster_idx"], []).append(pq["quad_pts"])
+            direction = transform_direction((1.0, 0.0), final_angle)
+            texts.append(Text(
+                text=box.text, bbox=pq["bbox"], direction=direction,
+                origin=compute_origin(pq["bbox"], direction),
+                font="", font_size=0.0, color=None, flags=0,
+                ascender=None, descender=None, wmode=0,
+                block_no=0, line_no=0, word_no=0,
+                page_index=page_meta.index, seqno=min(v.seqno for v in pq["group_vectors"]),
+                confidence=box.confidence, source="ocr", orientation_source="ocr",
+                quad_points=reorder_quad_reading(pq["quad_pts"], final_angle),
+            ))
+        retry_stats: dict = {"0": 0, "1": 0, "2": 0, "3": 0, "failed": 0}
+        for entry in rotation_entries:
+            key = "failed" if entry["retry_count"] is None else str(entry["retry_count"])
+            retry_stats[key] = retry_stats.get(key, 0) + 1
     _emit(lambda: _render_ocr_layers(page_meta, texts, blank_quads, detect_quads))
     _emit(lambda: _render_rotation_layers(page_meta, rotation_entries))
     _emit(lambda: _render_retry_layers(page_meta, rotation_entries))

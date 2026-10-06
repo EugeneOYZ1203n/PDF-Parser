@@ -22,6 +22,11 @@ Per `(layer, color, width)` bucket, `_classify_bucket` runs five named steps:
    `GRID_ANGLE_TOL_DEG` mod 90, holding more than `GRID_DOMINANCE` of the
    flagged "l" length). The rest of the flagged Vectors stay, recorded in
    an `info` category for the debug layers.
+
+Every step is timed through an optional `StepClock` (summed across
+buckets): `classify_separate`, `classify_collinear`, `classify_seqno`,
+`classify_spatial`, `classify_outliers`, `classify_crossings`,
+`classify_collect`.
 """
 from __future__ import annotations
 
@@ -30,6 +35,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from rastervec.commons.models import Page, Vector
+from rastervec.commons.step_timing import StepClock
 from rastervec.P3_Vector_Parsing.LatestVectorClassification import cluster_filters as clf
 from rastervec.P3_Vector_Parsing.LatestVectorClassification import group_filters as grf
 from rastervec.P3_Vector_Parsing.LatestVectorClassification.classification import CategoryResult, StepResult
@@ -157,27 +163,33 @@ def _remove_from_clusters(
     return kept_clusters, dropped
 
 
-def _classify_bucket(vectors: list[Vector]) -> list[StepResult]:
-    """The five-step chain for one bucket (see module docstring)."""
+def _classify_bucket(vectors: list[Vector], clock: "StepClock | None" = None) -> list[StepResult]:
+    """The five-step chain for one bucket (see module docstring); each step
+    is timed on `clock` (a private one when `None`)."""
+    clock = clock or StepClock()
     steps: list[StepResult] = []
 
-    kept, drawing_groups = collinear_drawing(vectors)
-    steps.append(StepResult(STEP_LABELS[0], {
-        "kept": CategoryResult([[v] for v in kept], "kept"),
-        "drawing": CategoryResult(drawing_groups, "dropped"),
-    }))
+    with clock("classify_collinear"):
+        kept, drawing_groups = collinear_drawing(vectors)
+        steps.append(StepResult(STEP_LABELS[0], {
+            "kept": CategoryResult([[v] for v in kept], "kept"),
+            "drawing": CategoryResult(drawing_groups, "dropped"),
+        }))
 
-    groups, _ = grf.combine_overlapping_seq([[v] for v in kept], SEQ_OVERLAP_TOLERANCE_PX)
-    steps.append(StepResult(STEP_LABELS[1], {"kept": CategoryResult(groups, "kept")}))
+    with clock("classify_seqno"):
+        groups, _ = grf.combine_overlapping_seq([[v] for v in kept], SEQ_OVERLAP_TOLERANCE_PX)
+        steps.append(StepResult(STEP_LABELS[1], {"kept": CategoryResult(groups, "kept")}))
 
-    clusters = clf.cluster_spatial_groups(groups, SPATIAL_CLUSTER_THRESHOLD, SPATIAL_SIZE_TOLERANCE)
-    steps.append(StepResult(STEP_LABELS[2], {"kept": CategoryResult(clusters, "kept")}))
+    with clock("classify_spatial"):
+        clusters = clf.cluster_spatial_groups(groups, SPATIAL_CLUSTER_THRESHOLD, SPATIAL_SIZE_TOLERANCE)
+        steps.append(StepResult(STEP_LABELS[2], {"kept": CategoryResult(clusters, "kept")}))
 
-    clusters, outliers = _remove_from_clusters(clusters, length_outliers)
-    steps.append(StepResult(STEP_LABELS[3], {
-        "kept": CategoryResult(clusters, "kept"),
-        "outliers": CategoryResult(outliers, "dropped"),
-    }))
+    with clock("classify_outliers"):
+        clusters, outliers = _remove_from_clusters(clusters, length_outliers)
+        steps.append(StepResult(STEP_LABELS[3], {
+            "kept": CategoryResult(clusters, "kept"),
+            "outliers": CategoryResult(outliers, "dropped"),
+        }))
 
     flagged_kept: list[list[Vector]] = []
 
@@ -187,12 +199,13 @@ def _classify_bucket(vectors: list[Vector]) -> list[StepResult]:
             flagged_kept.append(kept_flagged)
         return dropped
 
-    clusters, crossed = _remove_from_clusters(clusters, _crossed)
-    steps.append(StepResult(STEP_LABELS[4], {
-        "kept": CategoryResult(clusters, "kept"),
-        CROSSED_CATEGORY: CategoryResult(crossed, "dropped"),
-        FLAGGED_KEPT_CATEGORY: CategoryResult(flagged_kept, "info"),
-    }))
+    with clock("classify_crossings"):
+        clusters, crossed = _remove_from_clusters(clusters, _crossed)
+        steps.append(StepResult(STEP_LABELS[4], {
+            "kept": CategoryResult(clusters, "kept"),
+            CROSSED_CATEGORY: CategoryResult(crossed, "dropped"),
+            FLAGGED_KEPT_CATEGORY: CategoryResult(flagged_kept, "info"),
+        }))
     return steps
 
 
@@ -222,30 +235,35 @@ def _collect_dropped(clustering: dict) -> list[Vector]:
 
 def classify_vectors(
     vectors: list[Vector], page: Page, *, verbose: bool = False,
+    clock: "StepClock | None" = None,
 ) -> ClassificationResult:
     """Separate by (layer, color, width), run `_classify_bucket` per bucket,
     gather every bucket's final clusters and every dropped Vector
-    (drawing)."""
-    vectors_by_layer = separate_by_layer(vectors)
-    vectors_by_layer_color = {
-        layer: separate_by_color(vs) for layer, vs in vectors_by_layer.items()
-    }
-    vectors_by_layer_color_width = {
-        layer: {color: separate_by_width(vs) for color, vs in color_groups.items()}
-        for layer, color_groups in vectors_by_layer_color.items()
-    }
+    (drawing). Steps are timed on `clock` (see the module docstring)."""
+    clock = clock or StepClock()
+    with clock("classify_separate"):
+        vectors_by_layer = separate_by_layer(vectors)
+        vectors_by_layer_color = {
+            layer: separate_by_color(vs) for layer, vs in vectors_by_layer.items()
+        }
+        vectors_by_layer_color_width = {
+            layer: {color: separate_by_width(vs) for color, vs in color_groups.items()}
+            for layer, color_groups in vectors_by_layer_color.items()
+        }
 
     clustering: dict = {}
     for key, bucket in _iter_buckets(vectors_by_layer_color_width):
-        clustering[key] = ClusteringStageResult(steps=_classify_bucket(bucket))
+        clustering[key] = ClusteringStageResult(steps=_classify_bucket(bucket, clock))
 
-    text_clusters: list[list[list[Vector]]] = []
-    for stage in clustering.values():
-        text_clusters.extend(stage.steps[-1].categories["kept"].groups)
+    with clock("classify_collect"):
+        text_clusters: list[list[list[Vector]]] = []
+        for stage in clustering.values():
+            text_clusters.extend(stage.steps[-1].categories["kept"].groups)
+        drawing_vectors = _collect_dropped(clustering)
 
     return ClassificationResult(
         text_clusters=text_clusters,
-        drawing_vectors=_collect_dropped(clustering),
+        drawing_vectors=drawing_vectors,
         clustering=clustering,
         vectors_by_layer=vectors_by_layer if verbose else None,
         vectors_by_layer_color=vectors_by_layer_color if verbose else None,
