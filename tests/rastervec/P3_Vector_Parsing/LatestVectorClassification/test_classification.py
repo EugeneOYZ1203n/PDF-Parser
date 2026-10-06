@@ -27,14 +27,14 @@ def _dashes(vector, n, y=0.0, length=2.0, gap=2.0, seq0=0):
 def test_collinear_drawing_drops_long_regular_dashed_line(vector):
     dashes = _dashes(vector, COLLINEAR_DRAWING_MIN_COUNT + 1)
     other = _line(vector, 0, 50, 3, 53)
-    kept, drawing = cv.collinear_drawing(dashes + [other])
+    kept, drawing, _ = cv.collinear_drawing(dashes + [other])
     assert kept == [other]
     assert len(drawing) == 1 and len(drawing[0]) == len(dashes)
 
 
 def test_collinear_drawing_keeps_group_at_count_threshold(vector):
     dashes = _dashes(vector, COLLINEAR_DRAWING_MIN_COUNT)  # needs MORE than the threshold
-    kept, drawing = cv.collinear_drawing(dashes)
+    kept, drawing, _ = cv.collinear_drawing(dashes)
     assert drawing == [] and len(kept) == len(dashes)
 
 
@@ -43,7 +43,7 @@ def test_collinear_drawing_keeps_irregular_lengths(vector):
         _line(vector, x, 0, x + (1 if i % 2 else 20), 0)
         for i, x in enumerate(range(0, 30 * (COLLINEAR_DRAWING_MIN_COUNT + 1), 30))
     ]
-    _, drawing = cv.collinear_drawing(lines)
+    _, drawing, _ = cv.collinear_drawing(lines)
     assert drawing == []  # std of 1/20 alternating lengths is 9.5 pt > 5
 
 
@@ -144,4 +144,13 @@ def test_classify_vectors_end_to_end(page_meta, vector):
     assert {id(v) for v in res.drawing_vectors} == {id(v) for v in dashes}
     kept = [v for cluster in res.text_clusters for g in cluster for v in g]
     assert {id(v) for v in kept} == {id(v) for v in glyph}
-    assert not hasattr(res, "global_angles")
+    assert res.global_angles == pytest.approx([0.0])  # the dashed line's collinear group
+
+
+def test_global_angles_from_collinear_groups_of_two_or_more(vector, page_meta):
+    c, s = math.cos(math.radians(30.0)), math.sin(math.radians(30.0))
+    pair = [_line(vector, t * c, t * s, (t + 5) * c, (t + 5) * s, seqno=i) for i, t in enumerate((0.0, 20.0))]
+    lone = _line(vector, 100, 100, 100 + 5 * math.cos(math.radians(60)), 100 + 5 * math.sin(math.radians(60)), seqno=9)
+    page = Page(doc_path="synthetic.pdf", meta=page_meta(width=200.0, height=200.0), fitz_page=None)
+    res = cv.classify_vectors(pair + [lone], page)
+    assert res.global_angles == pytest.approx([30.0], abs=0.01)

@@ -59,7 +59,8 @@ def test_parse_empty_input_returns_empty_output(page_meta):
     assert drawing == [] and texts == []
     assert debug_out["rotation"] == []
     assert debug_out["retry_stats"] == {"0": 0, "1": 0, "2": 0, "3": 0, "failed": 0}
-    for gone in ("global_angles", "cluster_rotation", "fast", "fast_images"):
+    assert debug_out["global_angles"] == []
+    for gone in ("cluster_rotation", "fast", "fast_images"):
         assert gone not in debug_out
 
 
@@ -104,6 +105,35 @@ def test_parse_quad_angle_drives_the_text_direction(page_meta, vector, monkeypat
     # Reading-ordered quad: p0 -> p1 runs along the text direction.
     (x0, y0), (x1, y1) = t.quad_points[0], t.quad_points[1]
     assert math.degrees(math.atan2(y1 - y0, x1 - x0)) == pytest.approx(30.0, abs=0.5)
+
+
+def _collinear_pair(vector, angle_deg, seq0=100):
+    """Two dashes on one infinite line at `angle_deg` (y-down), far from the
+    text strokes -- a 2-member collinear group, i.e. one global angle."""
+    c, s = math.cos(math.radians(angle_deg)), math.sin(math.radians(angle_deg))
+    out = []
+    for i, t in enumerate((0.0, 20.0)):
+        x0, y0 = 120.0 + t * c, 60.0 + t * s
+        x1, y1 = x0 + 10.0 * c, y0 + 10.0 * s
+        out.append(vector(bbox=(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)),
+                          items=[("l", (x0, y0), (x1, y1))], width=0.5, seqno=seq0 + i))
+    return out
+
+
+@pytest.mark.parametrize("quad_deg, expected_deg, snapped", [(28.0, 30.0, True), (40.0, 40.0, False)])
+def test_parse_quad_angle_snaps_to_global_angle_within_tolerance(
+    page_meta, vector, monkeypatch, quad_deg, expected_deg, snapped,
+):
+    monkeypatch.setattr(PaddleDetectBackend, "detect", _rotated_quad(quad_deg))
+    _patch_rec(monkeypatch, "AB")
+    debug_out: dict = {}
+    text_vec = vector(bbox=(10.0, 10.0, 60.0, 40.0), width=0.5, seqno=1)
+    lvc.parse([text_vec] + _collinear_pair(vector, 30.0), [], _page(page_meta), debug_out=debug_out)
+    assert debug_out["global_angles"] == pytest.approx([30.0], abs=0.01)
+    entry = next(e for e in debug_out["rotation"] if e["quad_angle_raw_deg"] == pytest.approx(quad_deg, abs=0.5))
+    assert entry["snapped"] is snapped
+    assert entry["quad_angle_deg"] == pytest.approx(expected_deg, abs=0.5 if not snapped else 0.01)
+    assert entry["final_angle_deg"] == pytest.approx(expected_deg, abs=0.5 if not snapped else 0.01)
 
 
 def test_parse_classifier_flip_turns_the_text_180(page_meta, vector, monkeypatch):
@@ -260,7 +290,8 @@ def test_parse_streaming_matches_batch_render_debug(page_meta, vector, monkeypat
     names = {(s, l) for s, l, _h, _p in streamed}
     for expected in [
         ("geometry", "collinear groups"), ("geometry", "parallel singletons"),
-        ("rotation", "quad angle"), ("rotation", "final angle"),
+        ("rotation", "raw quad angle"), ("rotation", "snapped angle (0)"),
+        ("rotation", "final angle"),
         ("ownership", "text vectors"), ("ownership", "drawing vectors"),
         ("ocr", "detect bbox"), ("drawing", "drawing vectors"),
     ]:

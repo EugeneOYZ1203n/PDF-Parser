@@ -23,6 +23,13 @@ Per `(layer, color, width)` bucket, `_classify_bucket` runs five named steps:
    flagged "l" length). The rest of the flagged Vectors stay, recorded in
    an `info` category for the debug layers.
 
+`classify_vectors` also returns the page's **global potential angles**:
+the mean angle of every collinear group (step 1's grouping) with at least
+`GLOBAL_ANGLE_MIN_GROUP_SIZE` members, across every bucket (drawing groups
+included, singletons not), deduped within `ANGLE_TOL_DEG`. `parse.py` snaps
+each detect quad's long-edge angle to the nearest one within
+`QUAD_ANGLE_SNAP_TOL_DEG`.
+
 Every step is timed through an optional `StepClock` (summed across
 buckets): `classify_separate`, `classify_collinear`, `classify_seqno`,
 `classify_spatial`, `classify_outliers`, `classify_crossings`,
@@ -30,7 +37,7 @@ buckets): `classify_separate`, `classify_collinear`, `classify_seqno`,
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -45,6 +52,7 @@ from rastervec.P3_Vector_Parsing.LatestVectorClassification.config import (
     COLLINEAR_DRAWING_MIN_COUNT,
     COLLINEAR_OFFSET_TOL_PT,
     CROSS_EPS_PT,
+    GLOBAL_ANGLE_MIN_GROUP_SIZE,
     GRID_ANGLE_TOL_DEG,
     GRID_DOMINANCE,
     LENGTH_OUTLIER_STD,
@@ -59,7 +67,9 @@ from rastervec.P3_Vector_Parsing.LatestVectorClassification.layer_color_separati
     separate_by_color, separate_by_layer, separate_by_width,
 )
 from rastervec.P3_Vector_Parsing.LatestVectorClassification.line_geometry import (
+    dedupe_angles,
     dominant_grid,
+    group_angle,
     group_collinear,
     group_length_std,
     group_parallel,
@@ -85,19 +95,27 @@ class ClusteringStageResult:
 @dataclass
 class ClassificationResult:
     """`text_clusters` is tiered (`list[list[list[Vector]]]` -- per cluster,
-    its member groups). `drawing_vectors` is flat -- every dropped Vector."""
+    its member groups). `drawing_vectors` is flat -- every dropped Vector.
+    `global_angles` is the page's deduped global potential angles (deg,
+    folded to [0, 180), sorted -- see the module docstring)."""
 
     text_clusters: list[list[list[Vector]]]
     drawing_vectors: list[Vector]
     clustering: dict
+    global_angles: list[float] = field(default_factory=list)
     vectors_by_layer: dict | None = None
     vectors_by_layer_color: dict | None = None
     vectors_by_layer_color_width: dict | None = None
 
 
-def collinear_drawing(vectors: list[Vector]) -> tuple[list[Vector], list[list[Vector]]]:
-    """Step 1 for one bucket: `(kept, drawing_groups)` -- `kept` in input
-    order, `drawing_groups` the collinear groups judged to be drawing."""
+def collinear_drawing(
+    vectors: list[Vector],
+) -> tuple[list[Vector], list[list[Vector]], list[float]]:
+    """Step 1 for one bucket: `(kept, drawing_groups, angles)` -- `kept` in
+    input order, `drawing_groups` the collinear groups judged to be drawing,
+    `angles` the mean angle of every collinear group with at least
+    `GLOBAL_ANGLE_MIN_GROUP_SIZE` members (drawing groups included) -- this
+    bucket's share of the global potential angles."""
     straight, _ = split_straight(vectors, STRAIGHT_TOL_PT)
     groups = group_collinear(straight, ANGLE_TOL_DEG, COLLINEAR_OFFSET_TOL_PT)
     drawing_groups = [
@@ -106,7 +124,8 @@ def collinear_drawing(vectors: list[Vector]) -> tuple[list[Vector], list[list[Ve
     ]
     dropped = {id(v) for g in drawing_groups for v in g}
     kept = [v for v in vectors if id(v) not in dropped]
-    return kept, drawing_groups
+    angles = [group_angle(g) for g in groups if len(g) >= GLOBAL_ANGLE_MIN_GROUP_SIZE]
+    return kept, drawing_groups, angles
 
 
 def length_outliers(cluster_vectors: list[Vector]) -> list[Vector]:
@@ -163,14 +182,17 @@ def _remove_from_clusters(
     return kept_clusters, dropped
 
 
-def _classify_bucket(vectors: list[Vector], clock: "StepClock | None" = None) -> list[StepResult]:
-    """The five-step chain for one bucket (see module docstring); each step
-    is timed on `clock` (a private one when `None`)."""
+def _classify_bucket(
+    vectors: list[Vector], clock: "StepClock | None" = None,
+) -> tuple[list[StepResult], list[float]]:
+    """The five-step chain for one bucket (see module docstring), plus the
+    bucket's collinear-group angles; each step is timed on `clock` (a
+    private one when `None`)."""
     clock = clock or StepClock()
     steps: list[StepResult] = []
 
     with clock("classify_collinear"):
-        kept, drawing_groups = collinear_drawing(vectors)
+        kept, drawing_groups, angles = collinear_drawing(vectors)
         steps.append(StepResult(STEP_LABELS[0], {
             "kept": CategoryResult([[v] for v in kept], "kept"),
             "drawing": CategoryResult(drawing_groups, "dropped"),
@@ -206,7 +228,7 @@ def _classify_bucket(vectors: list[Vector], clock: "StepClock | None" = None) ->
             CROSSED_CATEGORY: CategoryResult(crossed, "dropped"),
             FLAGGED_KEPT_CATEGORY: CategoryResult(flagged_kept, "info"),
         }))
-    return steps
+    return steps, angles
 
 
 def _iter_buckets(vectors_by_layer_color_width: dict):
@@ -238,8 +260,8 @@ def classify_vectors(
     clock: "StepClock | None" = None,
 ) -> ClassificationResult:
     """Separate by (layer, color, width), run `_classify_bucket` per bucket,
-    gather every bucket's final clusters and every dropped Vector
-    (drawing). Steps are timed on `clock` (see the module docstring)."""
+    gather every bucket's final clusters, every dropped Vector (drawing)
+    and the page's deduped global potential angles. Steps are timed on `clock` (see the module docstring)."""
     clock = clock or StepClock()
     with clock("classify_separate"):
         vectors_by_layer = separate_by_layer(vectors)
@@ -252,19 +274,24 @@ def classify_vectors(
         }
 
     clustering: dict = {}
+    all_angles: list[float] = []
     for key, bucket in _iter_buckets(vectors_by_layer_color_width):
-        clustering[key] = ClusteringStageResult(steps=_classify_bucket(bucket, clock))
+        steps, angles = _classify_bucket(bucket, clock)
+        clustering[key] = ClusteringStageResult(steps=steps)
+        all_angles.extend(angles)
 
     with clock("classify_collect"):
         text_clusters: list[list[list[Vector]]] = []
         for stage in clustering.values():
             text_clusters.extend(stage.steps[-1].categories["kept"].groups)
         drawing_vectors = _collect_dropped(clustering)
+        global_angles = dedupe_angles(all_angles, ANGLE_TOL_DEG)
 
     return ClassificationResult(
         text_clusters=text_clusters,
         drawing_vectors=drawing_vectors,
         clustering=clustering,
+        global_angles=global_angles,
         vectors_by_layer=vectors_by_layer if verbose else None,
         vectors_by_layer_color=vectors_by_layer_color if verbose else None,
         vectors_by_layer_color_width=vectors_by_layer_color_width if verbose else None,

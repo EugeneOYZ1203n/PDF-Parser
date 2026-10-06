@@ -166,3 +166,22 @@ def test_piece_overlap_fraction_uses_cubic_chord_and_nan_when_empty(vector):
     assert lg.piece_overlap_fraction(curve, quad) == 1.0
     dot = vector(bbox=(5, 5, 5, 5), items=[("l", (5, 5), (5, 5))])
     assert math.isnan(lg.piece_overlap_fraction(dot, quad))
+
+
+def test_dedupe_angles_merges_across_the_wrap():
+    out = lg.dedupe_angles([0.5, 179.8, 45.0], 2.0)
+    assert len(out) == 2
+    assert min(lg.axial_distance(out[0], 0.15), lg.axial_distance(out[1], 0.15)) < 0.01
+    assert any(a == pytest.approx(45.0) for a in out)
+
+
+def test_snap_angle_within_tolerance_only():
+    assert lg.snap_angle(27.0, [30.0, 90.0], 5.0) == pytest.approx(30.0)
+    assert lg.snap_angle(24.0, [30.0, 90.0], 5.0) is None
+    assert lg.snap_angle(27.0, [], 5.0) is None
+
+
+def test_snap_angle_stays_on_its_side_of_the_wrap():
+    # -88 snapped to a 90 candidate is -90 (axially the same line).
+    assert lg.snap_angle(-88.0, [90.0], 5.0) == pytest.approx(-90.0)
+    assert lg.snap_angle(178.0, [1.0], 5.0) == pytest.approx(181.0)

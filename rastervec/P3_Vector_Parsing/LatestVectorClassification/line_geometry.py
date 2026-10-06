@@ -174,6 +174,32 @@ def group_length_std(group: list[Straight]) -> float:
     return float(np.std([fit.length for _, fit in group])) if group else 0.0
 
 
+def group_angle(group: list[Straight]) -> float:
+    """A group's circular-mean folded angle."""
+    return mean_axis_angle([fit.angle for _, fit in group])
+
+
+def dedupe_angles(angles: list[float], tol: float) -> list[float]:
+    """Merge axial angles that chain within `tol` (`chain_angles`) into one
+    circular mean each, sorted."""
+    return sorted(mean_axis_angle([angles[i] for i in g]) for g in chain_angles(angles, tol))
+
+
+def snap_angle(angle: float, candidates: list[float], tol: float) -> float | None:
+    """`angle` moved onto the axially nearest of `candidates` when that one
+    is within `tol` deg, else `None`. Returned as `angle + signed delta` (not
+    the candidate itself), so it stays on `angle`'s side of the wrap: -88
+    snapped to a 90 candidate is -90 -- so the result can fall
+    just outside `[-90, 90)` (89.9 snapped to 90 is 90.0)."""
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda c: axial_distance(angle, c))
+    if axial_distance(angle, best) > tol:
+        return None
+    delta = (best - angle + 90.0) % 180.0 - 90.0
+    return angle + delta
+
+
 def golden_hues(k: int) -> list[float]:
     """`k` well-spread hues in [0, 1) (golden-ratio steps) -- debug colours."""
     return [(i * 0.618033988749895) % 1.0 for i in range(k)]

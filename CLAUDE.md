@@ -469,9 +469,14 @@ generic parallel-pool mechanics), never phase-specific business logic.
     never drops). The rest stay, recorded in a `role="info"` `crossed_off_grid` category).
     Then per cluster, in chunks of `DETECT_RENDER_CHUNK_SIZE`: render (unrotated,
     `ocr_prep.render_cluster_with_dynamic_dpi`) → `PaddleDetectBackend.detect` (Pool 2 via
-    `_detect_job` with `compute`). **Rotation comes from the detect quad alone** — there is no
-    Hough, no minAreaRect, no parallel-group/vector-direction rule and no pre-detect rotation:
-    `paddle_engine.quad_long_edge_angle` (direction of the quad's longer side, `[-90, 90)`) →
+    `_detect_job` with `compute`). **Rotation comes from the detect quad, snapped to the page's
+    global potential angles** — there is no Hough, no minAreaRect, no per-cluster
+    parallel-group rule and no pre-detect rotation: `paddle_engine.quad_long_edge_angle`
+    (direction of the quad's longer side, `[-90, 90)`), snapped by `line_geometry.snap_angle` to
+    the nearest of `ClassificationResult.global_angles` when within `QUAD_ANGLE_SNAP_TOL_DEG` (5°),
+    unchanged otherwise (`global_angles` = the mean angle of every collinear group with ≥
+    `GLOBAL_ANGLE_MIN_GROUP_SIZE` (2) members, page-wide across every bucket, drawing groups
+    included, deduped within `ANGLE_TOL_DEG` — computed by step 1 at no extra cost) →
     `upright_crop` (the quad's surrounding region, `quad_region`, is **rotated** by that angle
     about the quad centre with `cv2.warpAffine` and the quad cut out upright — never a re-boxed
     axis-aligned bbox and never a perspective warp). Page-wide batched recognition:
@@ -481,7 +486,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
     +90/180/270 (`recognize_crops_raw`, no classifier) and the best score wins (pass 1 always a
     candidate) — attempts are compared on `english_words.selection_score` = score ×
     `ENGLISH_WORD_MULTIPLIER` (1.20) per pyenchant `en_US` word (alpha-only, ≥ 2 letters, uncapped);
-    the retry trigger itself stays on the raw score. `Text.angle` = long-edge angle + classifier flip + 90° × winning retry;
+    the retry trigger itself stays on the raw score. `Text.angle` = (snapped) long-edge angle + classifier flip + 90° × winning retry;
     `Text.quad_points` = the detect quad reordered so p0→p1 is the reading direction
     (`reorder_quad_reading`). **Text vs. drawing has no FAST**: `_text_vectors_by_quad` makes a
     vector of an OCR'd cluster text when a **non-blank** quad detected in **its own cluster** —
@@ -499,7 +504,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
     and the streaming `on_debug_layer` render: per-step `kept bbox` / `dropped <category>`,
     `intersection / dropped to drawing (N)` + `flagged, kept (off-grid) (N)`, `geometry`
     collinear/parallel groups (the same `line_geometry` grouping the steps use), `ocr` detect/
-    passed/failed quads, `rotation / quad angle` + `final angle` arrows + `cls flipped (N)` quads,
+    passed/failed quads, `rotation / raw quad angle` + `snapped angle (N)` + `final angle` arrows + `cls flipped (N)` quads,
     `retry` layers, `ownership / text vectors` + `drawing vectors`, and `drawing`. Debug images
     (`scripts/debug_image_savers.py::_save_latestvectorclassification_*`): `for_paddle_detect/`,
     `for_rotation_correction/{quad_rotation,paddle_classifier}/`, `for_paddle_recog/

@@ -4,19 +4,23 @@ VectorClassification + CollinearVectorClass backend:
 1. `classify_vectors` -- layer/color/width buckets; collinear drawing
    removal (long, regular dashed/repeated lines); seqno merge + spatial
    clustering; per cluster, parallel-group length outliers and the
-   crossed-grid removal -> drawing.
+   crossed-grid removal -> drawing. Also the page's global potential
+   angles (every >= 2-member collinear group's angle, page-wide, deduped).
 2. Per cluster: render (unrotated), PaddleOCR detect.
-3. Per detected quad: the quad's **long-edge angle** sets the rotation;
+3. Per detected quad: the quad's **long-edge angle**, snapped to the
+   nearest global potential angle when within `QUAD_ANGLE_SNAP_TOL_DEG`
+   (`line_geometry.snap_angle`; unchanged otherwise), sets the rotation;
    the region around the quad is rotated by it and the quad cropped out
    upright (`paddle_engine.upright_crop` -- a real rotation, never a
-   re-boxed axis-aligned bbox). No Hough, no minAreaRect, no
-   vector-direction rules.
+   re-boxed axis-aligned bbox). No Hough, no minAreaRect. The quad itself
+   (`Text.quad_points`) stays as detected.
 4. Page-wide batched recognition: PaddleOCR's 0/180 angle classifier, then
    recognise; every crop whose score (confidence, halved for a single
    character, 0 when blank) is below `RETRY_CONFIDENCE_THRESHOLD` is also
    recognised at +90/180/270 (no classifier) and the best attempt wins --
    compared on score x `ENGLISH_WORD_MULTIPLIER` ** (dictionary English
-   words in the read, `english_words.selection_score`). Text angle = long-edge angle + classifier flip + retry rotation.
+   words in the read, `english_words.selection_score`). Text angle = (snapped)
+   long-edge angle + classifier flip + retry rotation.
 5. Text/drawing split (`_text_vectors_by_quad`): a vector of an OCR'd
    cluster is text when some non-blank quad (the rotated quad itself)
    detected in its own cluster owns it -- tiered, cheapest first: bbox
@@ -58,6 +62,7 @@ from rastervec.P3_Vector_Parsing.LatestVectorClassification.config import (
     OCR_DPI,
     OCR_LANG,
     OCR_VERSION,
+    QUAD_ANGLE_SNAP_TOL_DEG,
     RENDER_PADDING_EXTRA_PT,
     RETRY_CONFIDENCE_THRESHOLD,
     STRAIGHT_TOL_PT,
@@ -75,6 +80,7 @@ from rastervec.P3_Vector_Parsing.LatestVectorClassification.line_geometry import
     ink_fraction_in_quad,
     piece_overlap_fraction,
     quad_area,
+    snap_angle,
     split_straight,
 )
 from rastervec.P3_Vector_Parsing.LatestVectorClassification.paddle_engine import (
@@ -228,8 +234,11 @@ def parse(
             else:
                 quads_per_cluster = [det_backend.detect(c["bgr"]) for c in clusters_render]
 
-        # Stage 3: per quad -- page-space bbox + quad, long-edge angle, and
-        # the upright crop (region rotated by that angle, quad cut out).
+        # Stage 3: per quad -- page-space bbox + quad, long-edge angle
+        # (snapped to the nearest global potential angle within
+        # QUAD_ANGLE_SNAP_TOL_DEG -- render pixel space is page space scaled,
+        # unrotated, so the angles compare directly), and the upright crop
+        # (region rotated by that angle, quad cut out).
         with clock("ocr_crop"):
             for c, quads in zip(clusters_render, quads_per_cluster):
                 if keep_arrays:
@@ -242,7 +251,11 @@ def parse(
                     ))
                     detect_boxes.append(bbox)
                     detect_quads.append(qpts)
-                    angle = quad_long_edge_angle(quad)
+                    raw_angle = quad_long_edge_angle(quad)
+                    snapped = snap_angle(raw_angle, cls.global_angles, QUAD_ANGLE_SNAP_TOL_DEG)
+                    # Not re-wrapped to [-90, 90): a raw 89.9 snapping to 90
+                    # must stay 90, not become -90 (a 180-degree crop flip).
+                    angle = raw_angle if snapped is None else snapped
                     crop = upright_crop(c["bgr"], quad, angle)
                     # Crops come out of the BGR render; the recognisers do
                     # their own RGB->BGR flip, so hand them RGB.
@@ -250,6 +263,8 @@ def parse(
                         "cluster_idx": c["cluster_idx"], "group_vectors": c["group_vectors"],
                         "crop": crop[:, :, ::-1], "bbox": bbox, "quad_pts": qpts,
                         "quad_angle": angle,
+                        "quad_angle_raw": raw_angle,
+                        "snapped": snapped is not None,
                         "region": quad_region(c["bgr"], quad)[0][:, :, ::-1] if keep_arrays else None,
                     })
 
@@ -318,6 +333,8 @@ def parse(
                 "bbox": pq["bbox"],
                 "quad_pts": pq["quad_pts"],
                 "quad_angle_deg": pq["quad_angle"],
+                "quad_angle_raw_deg": pq["quad_angle_raw"],
+                "snapped": pq["snapped"],
                 "cls_flip_deg": boxes[idx].flip_deg if k == 0 else None,
                 "retry_count": k if box.text else None,
                 "retried": idx in retried,
@@ -360,6 +377,7 @@ def parse(
 
     if debug_out is not None:
         debug_out["classification"] = cls
+        debug_out["global_angles"] = cls.global_angles
         debug_out["ocr_clusters"] = ocr_clusters
         debug_out["texts"] = texts
         debug_out["quad_rotation_regions"] = (
@@ -396,6 +414,7 @@ _C_DROPPED = "#dc2626"
 _C_FLAGGED = "#f59e0b"
 _C_ANGLE_QUAD = "#0891b2"
 _C_ANGLE_FINAL = "#65a30d"
+_C_ANGLE_SNAPPED = "#7c3aed"
 _C_CLS_FLIP = "#be185d"
 _C_RETRY_1 = "#f59e0b"
 _C_RETRY_2 = "#ea580c"
@@ -599,17 +618,22 @@ def _render_angle_arrows_pdf(page_meta, entries: list[dict], angle_key: str, hex
 
 
 def _render_rotation_layers(page_meta, rotation_entries: "list[dict] | None") -> "list[DebugLayer]":
-    """Per detected quad: `quad angle` (the long-edge angle the crop was
-    rotated by, before the classifier), `final angle` (a non-blank result's
-    text direction: quad angle + classifier flip + retry rotation), and
-    `cls flipped` (quads the classifier turned 180 on the winning pass)."""
+    """Per detected quad: `raw quad angle` (the detected long-edge angle),
+    `snapped angle (N)` (only the N quads whose angle snapped to a global
+    potential angle -- the angle their crop was rotated by), `final angle` (a
+    non-blank result's text direction: (snapped) quad angle + classifier flip
+    + retry rotation), and `cls flipped` (quads the classifier turned 180 on
+    the winning pass)."""
     from rastervec.commons.renderer import render_quads_pdf
 
     entries = rotation_entries or []
     flipped = [e["quad_pts"] for e in entries if e.get("cls_flip_deg") == 180]
+    snapped = [e for e in entries if e.get("snapped")]
     return [
-        ("rotation", "quad angle", _C_ANGLE_QUAD,
-         _render_angle_arrows_pdf(page_meta, entries, "quad_angle_deg", _C_ANGLE_QUAD)),
+        ("rotation", "raw quad angle", _C_ANGLE_QUAD,
+         _render_angle_arrows_pdf(page_meta, entries, "quad_angle_raw_deg", _C_ANGLE_QUAD)),
+        ("rotation", f"snapped angle ({len(snapped)})", _C_ANGLE_SNAPPED,
+         _render_angle_arrows_pdf(page_meta, snapped, "quad_angle_deg", _C_ANGLE_SNAPPED)),
         ("rotation", "final angle", _C_ANGLE_FINAL,
          _render_angle_arrows_pdf(page_meta, entries, "final_angle_deg", _C_ANGLE_FINAL)),
         ("rotation", f"cls flipped ({len(flipped)})", _C_CLS_FLIP, render_quads_pdf(
