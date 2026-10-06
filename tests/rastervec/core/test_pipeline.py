@@ -170,3 +170,46 @@ def test_failed_p2_under_verbose_does_not_cascade_into_unbound_local(
     assert outcomes["phase3"].status == "ok"
     assert [t.text for t in result.texts] == ["hello"]
     assert len(result.vectors) == 1
+
+
+def _p3_must_not_run(*_args, **_kwargs):
+    raise AssertionError("P3 ran despite stop_after")
+
+
+def test_stop_after_phase2_skips_p3_and_outputs_raw_vectors(
+    synthetic_pdf_factory, tmp_pdf_path, monkeypatch,
+):
+    monkeypatch.setitem(registry.P2_REGISTRY, "FakeP2", _fake_p2)
+    monkeypatch.setitem(registry.P3_REGISTRY, "NoP3", _p3_must_not_run)
+    path = _synthetic_pdf_path(synthetic_pdf_factory, tmp_pdf_path)
+    layers = []
+
+    result = run_pipeline(
+        path, 0, p2="FakeP2", p3="NoP3", verbose=True, stop_after="phase2",
+        on_debug_layer=lambda *a: layers.append(a[0]),
+    )
+
+    assert set(result.step_durations) == {"phase1", "phase2", "phase4"}
+    assert layers == ["phase2"]
+    assert [t.text for t in result.texts] == ["hello"]
+    assert len(result.vectors) == len(result.extra["phase1"].vectors)
+    assert result.extra["p3_debug"] == {}
+
+
+def test_stop_after_phase1_skips_p2_and_p3(synthetic_pdf_factory, tmp_pdf_path, monkeypatch):
+    monkeypatch.setitem(registry.P2_REGISTRY, "NoP2", _p3_must_not_run)
+    monkeypatch.setitem(registry.P3_REGISTRY, "NoP3", _p3_must_not_run)
+    path = _synthetic_pdf_path(synthetic_pdf_factory, tmp_pdf_path)
+
+    result = run_pipeline(path, 0, p2="NoP2", p3="NoP3", stop_after="phase1")
+
+    assert set(result.step_durations) == {"phase1", "phase4"}
+    assert [t.text for t in result.texts] == ["hello"]
+
+
+def test_stop_after_rejects_unknown_phase(synthetic_pdf_factory, tmp_pdf_path):
+    path = _synthetic_pdf_path(synthetic_pdf_factory, tmp_pdf_path)
+    import pytest
+
+    with pytest.raises(ValueError, match="stop_after"):
+        run_pipeline(path, 0, stop_after="phase4")

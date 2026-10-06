@@ -302,7 +302,10 @@ generic parallel-pool mechanics), never phase-specific business logic.
     stage) — `LatestVectorClassification` and `LegacyRecreation` have no FAST — but stay on this
     signature as generic, backend-agnostic plumbing). CLI:
     `python -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 LatestVectorClassification]
-    [--no-fast] [-v]`. No `stop_after`/partial-run support — always a full Phase1→P2→P3→P4 run.
+    [--no-fast] [--stop-after phase1|phase2|phase3] [-v]`. `stop_after` (`STEP_NAMES`) really
+    stops the run after that phase — later backends are never called and get no
+    `step_durations` entry; Phase 4 still runs, with the raw P1(+P2) vectors as output when P3
+    was skipped.
   - **`registry.py`** — `P2_REGISTRY`/`P3_REGISTRY` (name → backend callable),
     `resolve_p2`/`resolve_p3` (`ValueError` listing valid names on a miss), `DEFAULT_P2="Stub"`,
     `DEFAULT_P3="LatestVectorClassification"`. Also `P2_RENDER_DEBUG`/`P3_RENDER_DEBUG` — a *separate*,
@@ -1018,8 +1021,8 @@ generic parallel-pool mechanics), never phase-specific business logic.
   `input_files`, per-PDF `pages`, `vectorise` + `vectorise_mode` = an `Evaluation/conversion.py`
   mode), runs `core.pipeline.run_pipeline(..., p2=, p3=, verbose=True)` once per (pdf, page) for the
   `current` engine (`pipelines.legacy.run_pipeline` unchanged for `legacy` — always a full run;
-  the new orchestrator has no `stop_after`, so `final_stage` only trims which report *artifacts*
-  render, not how much of the pipeline executes), and writes
+  `final_stage` is passed as `run_pipeline(stop_after=...)`, so later phases really don't run —
+  value table in `scripts/report_configs/README.md`), and writes
   `outputs/pipeline_report/<ts>__<config-stem>/<pdf-stem>/` (the run's source config path is
   also recorded inside `config_and_hyperparameters.txt`) — see the artifact breakdown below.
   **`benchmark: true`** (mutually exclusive with `vectorise`) additionally makes each input's own
@@ -1090,10 +1093,10 @@ generic parallel-pool mechanics), never phase-specific business logic.
   sent to OCR that no GT region covers) and `benchmark__missed_vectors.pdf` (drawing-output
   vectors inside a manual-label region) — `label_overlays.extra_predictions`, rendered by
   `report_artifacts._add_extra_prediction_layers`. `legacy` still only ever emits the single
-  `reconstructed` row. There is no `stop_after`/partial-run support for `pipeline: "current"` —
-  `final_stage` (validated against `core.pipeline`'s short `phase1`/`phase2`/`phase3` names) only
-  trims which of the fixed phase-level artifacts render, not how much of the pipeline executes,
-  and doesn't gate the per-backend debug layers at all (those always render in full).
+  `reconstructed` row. For `pipeline: "current"`, `final_stage` (validated against
+  `core.pipeline`'s short `phase1`/`phase2`/`phase3` names) stops the run via
+  `run_pipeline(stop_after=...)` — a skipped phase renders no debug layers/images — and also
+  drops the fixed `phase2`/`reconstructed` rows for phases that didn't run.
   `scripts/pipeline_report_viewer.py` is the Tkinter counterpart: **1 or 2** per-PDF folders →
   toggleable source page + one side-by-side panel per folder, each a checkbox per layer PDF (grouped
   by stage, `all`/`none` per group, incl. the `benchmark` overlay group), each checked layer

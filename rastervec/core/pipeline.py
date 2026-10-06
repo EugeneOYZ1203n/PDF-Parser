@@ -9,7 +9,8 @@ contract each implements.
     texts, vectors = P4.organize_outputs(phase1.texts, p2_texts, p3_texts, p3_vectors, phase1.page)
     -> PipelineResult(texts=texts, vectors=vectors, ...)
 
-CLI: `python -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 LatestVectorClassification]`
+CLI: `python -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 LatestVectorClassification]
+[--stop-after phase1|phase2|phase3]`
 """
 from __future__ import annotations
 
@@ -24,6 +25,10 @@ from rastervec.P1_Reading_Native.phase1 import read_and_extract
 from rastervec.P4_Output_Organization.organize import organize_outputs
 
 _LOG = get_logger("core.pipeline")
+
+# The phases `run_pipeline(stop_after=...)` can stop after. Phase 4 always
+# runs (it just combines whatever the run produced), so it isn't listed.
+STEP_NAMES = ("phase1", "phase2", "phase3")
 
 
 class _StepTimer:
@@ -70,6 +75,7 @@ def run_pipeline(
     progress_counter=None,
     on_debug_layer=None,
     keep_debug_arrays: bool = True,
+    stop_after: str | None = None,
 ) -> PipelineResult:
     """Run one page through Phase 1 (always) -> `p2` -> `p3` -> Phase 4
     (always). `enable_fast` is forwarded to `p3` backends that accept it
@@ -94,7 +100,17 @@ def run_pipeline(
     angles, stats -- and skip the full-size image arrays (render crops,
     masks, diff canvases) plus any work done only to produce them, for a
     caller that wants the verbose result but not those arrays (e.g. the
-    report generator with `debug_images: false`)."""
+    report generator with `debug_images: false`).
+
+    `stop_after` (`None` or one of `STEP_NAMES`) really stops the run after
+    that phase: later P2/P3 backends are never called and get no
+    `step_durations` entry. Phase 4 still runs on what exists -- with P3
+    skipped, the output vectors are the raw, unclassified P1 (+ P2) vectors
+    and the texts are native (+ P2) only."""
+    if stop_after is not None and stop_after not in STEP_NAMES:
+        raise ValueError(f"stop_after must be None or one of {STEP_NAMES}, got {stop_after!r}")
+    run_p2 = stop_after != "phase1"
+    run_p3 = stop_after not in ("phase1", "phase2")
     p2_fn = resolve_p2(p2)
     p3_fn = resolve_p3(p3)
     timer = _StepTimer(verbose=verbose)
@@ -118,39 +134,45 @@ def run_pipeline(
     p3_vectors, p3_texts = [], []
     texts, vectors = [], []
 
-    _LOG.info("phase2 (p2=%s): %d image(s)", p2, len(phase1.images))
-    with timer("phase2"):
-        p2_kwargs = {}
-        p2_params = inspect.signature(p2_fn).parameters
-        if verbose and "debug_out" in p2_params:
-            p2_kwargs["debug_out"] = p2_debug
-        if on_debug_layer is not None and "on_debug_layer" in p2_params:
-            p2_kwargs["on_debug_layer"] = on_debug_layer
-        if compute is not None and "compute" in p2_params:
-            p2_kwargs["compute"] = compute
-        if "keep_debug_arrays" in p2_params:
-            p2_kwargs["keep_debug_arrays"] = keep_debug_arrays
-        p2_vectors, p2_texts = p2_fn(phase1.images, phase1.page, **p2_kwargs)
+    if run_p2:
+        _LOG.info("phase2 (p2=%s): %d image(s)", p2, len(phase1.images))
+        with timer("phase2"):
+            p2_kwargs = {}
+            p2_params = inspect.signature(p2_fn).parameters
+            if verbose and "debug_out" in p2_params:
+                p2_kwargs["debug_out"] = p2_debug
+            if on_debug_layer is not None and "on_debug_layer" in p2_params:
+                p2_kwargs["on_debug_layer"] = on_debug_layer
+            if compute is not None and "compute" in p2_params:
+                p2_kwargs["compute"] = compute
+            if "keep_debug_arrays" in p2_params:
+                p2_kwargs["keep_debug_arrays"] = keep_debug_arrays
+            p2_vectors, p2_texts = p2_fn(phase1.images, phase1.page, **p2_kwargs)
 
-    _LOG.info("phase3 (p3=%s): %d P1 + %d P2 vector(s)", p3, len(phase1.vectors), len(p2_vectors))
-    with timer("phase3"):
-        p3_kwargs = {}
+    if run_p3:
+        _LOG.info("phase3 (p3=%s): %d P1 + %d P2 vector(s)", p3, len(phase1.vectors), len(p2_vectors))
+        with timer("phase3"):
+            p3_kwargs = {}
 
-        sig = inspect.signature(p3_fn)
-        for name, value in (
-            ("enable_fast", enable_fast), ("verbose", verbose),
-            ("compute", compute), ("progress_counter", progress_counter),
-            ("keep_debug_arrays", keep_debug_arrays),
-        ):
-            if name in sig.parameters:
-                p3_kwargs[name] = value
-        if verbose and "debug_out" in sig.parameters:
-            p3_kwargs["debug_out"] = p3_debug
-        if on_debug_layer is not None and "on_debug_layer" in sig.parameters:
-            p3_kwargs["on_debug_layer"] = on_debug_layer
-        if "step_durations" in sig.parameters:
-            p3_kwargs["step_durations"] = p3_substeps
-        p3_vectors, p3_texts = p3_fn(phase1.vectors, p2_vectors, phase1.page, **p3_kwargs)
+            sig = inspect.signature(p3_fn)
+            for name, value in (
+                ("enable_fast", enable_fast), ("verbose", verbose),
+                ("compute", compute), ("progress_counter", progress_counter),
+                ("keep_debug_arrays", keep_debug_arrays),
+            ):
+                if name in sig.parameters:
+                    p3_kwargs[name] = value
+            if verbose and "debug_out" in sig.parameters:
+                p3_kwargs["debug_out"] = p3_debug
+            if on_debug_layer is not None and "on_debug_layer" in sig.parameters:
+                p3_kwargs["on_debug_layer"] = on_debug_layer
+            if "step_durations" in sig.parameters:
+                p3_kwargs["step_durations"] = p3_substeps
+            p3_vectors, p3_texts = p3_fn(phase1.vectors, p2_vectors, phase1.page, **p3_kwargs)
+    else:
+        # P3 is what classifies vectors; without it the raw P1 + P2 vectors
+        # are the run's output.
+        p3_vectors = list(phase1.vectors) + list(p2_vectors)
 
     with timer("phase4"):
         texts, vectors = organize_outputs(
@@ -184,6 +206,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--p2", default=DEFAULT_P2)
     parser.add_argument("--p3", default=DEFAULT_P3)
     parser.add_argument("--no-fast", action="store_true")
+    parser.add_argument("--stop-after", choices=STEP_NAMES, default=None)
     parser.add_argument("-v", "--verbose", action="store_true")
     return parser
 
@@ -193,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging("DEBUG" if args.verbose else "INFO")
     result = run_pipeline(
         args.pdf, args.page, p2=args.p2, p3=args.p3,
-        enable_fast=not args.no_fast, verbose=args.verbose,
+        enable_fast=not args.no_fast, verbose=args.verbose, stop_after=args.stop_after,
     )
     print(f"p2={result.p2} p3={result.p3} texts={len(result.texts)} vectors={len(result.vectors)}")
     print("step durations:", result.step_durations)

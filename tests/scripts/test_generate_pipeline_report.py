@@ -304,6 +304,18 @@ def test_new_engine_artifacts_skip_phase1_and_final():
     assert stems == ["phase2", "reconstructed"]
 
 
+def test_final_stage_trims_new_engine_artifacts():
+    variant = gpr.PipelineVariant(name="x", engine="current", p2="Stub", p3="LatestVectorClassification")
+
+    def stems(final_stage):
+        cfg = gpr.ReportConfig(final_stage=final_stage)
+        return [row[0] for row in gpr._active_artifacts(cfg, variant)]
+
+    assert stems(None) == stems("phase3") == ["phase2", "reconstructed"]
+    assert stems("phase2") == ["phase2"]
+    assert stems("phase1") == []
+
+
 def test_debug_images_flag_default_and_off(tmp_path):
     from types import SimpleNamespace
 

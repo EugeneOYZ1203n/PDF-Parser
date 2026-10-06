@@ -13,7 +13,7 @@ Every field is optional except that you need at least one of `input_dir` /
 | `p2` | only meaningful when `pipeline: "current"` — a `core.registry.P2_REGISTRY` name (`Stub` default, or `Junction`) |
 | `p3` | only meaningful when `pipeline: "current"` — a `core.registry.P3_REGISTRY` name (`LatestVectorClassification` default, `OldVectorClassification` -- the frozen 2026-09-29 snapshot -- or `LegacyRecreation`) |
 | `enable_fast` | forwarded to `p3` backends that accept it (default `true`). Currently a no-op — no P3 backend declares it (LatestVectorClassification has no FAST; OldVectorClassification always runs its own FAST filter); kept so older configs still validate |
-| `final_stage` | one of `core.pipeline`'s short step names (`phase1`/`phase2`/`phase3`); `null` = all. Trims which of the fixed phase-level artifacts render — doesn't skip any actual pipeline work or gate per-backend debug layers. Ignored for `pipeline: "legacy"`. |
+| `final_stage` | last phase to run: `null` (default) / `"phase1"` / `"phase2"` / `"phase3"` — see [`final_stage` values](#final_stage-values). Really stops the pipeline there (`run_pipeline(stop_after=...)`). Ignored for `pipeline: "legacy"` |
 | `input_dir` | folder scanned for `*.pdf` |
 | `input_files` | explicit list of PDF paths (merged with `input_dir`, deduped) |
 | `label_files` | `{ "<pdf-stem>": "path/to/labels.json" }` — recorded in the manifest for the benchmark step |
@@ -27,6 +27,22 @@ Every field is optional except that you need at least one of `input_dir` /
 | `debug_images` | write the `for_paddle_detect/` / `for_rotation_correction/` / `for_paddle_recog/` / `paddle_ocr_images/` PNG crops (max `debug_image_cap` random per leaf folder per input, default `true`). `false` also stops backends keeping the full-size image arrays those crops come from |
 | `debug_image_cap` | per-leaf-folder cap on `debug_images` PNGs (default `100`); `null` = uncapped |
 | `debug_layers` | write the layer PDFs the viewer toggles (default `true`): every backend debug layer (`<stage>__<layer>.pdf`), `phase2`/`reconstructed`, `benchmark__extra_*`, and the benchmark `<type>_{bbox,text}.pdf` overlays. `false` skips all of them **and** the work done only to render them; `dump.json`, ground truth, stats and debug images are still written, so `pipeline_report_benchmark.py` still scores the run (the viewer then shows only the source page). With `p2: "Junction"`, also set `debug_images: false` for the fastest run |
+
+## `final_stage` values
+
+Passed to `core.pipeline.run_pipeline(stop_after=...)`, so later phases are
+never called — they don't render debug layers, write debug images or take
+time. Phase 4 (output combination) always runs on whatever was produced.
+
+| value | phases run | layer PDFs written | `dump.json` texts / vectors |
+|---|---|---|---|
+| `null` (default) | P1 → P2 → P3 → P4 | all: P2 + P3 debug layers, `phase2`, `reconstructed` | final: native + P2 + P3 OCR text / P3's classified vectors |
+| `"phase1"` | P1 → P4 | none | native text only / raw P1 vectors |
+| `"phase2"` | P1 → P2 → P4 | P2 debug layers + `phase2` (written only if P2 produced anything, so nothing with `p2: "Stub"`) | native + P2 OCR text / raw P1 + P2 vectors |
+| `"phase3"` | same as `null` | same as `null` | same as `null` |
+
+Any other value is rejected when the config loads. With `benchmark: true`,
+`"phase1"`/`"phase2"` mean no P3 OCR text, so text scores drop to near zero.
 
 ## Faster runs
 

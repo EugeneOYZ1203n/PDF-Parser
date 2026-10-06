@@ -274,6 +274,7 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
                 enable_fast=variant.enable_fast, verbose=True,
                 on_debug_layer=_debug_layer_sink(writer) if config.debug_layers else None,
                 keep_debug_arrays=config.debug_images,
+                stop_after=config.final_stage,
             )
         if run_page != page_index:
             _restamp_page(res, page_index)
@@ -489,6 +490,7 @@ def _process_pdf_benchmark(
                 enable_fast=variant.enable_fast, verbose=True,
                 on_debug_layer=_debug_layer_sink(writer) if config.debug_layers else None,
                 keep_debug_arrays=config.debug_images,
+                stop_after=config.final_stage,
             )
         _restamp_page(res, p)
         _accumulate_page(res, p, active, writer, stats_pages, reservoirs,
@@ -526,6 +528,7 @@ def _process_pdf_benchmark(
                         str(raster_page_path), 0, p2=variant.p2, p3=variant.p3,
                         enable_fast=variant.enable_fast, verbose=True,
                         keep_debug_arrays=False,
+                        stop_after=config.final_stage,
                     )
                 _restamp_page(res_raster, p)
                 raster_texts = list(res_raster.texts or [])

@@ -81,7 +81,7 @@ one of `input_dir` / `input_files`):
 | `p2` | only meaningful when `pipeline: "current"` -- a `core.registry.P2_REGISTRY` name (`Stub` default, or `Junction`) |
 | `p3` | only meaningful when `pipeline: "current"` -- a `core.registry.P3_REGISTRY` name (`LatestVectorClassification` default, `OldVectorClassification` -- frozen 2026-09-29 baseline -- or `LegacyRecreation`) |
 | `enable_fast` | forwarded to `p3` backends that accept it (default `true`) |
-| `final_stage` | one of `core.pipeline`'s short step names (`phase1`/`phase2`/`phase3`); `null` = all. Only trims which of the 4 fixed phase-level artifacts render -- doesn't skip any actual pipeline work, and doesn't gate the per-backend debug layers (those always render in full). Ignored entirely for `pipeline: "legacy"`. |
+| `final_stage` | last phase to run: `null` (default, all) / `phase1` / `phase2` / `phase3`. Passed to `run_pipeline(stop_after=...)`, so later phases really don't run (no debug layers/images, no OCR); Phase 4 still combines what was produced (raw P1+P2 vectors when P3 is skipped). Full table in `scripts/report_configs/README.md`. Ignored entirely for `pipeline: "legacy"`. |
 | `input_dir` | folder scanned for `*.pdf` |
 | `input_files` | explicit PDF paths (merged with `input_dir`, deduped) |
 | `label_files` | `{ "<pdf-stem>": "path/to/labels.json" }` - recorded in the manifest only |
@@ -155,9 +155,8 @@ page - needs LibreOffice on PATH). Run one `benchmark` config with
 folders with `pipeline_report_benchmark.py --run ... --run ...`.
 
 `quick_classify.json` (`final_stage: "phase2"`) is the fast smoke test - it
-skips rendering the `final`/`reconstructed` artifacts (OCR still runs as
-part of the pipeline itself -- `final_stage` doesn't skip pipeline work, see
-above).
+stops after Phase 2, so the P3 backend (classification + OCR) never runs and
+no `reconstructed` artifact is written.
 
 ## `scripts/pipeline_report_viewer.py`
 

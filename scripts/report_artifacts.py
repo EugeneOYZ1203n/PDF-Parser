@@ -73,9 +73,9 @@ _ARTIFACTS: list[tuple[str, str, str | None, str]] = [
 
 # The new `core.pipeline` engine's artifact set -- deliberately small and
 # generic (see `commons/renderer/stages.py`'s "phase2" branch): no
-# per-backend stats files (stats_key=None throughout), no partial-run
-# support (the new orchestrator always runs phase1->p2->p3 in full;
-# `final_stage` here only trims which of these rows get rendered).
+# per-backend stats files (stats_key=None throughout). `final_stage` is
+# passed to `run_pipeline(stop_after=...)`, so later phases really don't
+# run; `_reached` additionally drops rows for phases that didn't run.
 # `phase1` (native words + raw vectors) is left out -- the inspector shows
 # exactly that for the same input PDF -- and so is `final` (final vectors =
 # the P3 backend's own `drawing` debug layer, final text = native + that
