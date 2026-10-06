@@ -82,7 +82,8 @@ from rastervec.commons.logging_setup import get_logger
 from rastervec.commons.models import PageMeta, Segment, Text
 from rastervec.core.pipeline import run_pipeline
 from rastervec.P1_Reading_Native.reader import Reader
-from rastervec.commons.renderer import render_boxes_pdf, render_reconstructed_pdf
+from rastervec.commons.renderer import render_boxes_pdf
+from rastervec.P4_Output_Organization import render_output_pdf
 
 _LOG = get_logger("reader.parallel.jobs")
 
@@ -357,7 +358,7 @@ def _write_current_outputs(
     if vector_input is not None:
         (directory / "input_original_vector.pdf").write_bytes(vector_input)
     (directory / "current.pdf").write_bytes(
-        render_reconstructed_pdf(page_meta, ocr_results=merged_ocr_results)
+        render_output_pdf(page_meta, merged_ocr_results, [])
     )
     # Box overlay: native predictions scored against native_to_vector GT,
     # vector predictions against original_vector GT; the other two types
@@ -459,9 +460,8 @@ def _run_legacy(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
     directory = _page_dir(task)
     if directory is not None:
         (directory / "legacy.pdf").write_bytes(
-            render_reconstructed_pdf(
-                _original_page_meta(task.pdf_path, task.page_index),
-                ocr_results=merged_ocr,
+            render_output_pdf(
+                _original_page_meta(task.pdf_path, task.page_index), merged_ocr, [],
             )
         )
     return result

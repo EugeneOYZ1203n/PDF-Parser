@@ -3,7 +3,7 @@
 Not used by the real pipeline, and deliberately not re-exported through
 `renderer/__init__.py` -- this module imports `matplotlib`, and every
 pipeline module already does `from rastervec.commons.renderer import ...` for
-lightweight things (`render_vector_cluster`, `render_reconstructed_page`,
+lightweight things (`render_vector_cluster`, `rasterize_pdf`,
 ...), so folding this module into that package's own `__init__` would drag
 matplotlib into every real pipeline run's import graph. Import it directly
 (`from rastervec.commons.renderer.notebook import ...`) instead -- the notebook

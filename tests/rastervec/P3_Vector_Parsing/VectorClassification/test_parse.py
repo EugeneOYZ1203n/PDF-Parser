@@ -372,3 +372,31 @@ def test_parse_ocr_rejected_cluster_ends_up_in_drawing(page_meta, vector, monkey
 
     assert texts == []
     assert drawing == [v]
+
+
+def test_parse_keeps_the_detectors_rotated_quad(page_meta, vector, monkeypatch):
+    """PaddleOCR's detector returns rotated quads -- the output `Text`
+    carries that quad in page space (`quad_points`, whose envelope is its
+    `bbox`), and the debug layers draw it rather than the envelope."""
+    v = vector(kind="l", bbox=(10.0, 10.0, 40.0, 30.0), color=(0.0, 0.0, 0.0), seqno=1)
+
+    def _detect(self, bgr):
+        h, w = bgr.shape[:2]
+        return [np.array([[w * 0.5, h * 0.1], [w * 0.9, h * 0.5], [w * 0.5, h * 0.9], [w * 0.1, h * 0.5]])]
+
+    monkeypatch.setattr(PaddleDetectBackend, "detect", _detect)
+    monkeypatch.setattr(
+        PaddleRecBackend, "recognize_crops",
+        lambda self, crops: [OcrBox(text="AB", confidence=0.9, flip_deg=0) for _ in crops],
+    )
+    debug_out: dict = {}
+    _drawing, texts = vectorclassification.parse([v], [], _page(page_meta), debug_out=debug_out)
+
+    [t] = texts
+    assert t.quad_points is not None and len(t.quad_points) == 4
+    xs = [p[0] for p in t.quad_points]
+    ys = [p[1] for p in t.quad_points]
+    assert t.bbox == (min(xs), min(ys), max(xs), max(ys))
+    assert len({round(x, 6) for x in xs}) == 3  # a diamond, not an axis-aligned box
+    assert debug_out["ocr_detect_quads"] == [t.quad_points]
+    assert debug_out["ocr_blank_quads"] == []

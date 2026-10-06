@@ -28,11 +28,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
-import pymupdf as fitz
 from PIL import Image
 
 from rastervec.commons.helpers.geometry import union_bbox
-from rastervec.commons.renderer import render_reconstructed_pdf, render_text_pdf, render_vectors_pdf
+from rastervec.commons.renderer import render_text_pdf, render_vectors_pdf
+from rastervec.commons.renderer.draw import (
+    bbox_spec, image_spec, quad_spec, render_specs_pdf, text_spec, vector_spec,
+)
 
 if TYPE_CHECKING:
     from rastervec.commons.models import PageMeta
@@ -148,111 +150,36 @@ def _compose(
     poly_layers: "list[tuple[list, str]] | None" = None,
     text_layer: "list[tuple[str, tuple, float, tuple]] | None" = None,
 ) -> bytes:
-    """Build one page sized/rotated to `page_meta`, painting (in order): a
+    """One page sized/rotated to `page_meta` holding (in paint order): a
     full-page raster `image`; each `(vectors, hex)` in `vector_layers` as
     recoloured strokes; each `(bboxes, hex, filled)` in `rect_layers`; each
-    `(polys, hex)` in `poly_layers` as closed, unfilled polylines (`polys`
-    is a list of `(N, 2)` point sequences -- for a genuinely rotated
-    rectangle, not just an axis-aligned bbox); then `text_layer` `(text,
-    bbox, rotation, rgb)` tuples. Returns PDF bytes."""
-    from rastervec.commons.renderer._shapes import replay_drawing_paths
-
-    doc = fitz.open()
-    try:
-        page = doc.new_page(width=page_meta.width, height=page_meta.height)
-        page.set_rotation(page_meta.rotation)
-
-        if image is not None:
-            # Raw samples straight into a Pixmap -- a PNG stream would be
-            # encoded here only for MuPDF to decode and re-compress it.
-            rgb_image = image.convert("RGB")
-            page.insert_image(
-                fitz.Rect(0, 0, page_meta.width, page_meta.height),
-                pixmap=fitz.Pixmap(
-                    fitz.csRGB, rgb_image.width, rgb_image.height, rgb_image.tobytes(), 0,
-                ),
-                keep_proportion=False,
+    `(polys, hex)` in `poly_layers` as closed, unfilled polygons (a
+    genuinely rotated rectangle, not just an axis-aligned bbox); then
+    `text_layer` `(text, bbox, rotation, rgb)` boxes. Pure spec-building --
+    every mark is placed by `draw.py`."""
+    specs: list = []
+    if image is not None:
+        specs.append(image_spec(
+            np.asarray(image.convert("RGB")), (0.0, 0.0, page_meta.width, page_meta.height),
+        ))
+    for vectors, hexcol in vector_layers or []:
+        rgb = _hex_to_rgb01(hexcol)
+        specs += [vector_spec(v, recolor=rgb) for v in vectors]
+    for bboxes, hexcol, filled in rect_layers or []:
+        rgb = _hex_to_rgb01(hexcol)
+        specs += [
+            bbox_spec(
+                b, rgb, width=1.0,
+                fill=rgb if filled else None, fill_opacity=0.25 if filled else None,
             )
-
-        import dataclasses
-
-        for vectors, hexcol in vector_layers or []:
-            rgb = _hex_to_rgb01(hexcol)
-            recol = [
-                dataclasses.replace(
-                    v, type="s", color=rgb, fill=None, dashes=None,
-                    width=max(v.width or 0.0, 1.0), closePath=False,
-                    blendmode="Normal", opacity=1.0, stroke_opacity=1.0, fill_opacity=None,
-                )
-                for v in vectors
-            ]
-            if recol:
-                replay_drawing_paths(page, recol)
-
-        # Every rect/poly/text layer below draws into one Shape per layer with
-        # a single commit -- `page.draw_rect`/`draw_polyline`/`insert_text`
-        # per item each make their own Shape + commit, one content stream per
-        # item (quadratic on a busy page).
-        for bboxes, hexcol, filled in rect_layers or []:
-            rgb = _hex_to_rgb01(hexcol)
-            kw = {"color": rgb, "width": 1.0}
-            if filled:
-                kw["fill"] = rgb
-                kw["fill_opacity"] = 0.25
-            shape = page.new_shape()
-            drawn = False
-            for b in bboxes:
-                if b is None:
-                    continue
-                shape.draw_rect(fitz.Rect(*b))
-                drawn = True
-                # A translucent fill is finished per rect so overlaps still
-                # darken each other, as separate draw_rect calls did.
-                if filled:
-                    shape.finish(**kw)
-            if drawn:
-                if not filled:
-                    shape.finish(**kw)
-                shape.commit()
-
-        for polys, hexcol in poly_layers or []:
-            rgb = _hex_to_rgb01(hexcol)
-            shape = page.new_shape()
-            drawn = False
-            for poly in polys:
-                if poly is None or len(poly) < 2:
-                    continue
-                pts = [fitz.Point(float(px), float(py)) for px, py in poly]
-                shape.draw_polyline(pts + [pts[0]])
-                drawn = True
-            if drawn:
-                shape.finish(color=rgb, width=1.0, closePath=False)
-                shape.commit()
-
-        if text_layer:
-            base_font = fitz.Font("helv")
-            span = base_font.ascender - base_font.descender
-            shape = page.new_shape()
-            for text, bbox, rotation, rgb in text_layer:
-                if not text or not text.strip():
-                    continue
-                x0, y0, x1, y1 = bbox
-                fs = max((y1 - y0) / span, 1.0)
-                natural = base_font.text_length(text, fontsize=fs)
-                if natural > (x1 - x0) > 0:
-                    fs = max(fs * (x1 - x0) / natural, 1.0)
-                try:
-                    shape.insert_text(
-                        fitz.Point(x0, y0 + base_font.ascender * fs), text,
-                        fontsize=fs, color=rgb,
-                    )
-                except Exception:  # noqa: BLE001 -- a preview; never fail the run over one label
-                    pass
-            shape.commit()  # no-op when nothing was placed
-
-        return doc.tobytes()
-    finally:
-        doc.close()
+            for b in bboxes if b is not None
+        ]
+    for polys, hexcol in poly_layers or []:
+        rgb = _hex_to_rgb01(hexcol)
+        specs += [quad_spec(poly, rgb, width=1.0) for poly in polys if poly is not None and len(poly) >= 2]
+    for item in text_layer or []:
+        specs.append(text_spec(item))
+    return render_specs_pdf(page_meta, specs)
 
 
 # ---------------------------------------------------------------------------
@@ -468,18 +395,6 @@ def render_ocr_results(res: "PipelineResult", *, page_meta: "PageMeta | None" = 
 
 
 # ---------------------------------------------------------------------------
-# Final reconstruction
-# ---------------------------------------------------------------------------
-def render_reconstructed(res: "PipelineResult", *, page_meta: "PageMeta | None" = None) -> bytes:
-    native = [t for t in (res.texts or []) if t.source == "native"]
-    ocr = [t for t in (res.texts or []) if t.source == "ocr"]
-    return render_reconstructed_pdf(
-        _meta(res, page_meta),
-        native_words=native, drawing_vectors=res.vectors or [], ocr_results=ocr,
-    )
-
-
-# ---------------------------------------------------------------------------
 # Per-layer split -- one single-purpose PDF per visual element, so the viewer
 # toggles a layer by loading / not loading its file (no colour-keying, so no
 # anti-alias fringe from a partially-knocked-out colour).
@@ -593,9 +508,6 @@ def render_stage_layers(
     if stage_key == "drawing":
         return [("drawing vector", C_DRAWING, render_drawing(res, page_meta=pm))]
 
-    if stage_key == "reconstructed":
-        return [("reconstructed page", "#111827", render_reconstructed(res, page_meta=pm))]
-
     # -----------------------------------------------------------------
     # New pluggable core.pipeline engine (P2/P3 registry). Deliberately
     # generic -- the three P3 backends share no code and populate `res.extra`
@@ -635,7 +547,8 @@ def _text_layer_pdf(page_meta: "PageMeta", texts, hexcol: str) -> bytes:
     """One-page PDF of `texts` (any `Text` list) drawn via `_compose`'s
     generic `text_layer` -- used by the new pluggable engine's phase2/final
     layers, which don't distinguish native vs OCR provenance the way the old
-    engine's `render_ocr_results`/`render_reconstructed` do."""
+    engine's `render_ocr_results` does. (The final reconstructed page is
+    Phase 4's -- `P4_Output_Organization.render_output_pdf`.)"""
     rgb = _hex_to_rgb01(hexcol)
     layer = [(t.text or "", tuple(t.bbox), t.angle(), rgb) for t in texts]
     return _compose(page_meta, text_layer=layer) if layer else _blank(page_meta)

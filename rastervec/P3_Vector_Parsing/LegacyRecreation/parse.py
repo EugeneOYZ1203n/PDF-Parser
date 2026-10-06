@@ -16,7 +16,7 @@ from typing import Callable
 import numpy as np
 
 from rastervec.commons.models import Page, Text, Vector
-from rastervec.commons.renderer import ocr_prep, pixel_to_page_bbox
+from rastervec.commons.renderer import ocr_prep, pixel_to_page_bbox, pixel_to_page_points
 from rastervec.commons.step_timing import StepClock
 from rastervec.commons.helpers.geometry import compute_origin, transform_direction
 from rastervec.P3_Vector_Parsing.LegacyRecreation.config import (
@@ -110,6 +110,9 @@ def parse(
     rec_backend = PaddleRecBackend()
     det_backend = PaddleDetectBackend()
     texts: list[Text] = []
+    # Every detected quad (blank reads included), page space -- the
+    # detector's own rotated quads, for the `ocr / detected quad` layer.
+    detect_quads: list[tuple] = []
     ocr_crops: list[tuple[np.ndarray, str]] = []
     keep_crops = debug_out is not None and keep_debug_arrays
     for wg in word_groups:
@@ -145,9 +148,11 @@ def parse(
         for quad, crop, box in zip(quads, crops, boxes):
             if keep_crops:
                 ocr_crops.append((crop, box.text))
+            unpadded_quad = (quad - np.array([pad_x_px, pad_y_px])).tolist()
+            quad_pts = tuple(pixel_to_page_points(group_vectors, dpi_used, unpadded_quad, padding))
+            detect_quads.append(quad_pts)
             if not box.text:
                 continue
-            unpadded_quad = (quad - np.array([pad_x_px, pad_y_px])).tolist()
             bbox = pixel_to_page_bbox(group_vectors, dpi_used, unpadded_quad, padding)
             rotate_deg = _normalize_rotation(_quad_rotation_deg(quad) + box.flip_deg)
             direction = transform_direction((1.0, 0.0), rotate_deg)
@@ -159,8 +164,9 @@ def parse(
                 block_no=0, line_no=0, word_no=0,
                 page_index=page.meta.index, seqno=group_vectors[0].seqno,
                 confidence=box.confidence, source="ocr", orientation_source="ocr",
+                quad_points=quad_pts,
             ))
-    _emit(lambda: _render_ocr_layers(page_meta, texts))
+    _emit(lambda: _render_ocr_layers(page_meta, texts, detect_quads))
     _emit(lambda: _render_drawing_layers(page_meta, drawing_vectors))
 
     if debug_out is not None:
@@ -168,6 +174,7 @@ def parse(
         debug_out["drawing_vectors"] = drawing_vectors
         debug_out["word_groups"] = word_groups
         debug_out["texts"] = texts
+        debug_out["ocr_detect_quads"] = detect_quads
         debug_out["ocr_crops"] = ocr_crops
 
     return drawing_vectors, texts
@@ -185,6 +192,7 @@ _C_FILL = "#059669"
 _C_DRAWING = "#111827"
 _C_GROUP = "#7c3aed"
 _C_OCR = "#16a34a"
+_C_DETECT = "#2563eb"
 
 
 def _hex_rgb(h: str) -> tuple[float, float, float]:
@@ -209,12 +217,19 @@ def _render_group_words_layers(page_meta, word_groups) -> "list[DebugLayer]":
     ))]
 
 
-def _render_ocr_layers(page_meta, texts) -> "list[DebugLayer]":
-    from rastervec.commons.renderer import render_text_pdf
+def _render_ocr_layers(page_meta, texts, detect_quads=None) -> "list[DebugLayer]":
+    """The detector's own (rotated) quads, every detection incl. blank
+    reads, then the recognized text placed in its quad."""
+    from rastervec.commons.renderer import render_quads_pdf, render_text_pdf
 
-    return [("ocr", "recognized text", _C_OCR, render_text_pdf(
-        page_meta, texts or [], color_of=lambda _t: _hex_rgb(_C_OCR),
-    ))]
+    return [
+        ("ocr", "detected quad", _C_DETECT, render_quads_pdf(
+            page_meta, [(q, _hex_rgb(_C_DETECT)) for q in (detect_quads or [])],
+        )),
+        ("ocr", "recognized text", _C_OCR, render_text_pdf(
+            page_meta, texts or [], color_of=lambda _t: _hex_rgb(_C_OCR),
+        )),
+    ]
 
 
 def _render_drawing_layers(page_meta, drawing_vectors) -> "list[DebugLayer]":
@@ -234,6 +249,6 @@ def render_debug(debug_out: "dict | None", page_meta) -> "list[DebugLayer]":
     out: "list[DebugLayer]" = []
     out += _render_filter_fill_layers(page_meta, debug_out.get("fill_vectors"))
     out += _render_group_words_layers(page_meta, debug_out.get("word_groups"))
-    out += _render_ocr_layers(page_meta, debug_out.get("texts"))
+    out += _render_ocr_layers(page_meta, debug_out.get("texts"), debug_out.get("ocr_detect_quads"))
     out += _render_drawing_layers(page_meta, debug_out.get("drawing_vectors"))
     return out

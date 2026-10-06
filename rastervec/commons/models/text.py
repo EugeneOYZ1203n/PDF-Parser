@@ -73,6 +73,12 @@ class Text:
     # the pipeline actually derives from them.
     raw_word: tuple | None = None  # verbatim get_text("words") tuple
     raw_span: dict | None = None  # verbatim matched get_text("dict") span
+    # The text detector's own quad, page space (4 points) -- PaddleOCR's DB
+    # detector returns rotated `cv2.minAreaRect` quads, which `bbox` (their
+    # axis-aligned envelope) can't represent. `None` for native text and
+    # anything with no detect quad; rendering (`commons/renderer/draw.py::
+    # text_spec`) then recovers the oriented box from `bbox` + `direction`.
+    quad_points: tuple[tuple[float, float], ...] | None = None
 
     def angle(self) -> float:
         dx, dy = self.direction

@@ -3,7 +3,7 @@
 Pure reductions over the same `metrics.OverlapGraph` the scores come from --
 no rendering, no pipeline import. `scripts/generate_pipeline_report.py`
 feeds the output straight to `renderer.render_boxes_pdf` /
-`renderer.render_reconstructed_pdf`.
+`renderer.render_text_pdf`.
 
 Two GT overlays (predictions are not drawn) plus `extra_predictions`
 (false-positive text / text-routed vectors outside every GT region, and

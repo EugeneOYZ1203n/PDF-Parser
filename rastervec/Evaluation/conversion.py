@@ -46,12 +46,15 @@ _LOG = get_logger("conversion")
 
 
 def _page_geometry(pdf_path: str, page_index: int) -> tuple[int, float, float]:
-    """`(rotation, mediabox width, mediabox height)` of one source page."""
+    """`(rotation, cropbox width, cropbox height)` of one source page -- the
+    CropBox, not the MediaBox: extraction (and `get_svg_image`) coordinates
+    are CropBox-relative, so a MediaBox-sized output page would stretch the
+    CropBox-sized text render onto the wrong frame."""
     src = fitz.open(pdf_path)
     try:
         page = src[page_index]
-        mb = page.mediabox
-        return int(page.rotation) % 360, mb.width, mb.height
+        cb = page.cropbox
+        return int(page.rotation) % 360, cb.width, cb.height
     finally:
         src.close()
 

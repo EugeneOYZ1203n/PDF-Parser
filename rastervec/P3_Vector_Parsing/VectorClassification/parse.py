@@ -16,7 +16,6 @@ P3_Vector_Parsing/LegacyRecreation or P2_Raster_To_Vec.
 """
 from __future__ import annotations
 
-import math
 from typing import Callable
 
 import numpy as np
@@ -26,7 +25,7 @@ from rastervec.commons.helpers.geometry import (
     bboxes_intersect, compute_origin, transform_direction,
 )
 from rastervec.commons.models import Page, Vector, Text
-from rastervec.commons.renderer import ocr_prep, pixel_to_page_bbox
+from rastervec.commons.renderer import ocr_prep, pixel_to_page_bbox, pixel_to_page_points
 from rastervec.commons.step_timing import StepClock
 from rastervec.P3_Vector_Parsing.VectorClassification.classify_vectors import classify_vectors
 from rastervec.P3_Vector_Parsing.VectorClassification.config import (
@@ -213,6 +212,9 @@ def parse(
     keep_cluster_detections = debug_out is not None and keep_debug_arrays
     cluster_detections: list[tuple[np.ndarray, list]] = []
     detect_boxes: list[tuple] = []
+    # The detector's own (rotated, cv2.minAreaRect) quads in page space --
+    # `detect_boxes` is only their axis-aligned envelope, used for logic.
+    detect_quads: list[tuple] = []
     page_quads: list[dict] = []
     for chunk_start in range(0, len(ocr_clusters), DETECT_RENDER_CHUNK_SIZE):
         chunk = ocr_clusters[chunk_start:chunk_start + DETECT_RENDER_CHUNK_SIZE]
@@ -270,8 +272,15 @@ def parse(
                     pixel_to_page_bbox(c["group_vectors"], c["dpi_used"], quad.tolist(), c["padding"])
                     for quad in quads
                 ]
+                quad_pts = [
+                    tuple(pixel_to_page_points(
+                        c["group_vectors"], c["dpi_used"], quad.tolist(), c["padding"],
+                    ))
+                    for quad in quads
+                ]
                 detect_boxes.extend(quad_bboxes)
-                for quad, bbox in zip(quads, quad_bboxes):
+                detect_quads.extend(quad_pts)
+                for quad, bbox, qpts in zip(quads, quad_bboxes, quad_pts):
                     # hough_deskew's crop is cropped straight out of `bgr`,
                     # so it's already BGR -- reverse channels back before
                     # recognize_crops, which does its own RGB->BGR flip
@@ -284,7 +293,7 @@ def parse(
                     )
                     page_quads.append({
                         "group_vectors": c["group_vectors"], "crop": crop[:, :, ::-1],
-                        "rd": rd, "bbox": bbox,
+                        "rd": rd, "bbox": bbox, "quad_pts": qpts,
                     })
 
     with clock("ocr_recognize"):
@@ -371,6 +380,7 @@ def parse(
         "0": [], "1": [], "2": [], "3": [], "failed": [],
     }
     blank_boxes: list[tuple] = []
+    blank_quads: list[tuple] = []
     rotation_entries: list[dict] = []
     for idx, (pq, box, recog_crop, flip_a, retry_n, retry_extra) in enumerate(zip(
         page_quads, boxes, recog_crops, flip_angle_degs, retry_counts, retry_extra_degs,
@@ -399,6 +409,7 @@ def parse(
         })
         if not box.text:
             blank_boxes.append(bbox)
+            blank_quads.append(pq["quad_pts"])
             continue
         direction = transform_direction((1.0, 0.0), best_angle)
         texts.append(Text(
@@ -409,12 +420,13 @@ def parse(
             block_no=0, line_no=0, word_no=0,
             page_index=page_meta.index, seqno=min(v.seqno for v in pq["group_vectors"]),
             confidence=box.confidence, source="ocr", orientation_source="ocr",
+            quad_points=pq["quad_pts"],
         ))
     retry_stats: dict = {"0": 0, "1": 0, "2": 0, "3": 0, "failed": 0}
     for entry in rotation_entries:
         key = "failed" if entry["retry_count"] is None else str(entry["retry_count"])
         retry_stats[key] = retry_stats.get(key, 0) + 1
-    _emit(lambda: _render_ocr_layers(page_meta, texts, blank_boxes, detect_boxes))
+    _emit(lambda: _render_ocr_layers(page_meta, texts, blank_quads, detect_quads))
     _emit(lambda: _render_rotation_layers(page_meta, rotation_entries))
     _emit(lambda: _render_retry_layers(page_meta, rotation_entries))
 
@@ -432,6 +444,8 @@ def parse(
         debug_out["cluster_detections"] = cluster_detections
         debug_out["ocr_blank_boxes"] = blank_boxes
         debug_out["ocr_detect_boxes"] = detect_boxes
+        debug_out["ocr_blank_quads"] = blank_quads
+        debug_out["ocr_detect_quads"] = detect_quads
         debug_out["rotation"] = rotation_entries
         debug_out["retry_stats"] = retry_stats
         debug_out["drawing"] = drawing
@@ -537,20 +551,23 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
     return out
 
 
-def _render_ocr_layers(page_meta, texts, blank_boxes=None, detect_boxes=None) -> "list[DebugLayer]":
-    from rastervec.commons.renderer import render_boxes_pdf, render_text_pdf
+def _render_ocr_layers(page_meta, texts, blank_quads=None, detect_quads=None) -> "list[DebugLayer]":
+    """Detect / passed / failed boxes are drawn as the detector's own quads
+    (PaddleOCR's DB detector returns rotated `cv2.minAreaRect` quads), not
+    their axis-aligned envelopes."""
+    from rastervec.commons.renderer import render_quads_pdf, render_text_pdf
 
     texts = texts or []
-    passed_boxes = [t.bbox for t in texts]
+    passed_quads = [t.quad_points or _bbox_quad(t.bbox) for t in texts]
     return [
-        ("ocr", "detect bbox", _C_OCR_DETECT, render_boxes_pdf(
-            page_meta, [(b, _hex_rgb(_C_OCR_DETECT)) for b in (detect_boxes or [])],
+        ("ocr", "detect bbox", _C_OCR_DETECT, render_quads_pdf(
+            page_meta, [(q, _hex_rgb(_C_OCR_DETECT)) for q in (detect_quads or [])],
         )),
-        ("ocr", "passed bbox", _C_OCR, render_boxes_pdf(
-            page_meta, [(b, _hex_rgb(_C_OCR)) for b in passed_boxes],
+        ("ocr", "passed bbox", _C_OCR, render_quads_pdf(
+            page_meta, [(q, _hex_rgb(_C_OCR)) for q in passed_quads],
         )),
-        ("ocr", "failed bbox", _C_OCR_BLANK, render_boxes_pdf(
-            page_meta, [(b, _hex_rgb(_C_OCR_BLANK)) for b in (blank_boxes or [])],
+        ("ocr", "failed bbox", _C_OCR_BLANK, render_quads_pdf(
+            page_meta, [(q, _hex_rgb(_C_OCR_BLANK)) for q in (blank_quads or [])],
         )),
         ("ocr", "passed text", _C_OCR, render_text_pdf(
             page_meta, texts, color_of=lambda _t: _hex_rgb(_C_OCR),
@@ -558,57 +575,30 @@ def _render_ocr_layers(page_meta, texts, blank_boxes=None, detect_boxes=None) ->
     ]
 
 
+def _bbox_quad(bbox) -> tuple:
+    x0, y0, x1, y1 = bbox
+    return ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
+
+
 def _render_angle_arrows_pdf(page_meta, entries: list[dict], angle_key: str, hexcolor: str) -> bytes:
-    """A fresh page with one direction arrow per `entries` item whose
-    `entries[i][angle_key]` isn't `None` -- centered on that entry's own
-    `"bbox"`, pointing along the angle (same `transform_direction`
-    convention `parse.py` already uses for real `Text.direction`), similar
-    in spirit to `scripts/label/vector_label.py`'s rotation-arrow overlay.
-    Visualizes the rotation pipeline's five angle sources (hough/minarea/
-    combined/flip/best) side by side as toggleable layers -- see
-    `_render_rotation_layers`."""
-    import pymupdf as fitz
+    """One direction arrow (`draw.arrow_spec`) per `entries` item whose
+    `entries[i][angle_key]` isn't `None`, centred on that entry's own
+    `"bbox"` and pointing along the angle (the same y-down convention
+    `Text.direction` uses). Visualizes the rotation pipeline's five angle
+    sources (hough/minarea/combined/flip/best) side by side as toggleable
+    layers -- see `_render_rotation_layers`."""
+    from rastervec.commons.renderer.draw import arrow_spec, render_specs_pdf
 
     color = _hex_rgb(hexcolor)
-    doc = fitz.open()
-    try:
-        page = doc.new_page(width=page_meta.width, height=page_meta.height)
-        page.set_rotation(page_meta.rotation)
-        # One Shape + one commit for every arrow -- `page.draw_line` per
-        # stroke would add one content stream each (quadratic).
-        shape = page.new_shape()
-        drawn = False
-        for entry in entries:
-            angle = entry.get(angle_key)
-            if angle is None:
-                continue
-            x0, y0, x1, y1 = entry["bbox"]
-            cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
-            length = max(10.0, 0.4 * max(x1 - x0, y1 - y0))
-            dx, dy = transform_direction((1.0, 0.0), angle)
-            tail = (cx - dx * length / 2.0, cy - dy * length / 2.0)
-            tip = (cx + dx * length / 2.0, cy + dy * length / 2.0)
-            shape.draw_line(tail, tip)
-            head_len = length * 0.3
-            for sign in (1.0, -1.0):
-                wing = _rotate_vec(-dx, -dy, sign * 25.0)
-                # Drawn wing-end -> tip, not tip -> wing-end: a Shape continues
-                # the current subpath when a line starts at its last point,
-                # and the shaft/wing miter join would spike past the tip.
-                shape.draw_line((tip[0] + wing[0] * head_len, tip[1] + wing[1] * head_len), tip)
-            drawn = True
-        if drawn:
-            shape.finish(color=color, width=1.5, closePath=False)
-            shape.commit()
-        return doc.tobytes()
-    finally:
-        doc.close()
-
-
-def _rotate_vec(dx: float, dy: float, deg: float) -> "tuple[float, float]":
-    rad = math.radians(deg)
-    c, s = math.cos(rad), math.sin(rad)
-    return dx * c - dy * s, dx * s + dy * c
+    specs: list = []
+    for entry in entries:
+        angle = entry.get(angle_key)
+        if angle is None:
+            continue
+        x0, y0, x1, y1 = entry["bbox"]
+        length = max(10.0, 0.4 * max(x1 - x0, y1 - y0))
+        specs += arrow_spec(((x0 + x1) / 2.0, (y0 + y1) / 2.0), angle, length, color)
+    return render_specs_pdf(page_meta, specs)
 
 
 def _render_rotation_layers(page_meta, rotation_entries: "list[dict] | None") -> "list[DebugLayer]":
@@ -670,8 +660,8 @@ def render_debug(debug_out: "dict | None", page_meta) -> "list[DebugLayer]":
     out: "list[DebugLayer]" = []
     out += _render_classification_layers(page_meta, debug_out.get("classification"))
     out += _render_ocr_layers(
-        page_meta, debug_out.get("texts"), debug_out.get("ocr_blank_boxes"),
-        debug_out.get("ocr_detect_boxes"),
+        page_meta, debug_out.get("texts"), debug_out.get("ocr_blank_quads"),
+        debug_out.get("ocr_detect_quads"),
     )
     out += _render_rotation_layers(page_meta, debug_out.get("rotation"))
     out += _render_retry_layers(page_meta, debug_out.get("rotation"))

@@ -16,16 +16,21 @@ def _page_meta(fitz_page: "fitz.Page", index: int) -> PageMeta:
 
     A free function (not a method) so it's testable directly against a
     synthetic fitz.Page without needing a full Reader/open document.
-    `rotation` is normalised to [0, 360).
+    `rotation` is normalised to [0, 360). `width`/`height` are the CropBox's
+    (unrotated): extraction coordinates are relative to the CropBox's
+    top-left, so a page whose CropBox is smaller than / offset within its
+    MediaBox would otherwise be reconstructed at the wrong size.
     """
     mediabox = fitz_page.mediabox
+    cropbox = fitz_page.cropbox
     return PageMeta(
         index=index,
         number=index + 1,
         mediabox=(mediabox.x0, mediabox.y0, mediabox.x1, mediabox.y1),
         rotation=int(fitz_page.rotation) % 360,
-        width=mediabox.width,
-        height=mediabox.height,
+        width=cropbox.width,
+        height=cropbox.height,
+        cropbox=(cropbox.x0, cropbox.y0, cropbox.x1, cropbox.y1),
     )
 
 

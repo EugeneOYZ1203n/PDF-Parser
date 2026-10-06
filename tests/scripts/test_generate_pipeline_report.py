@@ -406,7 +406,8 @@ def test_debug_layers_flag_default_and_off(monkeypatch):
         rendered.append(stage_key)
         return [("layer", "#000000", b"%PDF-fake")]
 
-    monkeypatch.setattr(ra.stages, "render_stage_layers", fake_render)
+    # the reconstructed layer is Phase 4's (`_stage_layers`), not stages'
+    monkeypatch.setattr(ra, "_stage_layers", fake_render)
     active = [("reconstructed", "reconstructed", None, "phase3")]
     res = SimpleNamespace(extra={})
 

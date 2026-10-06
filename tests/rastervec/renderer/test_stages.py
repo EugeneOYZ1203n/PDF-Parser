@@ -43,7 +43,7 @@ def result(page_meta, text, vector):
 @pytest.mark.parametrize("fn", [
     "render_native", "render_vectors", "render_fast", "render_separation",
     "render_clusters", "render_paddle_detect", "render_assignment", "render_rotate",
-    "render_drawing", "render_ocr_results", "render_reconstructed",
+    "render_drawing", "render_ocr_results",
 ])
 def test_render_returns_valid_pdf(result, fn):
     data = getattr(stages, fn)(result)
@@ -55,7 +55,7 @@ def test_render_returns_valid_pdf(result, fn):
 
 @pytest.mark.parametrize("stage_key", [
     "native", "vectors", "fast", "separation", "clusters", "paddle_detect",
-    "assignment", "rotate", "ocr", "drawing", "reconstructed",
+    "assignment", "rotate", "ocr", "drawing",
 ])
 def test_render_stage_layers(result, stage_key):
     layers = stages.render_stage_layers(result, stage_key)

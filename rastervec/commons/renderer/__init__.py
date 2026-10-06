@@ -13,9 +13,13 @@ Split by output concern:
   `paddle_engine.py`/`radon.py`. Rotation helpers and BGR normalization
   stay backend-local (`VectorClassification`/`LegacyRecreation` each keep
   their own copy).
-- `pdf.py`  -- `render_reconstructed_page`, the notebook's reconstruction
-  preview, plus `render_boxes_pdf`, a generic colored-bbox-outline
-  primitive used by the benchmark's pred-vs-GT box overlay.
+- `draw.py` -- the one standard drawing layer: a spec builder + a drawer
+  per primitive kind (text, bbox, quad, polyline, arrow, dot, vector,
+  raster image) and `render_specs_pdf`. Every PDF is built from these.
+- `pdf.py`  -- one-layer debug-PDF wrappers over `draw.py`
+  (`render_boxes_pdf`, `render_quads_pdf`, `render_text_pdf`,
+  `render_vectors_pdf`) plus `rasterize_pdf`. The final reconstructed page
+  is Phase 4's (`P4_Output_Organization.render_output_pdf`).
 - `svg.py`  -- `render_page_svg`, a thin `get_svg_image()` wrapper.
 - `_shapes.py` -- `replay_drawing_paths` (per-drawing composite path replay
   with the even_odd fill rule so filled glyph counters render as holes, plus
@@ -40,9 +44,9 @@ from rastervec.commons.renderer.ocr_prep import (
     render_cluster_with_dynamic_dpi,
 )
 from rastervec.commons.renderer.pdf import (
+    rasterize_pdf,
     render_boxes_pdf,
-    render_reconstructed_page,
-    render_reconstructed_pdf,
+    render_quads_pdf,
     render_text_pdf,
     render_vectors_pdf,
 )
@@ -61,9 +65,9 @@ __all__ = [
     "dpi_for_cluster",
     "pad_image_uniform",
     "render_cluster_with_dynamic_dpi",
-    "render_reconstructed_page",
-    "render_reconstructed_pdf",
+    "rasterize_pdf",
     "render_boxes_pdf",
+    "render_quads_pdf",
     "render_text_pdf",
     "render_vectors_pdf",
     "render_vector_cluster",

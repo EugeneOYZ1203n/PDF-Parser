@@ -49,6 +49,10 @@ from tqdm import tqdm
 from rastervec.commons.logging_setup import get_logger
 from rastervec.commons.helpers.geometry import compute_origin, transform_direction
 from rastervec.commons.models import Image, Page, Text, Vector
+from rastervec.commons.renderer.draw import (
+    bbox_spec, dot_spec, draw_image, image_spec, new_page_doc, polyline_spec, quad_spec,
+    render_specs_pdf,
+)
 from rastervec.P2_Raster_To_Vec.Junction import diff as diff_mod
 from rastervec.P2_Raster_To_Vec.Junction.color_separation import recolor, separate_colors
 from rastervec.P2_Raster_To_Vec.Junction.components import layer_components
@@ -135,6 +139,11 @@ class _PageState:
         "tile": [], "tile_detect": [], "merged": [], "refined_passed": [], "refined_failed": [],
         "component": [],
     })
+    # page-space detector quads (PaddleOCR returns rotated quads) for the
+    # tile-detect / passed / failed layers; `boxes` keeps their envelopes.
+    quads: dict = field(default_factory=lambda: {
+        "tile_detect": [], "refined_passed": [], "refined_failed": [],
+    })
     # page-space tracing geometry for the point / line debug layers
     geom: dict = field(default_factory=lambda: {
         "chains": [], "junctions": [], "endpoints": [], "segments": [], "segment_ends": [],
@@ -177,8 +186,8 @@ class _RasterSink:
         if self.stream:
             key = (stage, label)
             if key not in self._docs:
-                self._docs[key] = (hexcolor, _new_blank_doc(page_meta))
-            _place_raster(self._docs[key][1][0], array, image, array.shape[:2])
+                self._docs[key] = (hexcolor, new_page_doc(page_meta))
+            _place_raster(self._docs[key][1][1], array, image)
 
     def finish_stream(self, page_meta) -> "list[DebugLayer]":
         out: "list[DebugLayer]" = []
@@ -195,8 +204,8 @@ def _compose_raster_layers(page_meta, items: list[_RasterItem]) -> "list[DebugLa
             continue
         key = (it.stage, it.label)
         if key not in docs:
-            docs[key] = (it.hexcolor, _new_blank_doc(page_meta))
-        _place_raster(docs[key][1][0], it.array, it.image, it.shape)
+            docs[key] = (it.hexcolor, new_page_doc(page_meta))
+        _place_raster(docs[key][1][1], it.array, it.image)
     return [(s, l, hexcolor, _finish_doc(doc, page_meta)) for (s, l), (hexcolor, doc) in docs.items()]
 
 
@@ -311,14 +320,19 @@ def _collect_ocr(state: _PageState, ocr, inks, layers, to_page: Mapper, page_ind
     for tb in ocr.tile_boxes:
         x0, y0, x1, y1 = tb.bbox
         state.boxes["tile_detect"].append(_bbox_of([to_page((x0, y0)), to_page((x1, y1))]))
+        if tb.quad is not None:
+            state.quads["tile_detect"].append(_quad_to_page(tb.quad, to_page))
     for x0, y0, x1, y1 in ocr.merged:
         state.boxes["merged"].append(_bbox_of([to_page((x0, y0)), to_page((x1, y1))]))
     for hit, ink in zip(ocr.hits, inks):
-        bbox = _bbox_of([to_page((float(x), float(y))) for x, y in hit.quad])
+        quad = _quad_to_page(hit.quad, to_page)
+        bbox = _bbox_of(list(quad))
         if not hit.text:
             state.boxes["refined_failed"].append(bbox)
+            state.quads["refined_failed"].append(quad)
             continue
         state.boxes["refined_passed"].append(bbox)
+        state.quads["refined_passed"].append(quad)
         direction = _page_direction(transform_direction((1.0, 0.0), hit.angle_deg or 0.0), hit.quad, to_page)
         color = None
         if ink is not None:
@@ -329,7 +343,13 @@ def _collect_ocr(state: _PageState, ocr, inks, layers, to_page: Mapper, page_ind
             font="", font_size=0.0, color=color, flags=0, ascender=None, descender=None, wmode=0,
             block_no=0, line_no=0, word_no=0, page_index=page_index, seqno=state.next_seqno(),
             confidence=hit.confidence, source="ocr", orientation_source="ocr",
+            quad_points=quad,
         ))
+
+
+def _quad_to_page(quad, to_page: Mapper) -> tuple:
+    """A pixel-space quad's corners through the placement map, page space."""
+    return tuple(to_page((float(x), float(y))) for x, y in np.asarray(quad).reshape(-1, 2))
 
 
 def _page_direction(d_px: tuple[float, float], quad: np.ndarray, to_page: Mapper) -> tuple[float, float]:
@@ -467,19 +487,10 @@ def _rgb_hex(rgb) -> str:
     return "#" + "".join(f"{int(c):02x}" for c in rgb[:3])
 
 
-def _new_blank_doc(page_meta):
-    """`(page, doc)` -- a fresh page in *unrotated* MediaBox space; rotation
-    is only applied in `_finish_doc`, after every raster is placed, so
-    placement rects are never reinterpreted by `/Rotate`."""
-    import pymupdf as fitz
-
-    doc = fitz.open()
-    page = doc.new_page(width=page_meta.width, height=page_meta.height)
-    return page, doc
-
-
-def _finish_doc(page_doc, page_meta) -> bytes:
-    page, doc = page_doc
+def _finish_doc(doc_page, page_meta) -> bytes:
+    """Close out a `draw.new_page_doc` page: `/Rotate` last, so every raster
+    was placed in unrotated page space."""
+    doc, page = doc_page
     try:
         page.set_rotation(page_meta.rotation)
         return doc.tobytes(deflate=True)
@@ -487,99 +498,46 @@ def _finish_doc(page_doc, page_meta) -> bytes:
         doc.close()
 
 
-def _oriented_for_page(array: np.ndarray, image: Image) -> np.ndarray:
-    """Reorient `array` (image pixel frame) so rows run down and columns run
-    right in page space -- handles quarter-turn/flip placements exactly; a
-    general skew is approximated by its nearest quarter-turn."""
-    if image.transform is None:
-        return array
-    a, b, c, d, _e, _f = image.transform
-    if abs(a) >= abs(b):  # image x -> page x
-        out = array
-        if a < 0:
-            out = out[:, ::-1]
-        if d < 0:
-            out = out[::-1]
-    else:                 # image x -> page y (quarter turn)
-        out = np.swapaxes(array, 0, 1)
-        if b < 0:
-            out = out[::-1]
-        if c < 0:
-            out = out[:, ::-1]
-    return np.ascontiguousarray(out)
-
-
-def _place_raster(page, array: np.ndarray, image: Image, _shape) -> None:
-    """Embeds the array's raw samples as a `fitz.Pixmap` -- a PNG stream
-    would be encoded here only for MuPDF to decode and re-compress it
-    (~35 % slower on a full-resolution scan)."""
-    import pymupdf as fitz
-
-    arr = np.ascontiguousarray(_oriented_for_page(array, image), dtype=np.uint8)
-    if arr.ndim == 3 and arr.shape[2] == 1:
-        arr = arr[:, :, 0]
-    h, w = arr.shape[:2]
-    if arr.ndim == 2:
-        pixmap = fitz.Pixmap(fitz.csGRAY, w, h, arr.tobytes(), 0)
-    else:
-        pixmap = fitz.Pixmap(fitz.csRGB, w, h, arr.tobytes(), int(arr.shape[2] == 4))
-    page.insert_image(fitz.Rect(*image.bbox), pixmap=pixmap, keep_proportion=False)
+def _place_raster(page, array: np.ndarray, image: Image) -> None:
+    """An image-pixel-frame debug raster over its placement's page bbox,
+    reoriented through the placement transform (`draw.image_spec`)."""
+    draw_image(page, image_spec(array, image.bbox, transform=image.transform))
 
 
 def _boxes_layer(page_meta, stage: str, label: str, hexcolor: str, boxes) -> DebugLayer:
-    from rastervec.commons.renderer import render_boxes_pdf
-
     rgb = _hex_rgb(hexcolor)
-    return (stage, label, hexcolor, render_boxes_pdf(page_meta, [(b, rgb) for b in boxes]))
+    return (stage, label, hexcolor, render_specs_pdf(page_meta, [bbox_spec(b, rgb) for b in boxes]))
+
+
+def _quads_layer(page_meta, stage: str, label: str, hexcolor: str, quads) -> DebugLayer:
+    rgb = _hex_rgb(hexcolor)
+    return (stage, label, hexcolor, render_specs_pdf(page_meta, [quad_spec(q, rgb) for q in quads]))
 
 
 def _geometry_layer(
     page_meta, stage: str, label: str, hexcolor: str, *,
     polylines=(), points=(), width: float = 0.6, radius: float = 0.8,
 ) -> DebugLayer:
-    """Polylines (stroked) and points (small filled dots) on a fresh page
-    sized/rotated to `page_meta`. One `Shape` + one `commit()` for the whole
-    layer, like `render_boxes_pdf` -- a Shape per item adds a content stream
-    per item (quadratic)."""
-    import pymupdf as fitz
-
+    """Polylines (stroked) and points (small filled dots)."""
     rgb = _hex_rgb(hexcolor)
-    doc = fitz.open()
-    try:
-        page = doc.new_page(width=page_meta.width, height=page_meta.height)
-        page.set_rotation(page_meta.rotation)
-        shape = page.new_shape()
-        drawn = False
-        lines = [pl for pl in polylines if len(pl) >= 2]
-        if lines:
-            for pl in lines:
-                shape.draw_polyline([fitz.Point(*p) for p in pl])
-            shape.finish(color=rgb, width=width, closePath=False)
-            drawn = True
-        if points:
-            for p in points:
-                shape.draw_circle(fitz.Point(*p), radius)
-            shape.finish(color=None, fill=rgb, width=0)
-            drawn = True
-        if drawn:
-            shape.commit()
-        return (stage, label, hexcolor, doc.tobytes())
-    finally:
-        doc.close()
+    specs = [polyline_spec(pl, rgb, width=width) for pl in polylines if len(pl) >= 2]
+    specs += [dot_spec(p, rgb, radius) for p in points]
+    return (stage, label, hexcolor, render_specs_pdf(page_meta, specs))
 
 
 def _page_layers(page_meta, raster_layers: "list[DebugLayer]", state: _PageState) -> "list[DebugLayer]":
     from rastervec.commons.renderer import render_text_pdf, render_vectors_pdf
 
     bx = state.boxes
+    qd = state.quads
     geom = state.geom
     out: "list[DebugLayer]" = [layer for layer in raster_layers if not layer[0].startswith("_")]
     out += [
         _boxes_layer(page_meta, "ocr", "tiles", _C_TILE, bx["tile"]),
-        _boxes_layer(page_meta, "ocr", "tile detect bbox", _C_TILE_DETECT, bx["tile_detect"]),
+        _quads_layer(page_meta, "ocr", "tile detect bbox", _C_TILE_DETECT, qd["tile_detect"]),
         _boxes_layer(page_meta, "ocr", "merged bbox", _C_MERGED, bx["merged"]),
-        _boxes_layer(page_meta, "ocr", "passed bbox", _C_OCR_PASS, bx["refined_passed"]),
-        _boxes_layer(page_meta, "ocr", "failed bbox", _C_OCR_FAIL, bx["refined_failed"]),
+        _quads_layer(page_meta, "ocr", "passed bbox", _C_OCR_PASS, qd["refined_passed"]),
+        _quads_layer(page_meta, "ocr", "failed bbox", _C_OCR_FAIL, qd["refined_failed"]),
         ("ocr", "passed text", _C_OCR_PASS, render_text_pdf(
             page_meta, state.texts, color_of=lambda _t: _hex_rgb(_C_OCR_PASS),
         )),

@@ -41,6 +41,8 @@ def text_from_json(d: dict) -> Text:
             d[key] = tuple(d[key])
     if d.get("raw_word") is not None:
         d["raw_word"] = tuple(d["raw_word"])
+    if d.get("quad_points") is not None:
+        d["quad_points"] = tuple(tuple(pt) for pt in d["quad_points"])
     # raw_span stays a plain dict (its nested tuples become lists in JSON;
     # nothing downstream of a reload depends on their exact type).
     field_names = {f.name for f in dataclasses.fields(Text)}
@@ -127,6 +129,7 @@ def _page_dump_from_json(d: dict) -> PageDump:
             index=meta["index"], number=meta["number"],
             mediabox=tuple(meta["mediabox"]), rotation=meta["rotation"],
             width=meta["width"], height=meta["height"],
+            cropbox=tuple(meta["cropbox"]) if meta.get("cropbox") else None,
         ),
         texts=[text_from_json(t) for t in d["texts"]],
         vectors=[vector_from_json(v) for v in d["vectors"]],

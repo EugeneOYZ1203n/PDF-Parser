@@ -213,6 +213,13 @@ rotated 90/270). The rest of `rastervec` keeps unrotated MediaBox space as its c
 through every stage, only converting to display space at final render/reconstruction — see
 `rastervec/models.py`'s module docstring.
 
+"Unrotated page space" is also **CropBox-relative**: every extraction coordinate is measured from
+the CropBox's top-left, not the MediaBox's. `PageMeta.width`/`height` are therefore the CropBox's
+(unrotated) size (`P1_Reading_Native/reader.py::_page_meta`; the raw boxes are kept in
+`PageMeta.mediabox`/`cropbox`), and every rendered/converted page is built at that size — sizing a
+page from the MediaBox shifts and stretches everything on any page whose CropBox is smaller than,
+or offset inside, its MediaBox (`Evaluation/conversion.py::_page_geometry` had this bug too).
+
 For text specifically: a word's axis-aligned bbox from `get_text("words")` only equals its
 along-direction/normal-direction extents when the text is horizontal. `make_oriented_quad`
 (`rastervec/helpers/geometry.py`, ported from `inspector/pdf_model.py._make_oriented_quad` when
@@ -267,14 +274,17 @@ generic parallel-pool mechanics), never phase-specific business logic.
     objects), `clustering.py` (`Clustering` — spatial hash grid + union-find `cluster_spatial`,
     `cluster_by_dimension`, `cluster_by_seq`, `group_by_overlap`), `iterutils.py`.
   - **`renderer/`** — module-level rendering functions (no `Renderer` class), split by concern:
-    `png.py` (`render_vector_cluster`, `render_page_paths`, pixel↔page transforms), `pdf.py`
-    (`render_reconstructed_page`/`_pdf`, and the three generic primitives every backend's own
-    debug renderer builds on: `render_boxes_pdf` — colored bbox outlines; `render_text_pdf` — a
-    `Text` list placed at its own bbox/rotation; `render_vectors_pdf` — a `Vector` list replayed
-    recoloured), `svg.py`, `_shapes.py` (`replay_drawing_paths`), `stages.py` (the fixed
-    `phase1`/`phase2`/`final`/`reconstructed` layer renderers `core.pipeline` results always get
-    — see the `generate_pipeline_report.py` bullet below for the *additional*, per-backend debug
-    layers each P2/P3 module renders itself).
+    **`draw.py` — the one standard drawing layer every PDF is built from** (see "Drawing: spec →
+    draw" below); `png.py` (`render_vector_cluster`, `render_page_paths`, pixel↔page transforms);
+    `pdf.py` (one-layer debug wrappers over `draw.py` every backend's own debug renderer builds
+    on: `render_boxes_pdf` — bbox outlines; `render_quads_pdf` — closed polygons, e.g. detect
+    quads; `render_text_pdf` — `Text`s / `(text, bbox, rotation[, rgb])` boxes; `render_vectors_pdf`
+    — `Vector`s replayed recoloured; plus `rasterize_pdf`), `svg.py`, `_shapes.py`
+    (`replay_drawing_paths`), `stages.py` (the fixed `phase1`/`phase2`/`final` layer renderers
+    `core.pipeline` results always get — see the `generate_pipeline_report.py` bullet below for
+    the *additional*, per-backend debug layers each P2/P3 module renders itself). The final
+    reconstructed page is **not** built here — only Phase 4 builds it
+    (`P4_Output_Organization.render_output_pdf`).
 - **`core/`** — the orchestrator, registry, and stable public API:
   - **`pipeline.py`** — `run_pipeline(pdf_path, page_index=0, *, p2="Stub",
     p3="VectorClassification", enable_fast=True, verbose=False, compute=None, progress_counter=None,
@@ -320,7 +330,8 @@ generic parallel-pool mechanics), never phase-specific business logic.
     intermediates live entirely in the generic `extra` bucket since the three P3 backends'
     shapes genuinely differ.
   - **`api.py`** — `extract`/`extract_svg`, the stable export surface for other codebases to
-    import (thin wrappers over `run_pipeline`).
+    import (thin wrappers over `run_pipeline`; `extract_svg` renders through Phase 4's
+    `render_output_pdf`).
   - **`parallel/`** — `pool.py` (Pool 1/Pool 2 mechanics: `worker_init`, `warmup`, `run_parallel`,
     `compute_pool` — moved here from the old `Reader/Parallel/pool.py`, unchanged) and
     `benchmark_jobs.py` (`PageTask`/`run_page_task`/`PageResult` — see the `Reader/Parallel/`
@@ -390,7 +401,9 @@ generic parallel-pool mechanics), never phase-specific business logic.
     (`color_separation/clusters`, `text_removal/cleaned image`, `enhance/enhanced image`,
     `vector_render/rendered vectors`, `vector_diff/total` + `vector_diff/layer #rrggbb` —
     `diff.py`: red = ink with no vector within `DIFF_TOLERANCE_PX` (missed), blue = vector with no
-    ink (spurious), for future missed-line recovery) plus ocr/component box layers and tracing point/line layers (`graph_build/chains|junctions|endpoints`, `polyline_fit/segments|segment endpoints` -- real geometry, not bboxes);
+    ink (spurious), for future missed-line recovery) plus ocr/component box layers (`tile detect
+    bbox`/`passed bbox`/`failed bbox` drawn as the detector's own rotated quads, kept on
+    `TileBox.quad`/`_PageState.quads`; OCR `Text`s carry theirs as `quad_points`) and tracing point/line layers (`graph_build/chains|junctions|endpoints`, `polyline_fit/segments|segment endpoints` -- real geometry, not bboxes);
     each (stage, label) appears once per page. `debug_out["diff_codes"]` keeps the raw uint8
     code canvases. Tunables in `Junction/config.py`.
 - **`P3_Vector_Parsing/`** — pluggable vector-parsing/OCR backends, selected by `p3=`, each
@@ -502,7 +515,13 @@ generic parallel-pool mechanics), never phase-specific business logic.
   (never silently drops or reprojects) for any item whose bbox doesn't fit the page's own
   unrotated `width`/`height`, the shape of bug Phase 1's since-removed whole-page raster once
   had before it was fixed to counter-rotate via `derotation_matrix` — this phase exists to catch a future regression like that one at the seam instead of
-  letting it silently reach final output.
+  letting it silently reach final output. Plus `render.py::render_output_pdf(page_meta, texts,
+  vectors)` / `render_output_page(..., zoom)` — **the only builder of the final reconstructed
+  page** (vectors in their real paint, text via `draw.text_spec`). Everything that wants "the
+  pipeline's output as a page" calls it: `core/api.py::extract_svg`, the report's `reconstructed`
+  layer (`scripts/report_artifacts.py::_stage_layers`), `core/parallel/benchmark_jobs.py`. Apart
+  from debug layers, nothing else composes output PDFs. `run_pipeline` doesn't call it (callers
+  ask for a page when they want one).
 - **`rastervec/OCR/`** (top-level: `fast_detect.py`, `radon.py`, `Paddle_OCR/ocr_backend.py` +
   `render_ocr.py`) — **deprecated, but not dead**: each P3 backend under `P3_Vector_Parsing/` has
   its own duplicated `paddle_engine.py` (no Radon module, deskewing was dropped in favor of seqno
@@ -871,9 +890,10 @@ generic parallel-pool mechanics), never phase-specific business logic.
   confusion matrix (`detected_class`) + `aggregate_multiclass`.
 - **`renderer/` — module-level functions, no `Renderer` class** *(rendering helpers, not a pipeline
   stage)*: a package split by output concern — `png.py` (rasterize vector paths for OCR / FAST
-  input), `pdf.py` (`render_reconstructed_page`, `render_reconstructed_pdf`, `render_boxes_pdf`
-  — colored rectangle outlines, each entry `(bbox, rgb)` or `(bbox, rgb, dashes)` — plus
-  `render_text_pdf` / `render_vectors_pdf`, the two colour-callback stage-report primitives), `svg.py`
+  input), `draw.py` (the spec → draw layer, below), `pdf.py` (`render_boxes_pdf` — rectangle
+  outlines, each entry `(bbox, rgb)` or `(bbox, rgb, dashes)` — `render_quads_pdf` (same, closed
+  polygons), `render_text_pdf` / `render_vectors_pdf`, the colour-callback stage-report wrappers,
+  and `rasterize_pdf`), `svg.py`
   (`render_page_svg`, a thin `get_svg_image()` wrapper), and `_shapes.py` (shared). Import straight
   from `rastervec.renderer` (`from rastervec.renderer import render_vector_cluster`, etc.).
   `stages.py` holds one `render_<stage>(res) -> bytes` per pipeline stage (one-page composite
@@ -935,42 +955,47 @@ generic parallel-pool mechanics), never phase-specific business logic.
   page_meta, dpi)` is the whole-page counterpart (every given path drawn onto one page-sized canvas,
   no isolation/padding, no rotation applied) — used as FAST's own detection input by
   `fast_text_detect` (see below).
-  `pdf.render_reconstructed_page(page_meta, *, native_words=None, drawing_vectors=None,
-  ocr_results=None, text_boxes=None, zoom=1.0)` *(implemented, visualization-notebook preview — not
-  OCR input, not `evaluation.py`'s real reconstruction stage)*: redraws whatever elements are passed
-  onto a fresh blank page sized/rotated to match `page_meta`, then rasterizes at `zoom` the same way
-  the
-  notebook's `page_raster()` rasterizes the real page pixmap, so the two are pixel-comparable at the
-  same zoom. `drawing_vectors` are redrawn from each `DrawingVector`'s own real member `VectorPath`s
-  (via the shared `_shapes.replay_drawing_paths`, so multi-contour fills keep their holes here too),
-  never just their aggregate bbox. `native_words`/`ocr_results` are inserted as real text via
-  `page.insert_text` — necessarily approximate: font family isn't preserved (always PyMuPDF's
-  base14 `"helv"`). Two text helpers: **`_place_word`** (native words only) draws one word at its
-  own extracted `font_size` and its own `origin`. **`_place_text(text, bbox, rotation, *, color)`**
-  (OCR words — which carry no measured `font_size` — and `text_boxes`) derives the size from the
-  box *height* via helv's own metrics (`fontsize = bbox_height / (ascender - descender)`,
-  `baseline_y = bbox_top + ascender * fontsize`), then fills the box *width*: multiple words →
-  widen the gaps between words (justified-text style, one `insert_text` per word, letterforms and
-  intra-word spacing untouched); a single word → stretch it horizontally via a non-uniform scale
-  in the `morph` matrix (one draw call, so `render_reconstructed_pdf`'s output stays word-
-  searchable); a string too long even at natural spacing → shrink the font uniformly (via
-  `fitz.Font.text_length` vs `bbox_width`) so it never spills past the box/page. Rotation is
-  exact at any angle: since `insert_text`'s own `rotate` param only accepts multiples of 90, rotation
-  is applied instead via its `morph=(fixpoint, matrix)` param — `(bbox_center, fitz.Matrix(1,
-  1).prerotate(-angle))`, PyMuPDF's mechanism for arbitrary-angle text (a `cm` transform applied
-  before drawing). The angle is **negated**: `Text.angle()` is in `get_text`'s `dir` convention
-  (y down) and morph rotation turns the other way in that frame, so without the sign flip a word
-  whose direction has a non-zero y component reconstructs mirrored about the x-axis. The fixpoint is the bbox's own center, not the baseline origin — using origin as
-  the fixpoint (an earlier version of this code did) rotates the text around its own left edge
-  instead of turning it in place, drifting visibly off the bbox at any non-zero angle — a "does this
-  look roughly right" preview, not a byte-accurate reconstruction. A
-  blank/whitespace-only `text` is skipped outright (never handed to `insert_text`, which can be
-  finicky with empty strings). `text_boxes` is a generic
-  `list[tuple[text, bbox, rotation]]` fed through the same `_place_text` path — the ground-truth
-  reconstruction (label text) uses it, keeping the renderer decoupled from `label_schema`. Both
-  `render_reconstructed_page` and `pdf.render_reconstructed_pdf(...) -> bytes` (the PDF-bytes
-  variant, for a selectable-text comparison file — used by the benchmark notebook) share one
-  private `_build_reconstructed_doc`.
+
+  **Drawing: spec → draw (`commons/renderer/draw.py`).** Every PDF in the repo — debug layers and
+  Phase 4's final page alike — is built from two functions per primitive kind: a *spec builder*
+  turning a domain object into a frozen, fitz-free spec (`text_spec`, `bbox_spec`, `quad_spec`,
+  `polyline_spec`, `arrow_spec`, `dot_spec`, `vector_spec`, `image_spec` → `TextSpec`/`PathSpec`/
+  `DotSpec`/`VectorSpec`/`ImageSpec`) and a *drawer* putting it on a page (`draw_text`,
+  `draw_path`, `draw_dot`, `draw_vectors`, `draw_image`). `render_specs_pdf(page_meta, specs)` is
+  the page-level entry point: fresh page at `page_meta.width/height`, images → vectors → paths/
+  dots → text, one `Shape`+`commit` for all marks and one for all text (a commit per item is
+  quadratic), `/Rotate` set **last** so nothing is placed in rotated space. Don't hand-roll
+  `insert_text`/`draw_*`/`insert_image` anywhere else — add a spec kind here instead.
+
+  **Text rule (`text_spec`) — rotate, then scale to fit; never shear.** The text's *oriented* box
+  comes from `oriented_box`: the detect quad (`Text.quad_points`) projected onto the text
+  direction/normal when present, else the axis-aligned bbox inverted as the envelope of a `w×h`
+  rectangle at the text's angle (`W = w|c| + h|s|`, `H = w|s| + h|c|`; within ~3° of 45° that
+  is ill-conditioned, so the font's own natural aspect is assumed instead). Font size = box
+  height / (ascender − descender) — native words too (their extracted `font_size` is not used);
+  a horizontal scale `sx = w / natural_width` along the text's own direction fills the box
+  length (no word-gap justification, no stretch cap). One `insert_text` per item, base14
+  `"helv"` always (font family isn't preserved). `insert_text(point, morph=(fixpoint, M))` maps
+  glyphs *and* `point` through `FLIP·M·FLIP` about `fixpoint` (confirmed empirically on PyMuPDF
+  1.28; FLIP = y-mirror), so the page-space map "scale by `sx` along x, then rotate by θ" (y-down,
+  `Text.angle()`'s convention) is `M = Matrix(sx, 1) * Matrix(-θ)` — diagonal × orthogonal, can't
+  shear — and the string is laid out unmorphed with its glyph box centred on the fixpoint (the
+  box centre), so no point pre-correction is needed. The old `_place_text` used `Matrix(sx,
+  1).prerotate(-θ)` (= rotate *then* scale page-x: sheared, and at 90° stretched text
+  perpendicular to itself), laid multi-word lines out along page-x even when rotated, and sized
+  rotated text from the axis-aligned bbox height — all three were real bugs; don't reintroduce
+  any of them. `tests/rastervec/renderer/test_draw.py` checks rendered ink (not the spec) in the
+  text's own frame at many angles; `scripts/generate_render_probe_pdfs.py` writes a viewer-ready
+  eyeball check (rotated pages, an offset CropBox, text at 11 angles).
+
+  **Detect quads.** PaddleOCR 2.x's DB detector returns *rotated* quads (`db_postprocess.
+  get_mini_boxes` → `cv2.minAreaRect`, `det_box_type="quad"`; `filter_tag_det_res` orders them
+  clockwise and clips to the image, so an edge quad can be slightly non-rectangular). Every OCR
+  backend keeps the page-space quad on `Text.quad_points` (`pixel_to_page_points`; Collinear
+  through `unrotate_points` first) alongside the envelope `bbox`, and its debug `detect`/`passed`/
+  `failed` layers draw quads (`debug_out["ocr_detect_quads"]`/`["ocr_blank_quads"]`), not
+  envelopes. Native text has no quad (`None`) and goes through the bbox inversion.
+
 - **`rastervec/pipelines/`** — superseded in *intent* by `core/pipeline.py` +
   `P3_Vector_Parsing/*/parse.py` (see the `core/` and `P3_Vector_Parsing/` bullets above), but
   **not dead in practice**: `_common.py` and `sub_pipelines/` no longer exist, but `current.py`,
@@ -1121,9 +1146,10 @@ for unit tests since those are gitignored and give no exact expected values to a
    intermediate step objects into it verbatim (no shape conversion — `core.pipeline` only
    forwards it when `verbose=True` and your signature declares it, storing the result in
    `PipelineResult.extra["p2_debug"]`/`["p3_debug"]`). Factor your actual rendering logic into one
-   small `_render_<stage>_layers(...)` helper per pipeline step (built from the three shared
-   primitives in `commons/renderer` — `render_boxes_pdf`/`render_text_pdf`/`render_vectors_pdf` —
-   no generic interpreter, no shared rendering abstraction; each backend renders its own data),
+   small `_render_<stage>_layers(...)` helper per pipeline step (built from `commons/renderer`'s
+   `draw.py` specs + `render_specs_pdf`, or its one-layer wrappers `render_boxes_pdf`/
+   `render_quads_pdf`/`render_text_pdf`/`render_vectors_pdf` — never hand-rolled `insert_text`/
+   `draw_*`; each backend decides *what* to draw from its own data, `draw.py` decides *how*),
    then two call sites reuse those same helpers: a `render_debug(debug_out, page_meta) ->
    list[(stage, label, hex, pdf_bytes)]` in the same module (the *batch* path, reading your
    `debug_out` shape back after the whole run finishes — register it in `core/registry.py`'s

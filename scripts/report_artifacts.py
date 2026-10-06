@@ -21,11 +21,11 @@ from rastervec.Evaluation.Report import stage_stats
 from rastervec.commons.logging_setup import get_logger
 from rastervec.commons.renderer import (
     render_boxes_pdf,
-    render_reconstructed_pdf,
     render_text_pdf,
     render_vectors_pdf,
     stages,
 )
+from rastervec.P4_Output_Organization import render_output_pdf
 from rastervec.commons.step_timing import StepClock
 
 from scripts.debug_image_savers import (
@@ -189,6 +189,16 @@ def _restamp_page(res, page_index: int) -> None:
         res.page.meta.number = page_index + 1
 
 
+def _stage_layers(res, stage_key: str) -> "list[tuple[str, str, bytes]]":
+    """`stages.render_stage_layers`, except the final reconstructed page,
+    which only Phase 4 builds (`render_output_pdf`)."""
+    if stage_key == "reconstructed":
+        return [("reconstructed page", "#111827", render_output_pdf(
+            res.page.meta, list(res.texts or []), list(res.vectors or []),
+        ))]
+    return stages.render_stage_layers(res, stage_key)
+
+
 def _active_artifacts(config: "ReportConfig", variant) -> list[tuple]:
     if variant.engine == "legacy":
         return [row for row in _ARTIFACTS if row[0] == "reconstructed"]
@@ -242,7 +252,7 @@ def _accumulate_page(
             layers = []
             if render_layers:
                 try:
-                    layers = stages.render_stage_layers(res, stage_key)
+                    layers = _stage_layers(res, stage_key)
                 except Exception as exc:  # noqa: BLE001
                     _LOG.warning("%s render failed for page %d: %s", stem, page_index, exc)
             for label, hexc, pdf_bytes in layers:
@@ -362,9 +372,7 @@ def _write_label_overlays(
             render_boxes_pdf(pd.page_meta, label_overlays.gt_bbox_overlay(graph))
         )
         text_pages.append(
-            render_reconstructed_pdf(
-                pd.page_meta, text_boxes=label_overlays.gt_word_overlay(graph)
-            )
+            render_text_pdf(pd.page_meta, label_overlays.gt_word_overlay(graph))
         )
     _merge_pdfs(bbox_pages, doc_dir / f"{source}_bbox.pdf")
     _merge_pdfs(text_pages, doc_dir / f"{source}_text.pdf")

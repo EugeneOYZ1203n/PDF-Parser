@@ -21,20 +21,17 @@ def extract_svg(
     pdf_path: str, page_index: int = 0, *, p2: str = DEFAULT_P2, p3: str = DEFAULT_P3,
 ) -> bytes:
     """Run the pipeline on one page and re-render its final text+drawing
-    content as one page of SVG. Built on the same reconstruction primitive
-    `Evaluation/`'s reports use (`commons.renderer.pdf.render_reconstructed_page`
-    /`commons.renderer.svg`) so callers get one code path for "what did the
-    pipeline produce", whether they want structured objects (`extract`) or a
+    content as one page of SVG, via Phase 4's own output renderer
+    (`P4_Output_Organization.render_output_pdf` -- the one final-output
+    page builder), so callers get one code path for "what did the pipeline
+    produce", whether they want structured objects (`extract`) or a
     renderable page (`extract_svg`)."""
     import pymupdf as fitz
 
-    from rastervec.commons.renderer.pdf import render_reconstructed_pdf
+    from rastervec.P4_Output_Organization import render_output_pdf
 
     result = run_pipeline(pdf_path, page_index, p2=p2, p3=p3)
-    pdf_bytes = render_reconstructed_pdf(
-        result.page.meta, drawing_vectors=result.vectors,
-        text_boxes=[(t.text, t.bbox, 0.0) for t in result.texts],
-    )
+    pdf_bytes = render_output_pdf(result.page.meta, result.texts, result.vectors)
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
         return doc[0].get_svg_image().encode("utf-8")

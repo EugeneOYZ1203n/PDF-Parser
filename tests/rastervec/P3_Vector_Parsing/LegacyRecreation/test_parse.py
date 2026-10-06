@@ -69,7 +69,8 @@ def test_parse_streaming_matches_batch_render_debug(page_meta):
     batch_layers = legacyrecreation.render_debug(debug_out, page.meta)
 
     assert [layer[0] for layer in streamed] == [layer[0] for layer in batch_layers]
-    assert [layer[0] for layer in streamed] == ["filter_fill", "group_words", "ocr", "drawing"]
+    assert [layer[0] for layer in streamed] == ["filter_fill", "group_words", "ocr", "ocr", "drawing"]
+    assert [layer[1] for layer in streamed if layer[0] == "ocr"] == ["detected quad", "recognized text"]
     for stage, label, hexcolor, pdf_bytes in streamed:
         assert isinstance(pdf_bytes, (bytes, bytearray))
         assert pdf_bytes[:4] == b"%PDF"

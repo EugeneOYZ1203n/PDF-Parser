@@ -371,14 +371,14 @@ class CadFontLabelApp:
         self, origin: tuple[float, float], direction: tuple[float, float],
     ) -> tuple[tuple[float, float], tuple[float, float]] | None:
         """Clips the infinite line `origin + t * direction` to the page's
-        own mediabox (Liang-Barsky style per-axis `t` narrowing, no `[0, 1]`
+        own (CropBox-relative) frame (Liang-Barsky style per-axis `t` narrowing, no `[0, 1]`
         clamp since the line is infinite) -- a baseline "stretches the
         whole page", so it's drawn across its entire real page-space
         extent rather than the live scroll viewport (simpler, always
         correct, same visible result)."""
         ox, oy = origin
         dx, dy = direction
-        x0, y0, x1, y1 = self.page.meta.mediabox
+        x0, y0, x1, y1 = 0.0, 0.0, self.page.meta.width, self.page.meta.height
         t_min, t_max = -1e9, 1e9
         for d, o, lo, hi in ((dx, ox, x0, x1), (dy, oy, y0, y1)):
             if abs(d) < 1e-9:

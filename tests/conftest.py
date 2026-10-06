@@ -186,6 +186,7 @@ def text() -> Callable[..., Text]:
         source: str = "native",
         raw_word: tuple | None = None,
         raw_span: dict | None = None,
+        quad_points: tuple | None = None,
     ) -> Text:
         from rastervec.commons.helpers.geometry import compute_origin
 
@@ -210,6 +211,7 @@ def text() -> Callable[..., Text]:
             source=source,
             raw_word=raw_word,
             raw_span=raw_span,
+            quad_points=quad_points,
         )
 
     return _build

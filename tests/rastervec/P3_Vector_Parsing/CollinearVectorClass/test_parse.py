@@ -269,3 +269,19 @@ def test_classification_layers_intersection_stage(page_meta, vector):
     labels = [(s, l) for s, l, _h, _p in layers]
     assert ("intersection", "dropped to drawing (1)") in labels
     assert not any(l == "dropped crossed" for _s, l in labels)
+
+
+def test_parse_text_carries_its_page_space_detect_quad(page_meta, vector, monkeypatch):
+    _scripted_rec(monkeypatch, [("AB", 0.95)])
+    texts, debug_out = _one_vector_run(page_meta, vector, monkeypatch)
+    [t] = texts
+    xs = [p[0] for p in t.quad_points]
+    ys = [p[1] for p in t.quad_points]
+    assert t.bbox == pytest.approx((min(xs), min(ys), max(xs), max(ys)))
+    assert debug_out["ocr_detect_quads"] == [t.quad_points]
+
+
+def test_parse_blank_detection_keeps_its_quad_for_debug(page_meta, vector, monkeypatch):
+    _scripted_rec(monkeypatch, [("", 0.0)] * 4)
+    _texts, debug_out = _one_vector_run(page_meta, vector, monkeypatch)
+    assert len(debug_out["ocr_blank_quads"]) == 1 and len(debug_out["ocr_blank_quads"][0]) == 4

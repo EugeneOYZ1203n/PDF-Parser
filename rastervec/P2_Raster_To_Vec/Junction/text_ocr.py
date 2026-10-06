@@ -75,6 +75,9 @@ _DEDUPE_IOU = 0.5
 class TileBox:
     bbox: BBox
     tile: int
+    # The detector's own quad (4x2, whole-image px) -- `bbox` is its
+    # axis-aligned envelope; PaddleOCR's DB detector returns rotated quads.
+    quad: "np.ndarray | None" = None
 
 
 @dataclass
@@ -249,7 +252,10 @@ def detect_tiles(bgr: np.ndarray, tiles: list[tuple[int, int, int, int]], detect
             x0, y0 = tile[0], tile[1]
             for quad in quads:
                 b = _quad_bbox(np.asarray(quad, dtype=np.float64))
-                out.append(TileBox((b[0] + x0, b[1] + y0, b[2] + x0, b[3] + y0), chunk_start + offset))
+                out.append(TileBox(
+                    (b[0] + x0, b[1] + y0, b[2] + x0, b[3] + y0), chunk_start + offset,
+                    np.asarray(quad, dtype=np.float64) + np.array([x0, y0], dtype=np.float64),
+                ))
     bar.close()
     return out
 

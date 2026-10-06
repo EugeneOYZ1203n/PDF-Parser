@@ -118,7 +118,9 @@ def test_transform_maps_quarter_turn_placement():
     assert to_page((20, 0)) == pytest.approx((60, 20))
     assert to_page((0, 10)) == pytest.approx((50, 0))
     assert adapter._px_per_pt(img, 20, 10) == pytest.approx(1.0)
-    oriented = adapter._oriented_for_page(np.arange(200).reshape(10, 20), img)
+    from rastervec.commons.renderer.draw import orient_for_page
+
+    oriented = orient_for_page(np.arange(200).reshape(10, 20), img.transform)
     assert oriented.shape == (20, 10)
     # page top-right (row 0, last col) must be image pixel (0, 0)
     assert oriented[0, -1] == 0
