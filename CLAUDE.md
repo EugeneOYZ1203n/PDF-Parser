@@ -95,7 +95,7 @@ its own copy of the classical pipeline instead).
 .venv/Scripts/python.exe scripts/pipeline_report_viewer.py <run>/<stem> [<run2>/<stem>]  # Tkinter viewer: source page + toggleable stage-PDF overlays (1-2 folders side by side)
 .venv/Scripts/python.exe scripts/pipeline_report_benchmark.py --run DIR1 [--run DIR2]  # multiclass-score + chart benchmark report folders (1 or 2) on shared inputs
 .venv/Scripts/python.exe -m pytest tests/ -v                                        # run rastervec's test suite
-.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.prep_dataset --pdf A.pdf [--pdf B.pdf] --out data/deepvec  # DeepVectoriser training set (run once)
+.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.prep_dataset --pdf-dir PDFS/ [--pdf C.pdf] --out data/deepvec  # DeepVectoriser training set (run once)
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.train --data data/deepvec [--device cuda --amp] [--resume]  # train -> rastervec/weights/deep_vectoriser.pth
 .venv/Scripts/python.exe scripts/rasterize_pdf.py SRC [DST] --dpi 300               # flatten a PDF to pure raster (DST defaults to outputs/rasterize/)
 .venv/Scripts/python.exe scripts/label/master_label.py PDF [--dpi 300]              # full native+vector+raster label workflow, one outputs/labels/<stem>_label/ folder per PDF
@@ -433,10 +433,11 @@ generic parallel-pool mechanics), never phase-specific business logic.
     checkpoint. Weights: `rastervec/weights/deep_vectoriser.pth` (gitignored) or
     `$DEEPVEC_WEIGHTS_PATH`; missing → `FileNotFoundError`. Training (never imported by the
     pipeline, the only files allowed to import `Evaluation.Labelling`): **`prep_dataset.py`**
-    (run once; `--pdf ...`: per page render at `--dpi` + `raster_geometry_for_page` GT mapped via
+    (run once; `--pdf-dir DIR` — every `*.pdf` under it, recursive, keyed by relative path — and/or
+    `--pdf ...`: per page render at `--dpi` + `raster_geometry_for_page` GT mapped via
     `rotation_matrix` — the same vector→raster labelling method as `master_label.py` — chained
-    into strokes (`train_data.chain_annotations`, duplicate/retraced pieces dropped), the same
-    OCR + erase (GT under erased ink cut out), color layers (a stroke goes to every layer
+    into strokes (`train_data.chain_annotations`, duplicate/retraced pieces dropped), **no text
+    cleanup** (no OCR/erase — text glyph strokes stay in the GT), color layers (a stroke goes to every layer
     covering ≥ 50 % of it), one `layers/<key>.gray.npy` + `.strokes.npz` per (page, layer),
     resumable via `pages/<key>.json`, `index.json` split by page) and **`train.py`** (`--data
     DIR`: the paper's bootstrap → supervise → joint schedule, three Adam optimizers, AMP,

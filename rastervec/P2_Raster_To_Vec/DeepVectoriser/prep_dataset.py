@@ -1,24 +1,25 @@
 """Build DeepVectoriser's training set from PDFs -- run once, then `train.py`.
 
     python -m rastervec.P2_Raster_To_Vec.DeepVectoriser.prep_dataset \\
-        --pdf A.pdf [--pdf B.pdf ...] [--pages 0,2] [--dpi 300] [--val-frac 0.1] \\
+        --pdf-dir PDFS/ [--pdf C.pdf ...] [--pages 0,2] [--dpi 300] [--val-frac 0.1] \\
         --out data/deepvec
 
-Per page (the same steps the P2 backend runs at inference, so the model is
-trained on exactly the input it will see):
+`--pdf-dir` takes every `*.pdf` under the directory (recursive); `--pdf` adds
+single files. Per page:
 
   render   page -> RGB at --dpi (`get_pixmap`, same as master_label.py's
            rasterised.pdf)
   gt       `raster_geometry_for_page` -> strokes in px (rotation-aware),
            chained per drawing (train_data.chain_annotations)
   colors   DBSCAN color layers (copied Junction color separation)
-  ocr      tiled PaddleOCR (copied Junction text_ocr) ...
-  erase    ... and its text removal; GT ink under erased pixels is cut out
   layers   each GT stroke -> every color layer it lies on (pixel vote); per
            ink layer the layer mask (adapter.layer_image, resampled to the
            canonical 300 dpi) + its strokes are saved
 
-Resumable: a page whose manifest (`<out>/pages/<stem>_p<N>.json`) exists is
+No text cleanup: the P2 backend erases OCR'd text before the model runs, but
+prep does no OCR/erase, so text glyph strokes stay in the ground truth.
+
+Resumable: a page whose manifest (`<out>/pages/<key>.json`) exists is
 skipped. A failing page is logged (pdf, page, stage, traceback -> console +
 `<out>/prep_log.txt`) and the run continues; a summary prints at the end.
 `index.json` is rebuilt from every page manifest at the end of each run.
@@ -34,16 +35,12 @@ import time
 import traceback
 from pathlib import Path
 
-import cv2
-import numpy as np
 from tqdm import tqdm
 
 from rastervec.P2_Raster_To_Vec.DeepVectoriser import train_data as td
 from rastervec.P2_Raster_To_Vec.DeepVectoriser.adapter import layer_image
 from rastervec.P2_Raster_To_Vec.DeepVectoriser.color_separation import separate_colors
 from rastervec.P2_Raster_To_Vec.DeepVectoriser.config import TARGET_PX_PER_PT
-from rastervec.P2_Raster_To_Vec.DeepVectoriser.text_ocr import run_ocr
-from rastervec.P2_Raster_To_Vec.DeepVectoriser.text_removal import erase_text
 
 _LOG = logging.getLogger("rastervec.P2.DeepVectoriser.prep")
 
@@ -61,19 +58,23 @@ def _say(msg: str, log_file) -> None:
         log_file.flush()
 
 
-def page_key(pdf: Path, page_index: int) -> str:
-    return f"{pdf.stem}_p{page_index}"
+def page_key(pdf: Path, page_index: int, root: Path | None = None) -> str:
+    """`<stem>_p<N>`; under `root` the relative path (`sub__name_p<N>`), so
+    same-named PDFs in different subfolders never collide."""
+    name = pdf.stem
+    if root is not None:
+        name = "__".join(pdf.relative_to(root).with_suffix("").parts)
+    return f"{name}_p{page_index}"
 
 
-def prep_page(pdf: Path, page_index: int, out: Path, dpi: float, *, ocr_fns: dict | None = None,
-              skip_ocr: bool = False, log=lambda _m: None) -> dict:
+def prep_page(pdf: Path, page_index: int, out: Path, dpi: float, *, key: str | None = None,
+              log=lambda _m: None) -> dict:
     """Process one page; returns its manifest (also written to disk)."""
-    key = page_key(pdf, page_index)
+    key = key or page_key(pdf, page_index)
     steps: list[str] = []
-    stage = "render"
+    stage = "render+gt"
     t0 = time.perf_counter()
     try:
-        stage = "render+gt"
         rgb, strokes, rotation = td.page_ground_truth(str(pdf), page_index, dpi)
         steps.append(f"render {rgb.shape[1]}x{rgb.shape[0]}")
         steps.append(f"gt {len(strokes)} strokes")
@@ -81,32 +82,10 @@ def prep_page(pdf: Path, page_index: int, out: Path, dpi: float, *, ocr_fns: dic
 
         stage = "colors"
         layers = separate_colors(rgb)
+        del rgb
         steps.append(f"colors {len(layers.ink_layers())} ink layer(s)")
         if layers.n_layers == 0:
             raise RuntimeError("no color layers (blank page?)")
-
-        n_words = 0
-        if not skip_ocr:
-            stage = "ocr"
-            px_per_pt = dpi / 72.0
-            bg = tuple(int(c) for c in layers.centroids_rgb[layers.background])
-            before = rgb.copy()
-            ocr = run_ocr(rgb[:, :, ::-1], px_per_pt, bg[::-1], **(ocr_fns or {}))
-            n_words = sum(1 for h in ocr.hits if h.text)
-            steps.append(f"ocr {n_words} word(s)")
-            log(f"[{key}] " + " -> ".join(steps))
-
-            stage = "erase"
-            erase_text(rgb, layers, ocr.hits)
-            erased = np.any(before != rgb, axis=2)
-            del before
-            n_before = len(strokes)
-            if erased.any():
-                erased = cv2.dilate(erased.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
-                strokes = td.cut_by_mask(strokes, ~erased)
-            steps.append(f"erase ({n_before}->{len(strokes)} strokes)")
-
-        del rgb
 
         stage = "layers"
         scale = TARGET_PX_PER_PT / (dpi / 72.0)
@@ -128,7 +107,7 @@ def prep_page(pdf: Path, page_index: int, out: Path, dpi: float, *, ocr_fns: dic
 
     manifest = {
         "pdf": str(pdf), "page": page_index, "key": key, "dpi": dpi, "rotation": rotation,
-        "px_per_pt": TARGET_PX_PER_PT, "ocr_words": n_words, "layers": saved,
+        "px_per_pt": TARGET_PX_PER_PT, "layers": saved,
         "seconds": round(time.perf_counter() - t0, 2),
     }
     (out / "pages").mkdir(parents=True, exist_ok=True)
@@ -177,14 +156,36 @@ def _parse_pages(spec: str | None, n: int) -> list[int]:
     return pages
 
 
+def collect_pdfs(pdf_dir: str | None, pdfs: list[str]) -> list[tuple[Path, Path | None]]:
+    """`(pdf, key root)` for every `*.pdf` under `pdf_dir` (recursive, sorted),
+    then each extra `--pdf` (root None -> keyed by its stem)."""
+    if not pdf_dir and not pdfs:
+        raise SystemExit("give --pdf-dir DIR and/or --pdf FILE")
+    sources: list[tuple[Path, Path | None]] = []
+    if pdf_dir:
+        root = Path(pdf_dir)
+        if not root.is_dir():
+            raise SystemExit(f"--pdf-dir is not a directory: {root}")
+        found = sorted(p for p in root.rglob("*") if p.is_file() and p.suffix.lower() == ".pdf")
+        if not found:
+            raise SystemExit(f"no .pdf files under {root}")
+        sources += [(p, root) for p in found]
+    for pdf in pdfs:
+        p = Path(pdf)
+        if not p.is_file():
+            raise SystemExit(f"PDF not found: {p}")
+        sources.append((p, None))
+    return sources
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--pdf", action="append", required=True, help="source PDF (repeatable)")
-    ap.add_argument("--pages", default=None, help="comma-separated page indices (default: all)")
+    ap.add_argument("--pdf-dir", default=None, help="directory of source PDFs (searched recursively)")
+    ap.add_argument("--pdf", action="append", default=[], help="extra source PDF (repeatable)")
+    ap.add_argument("--pages", default=None, help="comma-separated page indices, every PDF (default: all)")
     ap.add_argument("--dpi", type=float, default=300.0, help="render dpi (default 300)")
     ap.add_argument("--val-frac", type=float, default=0.1, help="fraction of pages held out (default 0.1)")
     ap.add_argument("--out", required=True, help="output directory")
-    ap.add_argument("--skip-ocr", action="store_true", help="skip OCR + text erase (quick smoke runs)")
     ap.add_argument("-v", "--verbose", action="store_true")
     return ap
 
@@ -196,34 +197,35 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(logging.DEBUG if args.verbose else logging.WARNING)
     import fitz
 
+    sources = collect_pdfs(args.pdf_dir, args.pdf)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    jobs: list[tuple[Path, int]] = []
-    for pdf in args.pdf:
-        p = Path(pdf)
-        if not p.is_file():
-            raise SystemExit(f"PDF not found: {p}")
-        with fitz.open(p) as doc:
+    jobs: list[tuple[Path, int, str]] = []
+    for pdf, root in sources:
+        with fitz.open(pdf) as doc:
             n = doc.page_count
-        jobs += [(p, i) for i in _parse_pages(args.pages, n)]
+        jobs += [(pdf, i, page_key(pdf, i, root)) for i in _parse_pages(args.pages, n)]
+    keys = [key for *_x, key in jobs]
+    dupes = sorted({k for k in keys if keys.count(k) > 1})
+    if dupes:
+        raise SystemExit(f"page keys collide (same PDF given twice?): {dupes[:5]}")
 
     ok, skipped, failed = [], [], []
     with open(out / "prep_log.txt", "a", encoding="utf-8") as log_file:
-        _say(f"=== prep_dataset {time.strftime('%Y-%m-%d %H:%M:%S')}: {len(jobs)} page(s) -> {out}", log_file)
+        _say(f"=== prep_dataset {time.strftime('%Y-%m-%d %H:%M:%S')}: {len(sources)} PDF(s), "
+             f"{len(jobs)} page(s) -> {out}", log_file)
         bar = tqdm(jobs, desc="prep pages", unit="page")
-        for pdf, i in bar:
-            key = page_key(pdf, i)
+        for pdf, i, key in bar:
             bar.set_postfix_str(key)
             if (out / "pages" / f"{key}.json").exists():
                 skipped.append(key)
                 continue
             try:
-                prep_page(pdf, i, out, args.dpi, skip_ocr=args.skip_ocr,
-                          log=lambda m: _say(m, log_file))
+                prep_page(pdf, i, out, args.dpi, key=key, log=lambda m: _say(m, log_file))
                 ok.append(key)
             except _StageError as exc:
                 failed.append(key)
-                _say(f"[{key}] FAILED at stage '{exc.stage}': {exc}", log_file)
+                _say(f"[{key}] FAILED at stage '{exc.stage}' ({pdf} page {i}): {exc}", log_file)
                 log_file.write(traceback.format_exc() + "\n")
                 log_file.flush()
                 tqdm.write(traceback.format_exc())

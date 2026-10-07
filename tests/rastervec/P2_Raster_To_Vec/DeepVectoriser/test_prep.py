@@ -8,14 +8,6 @@ import pytest
 from rastervec.P2_Raster_To_Vec.DeepVectoriser import geometry as geo
 from rastervec.P2_Raster_To_Vec.DeepVectoriser import prep_dataset
 from rastervec.P2_Raster_To_Vec.DeepVectoriser import train_data as td
-from rastervec.P2_Raster_To_Vec.DeepVectoriser.paddle_engine import OcrBox
-
-_NO_OCR = {
-    "detect_many": lambda images: [[] for _ in images],
-    "recognize": lambda crops: [OcrBox("", 0.0) for _ in crops],
-    "recognize_raw": lambda crops: [OcrBox("", 0.0) for _ in crops],
-}
-
 
 def _pdf(tmp_path, synthetic_pdf_factory, rotation=0):
     doc = synthetic_pdf_factory([{
@@ -97,7 +89,7 @@ def test_prep_page_writes_layers_and_index_and_resumes(tmp_path, synthetic_pdf_f
     path = _pdf(tmp_path, synthetic_pdf_factory)
     out = tmp_path / "prep"
     logs: list[str] = []
-    manifest = prep_dataset.prep_page(path, 0, out, dpi=144, ocr_fns=_NO_OCR, log=logs.append)
+    manifest = prep_dataset.prep_page(path, 0, out, dpi=144, log=logs.append)
     # both GT strokes saved; an antialiased line may also sit on a fringe layer
     assert manifest["layers"] and sum(layer["n_strokes"] for layer in manifest["layers"]) >= 2
     by_len = {len(s) for layer in manifest["layers"]
@@ -114,7 +106,7 @@ def test_prep_page_writes_layers_and_index_and_resumes(tmp_path, synthetic_pdf_f
     assert json.loads((out / "index.json").read_text())["train"] == index["train"]
 
     # resume: the CLI skips a page whose manifest exists
-    assert prep_dataset.main(["--pdf", str(path), "--out", str(out), "--skip-ocr"]) == 0
+    assert prep_dataset.main(["--pdf", str(path), "--out", str(out)]) == 0
     log_text = (out / "prep_log.txt").read_text()
     assert "1 skipped" in log_text
 
@@ -127,6 +119,30 @@ def test_prep_failure_is_reported_with_stage(tmp_path, synthetic_pdf_factory, mo
         raise ValueError("bad colors")
 
     monkeypatch.setattr(prep_dataset, "separate_colors", boom)
-    assert prep_dataset.main(["--pdf", str(path), "--out", str(out), "--skip-ocr"]) == 1
+    assert prep_dataset.main(["--pdf", str(path), "--out", str(out)]) == 1
     log_text = (out / "prep_log.txt").read_text()
     assert "FAILED at stage 'colors'" in log_text and "bad colors" in log_text
+
+
+def test_pdf_dir_recursive_with_distinct_keys(tmp_path, synthetic_pdf_factory):
+    src = tmp_path / "pdfs"
+    (src / "sub").mkdir(parents=True)
+    a = _pdf(tmp_path, synthetic_pdf_factory)
+    a.rename(src / "drawing.pdf")
+    b = _pdf(tmp_path, synthetic_pdf_factory, rotation=90)
+    b.rename(src / "sub" / "drawing.pdf")  # same stem, different folder
+    out = tmp_path / "prep"
+    assert prep_dataset.main(["--pdf-dir", str(src), "--out", str(out), "--dpi", "72"]) == 0
+    keys = sorted(p.stem for p in (out / "pages").glob("*.json"))
+    assert keys == ["drawing_p0", "sub__drawing_p0"]
+    index = json.loads((out / "index.json").read_text())
+    assert sorted(index["pages"]) == keys
+    assert "2 PDF(s)" in (out / "prep_log.txt").read_text()
+
+
+def test_empty_pdf_dir_exits(tmp_path):
+    (tmp_path / "empty").mkdir()
+    with pytest.raises(SystemExit, match="no .pdf files"):
+        prep_dataset.main(["--pdf-dir", str(tmp_path / "empty"), "--out", str(tmp_path / "prep")])
+    with pytest.raises(SystemExit, match="--pdf-dir"):
+        prep_dataset.main(["--out", str(tmp_path / "prep")])
