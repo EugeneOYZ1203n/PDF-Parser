@@ -20,13 +20,6 @@ All thresholds are passed in by the caller (`classify_vectors.py`'s own
 constants), so nothing here is hardcoded. `max_area` (the caller's
 `MAX_CLUSTER_PAGE_AREA_FRAC` of the page) caps a cluster's bbox area --
 see `helpers.clustering.cluster_spatial`'s `max_union_area`.
-
-NOTE: `helpers.clustering.cluster_spatial` registers a very large group
-(more than its `_MAX_CELLS_PER_ITEM` grid cells, ~447 x 447 pt at the 10 pt
-threshold) in its centre cell only, so a group next to that big group's
-edge is never compared with it and the two never merge (see the note at
-that fallback). The `max_area` cap makes such big groups rarer here but
-does not remove the case; not fixed.
 """
 from __future__ import annotations
 

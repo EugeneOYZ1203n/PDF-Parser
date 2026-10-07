@@ -87,19 +87,85 @@ def test_group_by_overlap_empty_input():
     assert group_by_overlap([], _bbox) == []
 
 
-def test_group_by_overlap_correctly_merges_where_cluster_spatial_threshold_zero_would_not():
-    """`cluster_spatial(items, get_bbox, threshold=0.0)` looks like it
-    should express "pure overlap", but its grid cell size is `max(threshold,
-    1e-6)` -- a zero threshold collapses to a degenerate 1e-6-sized cell,
-    which trips `cluster_spatial`'s own `_MAX_CELLS_PER_ITEM` cap and
-    silently reduces every realistically-sized bbox down to its centroid
-    alone, missing true overlaps between items whose centroids land in
-    different cells. `group_by_overlap` exists specifically to do this
-    correctly -- this test pins that difference down."""
+def test_cluster_spatial_threshold_zero_and_group_by_overlap_agree_on_overlap():
+    """`cluster_spatial(items, get_bbox, threshold=0.0)` has a degenerate
+    1e-6-sized grid cell, so every realistically-sized bbox exceeds
+    `_MAX_CELLS_PER_ITEM` and goes through the direct big-item check -- it
+    used to be collapsed to its centre cell instead, which missed true
+    overlaps. Both functions now merge an overlapping pair (`group_by_overlap`
+    remains the fast tool for pure overlap)."""
     a, b = _item(0.0, 0.0, 5.0, 5.0), _item(3.0, 0.0, 8.0, 5.0)  # overlap
 
-    broken = cluster_spatial([a, b], _bbox, threshold=0.0)
-    assert len(broken) == 2  # the bug: overlapping boxes NOT merged
+    assert len(cluster_spatial([a, b], _bbox, threshold=0.0)) == 1
+    assert len(group_by_overlap([a, b], _bbox)) == 1
 
-    correct = group_by_overlap([a, b], _bbox)
-    assert len(correct) == 1  # group_by_overlap gets it right
+
+def _cluster_sets(clusters):
+    return sorted(sorted(i["seq"] for i in c) for c in clusters)
+
+
+def test_cluster_spatial_merges_a_small_item_at_a_large_items_edge():
+    # 1000 x 1000 spans ~10,000 cells at threshold 10 -- far over the cap. The
+    # small box sits 3 pt off its right edge, ~500 pt from its centre.
+    big = _item(0.0, 0.0, 1000.0, 1000.0, seq=0)
+    small = _item(1003.0, 100.0, 1008.0, 105.0, seq=1)
+    far = _item(2000.0, 100.0, 2005.0, 105.0, seq=2)
+
+    assert _cluster_sets(cluster_spatial([big, small, far], _bbox, threshold=10.0)) == [[0, 1], [2]]
+    # Order-independent: the big item last.
+    assert _cluster_sets(cluster_spatial([small, far, big], _bbox, threshold=10.0)) == [[0, 1], [2]]
+
+
+def test_cluster_spatial_merges_two_large_items():
+    a = _item(0.0, 0.0, 1000.0, 1000.0, seq=0)
+    b = _item(1005.0, 0.0, 2000.0, 1000.0, seq=1)
+    c = _item(5000.0, 0.0, 6000.0, 1000.0, seq=2)
+
+    assert _cluster_sets(cluster_spatial([a, b, c], _bbox, threshold=10.0)) == [[0, 1], [2]]
+
+
+def test_cluster_spatial_big_item_path_honours_extra_close_and_area_cap():
+    big = _item(0.0, 0.0, 1000.0, 1000.0, seq=0)
+    small = _item(1003.0, 100.0, 1008.0, 105.0, seq=1)
+
+    vetoed = cluster_spatial([big, small], _bbox, threshold=10.0, extra_close=lambda _a, _b: False)
+    assert _cluster_sets(vetoed) == [[0], [1]]
+    capped = cluster_spatial([big, small], _bbox, threshold=10.0, max_union_area=1_000_000.0)
+    assert _cluster_sets(capped) == [[0], [1]]  # union would be 1008 x 1000
+    allowed = cluster_spatial([big, small], _bbox, threshold=10.0, max_union_area=2_000_000.0)
+    assert _cluster_sets(allowed) == [[0, 1]]
+
+
+def test_cluster_spatial_matches_brute_force_single_linkage():
+    import random
+
+    from rastervec.commons.helpers.geometry import rect_gap
+
+    rng = random.Random(4)
+    for _trial in range(30):
+        items = []
+        for k in range(rng.randint(2, 60)):
+            x, y = rng.uniform(0, 3000), rng.uniform(0, 3000)
+            if rng.random() < 0.15:  # big enough for the direct path
+                w, h = rng.uniform(450, 1500), rng.uniform(450, 1500)
+            else:
+                w, h = rng.uniform(0, 40), rng.uniform(0, 40)
+            items.append(_item(x, y, x + w, y + h, seq=k))
+        threshold = rng.choice([5.0, 10.0, 25.0])
+
+        parent = list(range(len(items)))
+
+        def find(i):
+            while parent[i] != i:
+                i = parent[i]
+            return i
+
+        for i in range(len(items)):
+            for j in range(i + 1, len(items)):
+                if rect_gap(items[i]["bbox"], items[j]["bbox"]) <= threshold:
+                    parent[find(i)] = find(j)
+        groups: dict = {}
+        for i, it in enumerate(items):
+            groups.setdefault(find(i), []).append(it)
+
+        assert _cluster_sets(cluster_spatial(items, _bbox, threshold=threshold)) == _cluster_sets(groups.values())
