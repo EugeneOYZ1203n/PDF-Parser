@@ -247,6 +247,28 @@ def test_prep_imports_no_ocr_code():
     assert res.returncode == 0, res.stdout + res.stderr
 
 
+def test_sample_picks_n_pages_reproducibly(tmp_path, synthetic_pdf_factory):
+    doc = synthetic_pdf_factory([{
+        "width": 120, "height": 80,
+        "drawings": [{"lines": [((10, 20 + k), (110, 20 + k))], "color": (0, 0, 0), "width": 1.0}],
+    } for k in range(6)])
+    path = tmp_path / "six.pdf"
+    doc.save(path)
+    doc.close()
+
+    def run(out, *extra):
+        assert prep_dataset.main(["--pdf", str(path), "--out", str(out), "--dpi", "72", *extra]) == 0
+        return sorted(p.stem for p in (out / "pages").glob("*.json"))
+
+    a = run(tmp_path / "a", "--sample", "3")
+    assert len(a) == 3
+    assert run(tmp_path / "b", "--sample", "3") == a              # same seed -> same pages
+    assert "random sample of 6" in (tmp_path / "a" / "prep_log.txt").read_text()
+    assert len(run(tmp_path / "c", "--sample", "50")) == 6        # more than available -> all
+    with pytest.raises(SystemExit, match="--sample"):
+        run(tmp_path / "d", "--sample", "0")
+
+
 def test_empty_pdf_dir_exits(tmp_path):
     (tmp_path / "empty").mkdir()
     with pytest.raises(SystemExit, match="no .pdf files"):

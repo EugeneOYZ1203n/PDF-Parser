@@ -94,7 +94,7 @@ its own copy of the classical pipeline instead).
 .venv/Scripts/python.exe scripts/pipeline_report_viewer.py <run>/<stem> [<run2>/<stem>]  # Tkinter viewer: source page + toggleable stage-PDF overlays (1-2 folders side by side)
 .venv/Scripts/python.exe scripts/pipeline_report_benchmark.py --run DIR1 [--run DIR2]  # multiclass-score + chart benchmark report folders (1 or 2) on shared inputs
 .venv/Scripts/python.exe -m pytest tests/ -v                                        # run rastervec's test suite
-.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.prep_dataset --pdf-dir PDFS/ [--pdf C.pdf] [--workers 4] --out data/deepvec  # DeepVectoriser training set (run once)
+.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.prep_dataset --pdf-dir PDFS/ [--pdf C.pdf] [--sample 50] [--workers 4] --out data/deepvec  # DeepVectoriser training set (run once)
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.train --data data/deepvec [--threads N] [--resume]  # train -> rastervec/weights/deep_vectoriser.pth (output explained in DeepVectoriser/TRAINING.md)
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1] [--weights W.pth] [--ocr]  # try the model -> viewer folder + command
 .venv/Scripts/python.exe scripts/rasterize_pdf.py SRC [DST] --dpi 300               # flatten a PDF to pure raster (DST defaults to outputs/rasterize/)
@@ -448,7 +448,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
     layers (a stroke goes to every layer covering ≥ 50 % of it; `assign_layers`/
     `chain_annotations` are vectorized), one `layers/<key>.gray.png` (lossless, cropped to the
     layer's content + 256 px) + `.strokes.npz` (crop frame) per (page, layer) **with GT strokes**
-    (stroke-less layers are listed in the manifest, not stored), `--workers N` page processes,
+    (stroke-less layers are listed in the manifest, not stored), `--sample N` random pages (`--seed`, reproducible so re-runs resume), `--workers N` page processes,
     resumable via `pages/<key>.json`, `index.json` split by page) and **`train.py`** (`--data
     DIR`: the paper's bootstrap → supervise → joint schedule, three Adam optimizers, AMP,
     `--accum`, `--grad-checkpoint`; random 64-256 px crops; tqdm + `train_log.csv`;

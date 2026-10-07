@@ -2,7 +2,7 @@
 
     python -m rastervec.P2_Raster_To_Vec.DeepVectoriser.prep_dataset \\
         --pdf-dir PDFS/ [--pdf C.pdf ...] [--pages 0,2] [--dpi 300] [--val-frac 0.1] \\
-        [--workers 4] --out data/deepvec
+        [--sample 50] [--seed 0] [--workers 4] --out data/deepvec
 
 `--pdf-dir` takes every `*.pdf` under the directory (recursive); `--pdf` adds
 single files. Per page:
@@ -39,9 +39,11 @@ import json
 import logging
 import multiprocessing
 import os
+import random
 import sys
 import time
 import traceback
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -220,6 +222,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--pdf-dir", default=None, help="directory of source PDFs (searched recursively)")
     ap.add_argument("--pdf", action="append", default=[], help="extra source PDF (repeatable)")
     ap.add_argument("--pages", default=None, help="comma-separated page indices, every PDF (default: all)")
+    ap.add_argument("--sample", type=int, default=None, metavar="N",
+                    help="prepare only N pages, picked at random from every candidate page (default: all)")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="seed for --sample (default 0; same seed + same PDFs = same pages, so re-runs resume)")
     ap.add_argument("--dpi", type=float, default=300.0, help="render dpi (default 300)")
     ap.add_argument("--val-frac", type=float, default=0.1, help="fraction of pages held out (default 0.1)")
     ap.add_argument("--workers", type=int, default=1,
@@ -244,10 +250,17 @@ def main(argv: list[str] | None = None) -> int:
         with fitz.open(pdf) as doc:
             n = doc.page_count
         jobs += [(pdf, i, page_key(pdf, i, root)) for i in _parse_pages(args.pages, n)]
-    keys = [key for *_x, key in jobs]
-    dupes = sorted({k for k in keys if keys.count(k) > 1})
+    dupes = sorted(k for k, c in Counter(key for *_x, key in jobs).items() if c > 1)
     if dupes:
         raise SystemExit(f"page keys collide (same PDF given twice?): {dupes[:5]}")
+    n_candidates = len(jobs)
+    if args.sample is not None:
+        if args.sample < 1:
+            raise SystemExit(f"--sample must be >= 1 (got {args.sample})")
+        if args.sample < len(jobs):
+            # same seed + same inputs -> same pages, so a re-run resumes the same sample
+            picked = set(random.Random(args.seed).sample(range(len(jobs)), args.sample))
+            jobs = [job for n, job in enumerate(jobs) if n in picked]
 
     ok, skipped, failed = [], [], []
     where = {key: (pdf, i) for pdf, i, key in jobs}
@@ -263,7 +276,9 @@ def main(argv: list[str] | None = None) -> int:
     with open(out / "prep_log.txt", "a", encoding="utf-8") as log_file:
         workers = max(1, args.workers)
         _say(f"=== prep_dataset {time.strftime('%Y-%m-%d %H:%M:%S')}: {len(sources)} PDF(s), "
-             f"{len(jobs)} page(s), {workers} worker(s) -> {out}", log_file)
+             f"{len(jobs)} page(s)"
+             + (f" (random sample of {n_candidates}, seed {args.seed})" if len(jobs) < n_candidates else "")
+             + f", {workers} worker(s) -> {out}", log_file)
         todo = []
         for pdf, i, key in jobs:
             if (out / "pages" / f"{key}.json").exists():
