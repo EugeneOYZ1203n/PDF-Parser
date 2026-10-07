@@ -56,18 +56,23 @@ GLOBAL_ANGLE_MIN_GROUP_SIZE = 2
 QUAD_ANGLE_SNAP_TOL_DEG = 5.0
 # Pattern-lattice step (pattern_lattice.py), per bucket after collinear
 # drawing: Vectors are "similar" when they have the same item kinds in order
-# and the same per-item lengths, rounded to PATTERN_SIM_LENGTH_TOL_PT
-# (rotation-invariant). Only similarity buckets with more than
-# PATTERN_MIN_BUCKET members are searched for lattices; a lattice group
-# (flood-filled from a seed along +-v1/+-v2, each step matched within
-# PATTERN_LATTICE_TOL_FRAC of its own length) with more than
-# PATTERN_MAX_GROUP members is dropped to drawing. Neighbours closer than
-# PATTERN_MIN_STEP_PT (coincident duplicates) never define a lattice step;
-# PATTERN_KNN neighbours are searched per seed for v1/v2.
-PATTERN_SIM_LENGTH_TOL_PT = 0.1
+# and the same per-item lengths hashed into PATTERN_SIM_LENGTH_TOL_PT buckets
+# (rotation-invariant; two lengths straddling a bucket boundary are not
+# similar -- accepted). Only similarity buckets with more than
+# PATTERN_MIN_BUCKET members are searched for lattices. A lattice group is
+# flood-filled from a seed one unit step (+-v1/+-v2) at a time; a member must
+# lie within PATTERN_GRID_TOL_PT of the *global* grid point
+# origin + n1 v1 + n2 v2 (and nearer that site than any other). It is dropped
+# to drawing only when it has more than PATTERN_MAX_GROUP members AND every
+# link between lattice-adjacent members crosses fewer than
+# PATTERN_LINK_FOREIGN_LIMIT foreign (same-bucket, non-member) bboxes.
+# Neighbours closer than PATTERN_MIN_STEP_PT (coincident duplicates) never
+# define a lattice step; PATTERN_KNN neighbours are searched per seed for v1/v2.
+PATTERN_SIM_LENGTH_TOL_PT = 3.0
 PATTERN_MIN_BUCKET = 20
-PATTERN_MAX_GROUP = 10
-PATTERN_LATTICE_TOL_FRAC = 0.2
+PATTERN_MAX_GROUP = 100
+PATTERN_GRID_TOL_PT = 3.0
+PATTERN_LINK_FOREIGN_LIMIT = 3
 PATTERN_MIN_STEP_PT = 0.05
 PATTERN_KNN = 16
 # Per cluster, strokes in parallel groups whose length is more than this many

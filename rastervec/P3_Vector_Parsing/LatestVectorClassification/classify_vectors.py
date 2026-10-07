@@ -12,9 +12,12 @@ Per `(layer, color, width)` bucket, `_classify_bucket` runs seven named steps:
    `COLLINEAR_DRAWING_MAX_STD_PT` (a long dashed/repeated line) is dropped
    to drawing.
 2. **Pattern lattice** (`pattern_lattice.pattern_drawing`) -- similar
-   Vectors (same item kinds + per-item lengths) repeated on a regular
-   translation lattice; a lattice group with more than `PATTERN_MAX_GROUP`
-   members is dropped to drawing.
+   Vectors (same item kinds + per-item lengths, hashed into 3 pt buckets)
+   repeated on a regular translation lattice (each member within
+   `PATTERN_GRID_TOL_PT` of the global grid point); a lattice group with
+   more than `PATTERN_MAX_GROUP` members *and* no link between adjacent
+   members crossing `PATTERN_LINK_FOREIGN_LIMIT`+ foreign bboxes is dropped
+   to drawing.
 3. **Seq overlap merge** (`group_filters.combine_overlapping_seq`).
 4. **Spatial cluster** (`cluster_filters.cluster_spatial_groups`). Both
    merges are capped: no group/cluster grows to a bbox of

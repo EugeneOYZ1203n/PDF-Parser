@@ -455,13 +455,19 @@ generic parallel-pool mechanics), never phase-specific business logic.
     `layer_color_separation.width_key`: stroke width rounded to 0.01 pt, `None` for fill-only
     `"f"` vectors): **collinear drawing** (a same-infinite-line group of straight Vectors with
     > 50 members and length std < 5 pt → drawing), **pattern lattice** (`pattern_lattice.py`:
-    Vectors bucketed by similarity — same item kinds in order + same per-item lengths, rounded to
-    `PATTERN_SIM_LENGTH_TOL_PT`, rotation-invariant; in a similarity bucket of > `PATTERN_MIN_BUCKET`
-    (20), seeds in `seqno` order take v1 = nearest unassigned neighbour's anchor offset (anchor =
-    first point of the first item), v2 = nearest one not parallel to it (none → 1D), and
-    *flood-fill* a connected lattice patch along ±v1/±v2 (each step within
-    `PATTERN_LATTICE_TOL_FRAC` of its length) — never a global `p + n1·v1 + n2·v2` fit; a group of >
-    `PATTERN_MAX_GROUP` (10) → drawing; O(N log N) via `cKDTree`), **seqno merge**
+    Vectors bucketed by similarity — same item kinds in order + same per-item lengths hashed into
+    `PATTERN_SIM_LENGTH_TOL_PT` (3 pt) buckets, rotation-invariant, bucket-boundary splits accepted;
+    in a similarity bucket of > `PATTERN_MIN_BUCKET` (20), seeds in `seqno` order take v1 = nearest
+    unassigned neighbour's anchor offset (anchor = first point of the first item; the query reaches
+    past coincident duplicates), v2 = nearest one not parallel to it (none → 1D), least-squares
+    *prefit* the basis to the seed's KNN neighbours, then *flood-fill* a connected patch over integer
+    lattice sites one unit step ±v1/±v2 at a time: a Vector is claimed at a site only within
+    `PATTERN_GRID_TOL_PT` (3 pt) of the **global** grid point `origin + n1·v1 + n2·v2` (and nearer
+    that site than any other); an empty site is a dead end — the flood never jumps a gap; basis
+    refitted on the members whenever the site count doubles. A group → drawing only when it has >
+    `PATTERN_MAX_GROUP` (100) members **and** every link between lattice-adjacent members (segment
+    between bbox centres) crosses < `PATTERN_LINK_FOREIGN_LIMIT` (3) bboxes of foreign same-bucket
+    Vectors — interleaved content keeps the group; O(N log N) via `cKDTree`), **seqno merge**
     (`group_filters.combine_overlapping_seq`), **spatial cluster** (`cluster_filters.
     cluster_spatial_groups`), **length outliers** (per cluster, pool the lengths of every stroke in
     a parallel group — ≥ 2 same-angle straight Vectors — and drop those > 2 std from the mean),
