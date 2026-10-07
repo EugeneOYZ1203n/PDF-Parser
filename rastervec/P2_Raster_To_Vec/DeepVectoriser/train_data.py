@@ -8,19 +8,29 @@ and `Evaluation.Labelling.raster_label.raster_geometry_for_page`'s
 `GeometryAnnotation`s -- unrotated page space -- mapped into the render's
 pixel frame through `page.rotation_matrix * Matrix(dpi/72)`.
 
-On-disk layout (one entry per page x ink color layer, `<key>` =
-`<pdf stem>_p<page>__L<layer>`):
+On-disk layout (one entry per page x ink color layer that has GT strokes,
+`<key>` = `<page key>__L<layer>`):
 
-    <out>/layers/<key>.gray.npy      uint8 HxW layer image (canonical scale)
+    <out>/layers/<key>.gray.png      uint8 layer mask (canonical scale), lossless
+                                     PNG, cropped to the layer's content +
+                                     CROP_MARGIN_PX
     <out>/layers/<key>.strokes.npz   pieces (P,4,2) f32, offsets (n+1,) i64,
                                      widths (n,) f32 px, bboxes (n,4) f32,
-                                     ink_pts (Q,2) i32 (x, y), color (3,) u8
-    <out>/pages/<pdf stem>_p<page>.json   per-page manifest (resume marker)
+                                     ink_pts (Q,2) i32 (x, y), color (3,) u8 --
+                                     all in the crop's frame; origin (2,) i64 =
+                                     crop's (x0, y0) on the page, page_shape (2,)
+    <out>/pages/<page key>.json      per-page manifest (resume marker)
     <out>/index.json                 train/val layer keys + counts
+    <cache>/<key>.gray.npy           the PNG decoded once by `train.py`
+                                     (default <out>/cache/), memory-mapped
+
+An older dataset with full-page `layers/<key>.gray.npy` files still loads.
 """
 from __future__ import annotations
 
 import json
+import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -31,6 +41,8 @@ from . import geometry as geo
 
 SIZES = tuple(range(64, 257, 32))  # the paper's 64..256 px, step 32
 _INK_SAMPLES = 20000
+CROP_MARGIN_PX = max(SIZES)  # stored context around a layer's content
+PNG_COMPRESSION = 3          # cv2 PNG level: fast, ~15-100x smaller than raw
 
 
 # ---------------------------------------------------------------------------
@@ -64,55 +76,86 @@ def chain_annotations(annotations, matrix, tol_px: float = 0.05) -> list[tuple[n
     piece repeating earlier geometry (either direction) is dropped -- two GT
     strokes over the same pixels would be unlearnable.
     Returns `[(stroke (K,4,2), width_px), ...]`; width = annotation width
-    (1 px minimum; fill-only edges have none)."""
-    import fitz
+    (1 px minimum; fill-only edges have none).
 
+    Vectorized: every piece is mapped and keyed up front; only the
+    order-dependent chaining walks the annotations one by one."""
     scale = float(np.hypot(matrix.a, matrix.b))
+    usable, pieces = _pieces_px(annotations, matrix)
+    if not usable:
+        return []
+    keep = np.ptp(pieces, axis=1).max(axis=1) >= 1e-6       # drop degenerate (a point)
+    keys = _piece_keys(pieces)
+    starts, ends = pieces[:, 0], pieces[:, 3]
+
     out: list[tuple[np.ndarray, float]] = []
-    cur: list[np.ndarray] = []
+    cur: list[int] = []
     cur_key = None
     cur_w = 1.0
     seen: set = set()
 
     def flush():
         if cur:
-            out.append((np.stack(cur), cur_w))
+            out.append((pieces[cur], cur_w))
             cur.clear()
 
-    for ann in annotations:
-        pts = [fitz.Point(float(x), float(y)) * matrix for x, y in ann.points]
-        pts = [np.array([p.x, p.y], float) for p in pts]
-        if ann.kind == "l":
-            if len(pts) != 2:
-                continue
-            piece = geo.line_to_cubic(pts[0], pts[1])
-        else:
-            if len(pts) != 4:
-                continue
-            piece = np.stack(pts)
-        if np.ptp(piece, axis=0).max() < 1e-6:
-            continue  # degenerate (a point)
-        dup = _piece_key(piece)
-        if dup in seen:
+    for n, i in enumerate(usable):
+        if not keep[n]:
+            continue
+        if keys[n] in seen:
             continue  # same geometry again (e.g. a closed 2-point path retracing itself)
-        seen.add(dup)
+        seen.add(keys[n])
+        ann = annotations[i]
         key = (tuple(ann.color) if ann.color else None, tuple(ann.fill) if ann.fill else None, ann.width)
-        if cur and key == cur_key and np.hypot(*(cur[-1][3] - piece[0])) <= tol_px:
-            cur.append(piece)
+        if cur and key == cur_key and math.hypot(*(ends[cur[-1]] - starts[n])) <= tol_px:
+            cur.append(n)
             continue
         flush()
-        cur.append(piece)
+        cur.append(n)
         cur_key = key
         cur_w = max(1.0, float(ann.width or 0.0) * scale)
     flush()
     return out
 
 
-def _piece_key(piece: np.ndarray) -> tuple:
-    """Direction-independent identity of a piece (0.01 px grid)."""
-    fwd = tuple(np.round(piece, 2).ravel().tolist())
-    rev = tuple(np.round(piece[::-1], 2).ravel().tolist())
-    return min(fwd, rev)
+def _pieces_px(annotations, matrix) -> tuple[list[int], np.ndarray]:
+    """`(indices of usable annotations, their cubics (N,4,2) in px)`: an
+    `"l"` needs 2 points, anything else 4. Points go through `matrix` in
+    float32, exactly as MuPDF's `fz_transform_point` (`fitz.Point * Matrix`)
+    computes them, then everything continues in float64."""
+    usable: list[int] = []
+    lines: list[bool] = []
+    raw = np.zeros((len(annotations), 4, 2), np.float64)
+    for i, ann in enumerate(annotations):
+        pts = ann.points
+        if ann.kind == "l":
+            if len(pts) != 2:
+                continue
+            raw[len(usable), :2] = pts
+            lines.append(True)
+        else:
+            if len(pts) != 4:
+                continue
+            raw[len(usable)] = pts
+            lines.append(False)
+        usable.append(i)
+    raw = raw[:len(usable)].astype(np.float32)
+    m = np.array([matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f], np.float32)
+    x, y = raw[..., 0], raw[..., 1]
+    px = np.stack([x * m[0] + y * m[2] + m[4], x * m[1] + y * m[3] + m[5]], axis=-1).astype(np.float64)
+    is_line = np.array(lines, bool)
+    a, b = px[is_line, 0], px[is_line, 1]
+    px[is_line] = np.stack([a, a + (b - a) / 3.0, a + (b - a) * 2.0 / 3.0, b], axis=1)  # geo.line_to_cubic
+    return usable, px
+
+
+def _piece_keys(pieces: np.ndarray) -> list[bytes]:
+    """Direction-independent identity of each piece (0.01 px grid);
+    `+ 0.0` folds -0.0 into 0.0 so equal coordinates give equal bytes."""
+    fwd = np.round(pieces, 2) + 0.0
+    rev = np.ascontiguousarray(fwd[:, ::-1])
+    fwd = np.ascontiguousarray(fwd)
+    return [min(f.tobytes(), r.tobytes()) for f, r in zip(fwd, rev)]
 
 
 def page_ground_truth(pdf_path: str, page_index: int, dpi: float):
@@ -154,21 +197,50 @@ def assign_layers(strokes, labels: np.ndarray, ink_layers: list[int], min_frac: 
     neighbourhood of at least `min_frac` of its sample points. A stroke can
     belong to several layers -- e.g. a filled shape's outline is both its
     stroke layer's ink and its fill layer's boundary ("outline as strokes")
-    -- or to none (an invisible / fully covered stroke)."""
+    -- or to none (an invisible / fully covered stroke).
+
+    Vectorized: all strokes are sampled in one batch (the same points as
+    `geo.sample_stroke(s, 6)`), and "layer in the 3x3 neighbourhood" is one
+    lookup into that layer's 3x3-dilated mask."""
+    if not strokes:
+        return []
     h, w = labels.shape
-    out: list[list[int]] = []
-    for s, _w in strokes:
-        pts = np.floor(geo.sample_stroke(s, 6)).astype(int)
-        near = {layer: np.zeros(len(pts), bool) for layer in ink_layers}
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                x = np.clip(pts[:, 0] + dx, 0, w - 1)
-                y = np.clip(pts[:, 1] + dy, 0, h - 1)
-                lab = labels[y, x]
-                for layer in ink_layers:
-                    near[layer] |= lab == layer
-        out.append([layer for layer in ink_layers if near[layer].mean() >= min_frac])
-    return out
+    counts = np.array([len(s) for s, _ in strokes])
+    pieces = np.concatenate([s for s, _ in strokes if len(s)]) if counts.any() else np.zeros((0, 4, 2))
+    t = np.linspace(0.0, 1.0, 7)[:, None]
+    mt = 1.0 - t
+    p0, c1, c2, p3 = (pieces[:, None, k] for k in range(4))
+    samples = mt ** 3 * p0 + 3 * mt ** 2 * t * c1 + 3 * mt * t ** 2 * c2 + t ** 3 * p3   # (P, 7, 2)
+    first = np.zeros(len(pieces), bool)
+    first[(np.cumsum(counts) - counts)[counts > 0]] = True
+    take = np.ones(samples.shape[:2], bool)
+    take[~first, 0] = False                         # shared joints counted once, as sample_stroke
+    pts = np.floor(samples[take]).astype(np.int64)
+    x = np.clip(pts[:, 0], 0, w - 1)
+    y = np.clip(pts[:, 1], 0, h - 1)
+    # An off-page coordinate clips every neighbour offset onto the edge, so
+    # that axis contributes no neighbours: off in x -> vertical only, off in
+    # y -> horizontal only, off in both -> the corner pixel itself.
+    in_x = (pts[:, 0] >= 0) & (pts[:, 0] < w)
+    in_y = (pts[:, 1] >= 0) & (pts[:, 1] < h)
+    off_page = {(3, 1): ~in_x & in_y, (1, 3): in_x & ~in_y, (1, 1): ~in_x & ~in_y}
+    n_pts = np.where(counts > 0, 6 * counts + 1, 0)
+    starts = np.cumsum(n_pts) - n_pts
+    nonempty = n_pts > 0
+    frac: dict[int, np.ndarray] = {}
+    for layer in ink_layers:
+        mask = (labels == layer).view(np.uint8)
+        near = cv2.dilate(mask, np.ones((3, 3), np.uint8))[y, x].astype(np.int64)
+        for (kh, kw), sel in off_page.items():
+            if sel.any():
+                kmask = mask if (kh, kw) == (1, 1) else cv2.dilate(mask, np.ones((kh, kw), np.uint8))
+                near[sel] = kmask[y[sel], x[sel]]
+        hits = np.zeros(len(strokes))
+        if len(near):
+            hits[nonempty] = np.add.reduceat(near, starts[nonempty])
+        frac[layer] = hits / np.maximum(n_pts, 1)
+    return [[layer for layer in ink_layers if nonempty[i] and frac[layer][i] >= min_frac]
+            for i in range(len(strokes))]
 
 
 def scale_strokes(strokes, factor: float):
@@ -180,24 +252,49 @@ def scale_strokes(strokes, factor: float):
 # ---------------------------------------------------------------------------
 # Storage
 # ---------------------------------------------------------------------------
-def save_layer(layers_dir: Path, key: str, gray: np.ndarray, strokes, color, seed: int = 0) -> None:
+def save_layer(layers_dir: Path, key: str, gray: np.ndarray, strokes, color, seed: int = 0) -> dict:
+    """Save one (page, layer) training sample; returns `{"offset": [x0, y0],
+    "shape": [h, w]}` of the stored crop.
+
+    The mask is cropped to its content (ink pixels + GT strokes) plus
+    `CROP_MARGIN_PX` -- the largest training crop, so every window around
+    ink is still complete -- and stored as a lossless PNG; strokes, bboxes
+    and ink samples are stored in that crop's frame."""
     layers_dir.mkdir(parents=True, exist_ok=True)
+    h, w = gray.shape
+    ys, xs = np.nonzero(gray < 200)
     n = len(strokes)
-    pieces = np.concatenate([s for s, _ in strokes]).astype(np.float32) if n else np.zeros((0, 4, 2), np.float32)
+    xy = [s.reshape(-1, 2) for s, _ in strokes]
+    lo = [m.min(0) for m in xy] + ([np.array([xs.min(), ys.min()])] if len(xs) else [])
+    hi = [m.max(0) for m in xy] + ([np.array([xs.max(), ys.max()])] if len(xs) else [])
+    if lo:
+        x0 = max(0, int(math.floor(min(p[0] for p in lo))) - CROP_MARGIN_PX)
+        y0 = max(0, int(math.floor(min(p[1] for p in lo))) - CROP_MARGIN_PX)
+        x1 = min(w, int(math.ceil(max(p[0] for p in hi))) + 1 + CROP_MARGIN_PX)
+        y1 = min(h, int(math.ceil(max(p[1] for p in hi))) + 1 + CROP_MARGIN_PX)
+    else:
+        x0, y0, x1, y1 = 0, 0, w, h
+    off = np.array([x0, y0], np.float64)
+    crop = np.ascontiguousarray(gray[y0:y1, x0:x1], dtype=np.uint8)
+
+    pieces = (np.concatenate([s for s, _ in strokes]) - off).astype(np.float32) if n         else np.zeros((0, 4, 2), np.float32)
     offsets = np.zeros(n + 1, np.int64)
     if n:
         offsets[1:] = np.cumsum([len(s) for s, _ in strokes])
-    widths = np.array([w for _, w in strokes], np.float32)
-    bboxes = np.array([[*s.reshape(-1, 2).min(0), *s.reshape(-1, 2).max(0)] for s, _ in strokes],
-                      np.float32).reshape(n, 4)
-    ys, xs = np.nonzero(gray < 200)
+    widths = np.array([wd for _, wd in strokes], np.float32)
+    bboxes = np.array([[*(m.min(0) - off), *(m.max(0) - off)] for m in xy], np.float32).reshape(n, 4)
     if len(xs) > _INK_SAMPLES:
         pick = np.random.default_rng(seed).choice(len(xs), _INK_SAMPLES, replace=False)
         xs, ys = xs[pick], ys[pick]
-    ink_pts = np.stack([xs, ys], axis=1).astype(np.int32)
-    np.save(layers_dir / f"{key}.gray.npy", np.ascontiguousarray(gray, dtype=np.uint8))
+    ink_pts = np.stack([xs - x0, ys - y0], axis=1).astype(np.int32)
+    ok, png = cv2.imencode(".png", crop, [cv2.IMWRITE_PNG_COMPRESSION, PNG_COMPRESSION])
+    if not ok:
+        raise RuntimeError(f"PNG encode failed for {key}")
+    png.tofile(str(layers_dir / f"{key}.gray.png"))
     np.savez_compressed(layers_dir / f"{key}.strokes.npz", pieces=pieces, offsets=offsets, widths=widths,
-                        bboxes=bboxes, ink_pts=ink_pts, color=np.asarray(color, np.uint8))
+                        bboxes=bboxes, ink_pts=ink_pts, color=np.asarray(color, np.uint8),
+                        origin=np.array([x0, y0], np.int64), page_shape=np.array([h, w], np.int64))
+    return {"offset": [x0, y0], "shape": list(crop.shape)}
 
 
 @dataclass
@@ -210,9 +307,39 @@ class LayerData:
     ink_pts: np.ndarray
 
 
-def load_layer(layers_dir: Path, key: str) -> LayerData:
-    gray = np.load(layers_dir / f"{key}.gray.npy", mmap_mode="r")
-    z = np.load(layers_dir / f"{key}.strokes.npz")
+def default_cache_dir(layers_dir: Path) -> Path:
+    return Path(layers_dir).parent / "cache"
+
+
+def gray_path(layers_dir: Path, key: str, cache_dir: "Path | None" = None) -> Path:
+    """The memory-mappable `.npy` of a layer's mask: an old-format
+    `layers/<key>.gray.npy` as is, else the PNG decoded once into
+    `cache_dir` (default `<data>/cache/`; re-decoded when the PNG is newer).
+    Written to a temp file and renamed, so an interrupted decode never
+    leaves a half-written cache file."""
+    layers_dir = Path(layers_dir)
+    legacy = layers_dir / f"{key}.gray.npy"
+    if legacy.is_file():
+        return legacy
+    png = layers_dir / f"{key}.gray.png"
+    cache = Path(cache_dir) if cache_dir is not None else default_cache_dir(layers_dir)
+    target = cache / f"{key}.gray.npy"
+    if target.is_file() and target.stat().st_mtime >= png.stat().st_mtime:
+        return target
+    cache.mkdir(parents=True, exist_ok=True)
+    gray = cv2.imdecode(np.fromfile(str(png), np.uint8), cv2.IMREAD_GRAYSCALE)
+    if gray is None:
+        raise RuntimeError(f"could not decode {png}")
+    tmp = target.with_name(target.name + f".{os.getpid()}.tmp")
+    with open(tmp, "wb") as fh:
+        np.save(fh, gray)
+    os.replace(tmp, target)
+    return target
+
+
+def load_layer(layers_dir: Path, key: str, cache_dir: "Path | None" = None) -> LayerData:
+    gray = np.load(gray_path(layers_dir, key, cache_dir), mmap_mode="r")
+    z = np.load(Path(layers_dir) / f"{key}.strokes.npz")
     pieces, offsets = z["pieces"].astype(np.float64), z["offsets"]
     strokes = [pieces[offsets[i]:offsets[i + 1]] for i in range(len(offsets) - 1)]
     return LayerData(key, gray, strokes, z["widths"], z["bboxes"], z["ink_pts"])

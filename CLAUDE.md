@@ -94,8 +94,9 @@ its own copy of the classical pipeline instead).
 .venv/Scripts/python.exe scripts/pipeline_report_viewer.py <run>/<stem> [<run2>/<stem>]  # Tkinter viewer: source page + toggleable stage-PDF overlays (1-2 folders side by side)
 .venv/Scripts/python.exe scripts/pipeline_report_benchmark.py --run DIR1 [--run DIR2]  # multiclass-score + chart benchmark report folders (1 or 2) on shared inputs
 .venv/Scripts/python.exe -m pytest tests/ -v                                        # run rastervec's test suite
-.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.prep_dataset --pdf-dir PDFS/ [--pdf C.pdf] --out data/deepvec  # DeepVectoriser training set (run once)
-.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.train --data data/deepvec [--device cuda --amp] [--resume]  # train -> rastervec/weights/deep_vectoriser.pth
+.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.prep_dataset --pdf-dir PDFS/ [--pdf C.pdf] [--workers 4] --out data/deepvec  # DeepVectoriser training set (run once)
+.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.train --data data/deepvec [--threads N] [--resume]  # train -> rastervec/weights/deep_vectoriser.pth (output explained in DeepVectoriser/TRAINING.md)
+.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1] [--weights W.pth] [--ocr]  # try the model -> viewer folder + command
 .venv/Scripts/python.exe scripts/rasterize_pdf.py SRC [DST] --dpi 300               # flatten a PDF to pure raster (DST defaults to outputs/rasterize/)
 .venv/Scripts/python.exe scripts/label/master_label.py PDF [--dpi 300]              # full native+vector+raster label workflow, one outputs/labels/<stem>_label/ folder per PDF
 .venv/Scripts/python.exe scripts/label/native_label.py PDF --page N [--out ...]     # auto-derive native-text ground truth (GUI-free)
@@ -442,13 +443,23 @@ generic parallel-pool mechanics), never phase-specific business logic.
     `--pdf ...`: per page render at `--dpi` + `raster_geometry_for_page` GT mapped via
     `rotation_matrix` — the same vector→raster labelling method as `master_label.py` — chained
     into strokes (`train_data.chain_annotations`, duplicate/retraced pieces dropped), **no text
-    cleanup** (no OCR/erase — text glyph strokes stay in the GT), color layers (a stroke goes to every layer
-    covering ≥ 50 % of it), one `layers/<key>.gray.npy` + `.strokes.npz` per (page, layer),
+    cleanup** (no OCR/erase, and no OCR module is even imported — `layer_image` lives in
+    `masks.py`, not the OCR-importing `adapter.py`; text glyph strokes stay in the GT), color
+    layers (a stroke goes to every layer covering ≥ 50 % of it; `assign_layers`/
+    `chain_annotations` are vectorized), one `layers/<key>.gray.png` (lossless, cropped to the
+    layer's content + 256 px) + `.strokes.npz` (crop frame) per (page, layer) **with GT strokes**
+    (stroke-less layers are listed in the manifest, not stored), `--workers N` page processes,
     resumable via `pages/<key>.json`, `index.json` split by page) and **`train.py`** (`--data
     DIR`: the paper's bootstrap → supervise → joint schedule, three Adam optimizers, AMP,
     `--accum`, `--grad-checkpoint`; random 64-256 px crops; tqdm + `train_log.csv`;
     `<out>.last.ckpt` per epoch / `--resume`; best joint val Chamfer → `--out`; `--tiny` for
-    smoke runs). Debug layers: `color_separation`, `ocr/*`, `text_removal`, `tiles/vectorizer
+    smoke runs; PNG masks decoded once into `--cache-dir` (default `<data>/cache/`) and
+    memory-mapped — an old full-page `.gray.npy` dataset still loads; `--threads`; terminal
+    output explained in `DeepVectoriser/TRAINING.md`). **`predict.py`** (`--pdf --pages --clip
+    [--weights] [--ocr]`): renders a page region, runs `adapter.extract` on it as one image (OCR
+    off by default, as in prep) and writes a `scripts/pipeline_report_viewer.py` folder —
+    every backend debug layer plus `original/vectors`, `original/clip region`,
+    `detected/vectors` — and prints the viewer command. Debug layers: `color_separation`, `ocr/*`, `text_removal`, `tiles/vectorizer
     tile grid` + `re-split tiles`, `strokes/raw tile strokes` + `raw endpoints`, `merge/merged
     vectors` + `merged endpoints`, `vector_diff/total`.
 - **`P3_Vector_Parsing/`** — pluggable vector-parsing/OCR backends, selected by `p3=`, each

@@ -2,7 +2,7 @@
 
     python -m rastervec.P2_Raster_To_Vec.DeepVectoriser.prep_dataset \\
         --pdf-dir PDFS/ [--pdf C.pdf ...] [--pages 0,2] [--dpi 300] [--val-frac 0.1] \\
-        --out data/deepvec
+        [--workers 4] --out data/deepvec
 
 `--pdf-dir` takes every `*.pdf` under the directory (recursive); `--pdf` adds
 single files. Per page:
@@ -13,11 +13,18 @@ single files. Per page:
            chained per drawing (train_data.chain_annotations)
   colors   DBSCAN color layers (copied Junction color separation)
   layers   each GT stroke -> every color layer it lies on (pixel vote); per
-           ink layer the layer mask (adapter.layer_image, resampled to the
-           canonical 300 dpi) + its strokes are saved
+           ink layer with GT strokes, the layer mask (masks.layer_image,
+           resampled to the canonical 300 dpi) cropped to its content, as a
+           lossless PNG, + its strokes are saved (train_data.save_layer); a
+           layer with no strokes is listed in the manifest but not saved
 
 No text cleanup: the P2 backend erases OCR'd text before the model runs, but
-prep does no OCR/erase, so text glyph strokes stay in the ground truth.
+prep does no OCR/erase (and imports no OCR code), so text glyph strokes stay
+in the ground truth.
+
+`--workers N` (default 1) prepares N pages at once in separate processes.
+Memory is per worker: roughly 0.7-1 GB for an A1 sheet at 300 dpi (RGB render
++ layer labels + one layer mask).
 
 Resumable: a page whose manifest (`<out>/pages/<key>.json`) exists is
 skipped. A failing page is logged (pdf, page, stage, traceback -> console +
@@ -30,17 +37,20 @@ import argparse
 import hashlib
 import json
 import logging
+import multiprocessing
+import os
 import sys
 import time
 import traceback
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from tqdm import tqdm
 
 from rastervec.P2_Raster_To_Vec.DeepVectoriser import train_data as td
-from rastervec.P2_Raster_To_Vec.DeepVectoriser.adapter import layer_image
 from rastervec.P2_Raster_To_Vec.DeepVectoriser.color_separation import separate_colors
 from rastervec.P2_Raster_To_Vec.DeepVectoriser.config import TARGET_PX_PER_PT
+from rastervec.P2_Raster_To_Vec.DeepVectoriser.masks import layer_image
 
 _LOG = logging.getLogger("rastervec.P2.DeepVectoriser.prep")
 
@@ -94,14 +104,21 @@ def prep_page(pdf: Path, page_index: int, out: Path, dpi: float, *, key: str | N
         saved = []
         for layer in ink_layers:
             mine = [s for s, o in zip(strokes, owner) if layer in o]
-            gray = layer_image(layers.labels, layer, scale)
-            mine = td.scale_strokes(mine, scale)
             lkey = f"{key}__L{layer}"
-            td.save_layer(out / "layers", lkey, gray, mine, layers.centroids_rgb[layer],
-                          seed=int(hashlib.md5(lkey.encode()).hexdigest()[:8], 16))
-            saved.append({"key": lkey, "n_strokes": len(mine), "shape": list(gray.shape),
-                          "color": [int(c) for c in layers.centroids_rgb[layer]]})
-        steps.append(f"saved {len(saved)} layer(s), {sum(s['n_strokes'] for s in saved)} strokes")
+            entry = {"key": lkey, "n_strokes": len(mine),
+                     "color": [int(c) for c in layers.centroids_rgb[layer]]}
+            if not mine:  # never trained on (write_index skips it) -- don't store its mask
+                saved.append({**entry, "saved": False})
+                continue
+            gray = layer_image(layers.labels, layer, scale)
+            stored = td.save_layer(out / "layers", lkey, gray, td.scale_strokes(mine, scale),
+                                   layers.centroids_rgb[layer],
+                                   seed=int(hashlib.md5(lkey.encode()).hexdigest()[:8], 16))
+            saved.append({**entry, "saved": True, "page_shape": list(gray.shape), **stored})
+            del gray
+        n_saved = sum(1 for s in saved if s["saved"])
+        steps.append(f"saved {n_saved} layer(s) ({len(saved) - n_saved} empty skipped), "
+                     f"{sum(s['n_strokes'] for s in saved)} strokes")
     except Exception as exc:  # noqa: BLE001 -- re-raised with the stage attached
         raise _StageError(stage, exc) from exc
 
@@ -114,6 +131,26 @@ def prep_page(pdf: Path, page_index: int, out: Path, dpi: float, *, key: str | N
     (out / "pages" / f"{key}.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     log(f"[{key}] " + " -> ".join(steps) + f" ({manifest['seconds']}s)")
     return manifest
+
+
+def _init_worker() -> None:
+    """Pool initializer: one BLAS/OMP thread per worker (N workers x all
+    cores each would oversubscribe the CPU)."""
+    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
+
+
+def _prep_job(pdf: Path, page_index: int, out: Path, dpi: float, key: str) -> tuple:
+    """One page in a worker process. Returns plain data -- `("ok", key,
+    log_lines)` or `("fail", key, stage, message, traceback, log_lines)` --
+    since `_StageError` doesn't survive pickling; the main process does all
+    the logging."""
+    lines: list[str] = []
+    try:
+        prep_page(pdf, page_index, out, dpi, key=key, log=lines.append)
+        return ("ok", key, lines)
+    except _StageError as exc:
+        return ("fail", key, exc.stage, str(exc), traceback.format_exc(), lines)
 
 
 def _is_val(page_key_: str, val_frac: float) -> bool:
@@ -185,6 +222,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--pages", default=None, help="comma-separated page indices, every PDF (default: all)")
     ap.add_argument("--dpi", type=float, default=300.0, help="render dpi (default 300)")
     ap.add_argument("--val-frac", type=float, default=0.1, help="fraction of pages held out (default 0.1)")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="pages prepared in parallel processes (default 1; ~0.7-1 GB RAM each on A1 @ 300 dpi)")
     ap.add_argument("--out", required=True, help="output directory")
     ap.add_argument("-v", "--verbose", action="store_true")
     return ap
@@ -211,24 +250,55 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"page keys collide (same PDF given twice?): {dupes[:5]}")
 
     ok, skipped, failed = [], [], []
+    where = {key: (pdf, i) for pdf, i, key in jobs}
+
+    def report_failure(key: str, stage: str, msg: str, tb: str, log_file) -> None:
+        failed.append(key)
+        pdf, i = where[key]
+        _say(f"[{key}] FAILED at stage '{stage}' ({pdf} page {i}): {msg}", log_file)
+        log_file.write(tb + "\n")
+        log_file.flush()
+        tqdm.write(tb)
+
     with open(out / "prep_log.txt", "a", encoding="utf-8") as log_file:
+        workers = max(1, args.workers)
         _say(f"=== prep_dataset {time.strftime('%Y-%m-%d %H:%M:%S')}: {len(sources)} PDF(s), "
-             f"{len(jobs)} page(s) -> {out}", log_file)
-        bar = tqdm(jobs, desc="prep pages", unit="page")
-        for pdf, i, key in bar:
-            bar.set_postfix_str(key)
+             f"{len(jobs)} page(s), {workers} worker(s) -> {out}", log_file)
+        todo = []
+        for pdf, i, key in jobs:
             if (out / "pages" / f"{key}.json").exists():
                 skipped.append(key)
-                continue
-            try:
-                prep_page(pdf, i, out, args.dpi, key=key, log=lambda m: _say(m, log_file))
-                ok.append(key)
-            except _StageError as exc:
-                failed.append(key)
-                _say(f"[{key}] FAILED at stage '{exc.stage}' ({pdf} page {i}): {exc}", log_file)
-                log_file.write(traceback.format_exc() + "\n")
-                log_file.flush()
-                tqdm.write(traceback.format_exc())
+            else:
+                todo.append((pdf, i, key))
+        bar = tqdm(total=len(jobs), initial=len(skipped), desc="prep pages", unit="page")
+        if workers == 1 or len(todo) <= 1:
+            for pdf, i, key in todo:
+                bar.set_postfix_str(key)
+                try:
+                    prep_page(pdf, i, out, args.dpi, key=key, log=lambda m: _say(m, log_file))
+                    ok.append(key)
+                except _StageError as exc:
+                    report_failure(key, exc.stage, str(exc), traceback.format_exc(), log_file)
+                bar.update(1)
+        else:
+            ctx = multiprocessing.get_context("spawn")
+            with ProcessPoolExecutor(max_workers=min(workers, len(todo)), mp_context=ctx,
+                                     initializer=_init_worker) as pool:
+                futures = [pool.submit(_prep_job, pdf, i, out, args.dpi, key) for pdf, i, key in todo]
+                for fut in as_completed(futures):
+                    result = fut.result()
+                    key = result[1]
+                    bar.set_postfix_str(key)
+                    if result[0] == "ok":
+                        for line in result[2]:
+                            _say(line, log_file)
+                        ok.append(key)
+                    else:
+                        for line in result[5]:
+                            _say(line, log_file)
+                        report_failure(key, result[2], result[3], result[4], log_file)
+                    bar.update(1)
+        bar.close()
         index = write_index(out, args.val_frac)
         _say(f"=== done: {len(ok)} ok, {len(skipped)} skipped (already done), {len(failed)} failed"
              + (f": {failed}" if failed else ""), log_file)

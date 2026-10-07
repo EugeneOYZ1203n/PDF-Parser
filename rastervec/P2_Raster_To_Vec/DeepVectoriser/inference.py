@@ -94,8 +94,10 @@ def warmup() -> None:
 
 
 def predict_tiles(model, tiles: list[np.ndarray], conf_thresh: float = CONFIDENCE_THRESHOLD,
-                  max_prims: int | None = None) -> list[TilePrediction]:
-    """Same-size uint8 gray tiles -> one `TilePrediction` each."""
+                  max_prims: int | None = None, enc: "dict | None" = None) -> list[TilePrediction]:
+    """Same-size uint8 gray tiles -> one `TilePrediction` each. `enc` is the
+    encoder's output for exactly these tiles when the caller already has it
+    (training validation), saving a second encoder pass."""
     import torch
 
     from .model.layers import prepare_input
@@ -106,7 +108,8 @@ def predict_tiles(model, tiles: list[np.ndarray], conf_thresh: float = CONFIDENC
     with torch.no_grad():
         size_h, size_w = tiles[0].shape
         x = prepare_input(torch.from_numpy(np.stack(tiles)).to(device))
-        enc = model.encoder(x)
+        if enc is None:
+            enc = model.encoder(x)
         p = torch.sigmoid(enc["logit"])
         keep = p >= conf_thresh
         n_queries = int(p.shape[1])

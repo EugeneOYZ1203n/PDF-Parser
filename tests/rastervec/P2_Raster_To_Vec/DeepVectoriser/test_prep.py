@@ -92,15 +92,22 @@ def test_prep_page_writes_layers_and_index_and_resumes(tmp_path, synthetic_pdf_f
     manifest = prep_dataset.prep_page(path, 0, out, dpi=144, log=logs.append)
     # both GT strokes saved; an antialiased line may also sit on a fringe layer
     assert manifest["layers"] and sum(layer["n_strokes"] for layer in manifest["layers"]) >= 2
-    by_len = {len(s) for layer in manifest["layers"]
-              for s in td.load_layer(out / "layers", layer["key"]).strokes}
+    saved = [layer for layer in manifest["layers"] if layer["saved"]]
+    by_len = {len(s) for layer in saved for s in td.load_layer(out / "layers", layer["key"]).strokes}
     assert by_len == {1, 4}
     assert any("render" in m and "saved" in m for m in logs)
     for layer in manifest["layers"]:
+        png = out / "layers" / f"{layer['key']}.gray.png"
+        # a layer without GT strokes is listed but not stored
+        assert png.exists() == (layer["n_strokes"] > 0) == layer["saved"]
+    for layer in saved:
         data = td.load_layer(out / "layers", layer["key"])
-        # canonical 300 dpi: a 200 pt page is ~833 px wide
-        assert data.gray.shape[1] == pytest.approx(200 * 300 / 72, abs=2)
+        # canonical 300 dpi: a 200 pt page is ~833 px wide; the stored mask is a crop of it
+        assert layer["page_shape"][1] == pytest.approx(200 * 300 / 72, abs=2)
+        assert list(data.gray.shape) == layer["shape"]
         assert len(data.strokes) == layer["n_strokes"]
+        # decoded once into <out>/cache, memory-mapped from there
+        assert (out / "cache" / f"{layer['key']}.gray.npy").exists()
     index = prep_dataset.write_index(out, val_frac=0.1)
     assert index["train"] and not index["val"]
     assert json.loads((out / "index.json").read_text())["train"] == index["train"]
@@ -138,6 +145,106 @@ def test_pdf_dir_recursive_with_distinct_keys(tmp_path, synthetic_pdf_factory):
     index = json.loads((out / "index.json").read_text())
     assert sorted(index["pages"]) == keys
     assert "2 PDF(s)" in (out / "prep_log.txt").read_text()
+
+
+def test_pdf_dir_with_workers_matches_serial(tmp_path, synthetic_pdf_factory):
+    src = tmp_path / "pdfs"
+    (src / "sub").mkdir(parents=True)
+    _pdf(tmp_path, synthetic_pdf_factory).rename(src / "drawing.pdf")
+    _pdf(tmp_path, synthetic_pdf_factory, rotation=90).rename(src / "sub" / "drawing.pdf")
+    serial, parallel = tmp_path / "serial", tmp_path / "parallel"
+    assert prep_dataset.main(["--pdf-dir", str(src), "--out", str(serial), "--dpi", "72"]) == 0
+    assert prep_dataset.main(["--pdf-dir", str(src), "--out", str(parallel), "--dpi", "72",
+                              "--workers", "2"]) == 0
+    assert "2 worker(s)" in (parallel / "prep_log.txt").read_text()
+    for out in (serial, parallel):
+        assert sorted(p.stem for p in (out / "pages").glob("*.json")) == ["drawing_p0", "sub__drawing_p0"]
+    a = json.loads((serial / "index.json").read_text())
+    b = json.loads((parallel / "index.json").read_text())
+    assert a == b
+    for key in a["train"] + a["val"]:
+        x, y = td.load_layer(serial / "layers", key), td.load_layer(parallel / "layers", key)
+        assert np.array_equal(x.gray, y.gray)
+        assert all(np.array_equal(s, t) for s, t in zip(x.strokes, y.strokes))
+    # and a re-run skips both pages
+    assert prep_dataset.main(["--pdf-dir", str(src), "--out", str(parallel), "--workers", "2"]) == 0
+    assert "0 ok, 2 skipped" in (parallel / "prep_log.txt").read_text()
+
+
+def test_worker_job_reports_failure_as_data(tmp_path, synthetic_pdf_factory, monkeypatch):
+    path = _pdf(tmp_path, synthetic_pdf_factory)
+
+    def boom(*_a, **_k):
+        raise ValueError("bad colors")
+
+    monkeypatch.setattr(prep_dataset, "separate_colors", boom)
+    result = prep_dataset._prep_job(path, 0, tmp_path / "prep", 72.0, "k_p0")
+    assert result[0] == "fail" and result[1] == "k_p0" and result[2] == "colors"
+    assert "bad colors" in result[3] and "Traceback" in result[4]
+
+
+def test_cropped_layer_strokes_land_on_ink(tmp_path, synthetic_pdf_factory):
+    path = _pdf(tmp_path, synthetic_pdf_factory)
+    out = tmp_path / "prep"
+    manifest = prep_dataset.prep_page(path, 0, out, dpi=300)
+    for layer in (layer for layer in manifest["layers"] if layer["saved"]):
+        data = td.load_layer(out / "layers", layer["key"])
+        h, w = data.gray.shape
+        assert h < layer["page_shape"][0] or w < layer["page_shape"][1] or layer["offset"] == [0, 0]
+        for s in data.strokes:
+            pts = np.floor(geo.sample_stroke(s, 8)).astype(int)
+            pts[:, 0] = np.clip(pts[:, 0], 0, w - 1)
+            pts[:, 1] = np.clip(pts[:, 1], 0, h - 1)
+            dark = np.array([data.gray[max(0, y - 1):y + 2, max(0, x - 1):x + 2].min() for x, y in pts])
+            assert (dark < 200).mean() > 0.9
+        assert ((data.ink_pts >= 0) & (data.ink_pts < [w, h])).all()
+
+
+def test_load_layer_png_cache_and_legacy_npy(tmp_path):
+    gray = np.full((300, 400), 255, np.uint8)
+    gray[100:102, 50:350] = 0
+    stroke = geo.line_to_cubic((50, 101), (350, 101))[None]
+    layers = tmp_path / "data" / "layers"
+    stored = td.save_layer(layers, "k", gray, [(stroke, 2.0)], (0, 0, 0))
+    # cropped to content + margin, clipped to the image
+    assert stored["offset"] == [0, 0] and stored["shape"] == [300, 400]
+    data = td.load_layer(layers, "k", cache_dir=tmp_path / "cache")
+    assert np.array_equal(data.gray, gray)
+    assert (tmp_path / "cache" / "k.gray.npy").exists()
+    # an old-format dataset (full-page .npy next to the strokes) still loads, no cache needed
+    np.save(layers / "old.gray.npy", gray)
+    (layers / "old.strokes.npz").write_bytes((layers / "k.strokes.npz").read_bytes())
+    old = td.load_layer(layers, "old", cache_dir=tmp_path / "nocache")
+    assert np.array_equal(old.gray, gray) and not (tmp_path / "nocache").exists()
+
+
+def test_save_layer_crops_far_from_edges(tmp_path):
+    gray = np.full((2000, 3000), 255, np.uint8)
+    gray[1000:1002, 1400:1600] = 0
+    stroke = geo.line_to_cubic((1400, 1001), (1600, 1001))[None]
+    stored = td.save_layer(tmp_path / "layers", "k", gray, [(stroke, 2.0)], (0, 0, 0))
+    m = td.CROP_MARGIN_PX
+    assert stored["offset"] == [1400 - m, 1000 - m]
+    data = td.load_layer(tmp_path / "layers", "k")
+    assert np.array_equal(data.gray, gray[1000 - m:1002 + m, 1400 - m:1601 + m])
+    assert data.strokes[0][0, 0] == pytest.approx([m, 1 + m])
+
+
+def test_prep_imports_no_ocr_code():
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[4]
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(repo), os.environ.get("PYTHONPATH", "")])}
+    # (commons.renderer.ocr_prep -- numpy/PIL padding helpers in the shared
+    # renderer package -- is not OCR code and may load)
+    code = ("import sys, rastervec.P2_Raster_To_Vec.DeepVectoriser.prep_dataset; "
+            "bad = [m for m in sys.modules if any(k in m for k in "
+            "('text_ocr', 'paddle', 'text_removal'))]; print(bad); sys.exit(1 if bad else 0)")
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=repo, env=env)
+    assert res.returncode == 0, res.stdout + res.stderr
 
 
 def test_empty_pdf_dir_exits(tmp_path):

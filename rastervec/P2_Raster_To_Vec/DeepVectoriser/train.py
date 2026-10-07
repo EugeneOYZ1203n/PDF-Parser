@@ -2,7 +2,9 @@
 
     python -m rastervec.P2_Raster_To_Vec.DeepVectoriser.train --data data/deepvec \\
         [--device cuda] [--amp] [--epochs 50] [--batch 16] [--accum 1] [--resume] \\
-        [--out rastervec/weights/deep_vectoriser.pth]
+        [--threads N] [--cache-dir DIR] [--out rastervec/weights/deep_vectoriser.pth]
+
+How to read what this prints: `TRAINING.md` next to this file.
 
 The paper's schedule ("Training" section), run automatically, stage by stage:
 
@@ -28,13 +30,18 @@ every epoch (`--resume` continues from it); `--out` gets the best joint-
 stage model by validation Chamfer distance -- the file the P2 adapter
 loads. A non-finite loss or an out-of-memory error logs where it happened
 (stage / epoch / step / crop size), saves `<out>.last.ckpt` and exits 2.
+
+Layer masks are stored as PNG by `prep_dataset.py`; each is decoded once into
+`--cache-dir` (default `<data>/cache/`) and memory-mapped from there.
 """
 from __future__ import annotations
 
 import argparse
 import csv
 import math
+import queue
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -66,17 +73,25 @@ class TrainError(RuntimeError):
 # Data
 # ---------------------------------------------------------------------------
 class _Layers:
-    """Lazily loaded prep layers (gray images are memory-mapped)."""
+    """Lazily loaded prep layers (gray images are memory-mapped from the
+    decode cache)."""
 
-    def __init__(self, data_dir: Path, keys: list[str]) -> None:
+    def __init__(self, data_dir: Path, keys: list[str], cache_dir: "Path | None" = None) -> None:
         self.dir = Path(data_dir) / "layers"
         self.keys = list(keys)
+        self.cache_dir = cache_dir
         self._cache: dict[str, td.LayerData] = {}
 
     def get(self, key: str) -> td.LayerData:
         if key not in self._cache:
-            self._cache[key] = td.load_layer(self.dir, key)
+            self._cache[key] = td.load_layer(self.dir, key, self.cache_dir)
         return self._cache[key]
+
+    def prepare(self, desc: str) -> None:
+        """Decode every layer's PNG into the cache now (once per dataset), so
+        training never stalls on a decode."""
+        for key in tqdm(self.keys, desc=desc, unit="layer", leave=False):
+            td.gray_path(self.dir, key, self.cache_dir)
 
 
 def _weights(index: dict, keys: list[str]) -> np.ndarray:
@@ -101,17 +116,18 @@ class CropStream(torch.utils.data.IterableDataset):
     """Endless random same-size batches for the joint stage."""
 
     def __init__(self, data_dir: Path, keys: list[str], probs: np.ndarray, cfg: dict, batch: int,
-                 steps: int, seed: int) -> None:
+                 steps: int, seed: int, cache_dir: "Path | None" = None) -> None:
         super().__init__()
         self.data_dir, self.keys, self.probs = Path(data_dir), keys, probs
         self.cfg, self.batch, self.steps, self.seed = cfg, batch, steps, seed
+        self.cache_dir = cache_dir
         self.epoch = 0
 
     def __iter__(self):
         info = torch.utils.data.get_worker_info()
         wid, nw = (info.id, info.num_workers) if info else (0, 1)
         rng = np.random.default_rng([self.seed, self.epoch, wid])
-        layers = _Layers(self.data_dir, self.keys)
+        layers = _Layers(self.data_dir, self.keys, self.cache_dir)
         for _ in range(wid, self.steps, nw):
             size = int(rng.choice(td.SIZES))
             crops = []
@@ -122,12 +138,53 @@ class CropStream(torch.utils.data.IterableDataset):
             yield td.build_batch(crops, self.cfg["n_stroke"], self.cfg["max_prims"])
 
 
-def _batches_from(crops: list[td.Crop], batch: int, cfg: dict, rng, id_offsets: list[int] | None):
+def _batches_from(crops: list[td.Crop], batch: int, cfg: dict, rng, id_offsets: list[int] | None,
+                  with_raster: bool = True):
     order = rng.permutation(len(crops))
     for b0 in range(0, len(order), batch):
         idx = order[b0:b0 + batch]
         offs = None if id_offsets is None else [id_offsets[i] for i in idx]
-        yield td.build_batch([crops[i] for i in idx], cfg["n_stroke"], cfg["max_prims"], id_offsets=offs)
+        yield td.build_batch([crops[i] for i in idx], cfg["n_stroke"], cfg["max_prims"],
+                             with_raster=with_raster, id_offsets=offs)
+
+
+_DONE = object()
+
+
+def _prefetch(gen, depth: int = 2):
+    """Run `gen` on a background thread, `depth` items ahead, so the next
+    batch is built (numpy / cv2) while the current one trains. Items come out
+    in the same order; an exception in `gen` is re-raised here."""
+    q: queue.Queue = queue.Queue(maxsize=depth)
+    stop = threading.Event()
+
+    def work() -> None:
+        try:
+            for item in gen:
+                while not stop.is_set():
+                    try:
+                        q.put(item, timeout=0.1)
+                        break
+                    except queue.Full:
+                        continue
+                if stop.is_set():
+                    return
+            q.put(_DONE)
+        except BaseException as exc:  # noqa: BLE001 -- handed to the consumer
+            q.put(exc)
+
+    thread = threading.Thread(target=work, daemon=True, name="batch-prefetch")
+    thread.start()
+    try:
+        while True:
+            item = q.get()
+            if item is _DONE:
+                return
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+    finally:
+        stop.set()
 
 
 def _has_grad(opt) -> bool:
@@ -239,15 +296,22 @@ def _chamfer(pred, gt, size: int) -> float:
     return 0.5 * (one_way(pred, gt) + one_way(gt, pred))
 
 
-@torch.no_grad()
-def validate(model: LiuVectorizer, crops: list[td.Crop], device, cfg: dict, full: bool, batch: int) -> dict:
+def val_batches(crops: list[td.Crop], cfg: dict, batch: int) -> list[tuple[list[td.Crop], dict]]:
+    """The fixed validation crops, batched once (`build_batch` is
+    deterministic, so rebuilding them every epoch gave the same arrays)."""
+    return [(crops[b0:b0 + batch],
+             td.build_batch(crops[b0:b0 + batch], cfg["n_stroke"], cfg["max_prims"], with_raster=False))
+            for b0 in range(0, len(crops), batch)]
+
+
+@torch.inference_mode()
+def validate(model: LiuVectorizer, batches: list[tuple[list[td.Crop], dict]], device, full: bool) -> dict:
     model.eval()
     ep_err, ep_n = 0.0, 0
     cham, iou = [], []
     try:
-        for b0 in range(0, len(crops), batch):
-            chunk = crops[b0:b0 + batch]
-            b = _to_device(td.build_batch(chunk, cfg["n_stroke"], cfg["max_prims"], with_raster=False), device)
+        for chunk, batch in batches:
+            b = _to_device(batch, device)
             enc = model.encoder(prepare_input(b["gray"]))
             v = b["valid"]
             if bool(v.any()):
@@ -255,7 +319,8 @@ def validate(model: LiuVectorizer, crops: list[td.Crop], device, cfg: dict, full
                 ep_err += float((enc["endpoints"][v] - b["endpoints"][v]).abs().sum()) * size / 4
                 ep_n += int(v.sum())
             if full:
-                preds = predict_tiles(model, [c.gray for c in chunk])
+                # the same tiles as b["gray"], so the encoder pass above is reused
+                preds = predict_tiles(model, [c.gray for c in chunk], enc=enc)
                 for c, p in zip(chunk, preds):
                     size = c.gray.shape[0]
                     cham.append(_chamfer(p.strokes, c.strokes, size))
@@ -308,6 +373,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="strokes per batch through the raster/vector branches (memory cap)")
     ap.add_argument("--val-crops", type=int, default=128)
     ap.add_argument("--workers", type=int, default=2, help="DataLoader workers for the joint stage")
+    ap.add_argument("--threads", type=int, default=None,
+                    help="torch CPU threads for the model (default: torch's own choice, ~all cores)")
+    ap.add_argument("--cache-dir", default=None,
+                    help="where layer PNGs are decoded once for memory-mapping (default: <data>/cache)")
     ap.add_argument("--resume", action="store_true", help="continue from <out>.last.ckpt")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--tiny", action="store_true", help="tiny model (smoke tests only)")
@@ -322,6 +391,9 @@ def main(argv: list[str] | None = None) -> int:
     log_csv = out.parent / "train_log.csv"
     device = torch.device(args.device)
     amp = bool(args.amp and device.type == "cuda")
+    if args.threads:
+        torch.set_num_threads(args.threads)
+    cache_dir = Path(args.cache_dir) if args.cache_dir else None
     torch.manual_seed(args.seed)
 
     def banner(msg: str) -> None:
@@ -336,16 +408,19 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"--resume: {last} not found")
         resume_blob = torch.load(last, map_location="cpu", weights_only=False)
     cfg = resume_blob["config"] if resume_blob else dict(TINY_CONFIG if args.tiny else MODEL_DEFAULTS)
-    banner(f"DeepVectoriser training | device {device}{' (AMP)' if amp else ''} | data {data}\n"
+    banner(f"DeepVectoriser training | device {device}{' (AMP)' if amp else ''}"
+           f"{f' | {torch.get_num_threads()} threads' if device.type == 'cpu' else ''} | data {data}\n"
            f"train layers {len(index['train'])}, val layers {len(index['val'])} | out {out}\n"
            f"model {cfg}")
 
-    train_layers = _Layers(data, index["train"])
+    train_layers = _Layers(data, index["train"], cache_dir)
     probs = _weights(index, index["train"])
+    train_layers.prepare("decode train layers")
     tqdm.write("building fixed crop sets ...")
     boot = fixed_crops(train_layers, probs, args.bootstrap_crops, 128, cfg, args.seed, "bootstrap crops", True)
     if index["val"]:
-        val_layers = _Layers(data, index["val"])
+        val_layers = _Layers(data, index["val"], cache_dir)
+        val_layers.prepare("decode val layers")
         val = fixed_crops(val_layers, _weights(index, index["val"]), args.val_crops, 128, cfg,
                           args.seed + 1, "val crops", False)
     else:
@@ -354,6 +429,7 @@ def main(argv: list[str] | None = None) -> int:
     boot_offsets = list(np.cumsum([0] + [len(c.strokes) for c in boot])[:-1])
     n_boot_strokes = int(sum(len(c.strokes) for c in boot))
     tqdm.write(f"bootstrap: {len(boot)} crops, {n_boot_strokes} strokes | val: {len(val)} crops")
+    val_set = val_batches(val, cfg, args.batch)
 
     model = build_model(cfg).to(device)
     model.unet.grad_checkpoint = args.grad_checkpoint
@@ -403,7 +479,8 @@ def main(argv: list[str] | None = None) -> int:
             banner(f"stage {si + 1}/3: {stage} -- epochs {start_ep}..{n_ep - 1}, optimizers {stage_optims[stage]}")
             stream = None
             if stage == "joint" and n_ep > start_ep:
-                stream = CropStream(data, index["train"], probs, cfg, args.batch, args.steps_per_epoch, args.seed)
+                stream = CropStream(data, index["train"], probs, cfg, args.batch, args.steps_per_epoch, args.seed,
+                                    cache_dir)
             for ep in range(start_ep, n_ep):
                 ctx.update(stage=stage, epoch=ep)
                 t_ep = time.perf_counter()
@@ -413,7 +490,9 @@ def main(argv: list[str] | None = None) -> int:
                                                          persistent_workers=False)
                     total = args.steps_per_epoch
                 else:
-                    loader = _batches_from(boot, args.batch, cfg, rng, boot_offsets)
+                    # supervise never reads the stroke rasters -- don't draw them
+                    loader = _prefetch(_batches_from(boot, args.batch, cfg, rng, boot_offsets,
+                                                     with_raster=stage == "bootstrap"))
                     total = math.ceil(len(boot) / args.batch)
                 sums: dict[str, float] = {}
                 n_steps = 0
@@ -456,7 +535,7 @@ def main(argv: list[str] | None = None) -> int:
                     bar.set_postfix({k: f"{v / n_steps:.4f}" for k, v in sums.items()}, refresh=False)
                 bar.close()
                 ctx.update(step="validation")
-                metrics = validate(model, val, device, cfg, full=stage != "bootstrap", batch=args.batch)
+                metrics = validate(model, val_set, device, full=stage != "bootstrap")
                 row = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "stage": stage, "epoch": ep, "steps": n_steps,
                        **{k: round(v / max(n_steps, 1), 6) for k, v in sums.items()},
                        **{k: round(v, 4) for k, v in metrics.items()},
