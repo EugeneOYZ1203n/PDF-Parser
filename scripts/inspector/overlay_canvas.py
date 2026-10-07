@@ -20,9 +20,9 @@ from PIL import ImageTk
 
 import pymupdf as fitz
 
-from rastervec.Evaluation.inspector.layers import OverlayItem
-from rastervec.Evaluation.inspector.overlay_metadata_format import format_metadata
-from rastervec.Evaluation.inspector.overlay_tooltip import Tooltip  # noqa: F401 -- re-exported for callers
+from scripts.inspector.layers import OverlayItem
+from scripts.inspector.overlay_metadata_format import format_metadata
+from scripts.inspector.overlay_tooltip import Tooltip  # noqa: F401 -- re-exported for callers
 
 ItemColor = str | Callable[[OverlayItem], str]
 

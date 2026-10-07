@@ -89,10 +89,11 @@ stage `benchmark`), and a run-root `benchmark.json` marker.
 `docs/SCRIPTS.md`.
 
 This module's own schema (`ReportConfig`/`BenchInput`) lives in
-`report_config.py`, the per-backend debug-image dumpers in
-`debug_image_savers.py`, and the artifact-writing machinery
-(`_LayerWriter`/`_accumulate_page`/`_finalize_doc_dir`/`_write_label_
-overlays`/...) in `report_artifacts.py` -- all re-exported here since
+`rastervec/Evaluation/Report/report_config.py`, the per-backend
+debug-image dumpers in `rastervec/Evaluation/Report/debug_image_savers.py`,
+and the artifact-writing machinery (`_LayerWriter`/`_accumulate_page`/
+`_finalize_doc_dir`/`_write_label_overlays`/...) in
+`rastervec/Evaluation/Report/report_artifacts.py` -- all re-exported here since
 several names are imported directly from this module's own path.
 
     .venv/Scripts/python.exe scripts/generate_pipeline_report.py --config run.json
@@ -126,7 +127,7 @@ from rastervec.commons.logging_setup import configure_logging, get_logger
 from rastervec.commons.paths import output_dir
 from rastervec.commons.step_timing import StepClock
 
-from scripts.debug_image_savers import (  # noqa: F401 -- re-exported for callers/tests
+from rastervec.Evaluation.Report.debug_image_savers import (  # noqa: F401 -- re-exported for callers/tests
     _draw_boxes,
     _safe_slug,
     _save_crop_text_images,
@@ -142,7 +143,7 @@ from scripts.debug_image_savers import (  # noqa: F401 -- re-exported for caller
     _save_oldvectorclassification_minarea_images,
     _save_oldvectorclassification_recog_images,
 )
-from scripts.report_artifacts import (  # noqa: F401 -- re-exported for callers/tests
+from rastervec.Evaluation.Report.report_artifacts import (  # noqa: F401 -- re-exported for callers/tests
     _ARTIFACTS,
     _NEW_ARTIFACTS,
     RASTER_TEXT_TYPES,
@@ -160,7 +161,7 @@ from scripts.report_artifacts import (  # noqa: F401 -- re-exported for callers/
     _write_hyperparams,
     _write_label_overlays,
 )
-from scripts.report_config import (  # noqa: F401 -- re-exported for callers/tests
+from rastervec.Evaluation.Report.report_config import (  # noqa: F401 -- re-exported for callers/tests
     NEW_STEP_NAMES,
     BenchInput,
     ReportConfig,
@@ -214,7 +215,7 @@ def _image_dirs(doc_dir: Path) -> "dict[str, Path]":
     calls `.offer()` on is simply never created) -- see that dispatch for
     which backend writes which. LatestVectorClassification's own folders are
     organized by which model/algorithm call the saved image was the actual
-    input to (see `scripts/debug_image_savers.py`'s module docstring);
+    input to (see `rastervec/Evaluation/Report/debug_image_savers.py`'s module docstring);
     `for_rotation_correction`/`for_paddle_recog` fan out into subfolders,
     which a plain `_ImageReservoir(path, ...)` handles the same as a
     top-level folder (`Path.mkdir(parents=True, ...)`)."""

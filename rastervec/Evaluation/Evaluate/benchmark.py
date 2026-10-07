@@ -339,7 +339,7 @@ def format_fast_cluster_comparison(
     """One line per run: how many classification clusters the FAST-filter
     step (`P3_Vector_Parsing/OldVectorClassification/fast_filter.py`) kept vs.
     dropped to drawing output (`{"total": N, "passed": P}`, summed across
-    every page -- see `scripts/benchmark_run_loading.py::
+    every page -- see `rastervec/Evaluation/Evaluate/benchmark_run_loading.py::
     _load_fast_cluster_stats`). `None` (a non-OldVectorClassification P3
     backend, the legacy engine, or an older dump with no recorded stats)
     shows `n/a`."""
@@ -364,7 +364,7 @@ def format_retry_stats_comparison(
     """One line per run: how many detections needed 0/1/2/3 extra
     +90-degree recognition passes before recovering non-blank text, and how
     many never recovered (`{"0": N, "1": N, "2": N, "3": N, "failed": N}`,
-    summed across every page -- see `scripts/benchmark_run_loading.py::
+    summed across every page -- see `rastervec/Evaluation/Evaluate/benchmark_run_loading.py::
     _load_retry_stats`). `None` (a non-Latest/OldVectorClassification P3 backend, the
     legacy engine, or an older dump with no recorded stats) shows `n/a`.
     Mirrors `format_fast_cluster_comparison` exactly."""

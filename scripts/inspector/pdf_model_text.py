@@ -7,8 +7,8 @@ from math import degrees, atan2, hypot
 
 import pymupdf as fitz
 
-from rastervec.Evaluation.inspector.layers import OverlayItem
-from rastervec.Evaluation.inspector.pdf_model_core import _rect_metadata
+from scripts.inspector.layers import OverlayItem
+from scripts.inspector.pdf_model_core import _rect_metadata
 
 
 def extract_text_items(

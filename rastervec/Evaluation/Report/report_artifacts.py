@@ -30,7 +30,7 @@ from rastervec.commons.renderer import (
 from rastervec.P4_Output_Organization import render_output_pdf
 from rastervec.commons.step_timing import StepClock
 
-from scripts.debug_image_savers import (
+from rastervec.Evaluation.Report.debug_image_savers import (
     _DEBUG_IMAGE_CAP,
     _ImageReservoir,
     _save_legacyrecreation_ocr_images,
@@ -45,10 +45,10 @@ from scripts.debug_image_savers import (
     _save_oldvectorclassification_minarea_images,
     _save_oldvectorclassification_recog_images,
 )
-from scripts.report_config import NEW_STEP_NAMES, _layer_slug
+from rastervec.Evaluation.Report.report_config import NEW_STEP_NAMES, _layer_slug
 
 if TYPE_CHECKING:
-    from scripts.report_config import ReportConfig
+    from rastervec.Evaluation.Report.report_config import ReportConfig
 
 _LOG = get_logger("generate_pipeline_report")
 

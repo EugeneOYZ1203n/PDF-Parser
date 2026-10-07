@@ -8,7 +8,7 @@ import os
 import tkinter as tk
 from tkinter import filedialog
 
-from rastervec.Evaluation.inspector.inspector import InspectorApp, REFERENCES_DIR
+from scripts.inspector.inspector import InspectorApp, REFERENCES_DIR
 
 
 def parse_args() -> argparse.Namespace:

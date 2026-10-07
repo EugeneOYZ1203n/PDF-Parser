@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pymupdf as fitz
 
-from rastervec.Evaluation.inspector.layers import OverlayItem
-from rastervec.Evaluation.inspector.pdf_model_core import (
+from scripts.inspector.layers import OverlayItem
+from scripts.inspector.pdf_model_core import (
     _format_matrix,
     _matrix_rotation,
     _matrix_scale,

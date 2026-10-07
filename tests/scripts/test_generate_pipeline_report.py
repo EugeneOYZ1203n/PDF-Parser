@@ -353,7 +353,7 @@ def test_debug_image_cap_default_and_configurable(tmp_path):
 def test_debug_layers_flag_default_and_off(monkeypatch):
     from types import SimpleNamespace
 
-    import scripts.report_artifacts as ra
+    import rastervec.Evaluation.Report.report_artifacts as ra
 
     assert gpr.ReportConfig().debug_layers is True
     assert gpr.ReportConfig(debug_layers=False).debug_layers is False
@@ -383,7 +383,7 @@ def test_debug_layers_flag_default_and_off(monkeypatch):
 def test_image_reservoir_caps_randomly_and_deterministically(tmp_path):
     from PIL import Image
 
-    from scripts.debug_image_savers import _ImageReservoir
+    from rastervec.Evaluation.Report.debug_image_savers import _ImageReservoir
 
     def fill(folder, seed):
         r = _ImageReservoir(folder, cap=10, seed=seed)
@@ -499,7 +499,7 @@ def test_layer_writer_spills_to_disk_and_cleans_up(tmp_path):
 def test_debug_image_sink_prefixes_the_page_and_respects_the_reservoir(tmp_path):
     from PIL import Image
 
-    from scripts.debug_image_savers import _ImageReservoir
+    from rastervec.Evaluation.Report.debug_image_savers import _ImageReservoir
 
     reservoirs = {"detect": _ImageReservoir(tmp_path / "detect", cap=None)}
     sink = gpr._debug_image_sink(reservoirs, 7)

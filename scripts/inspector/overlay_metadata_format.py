@@ -4,7 +4,7 @@ out of `overlay_canvas.py::PageView` (where these were `_format_metadata`/
 `_pretty_key`/`_format_value`, the latter two already `@staticmethod`s)."""
 from __future__ import annotations
 
-from rastervec.Evaluation.inspector.layer_types import OverlayItem
+from scripts.inspector.layer_types import OverlayItem
 
 _PREFERRED_KEY_ORDER = [
 

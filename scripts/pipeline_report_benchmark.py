@@ -34,10 +34,11 @@ rendered -- `pipeline_report_viewer.py` over the run folders (incl. the
     charts/                 <key>__aggregate__*.png, aggregate__*.png
 
 This module's own run-loading + scoring (`RunEntry`/`_merge_gt`/`_load_run`/
-`_score_text`/`_score_vectors`) lives in `benchmark_run_loading.py`, and
-the HTML section builders
-(`_add_text_sections`/`_add_vector_sections`) in
-`benchmark_report_sections.py` -- all re-exported here since some names are
+`_score_text`/`_score_vectors`) lives in
+`rastervec/Evaluation/Evaluate/benchmark_run_loading.py`, and the HTML
+section builders (`_add_text_sections`/`_add_vector_sections`) in
+`rastervec/Evaluation/Evaluate/benchmark_report_sections.py` -- all
+re-exported here since some names are
 imported directly from this module's own path.
 
     .venv/Scripts/python.exe scripts/pipeline_report_benchmark.py \
@@ -80,7 +81,7 @@ from rastervec.Evaluation.Evaluate.vector_metrics import (
 from rastervec.commons.logging_setup import configure_logging, get_logger
 from rastervec.commons.paths import output_dir
 
-from scripts.benchmark_report_sections import (  # noqa: F401 -- re-exported for callers/tests
+from rastervec.Evaluation.Evaluate.benchmark_report_sections import (  # noqa: F401 -- re-exported for callers/tests
     _add_fast_cluster_section,
     _add_retry_stats_section,
     _add_text_sections,
@@ -88,7 +89,7 @@ from scripts.benchmark_report_sections import (  # noqa: F401 -- re-exported for
     _add_vector_sections,
     _fmt_property_rows,
 )
-from scripts.benchmark_run_loading import (  # noqa: F401 -- re-exported for callers/tests
+from rastervec.Evaluation.Evaluate.benchmark_run_loading import (  # noqa: F401 -- re-exported for callers/tests
     RunEntry,
     _load_fast_cluster_stats,
     _load_retry_stats,

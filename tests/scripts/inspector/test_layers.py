@@ -1,6 +1,6 @@
 import colorsys
 
-from rastervec.Evaluation.inspector.layers import (
+from scripts.inspector.layers import (
     OverlayItem,
     rgb_to_hex,
     seqno_rainbow_color_map,

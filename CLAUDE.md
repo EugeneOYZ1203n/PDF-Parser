@@ -6,8 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A raster-to-vector pipeline project for architectural/engineering shop drawings
 (see `references/*.pdf`, gitignored sample PDFs). `rastervec/` is the only package here —
-the standalone PDF-layer inspector tool that used to live at the repo root now lives inside it,
-at `rastervec/Evaluation/inspector/` (see below).
+the standalone PDF-layer inspector tool lives outside it, at `scripts/inspector/` (see below).
 
 `rastervec/` is the actual extraction pipeline, organized as **two pluggable phases sandwiched
 between two always-the-same phases, behind one shared harness**, not a fixed step sequence:
@@ -78,7 +77,7 @@ live file in `pipelines/` that isn't part of the old pipeline chain, and it's wh
 
 The `Evaluation/` package holds a benchmarking suite (`Conversion/` — native text → vector-text
 PDF; `Labelling/` — manual + automatic ground-truth labelling; `Evaluate/` — accuracy metrics
-against those labels) plus the inspector tool — see "rastervec architecture" below.
+against those labels) — see "rastervec architecture" below. (The inspector tool is in `scripts/inspector/`.)
 `junction_cnn/` and `hawp/` at the repo root are unrelated, independent experiments (the CNN
 junction-detector approach `junction_cnn/` explored was superseded by the classical, no-ML
 pipeline ported into `P2_Raster_To_Vec/Junction/junction_test/` — see that bullet); nothing in
@@ -89,7 +88,7 @@ its own copy of the classical pipeline instead).
 
 ```
 .venv/Scripts/python.exe -m pip install -r requirements.txt                        # install deps
-.venv/Scripts/python.exe -m rastervec.Evaluation.inspector.inspector [path/to.pdf]  # run the PDF layer inspector
+.venv/Scripts/python.exe -m scripts.inspector.inspector [path/to.pdf]              # run the PDF layer inspector
 .venv/Scripts/python.exe -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 LatestVectorClassification]  # run the pluggable pipeline (P1 -> P2_REGISTRY[p2] -> P3_REGISTRY[p3])
 .venv/Scripts/python.exe scripts/generate_pipeline_report.py --config run.json      # config-driven per-stage report (PDFs + stats + dump.json per source PDF)
 .venv/Scripts/python.exe scripts/pipeline_report_viewer.py <run>/<stem> [<run2>/<stem>]  # Tkinter viewer: source page + toggleable stage-PDF overlays (1-2 folders side by side)
@@ -155,14 +154,15 @@ at all), and FAST is used differently (`OldVectorClassification` keeps its own p
 filter copy; `LatestVectorClassification` and `LegacyRecreation` have none) — this paragraph is
 about the original, shared `OCR/` copy only.
 
-## `rastervec/Evaluation/inspector/` architecture
+## `scripts/inspector/` architecture
 
 A standalone Tkinter + PyMuPDF desktop tool for visually inspecting what's inside a PDF (text,
-images, annotations, vector drawings, as toggleable overlays) — predates `rastervec`'s own
-extraction pipeline and shares no imports with it; it was built as step 0, to visually validate
-what PyMuPDF extracts before writing real extraction logic elsewhere in `rastervec`. It now lives
-inside `rastervec/` (under `Evaluation/`, alongside the not-yet-built benchmarking suite) since it
-remains a useful dev-facing inspection tool, but its own five top-level modules' *responsibilities*
+images, annotations, vector drawings, clip masks, as toggleable overlays) — predates `rastervec`'s
+own extraction pipeline and shares no imports with it; it was built as step 0, to visually validate
+what PyMuPDF extracts before writing real extraction logic elsewhere in `rastervec`. It lives in
+`scripts/inspector/` (a dev-facing tool, not pipeline code; moved there from
+`rastervec/Evaluation/inspector/`; tests in `tests/scripts/inspector/`), and its own five
+top-level modules' *responsibilities*
 are otherwise unchanged, even though several are now internally split into smaller sibling files
 (each re-exported through the original module's own path, so nothing importing e.g. `layers.X`
 or `pdf_model.X` needs to change):
@@ -171,8 +171,8 @@ or `pdf_model.X` needs to change):
   returns (bbox always in PDF page coordinates; `quad`/`points` optionally for non-axis-aligned
   geometry; `attrs` for machine-filterable values; `metadata` for human-readable hover info).
   `LayerSpec` (one top-level checkbox) and `SubFilterSpec` (a sub-checkbox group under a layer) are
-  declarative — `build_layers(pdf_model)` wires the four current layers (text/images/annotations/
-  drawings) to their extractor functions in `pdf_model.py`. `filter_items()` is the one shared
+  declarative — `build_layers(pdf_model)` wires the five current layers (text/images/annotations/
+  drawings/clip masks) to their extractor functions in `pdf_model.py`. `filter_items()` is the one shared
   filtering function all layers use (AND across sub-filter groups, OR within a group, empty
   selection = no restriction). Adding a new layer means adding one `LayerSpec` + one extractor
   function — nothing in `inspector.py`, `overlay_canvas.py`, or `control_panel.py` needs to change.
@@ -185,7 +185,12 @@ or `pdf_model.X` needs to change):
   scans a page's `get_drawings()` once to populate the dynamic stroke/fill color sub-filters. Split
   into `pdf_model_core.py` (`PdfDocument` + shared geometry/matrix/color helpers),
   `pdf_model_text.py` (`extract_text_items`), `pdf_model_image.py` (`extract_image_items`),
-  `pdf_model_drawing.py` (`extract_annot_items`/`extract_drawing_items`/`collect_drawing_colors`) —
+  `pdf_model_drawing.py` (`extract_annot_items`/`extract_drawing_items`/`collect_drawing_colors`,
+  plus `_operation_item` — one `l`/`re`/`qu`/`c` op → `OverlayItem`), `pdf_model_clip.py`
+  (`extract_clip_mask_items` — the "Clip masks" layer: vector clip paths, which plain
+  `get_drawings()` drops and only `get_drawings(extended=True)` returns as `type == "clip"`, plus
+  mask images per placement — `/SMask`, `/Mask <xref>`, stencil `/ImageMask`, read off the image
+  dict since `get_image_info` has no smask key — filterable by `mask_source`) —
   one file per independent fitz-extraction concern.
 - **`overlay_canvas.py`** — `PageView`: the left-pane Tk `Canvas` showing the rendered page pixmap
   with overlay shapes drawn on top, plus page nav/zoom controls and a hover tooltip. The tooltip
@@ -194,11 +199,11 @@ or `pdf_model.X` needs to change):
   which are genuinely one cohesive widget.
 - **`control_panel.py`** — `ControlPanel`: the right-pane checkbox tree built from the `LAYERS`
   registry, with collapsible sub-filter groups (checkboxes or color swatches).
-- **`inspector.py`** (the package's entry point, `python -m rastervec.Evaluation.inspector.inspector
+- **`inspector.py`** (the package's entry point, `python -m scripts.inspector.inspector
   [pdf]` — renamed from the original standalone tool's `app.py`) — `InspectorApp` wires the two
   panels together, owns `AppState` (current page/zoom, per-page extraction and color caches), and
-  drives the redraw cycle. `REFERENCES_DIR` resolves to the repo-root `references/` folder (three
-  levels above the `inspector/` package: `inspector` → `Evaluation` → `rastervec` → repo root).
+  drives the redraw cycle. `REFERENCES_DIR` resolves to the repo-root `references/` folder (two
+  levels above the `inspector/` package: `inspector` → `scripts` → repo root).
   CLI arg-parsing/PDF-path-resolution (`parse_args`/`pick_initial_pdf`/`pick_pdf_with_dialog`/
   `resolve_pdf_path`/`main`) lives in `inspector_cli.py`, imported by `inspector.py`'s own
   `if __name__ == "__main__":` block only (avoids a module-load cycle, since `inspector_cli.py`
@@ -520,7 +525,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
     collinear/parallel groups (the same `line_geometry` grouping the steps use), `ocr` detect/
     passed/failed quads, `rotation / raw quad angle` + `snapped angle (N)` + `final angle` arrows + `cls flipped (N)` quads,
     `retry` layers, `ownership / text vectors` + `drawing vectors`, and `drawing`. Debug images
-    (`scripts/debug_image_savers.py::_save_latestvectorclassification_*`): `for_paddle_detect/`,
+    (`rastervec/Evaluation/Report/debug_image_savers.py::_save_latestvectorclassification_*`): `for_paddle_detect/`,
     `for_rotation_correction/{quad_rotation,paddle_classifier}/`, `for_paddle_recog/
     {0..3_retry,failed}/`.
   - **`OldVectorClassification/`** — **FROZEN: never edit anything in this folder, in any way**
@@ -579,7 +584,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
   vectors)` / `render_output_page(..., zoom)` — **the only builder of the final reconstructed
   page** (vectors in their real paint, text via `draw.text_spec`). Everything that wants "the
   pipeline's output as a page" calls it: `core/api.py::extract_svg`, the report's `reconstructed`
-  layer (`scripts/report_artifacts.py::_stage_layers`), `core/parallel/benchmark_jobs.py`. Apart
+  layer (`rastervec/Evaluation/Report/report_artifacts.py::_stage_layers`), `core/parallel/benchmark_jobs.py`. Apart
   from debug layers, nothing else composes output PDFs. `run_pipeline` doesn't call it (callers
   ask for a page when they want one).
 - **`rastervec/OCR/`** (top-level: `fast_detect.py`, `radon.py`, `Paddle_OCR/ocr_backend.py` +
@@ -1054,8 +1059,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
   perpendicular to itself), laid multi-word lines out along page-x even when rotated, and sized
   rotated text from the axis-aligned bbox height — all three were real bugs; don't reintroduce
   any of them. `tests/rastervec/renderer/test_draw.py` checks rendered ink (not the spec) in the
-  text's own frame at many angles; `scripts/generate_render_probe_pdfs.py` writes a viewer-ready
-  eyeball check (rotated pages, an offset CropBox, text at 11 angles).
+  text's own frame at many angles.
 
   **Detect quads.** PaddleOCR 2.x's DB detector returns *rotated* quads (`db_postprocess.
   get_mini_boxes` → `cv2.minAreaRect`, `det_box_type="quad"`; `filter_tag_det_res` orders them
@@ -1137,7 +1141,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
   quads/angle lines on top, as they did then), plus LegacyRecreation's single `paddle_ocr_images/`,
   organized by which model/algorithm call each saved image was the exact input to (never an
   overlay/annotation — only a BGR/RGB channel reorder for display; per-P3-backend savers in
-  `scripts/debug_image_savers.py`) are written unless the config sets `debug_images: false`
+  `rastervec/Evaluation/Report/debug_image_savers.py`) are written unless the config sets `debug_images: false`
   (`ReportConfig`, default `true`; it's also passed to `run_pipeline(keep_debug_arrays=...)`,
   which backends that declare it use to decide whether a `debug_out` keeps full-size image arrays
   at all). `debug_layers: false` (default `true`) likewise skips *every* layer PDF — no
@@ -1172,19 +1176,23 @@ generic parallel-pool mechanics), never phase-specific business logic.
   zoom/pan/page-flip. `pipeline_report_benchmark.py` emits ready-to-paste invocations in
   `viewer_commands.txt`.
 
-  Both scripts are split by concern across several sibling files (each with a thin
-  re-export back through the main script's own path, so `from scripts.generate_pipeline_report
-  import X` / `from scripts.pipeline_report_benchmark import X` keep working regardless of which
-  file `X` actually lives in): `generate_pipeline_report.py` keeps only orchestration
-  (`_process_pdf`/`_process_pdf_benchmark`/`build_arg_parser`/`main`) plus its own
-  `_bench_ground_truth_by_type`/`_filter_valid_pages`/`_bench_doc_name`/`_image_dirs`;
-  `scripts/report_config.py` holds its `ReportConfig`/`BenchInput` schema; `scripts/
-  debug_image_savers.py` holds the seven per-P3-backend pre-OCR debug-image dumpers;
-  `scripts/report_artifacts.py` holds the artifact-writing machinery (`_LayerWriter`/
-  `_accumulate_page`/`_active_artifacts`/`_finalize_doc_dir`/`_write_label_overlays`/...).
+  Both scripts keep only orchestration in `scripts/` — `scripts/` holds just the runnable tools
+  (`label/`, `inspector/`, `generate_pipeline_report.py`, `pipeline_report_viewer.py`,
+  `pipeline_report_benchmark.py`, `rasterize_pdf.py`, `report_configs/`); their helper logic lives
+  in `rastervec/Evaluation/{Report,Evaluate}/`, each re-exported back through the main script's
+  own path, so `from scripts.generate_pipeline_report import X` / `from
+  scripts.pipeline_report_benchmark import X` keep working regardless of which file `X` actually
+  lives in. `generate_pipeline_report.py` keeps `_process_pdf`/`_process_pdf_benchmark`/
+  `build_arg_parser`/`main` plus its own `_bench_ground_truth_by_type`/`_filter_valid_pages`/
+  `_bench_doc_name`/`_image_dirs`; `rastervec/Evaluation/Report/report_config.py` holds its
+  `ReportConfig`/`BenchInput` schema; `rastervec/Evaluation/Report/debug_image_savers.py` holds
+  the seven per-P3-backend pre-OCR debug-image dumpers; `rastervec/Evaluation/Report/
+  report_artifacts.py` holds the artifact-writing machinery (`_LayerWriter`/`_accumulate_page`/
+  `_active_artifacts`/`_finalize_doc_dir`/`_write_label_overlays`/...).
   `pipeline_report_benchmark.py` keeps only its `main`/`build_arg_parser` orchestration;
-  `scripts/benchmark_run_loading.py` holds `RunEntry`/`_load_run`/`_merge_gt`/`_score_text`/
-  `_score_vectors`/`_load_timings`; `scripts/benchmark_report_sections.py` holds the HTML section
+  `rastervec/Evaluation/Evaluate/benchmark_run_loading.py` holds `RunEntry`/`_load_run`/
+  `_merge_gt`/`_score_text`/`_score_vectors`/`_load_timings`; `rastervec/Evaluation/Evaluate/
+  benchmark_report_sections.py` holds the HTML section
   builders (`_add_text_sections`/`_add_vector_sections`/`_add_timing_sections`). The benchmark
   report renders no example crops — individual errors are inspected with
   `pipeline_report_viewer.py` over the run folders (incl. the `benchmark__extra_*` layers).

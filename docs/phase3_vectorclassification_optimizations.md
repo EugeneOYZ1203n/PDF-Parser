@@ -65,7 +65,7 @@ an opaque allocator error under memory pressure. The fix: stages 1-3 run in boun
 (`DETECT_RENDER_CHUNK_SIZE = 8`), so only one chunk's worth of cluster renders is ever live at once;
 recognition (stage 4/5) is unaffected since crops are far smaller than full cluster renders and
 still batch across the whole page. Separately, `debug_out["cluster_detections"]` (raw per-cluster
-bgr + quads, read back only by `scripts/debug_image_savers.py` for debug-image dumping) is now only
+bgr + quads, read back only by `rastervec/Evaluation/Report/debug_image_savers.py` for debug-image dumping) is now only
 accumulated when a caller actually passed `debug_out` — it used to be built unconditionally on
 every run, which is the same latent memory-accumulation pattern independent of the chunking fix
 above.

@@ -43,29 +43,29 @@ from tkinter import filedialog, messagebox, ttk
 
 import pymupdf as fitz
 
-# This file lives at rastervec/Evaluation/inspector/inspector.py -- three
-# dirname() calls from its own directory reaches the repo root (inspector
-# -> Evaluation -> rastervec -> repo root).
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+# This file lives at scripts/inspector/inspector.py -- two dirname() calls
+# from its own directory reach the repo root (inspector -> scripts -> repo
+# root).
+_REPO_ROOT = os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))
-)))
+))
 
 if __name__ == "__main__" and __package__ is None:
-    # Allow running this file directly (`python rastervec/Evaluation/
-    # inspector/inspector.py`), not just as a module (`python -m
-    # rastervec.Evaluation.inspector.inspector`), by putting the repo root
+    # Allow running this file directly (`python scripts/inspector/
+    # inspector.py`), not just as a module (`python -m
+    # scripts.inspector.inspector`), by putting the repo root
     # on sys.path.
     sys.path.insert(0, _REPO_ROOT)
 
-from rastervec.Evaluation.inspector import pdf_model
-from rastervec.Evaluation.inspector.control_panel import ControlPanel
-from rastervec.Evaluation.inspector.layers import (
+from scripts.inspector import pdf_model
+from scripts.inspector.control_panel import ControlPanel
+from scripts.inspector.layers import (
     build_layers,
     filter_items,
     seqno_rainbow_colorer,
     summarize_selection,
 )
-from rastervec.Evaluation.inspector.overlay_canvas import ItemColor, PageView
+from scripts.inspector.overlay_canvas import ItemColor, PageView
 
 
 REFERENCES_DIR = os.path.join(_REPO_ROOT, "references")
@@ -678,6 +678,6 @@ class InspectorApp:
 # not at module top, since `inspector_cli.py` imports `InspectorApp`/
 # `REFERENCES_DIR` back from this module.
 if __name__ == "__main__":
-    from rastervec.Evaluation.inspector.inspector_cli import main
+    from scripts.inspector.inspector_cli import main
 
     main()

@@ -343,16 +343,6 @@ label set (plus the vector set's own backing `Vector`s). No editing, no save.
 
 Accepts either the source PDF path or the `<stem>_label` folder itself.
 
-## `scripts/generate_test_pdfs.py`
-
-One-off generator for the `tests/references/test_pdfs_*.pdf` fixtures. Run
-once, then `git add` the results. Each PDF uses its 1-based index as its
-random seed, so regeneration is byte-identical. No arguments.
-
-```
-.venv/Scripts/python.exe scripts/generate_test_pdfs.py
-```
-
 ---
 
 ## Module CLIs (`python -m ...`)
@@ -420,14 +410,14 @@ per variant, with an aggregate + timing comparison.
 OCR path is a manual smoke test; the pure formatting/aggregation helpers are
 unit-tested.
 
-### `rastervec.Evaluation.inspector.inspector`
+### `scripts.inspector.inspector`
 
 Standalone Tkinter + PyMuPDF PDF layer inspector (text / images /
-annotations / drawings as toggleable overlays). Predates the pipeline,
+annotations / drawings / clip masks as toggleable overlays). Predates the pipeline,
 shares no imports with it.
 
 ```
-.venv/Scripts/python.exe -m rastervec.Evaluation.inspector.inspector \
+.venv/Scripts/python.exe -m scripts.inspector.inspector \
     "references/<stem>.pdf"
 ```
 

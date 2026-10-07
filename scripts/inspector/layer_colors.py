@@ -5,7 +5,7 @@ from __future__ import annotations
 import colorsys
 from typing import Callable
 
-from rastervec.Evaluation.inspector.layer_types import OverlayItem
+from scripts.inspector.layer_types import OverlayItem
 
 
 def rgb_to_hex(color) -> str:

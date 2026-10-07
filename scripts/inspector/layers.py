@@ -44,7 +44,7 @@ from typing import Any, Callable
 
 import pymupdf as fitz
 
-from rastervec.Evaluation.inspector.layer_types import (  # noqa: F401
+from scripts.inspector.layer_types import (  # noqa: F401
     LayerSpec,
     OverlayItem,
     SubFilterSpec,
@@ -52,7 +52,7 @@ from rastervec.Evaluation.inspector.layer_types import (  # noqa: F401
     _quad_to_tuple,
     _rect_to_tuple,
 )
-from rastervec.Evaluation.inspector.layer_colors import (  # noqa: F401
+from scripts.inspector.layer_colors import (  # noqa: F401
     rgb_to_hex,
     seqno_rainbow_color_map,
     seqno_rainbow_colorer,
@@ -90,6 +90,24 @@ IMAGE_MASK_OPTIONS = [
     ("True", "Has mask"),
     ("False", "No mask"),
 ]
+
+
+MASK_SOURCE_OPTIONS = [
+    ("clip_path", "Vector clip path"),
+    ("soft_mask", "Soft mask image (SMask)"),
+    ("explicit_mask", "Mask image (/Mask)"),
+    ("stencil", "Stencil image (ImageMask)"),
+]
+
+
+mask_source_filter = SubFilterSpec(
+    key="mask_source",
+    label="Mask source",
+    attr_getter=lambda item: item.attrs.get(
+        "mask_source"
+    ),
+    static_options=MASK_SOURCE_OPTIONS,
+)
 
 
 item_kind_filter = SubFilterSpec(
@@ -258,6 +276,7 @@ _GETTERS: dict[
     "fill_color": fill_color_filter.attr_getter,
     "close_path": drawing_close_filter.attr_getter,
     "has_mask": image_mask_filter.attr_getter,
+    "mask_source": mask_source_filter.attr_getter,
 }
 
 
@@ -305,6 +324,18 @@ def build_layers(pdf_model) -> list[LayerSpec]:
                 stroke_color_filter,
                 fill_color_filter,
                 drawing_close_filter,
+            ],
+        ),
+
+
+        LayerSpec(
+            key="clip_masks",
+            label="Clip masks",
+            color="#ea580c",
+            extractor=pdf_model.extract_clip_mask_items,
+            subfilters=[
+                mask_source_filter,
+                item_kind_filter,
             ],
         ),
     ]

@@ -4,7 +4,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from rastervec.Evaluation.inspector.layers import (
+from scripts.inspector.layers import (
     ITEM_KIND_OPTIONS,
     LayerSpec,
     SubFilterSpec,

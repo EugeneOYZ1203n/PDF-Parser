@@ -306,7 +306,7 @@ def test_merge_gt_supports_legacy_auto_manual_filenames(tmp_path):
 
 def test_char_order_sorts_by_error_rate():
     from rastervec.Evaluation.Evaluate.confusion_metrics import CharStats
-    from scripts.benchmark_report_sections import char_order
+    from rastervec.Evaluation.Evaluate.benchmark_report_sections import char_order
 
     class _PT:
         def __init__(self, cs):

@@ -141,7 +141,7 @@ class ImageRegion:
 def embedded_images_for_page(pdf_path: str, page_index: int) -> list[ImageRegion]:
     """Every embedded raster image placement on `page_index`, via
     `page.get_image_info(xrefs=True)` (page-space bbox, placement-aware --
-    same API `Evaluation/inspector/pdf_model.py::extract_image_items` uses
+    same API `scripts/inspector/pdf_model.py::extract_image_items` uses
     for the inspector tool's own image layer)."""
     with Reader(pdf_path) as reader:
         page = reader.get_page(page_index)

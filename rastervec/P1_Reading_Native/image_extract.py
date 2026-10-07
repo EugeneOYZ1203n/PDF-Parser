@@ -3,7 +3,7 @@
 Only real embedded raster image placements (via
 `page.get_image_info(xrefs=True)`, the same API
 `Evaluation/Labelling/raster_label.py::embedded_images_for_page` and
-`Evaluation/inspector/pdf_model.py::extract_image_items` already use). There
+`scripts/inspector/pdf_model.py::extract_image_items` already use). There
 is deliberately no whole-page render: Phase 2 turns *raster content* into
 vectors, and re-rasterising a page's own native text/vector drawing would
 only make a Phase 2 backend trace content Phase 1/3 already own exactly

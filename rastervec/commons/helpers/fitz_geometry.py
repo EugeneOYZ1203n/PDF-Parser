@@ -4,7 +4,7 @@
 Kept separate from `helpers/geometry.py` (which is pure tuple math and does
 not import pymupdf) so a module that only needs the tuple helpers -- e.g.
 `models.py`, the evaluation metric suite -- never pulls pymupdf in
-transitively. Used by the two Tkinter tools (`Evaluation/inspector/`,
+transitively. Used by the two Tkinter tools (`scripts/inspector/`,
 `Evaluation/Labelling/manual_label.py`) for hover-metadata formatting.
 """
 from __future__ import annotations
