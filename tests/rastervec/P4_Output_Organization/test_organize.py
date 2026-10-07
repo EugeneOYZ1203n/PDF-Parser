@@ -65,3 +65,23 @@ def test_organize_outputs_tolerates_tiny_float_overrun(page_meta, vector, caplog
         organize_outputs([], [], [], [v], page)
 
     assert not caplog.records
+
+
+def test_organize_outputs_returns_vectors_in_seqno_paint_order(page_meta, vector):
+    # P3 backends emit vectors in bucket/step order; P4 restores paint order.
+    page = _page(page_meta, width=200.0, height=100.0)
+    a, b, c = vector(seqno=5), vector(seqno=-2), vector(seqno=1)
+
+    _texts, vectors = organize_outputs([], [], [], [a, b, c], page)
+
+    assert vectors == [b, c, a]
+
+
+def test_organize_outputs_seqno_sort_is_stable_on_ties(page_meta, vector):
+    page = _page(page_meta, width=200.0, height=100.0)
+    first, second, earlier = vector(seqno=3), vector(seqno=3), vector(seqno=0)
+
+    _texts, vectors = organize_outputs([], [], [], [first, second, earlier], page)
+
+    assert vectors[0] is earlier
+    assert vectors[1] is first and vectors[2] is second

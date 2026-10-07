@@ -213,3 +213,44 @@ def test_stop_after_rejects_unknown_phase(synthetic_pdf_factory, tmp_pdf_path):
 
     with pytest.raises(ValueError, match="stop_after"):
         run_pipeline(path, 0, stop_after="phase4")
+
+
+def _p2_two_vectors(images, page):
+    def _v(seqno, y):
+        return Vector(
+            type="s", items=[("l", (0.0, y), (10.0, y))], color=(1, 0, 0), fill=None,
+            width=1.0, dashes=None, closePath=None, lineCap=0, lineJoin=0, even_odd=False,
+            stroke_opacity=None, fill_opacity=None, layer=None, rect=(0.0, y, 10.0, y),
+            scissor=None, seqno=seqno, blendmode=None, isolated=False, knockout=False,
+            opacity=None, page_index=page.meta.index,
+        )
+    # P2 backends number from 0, colliding with Phase 1's own seqnos.
+    return [_v(0, 50.0), _v(1, 60.0)], []
+
+
+def _p3_passthrough(vectors_p1, vectors_p2, page, **_kwargs):
+    # Deliberately P2-last, so the final order can only come from P4's sort.
+    return list(vectors_p1) + list(vectors_p2), []
+
+
+def test_run_pipeline_paints_p2_vectors_below_p1_vectors(
+    synthetic_pdf_factory, tmp_pdf_path, monkeypatch,
+):
+    monkeypatch.setitem(registry.P2_REGISTRY, "P2Two", _p2_two_vectors)
+    monkeypatch.setitem(registry.P3_REGISTRY, "P3Pass", _p3_passthrough)
+    doc = synthetic_pdf_factory([{
+        "width": 200, "height": 100,
+        "drawings": [{"lines": [((5, 5), (100, 5)), ((5, 15), (100, 15))], "color": (0, 0, 0)}],
+    }])
+    path = tmp_pdf_path(doc)
+
+    result = run_pipeline(path, 0, p2="P2Two", p3="P3Pass")
+
+    p2_out = [v for v in result.vectors if v.color == (1, 0, 0)]
+    p1_out = [v for v in result.vectors if v.color != (1, 0, 0)]
+    assert len(p2_out) == 2 and p1_out
+    # every P2 seqno sits below every P1 seqno, P2's own order kept ...
+    assert max(v.seqno for v in p2_out) < min(v.seqno for v in p1_out)
+    assert [v.bbox[1] for v in p2_out] == [50.0, 60.0]
+    # ... so in paint order P2 comes first and P1 is drawn on top.
+    assert result.vectors[:2] == p2_out

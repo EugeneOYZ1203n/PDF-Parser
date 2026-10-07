@@ -15,6 +15,7 @@ CLI: `python -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 La
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import sys
 import time
 
@@ -29,6 +30,25 @@ _LOG = get_logger("core.pipeline")
 # The phases `run_pipeline(stop_after=...)` can stop after. Phase 4 always
 # runs (it just combines whatever the run produced), so it isn't listed.
 STEP_NAMES = ("phase1", "phase2", "phase3")
+
+
+def _rebase_p2_seqnos(p2_vectors: list, p2_texts: list, phase1) -> tuple[list, list]:
+    """Shift Phase 2's seqnos into one block entirely below Phase 1's,
+    keeping P2's own relative order. P2 backends number from 0 and can't see
+    Phase 1, so without this their seqnos collide with native ones: P4's
+    paint-order sort would interleave them and P3's seqno merge would treat
+    unrelated native/traced vectors as draw-order neighbours. Below, not
+    above: traced raster content paints first, native vectors on top.
+    Seqnos may go negative -- they are only ever compared for order."""
+    p2_items = list(p2_vectors) + list(p2_texts)
+    if not p2_items:
+        return p2_vectors, p2_texts
+    p1_seqnos = [v.seqno for v in phase1.vectors] + [t.seqno for t in phase1.texts]
+    shift = min(p1_seqnos, default=0) - (max(i.seqno for i in p2_items) + 1)
+    return (
+        [dataclasses.replace(v, seqno=v.seqno + shift) for v in p2_vectors],
+        [dataclasses.replace(t, seqno=t.seqno + shift) for t in p2_texts],
+    )
 
 
 class _StepTimer:
@@ -106,7 +126,11 @@ def run_pipeline(
     that phase: later P2/P3 backends are never called and get no
     `step_durations` entry. Phase 4 still runs on what exists -- with P3
     skipped, the output vectors are the raw, unclassified P1 (+ P2) vectors
-    and the texts are native (+ P2) only."""
+    and the texts are native (+ P2) only.
+
+    Phase 2's seqnos are rebased below Phase 1's (`_rebase_p2_seqnos`), so
+    in Phase 4's seqno paint order traced raster vectors sit under native
+    ones."""
     if stop_after is not None and stop_after not in STEP_NAMES:
         raise ValueError(f"stop_after must be None or one of {STEP_NAMES}, got {stop_after!r}")
     run_p2 = stop_after != "phase1"
@@ -148,6 +172,7 @@ def run_pipeline(
             if "keep_debug_arrays" in p2_params:
                 p2_kwargs["keep_debug_arrays"] = keep_debug_arrays
             p2_vectors, p2_texts = p2_fn(phase1.images, phase1.page, **p2_kwargs)
+            p2_vectors, p2_texts = _rebase_p2_seqnos(p2_vectors, p2_texts, phase1)
 
     if run_p3:
         _LOG.info("phase3 (p3=%s): %d P1 + %d P2 vector(s)", p3, len(phase1.vectors), len(p2_vectors))

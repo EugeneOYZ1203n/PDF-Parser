@@ -309,7 +309,8 @@ def draw_dot(shape: "fitz.Shape", spec: DotSpec) -> None:
 def vector_spec(vector: "Vector", *, recolor: Rgb | None = None, min_width: float = 1.0) -> VectorSpec:
     """`recolor=None` keeps the vector's real paint (final output); a colour
     turns it into a plain stroked copy in that colour (debug layers), its
-    real fill/dashes/blend dropped so the colour isn't drowned out."""
+    real fill/dashes/blend/clip dropped so the colour isn't drowned out and
+    the full geometry shows."""
     if recolor is None:
         return VectorSpec(vector)
     import dataclasses
@@ -318,6 +319,7 @@ def vector_spec(vector: "Vector", *, recolor: Rgb | None = None, min_width: floa
         vector, type="s", color=tuple(recolor), fill=None, dashes=None,
         width=max(vector.width or 0.0, min_width), closePath=False,
         blendmode="Normal", opacity=1.0, stroke_opacity=1.0, fill_opacity=None,
+        scissor=None,
     ))
 
 

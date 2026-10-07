@@ -45,10 +45,16 @@ def organize_outputs(
     warn about any item whose bbox doesn't fit the page's own unrotated
     MediaBox dims. `vectors_p3` is already Phase 3's complete final vector
     output (it supersedes `vectors_p2`, which fed into Phase 3 as an
-    input) -- unchanged from what `core.pipeline.run_pipeline` used to
-    return directly."""
+    input).
+
+    The returned vectors are in paint order -- sorted by `seqno` (stable,
+    so ties keep the backend's order). P3 backends emit vectors grouped by
+    their own bucket/step bookkeeping, not content-stream order; painting
+    that order back would put e.g. a white mask fill on top of the lines it
+    sat under in the source. `core.pipeline` rebases Phase 2's seqnos below
+    Phase 1's, so traced raster vectors paint under native ones."""
     texts = list(texts_p1) + list(texts_p2) + list(texts_p3)
-    vectors = list(vectors_p3)
+    vectors = sorted(vectors_p3, key=lambda v: v.seqno)
 
     width, height = page.meta.width, page.meta.height
     for t in texts:

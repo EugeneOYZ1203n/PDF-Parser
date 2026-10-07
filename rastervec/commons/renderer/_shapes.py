@@ -20,6 +20,12 @@ Blend mode + transparency-group opacity can't go through `Shape.finish()`
 is wrapped in a `/BM`+`/ca`+`/CA` ExtGState (`_wrap_run_gstate`). Without
 this a Multiply-blended line reconstructs fully opaque, painting solid over
 whatever is beneath it.
+
+The same run split also keys on each Vector's `scissor` (its enclosing
+clip's bbox, folded in at extraction): a clipped run's stream gets a
+`re W n` clip prefix too, so hatching / pattern fills clipped to a region
+don't spill past it. Only the clip's bbox is reproduced, not its exact path.
+Runs are consecutive, so paint order is always the input order.
 """
 from __future__ import annotations
 
@@ -91,21 +97,21 @@ def _resolve_extgstate_container(
     return res_xref, "ExtGState/"
 
 
-def _wrap_run_gstate(
-    page: "fitz.Page",
-    new_xrefs: list[int],
-    blendmode: str | None,
-    opacity: float | None,
-) -> None:
-    """Wrap each content stream in `new_xrefs` (the ones a run's `commit`
-    just added) in `q /GSx gs ... Q`, where `/GSx` is a fresh ExtGState
-    carrying the run's blend mode and constant opacity."""
-    if not new_xrefs:
-        return
+def _clip_operator(page: "fitz.Page", clip: tuple, dx: float, dy: float) -> str:
+    """`x y w h re W n` for page-space `clip` (offset by `(dx, dy)`), in
+    the page's own PDF content-stream space."""
+    rect = fitz.Rect(clip[0] + dx, clip[1] + dy, clip[2] + dx, clip[3] + dy)
+    r = (rect * ~page.transformation_matrix).normalize()
+    return f"{r.x0:g} {r.y0:g} {r.width:g} {r.height:g} re W n\n"
+
+
+def _extgstate_operator(page: "fitz.Page", blendmode: str | None, opacity: float | None) -> str:
+    """`/GSx gs` for a fresh ExtGState carrying the run's blend mode and
+    constant opacity, registered on `page`'s resources ("" if it can't be)."""
     doc = page.parent
     resolved = _resolve_extgstate_container(doc, page)
     if resolved is None:
-        return
+        return ""
     container, key_prefix = resolved
 
     parts = ["/Type/ExtGState"]
@@ -119,8 +125,31 @@ def _wrap_run_gstate(
 
     name = f"GSrv{gs_xref}"
     doc.xref_set_key(container, key_prefix + name, f"{gs_xref} 0 R")
+    return f"/{name} gs\n"
 
-    prefix = f"q /{name} gs\n".encode("latin-1")
+
+def _wrap_run(
+    page: "fitz.Page",
+    new_xrefs: list[int],
+    blendmode: str | None,
+    opacity: float | None,
+    clip: tuple | None,
+    dx: float = 0.0,
+    dy: float = 0.0,
+) -> None:
+    """Wrap each content stream in `new_xrefs` (the ones a run's `commit`
+    just added) in `q [/GSx gs] [clip re W n] ... Q` -- `/GSx` a fresh
+    ExtGState carrying the run's blend mode and constant opacity, the clip
+    the run's shared `scissor` rect."""
+    if not new_xrefs:
+        return
+    prefix = "q\n"
+    if not _is_trivial_blend(blendmode, opacity):
+        prefix += _extgstate_operator(page, blendmode, opacity)
+    if clip is not None:
+        prefix += _clip_operator(page, clip, dx, dy)
+    doc = page.parent
+    prefix = prefix.encode("latin-1")
     for xref in new_xrefs:
         stream = doc.xref_stream(xref)
         doc.update_stream(xref, prefix + stream + b"\nQ")
@@ -156,12 +185,13 @@ def replay_drawing_paths(
     `line_join`, `line_cap` and stroke/fill opacity. Points are offset by
     `(dx, dy)` (used to translate a cluster into its own isolated canvas).
 
-    Vectors are processed in consecutive `(blendmode, opacity)` runs -- each
-    run gets its own `Shape` + `commit()`, and a run with a non-Normal blend
-    mode or a group opacity < 1 has its committed content stream wrapped in
-    an ExtGState (`_wrap_run_gstate`) so it composites the way the source
-    PDF did instead of painting fully opaque. A run of ordinary vectors is
-    one `Shape` + one `commit()`, exactly as before.
+    Vectors are processed in consecutive `(blendmode, opacity, scissor)`
+    runs -- each run gets its own `Shape` + `commit()`; a run with a
+    non-Normal blend mode or a group opacity < 1 has its committed content
+    stream wrapped in an ExtGState so it composites the way the source PDF
+    did instead of painting fully opaque, and a run with a `scissor`
+    (enclosing clip bbox) is clipped to it (`_wrap_run`). A run of ordinary
+    vectors is one `Shape` + one `commit()`.
 
     A `Vector` carrying neither `color` nor `fill` is skipped outright:
     `Shape.finish()` emits a stroke operator whenever `fill` is `None` even
@@ -178,11 +208,13 @@ def replay_drawing_paths(
     `monochrome=True` (OCR / FAST inputs -- `png.py`) paints every stroke and
     fill solid black and drops opacity, blend mode and group opacity, so the
     image is black ink on white; geometry, widths (hairlines included),
-    dashes, caps/joins and the fill rule are unchanged. Colour only belongs
+    dashes, caps/joins and the fill rule are unchanged; clips are dropped
+    too (a cluster render is an isolated canvas). Colour only belongs
     in the final reconstruction.
     """
-    for (blendmode, opacity), run in groupby(
-        vectors, key=lambda v: (None, None) if monochrome else (v.blendmode, v.opacity)
+    for (blendmode, opacity, clip), run in groupby(
+        vectors,
+        key=lambda v: (None, None, None) if monochrome else (v.blendmode, v.opacity, v.scissor),
     ):
         run = list(run)
         shape = page.new_shape()
@@ -235,7 +267,7 @@ def replay_drawing_paths(
 
         contents_before = set(page.get_contents())
         shape.commit(overlay=True)
-        if _is_trivial_blend(blendmode, opacity):
+        if _is_trivial_blend(blendmode, opacity) and clip is None:
             continue
         new_xrefs = [x for x in page.get_contents() if x not in contents_before]
-        _wrap_run_gstate(page, new_xrefs, blendmode, opacity)
+        _wrap_run(page, new_xrefs, blendmode, opacity, clip, dx, dy)
