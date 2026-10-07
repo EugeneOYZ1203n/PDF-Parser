@@ -101,6 +101,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import gc
 import json
 import sys
 from pathlib import Path
@@ -148,6 +149,7 @@ from scripts.report_artifacts import (  # noqa: F401 -- re-exported for callers/
     _accumulate_page,
     _active_artifacts,
     _add_extra_prediction_layers,
+    _debug_image_sink,
     _debug_layer_sink,
     _finalize_doc_dir,
     _image_reservoirs,
@@ -251,7 +253,7 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
     pages = _filter_valid_pages(pdf_path, config.pages_for(pdf_path.stem), pdf_path.stem)
     active = _active_artifacts(config, variant)
 
-    writer = _LayerWriter()
+    writer = _LayerWriter(doc_dir / ".layer_parts")
     stats_pages: dict[str, list[tuple[int, dict]]] = {row[0]: [] for row in active}
     dumps: list[dump_io.PageDump] = []
 
@@ -273,6 +275,9 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
                 run_input, run_page, p2=variant.p2, p3=variant.p3,
                 enable_fast=variant.enable_fast, verbose=True,
                 on_debug_layer=_debug_layer_sink(writer) if config.debug_layers else None,
+                on_debug_image=(
+                    _debug_image_sink(reservoirs, page_index) if reservoirs is not None else None
+                ),
                 keep_debug_arrays=config.debug_images,
                 stop_after=config.final_stage,
             )
@@ -291,6 +296,11 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
             fast_cluster_stats=_fast_cluster_stats(res, variant.p3),
             retry_stats=_retry_stats(res, variant.p3),
         ))
+        # Drop this page's verbose result (Phase-1 images, debug_out, the
+        # classification) before the next page runs -- otherwise two pages'
+        # results are alive at once.
+        del res
+        gc.collect()
 
     _finalize_doc_dir(doc_dir, pdf_path, pages, config, variant, active,
                       writer, stats_pages, dumps)
@@ -471,7 +481,7 @@ def _process_pdf_benchmark(
     # Extra-prediction layers only when this input has manual vector labels.
     has_manual = bool(gt_by_type["original_vector"].entries)
 
-    writer = _LayerWriter()
+    writer = _LayerWriter(doc_dir / ".layer_parts")
     stats_pages: dict[str, list[tuple[int, dict]]] = {row[0]: [] for row in active}
     dumps: list[dump_io.PageDump] = []
 
@@ -489,6 +499,9 @@ def _process_pdf_benchmark(
                 str(conv_path), 0, p2=variant.p2, p3=variant.p3,
                 enable_fast=variant.enable_fast, verbose=True,
                 on_debug_layer=_debug_layer_sink(writer) if config.debug_layers else None,
+                on_debug_image=(
+                    _debug_image_sink(reservoirs, p) if reservoirs is not None else None
+                ),
                 keep_debug_arrays=config.debug_images,
                 stop_after=config.final_stage,
             )
@@ -522,11 +535,12 @@ def _process_pdf_benchmark(
                 if is_legacy:
                     res_raster = run_legacy(str(raster_page_path), 0, verbose=True)
                 else:
-                    # Only texts + timings are read back from this run --
-                    # never its debug arrays.
+                    # Only texts + timings are read back from this run, and
+                    # run_pipeline fills step/substep durations without
+                    # verbose -- so no debug data is kept at all.
                     res_raster = run_current(
                         str(raster_page_path), 0, p2=variant.p2, p3=variant.p3,
-                        enable_fast=variant.enable_fast, verbose=True,
+                        enable_fast=variant.enable_fast, verbose=False,
                         keep_debug_arrays=False,
                         stop_after=config.final_stage,
                     )
@@ -534,6 +548,7 @@ def _process_pdf_benchmark(
                 raster_texts = list(res_raster.texts or [])
                 raster_steps = dict(res_raster.step_durations or {})
                 raster_substeps = _substeps(res_raster)
+                del res_raster
             except Exception as exc:  # noqa: BLE001
                 _LOG.warning(
                     "%s: rasterised-PDF run failed for page %d: %s", bench.key, p, exc,
@@ -551,6 +566,8 @@ def _process_pdf_benchmark(
             fast_cluster_stats=_fast_cluster_stats(res, variant.p3),
             retry_stats=_retry_stats(res, variant.p3),
         ))
+        del res
+        gc.collect()
 
     sources: list[str] = []
     # Types whose `<type>_{bbox,text}.pdf` overlays were actually written

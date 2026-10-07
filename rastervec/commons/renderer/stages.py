@@ -179,7 +179,7 @@ def _compose(
         specs += [quad_spec(poly, rgb, width=1.0) for poly in polys if poly is not None and len(poly) >= 2]
     for item in text_layer or []:
         specs.append(text_spec(item))
-    return render_specs_pdf(page_meta, specs)
+    return render_specs_pdf(page_meta, specs, deflate=True)
 
 
 # ---------------------------------------------------------------------------

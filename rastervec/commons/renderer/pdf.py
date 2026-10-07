@@ -59,7 +59,7 @@ def render_boxes_pdf(page_meta: PageMeta, boxes: "list[BoxOverlay]", *, width: f
     return render_specs_pdf(page_meta, [
         bbox_spec(spec[0], spec[1], width=width, dashes=spec[2] if len(spec) > 2 else None)
         for spec in boxes
-    ])
+    ], deflate=True)
 
 
 def render_quads_pdf(page_meta: PageMeta, quads: list, *, width: float = 1.5) -> bytes:
@@ -69,7 +69,7 @@ def render_quads_pdf(page_meta: PageMeta, quads: list, *, width: float = 1.5) ->
     return render_specs_pdf(page_meta, [
         quad_spec(spec[0], spec[1], width=width, dashes=spec[2] if len(spec) > 2 else None)
         for spec in quads if spec[0] is not None and len(spec[0]) >= 3
-    ])
+    ], deflate=True)
 
 
 def render_text_pdf(page_meta: PageMeta, texts: "list[Text | TextBox]", *, color_of=None) -> bytes:
@@ -86,7 +86,7 @@ def render_text_pdf(page_meta: PageMeta, texts: "list[Text | TextBox]", *, color
         else:
             color = (0.0, 0.0, 0.0)
         specs.append(text_spec(item, color=color))
-    return render_specs_pdf(page_meta, specs)
+    return render_specs_pdf(page_meta, specs, deflate=True)
 
 
 def render_vectors_pdf(
@@ -98,7 +98,7 @@ def render_vectors_pdf(
     return render_specs_pdf(page_meta, [
         vector_spec(v, recolor=color_of(v) if color_of is not None else (0.0, 0.0, 0.0), min_width=width)
         for v in vectors
-    ])
+    ], deflate=True)
 
 
 def rasterize_pdf(pdf_bytes: bytes, *, zoom: float = 1.0) -> "Image.Image":

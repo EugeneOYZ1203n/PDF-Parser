@@ -471,3 +471,38 @@ def test_old_vectorclassification_savers_use_its_own_folders(tmp_path):
     ):
         assert len(list((tmp_path / folder).glob("*.png"))) == 1, folder
     assert not (tmp_path / "for_paddle_detect").exists()
+
+
+def test_layer_writer_spills_to_disk_and_cleans_up(tmp_path):
+    from rastervec.commons.models import PageMeta
+    from rastervec.commons.renderer import render_boxes_pdf
+
+    pm = PageMeta(index=0, number=1, mediabox=(0, 0, 100, 100), rotation=0, width=100, height=100)
+    spill = tmp_path / "spill"
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    writer = gpr._LayerWriter(spill)
+    xs = (10, 30, 50)
+    for x in xs:  # one page per x, each box at a different place
+        writer.add("boxes.pdf", {"file": "boxes.pdf"}, render_boxes_pdf(pm, [((x, 10, x + 5, 20), (1, 0, 0))]))
+    assert spill.is_dir()
+    assert not (out_dir / "boxes.pdf").exists()  # nothing merged before finalize
+    writer.finalize(out_dir)
+    assert not spill.exists()
+    with fitz.open(str(out_dir / "boxes.pdf")) as doc:
+        assert doc.page_count == 3
+        # Pages stay in insertion order.
+        lefts = [min(d["rect"].x0 for d in page.get_drawings()) for page in doc]
+        assert lefts == pytest.approx([x for x in xs], abs=1.0)
+
+
+def test_debug_image_sink_prefixes_the_page_and_respects_the_reservoir(tmp_path):
+    from PIL import Image
+
+    from scripts.debug_image_savers import _ImageReservoir
+
+    reservoirs = {"detect": _ImageReservoir(tmp_path / "detect", cap=None)}
+    sink = gpr._debug_image_sink(reservoirs, 7)
+    sink("detect", "cluster_000.png", lambda: Image.new("RGB", (4, 4), "white"))
+    sink("unknown_folder", "x.png", lambda: (_ for _ in ()).throw(AssertionError("never built")))
+    assert [p.name for p in (tmp_path / "detect").iterdir()] == ["p7_cluster_000.png"]

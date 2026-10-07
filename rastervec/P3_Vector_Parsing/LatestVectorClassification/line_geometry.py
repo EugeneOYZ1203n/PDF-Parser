@@ -358,30 +358,85 @@ def is_line_only(v: Vector) -> bool:
     return bool(v.items) and all(item[0] == "l" for item in v.items)
 
 
-def line_crossing_counts(vectors: list[Vector], *, eps: float) -> list[int | None]:
+def _seg_bboxes(segs: np.ndarray) -> np.ndarray:
+    """`(n, 4)` `(x0, y0, x1, y1)` bboxes of `(n, 4)` segments."""
+    return np.stack([
+        np.minimum(segs[:, 0], segs[:, 2]), np.minimum(segs[:, 1], segs[:, 3]),
+        np.maximum(segs[:, 0], segs[:, 2]), np.maximum(segs[:, 1], segs[:, 3]),
+    ], axis=1) if len(segs) else np.zeros((0, 4))
+
+
+def _overlap_mask(boxes: np.ndarray, box) -> np.ndarray:
+    """Which rows of `(n, 4)` `boxes` overlap (or touch) `box`."""
+    return (
+        (boxes[:, 0] <= box[2]) & (box[0] <= boxes[:, 2])
+        & (boxes[:, 1] <= box[3]) & (box[1] <= boxes[:, 3])
+    )
+
+
+def _crossed_foreign_count(own: np.ndarray, foreign: np.ndarray, eps: float, chunk: int) -> int:
+    """How many rows of `foreign` properly cross at least one row of `own`
+    (`crossing_matrix(own, foreign).any(axis=0).sum()`), broadcast in
+    chunks of `own` rows so at most ~`chunk` pairs are live at once."""
+    if not len(own) or not len(foreign):
+        return 0
+    hit = np.zeros(len(foreign), dtype=bool)
+    step = max(1, chunk // len(foreign))
+    for start in range(0, len(own), step):
+        hit |= crossing_matrix(own[start:start + step], foreign, eps).any(axis=0)
+    return int(hit.sum())
+
+
+def line_crossing_counts(
+    vectors: list[Vector], *, eps: float, chunk: int = 250_000,
+) -> list[int | None]:
     """Per Vector of `vectors` (same order): `None` unless it is made only of
     "l" items; otherwise how many foreign pieces properly cross it. Foreign
     = every other Vector of `vectors`, tested unflattened: each "l"
     segment / "re"-"qu" edge crossing any of this Vector's segments counts
     once (a foreign edge crossing two of its segments is still one), each
     "c" curve counts every proper crossing with every one of this Vector's
-    segments (`line_cubic_crossings`). Its own items never count."""
+    segments (`line_cubic_crossings`). Its own items never count.
+
+    Cost: candidate Vectors come from one numpy bbox mask per Vector (no
+    Python n^2 loop); every candidate's segments are pooled and pruned to
+    those whose bbox meets this Vector's, then tested in chunks of at most
+    `chunk` (own, foreign) pairs -- a segment belongs to exactly one
+    Vector, so the pooled distinct-crossing count equals the per-Vector
+    sum. Curves are only solved against own segments whose bbox meets the
+    curve's control hull. All prefilters are necessary conditions for a
+    proper crossing, so counts are exact."""
+    n_vec = len(vectors)
     pieces = [item_pieces(v) for v in vectors]
     seg_arrays = [np.asarray(s, dtype=float).reshape(-1, 4) for s, _ in pieces]
-    bboxes = [_pieces_bbox(s, c) for s, c in pieces]
-    counts: list[int | None] = [None] * len(vectors)
+    seg_boxes = [_seg_bboxes(a) for a in seg_arrays]
+    vec_boxes = np.asarray([_pieces_bbox(s, c) for s, c in pieces], dtype=float).reshape(-1, 4)
+    cubic_boxes = [
+        [(min(p[0] for p in cb), min(p[1] for p in cb), max(p[0] for p in cb), max(p[1] for p in cb))
+         for cb in cubics]
+        for _segs, cubics in pieces
+    ]
+    counts: list[int | None] = [None] * n_vec
     for i, v in enumerate(vectors):
         if not is_line_only(v) or not len(seg_arrays[i]):
             continue
-        own = seg_arrays[i]
+        own, own_boxes, box = seg_arrays[i], seg_boxes[i], vec_boxes[i]
+        cand = np.flatnonzero(_overlap_mask(vec_boxes, box))
+        cand = cand[cand != i]
         n = 0
-        for j in range(len(vectors)):
-            if j == i or not _bboxes_overlap(bboxes[i], bboxes[j]):
-                continue
-            if len(seg_arrays[j]):
-                n += int(crossing_matrix(own, seg_arrays[j], eps).any(axis=0).sum())
-            for cubic in pieces[j][1]:
-                n += sum(line_cubic_crossings(tuple(s), cubic, eps) for s in own)
+        foreign = [seg_arrays[j][_overlap_mask(seg_boxes[j], box)] for j in cand if len(seg_arrays[j])]
+        foreign = [f for f in foreign if len(f)]
+        if foreign:
+            pooled = np.concatenate(foreign)
+            fb = _seg_bboxes(pooled)
+            pool_box = (fb[:, 0].min(), fb[:, 1].min(), fb[:, 2].max(), fb[:, 3].max())
+            n += _crossed_foreign_count(own[_overlap_mask(own_boxes, pool_box)], pooled, eps, chunk)
+        for j in cand:
+            for cubic, cbox in zip(pieces[j][1], cubic_boxes[j]):
+                if not _bboxes_overlap(box, cbox):
+                    continue
+                for s in own[_overlap_mask(own_boxes, cbox)]:
+                    n += line_cubic_crossings(tuple(s), cubic, eps)
         counts[i] = n
     return counts
 
@@ -518,19 +573,82 @@ def ink_segments(v: Vector, curve_samples: int) -> list[Segment]:
     return segs
 
 
-def ink_fraction_in_quad(v: Vector, quad, *, curve_samples: int) -> float:
+@dataclass(frozen=True)
+class QuadGeom:
+    """Everything the ownership tests derive from one convex quad, built
+    once (`quad_geom`) and reused for every Vector tested against it --
+    `parse._text_vectors_by_quad` tests every Vector of a cluster against
+    every quad of that cluster."""
+
+    pts: tuple                       # the quad's points as plain floats
+    edges: tuple                     # (ax, ay, ex, ey) per edge, for bbox_inside_quad
+    poly: np.ndarray                 # (n, 2)
+    normals: np.ndarray              # (n, 2) inward edge normals
+    signed_area2: float              # twice the signed area (0 -> degenerate)
+    envelope: tuple[float, float, float, float]
+    area: float
+
+
+def quad_geom(quad) -> QuadGeom:
+    """Precompute `QuadGeom` for the convex polygon `quad`."""
+    pts = tuple((float(p[0]), float(p[1])) for p in quad)
+    edges = tuple((ax, ay, bx - ax, by - ay) for (ax, ay), (bx, by) in zip(pts, pts[1:] + pts[:1]))
+    poly = np.asarray(pts, dtype=float).reshape(-1, 2)
+    x, y = poly[:, 0], poly[:, 1]
+    area2 = float(np.dot(x, np.roll(y, -1)) - np.dot(np.roll(x, -1), y))
+    e = np.roll(poly, -1, axis=0) - poly
+    normals = (math.copysign(1.0, area2) if area2 else 0.0) * np.stack([-e[:, 1], e[:, 0]], axis=1)
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    return QuadGeom(
+        pts=pts, edges=edges, poly=poly, normals=normals, signed_area2=area2,
+        envelope=(min(xs), min(ys), max(xs), max(ys)), area=abs(area2) / 2.0,
+    )
+
+
+def _clip_params(rows: np.ndarray, geom: QuadGeom) -> "tuple[np.ndarray, np.ndarray, np.ndarray]":
+    """Vectorised Cyrus-Beck of `(n, 4)` segment `rows` against the convex
+    quad: `(t_lo, t_hi, parallel_out)` per row -- the row lies inside the
+    quad over `[t_lo, t_hi]` (empty when `t_lo > t_hi` or `parallel_out`)."""
+    poly, normals = geom.poly, geom.normals
+    p0 = rows[:, :2]
+    d = rows[:, 2:] - p0
+    num = np.einsum("sek,ek->se", p0[:, None, :] - poly[None, :, :], normals)  # >= 0 inside
+    den = d @ normals.T
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = -num / den
+    t_lo = np.maximum(np.where(den > 0.0, t, -np.inf).max(axis=1), 0.0)
+    t_hi = np.minimum(np.where(den < 0.0, t, np.inf).min(axis=1), 1.0)
+    parallel_out = ((den == 0.0) & (num < 0.0)).any(axis=1)
+    return t_lo, t_hi, parallel_out
+
+
+def ink_fraction_in_quad(
+    v: Vector, quad, *, curve_samples: int,
+    geom: "QuadGeom | None" = None, ink: "list[Segment] | None" = None,
+) -> float:
     """Fraction (0..1) of `v`'s ink -- its path length -- that lies inside
     the convex `quad` (4 page-space points, the rotated detect quad itself,
     not its envelope). A zero-length Vector counts as all-in or all-out by
-    its bbox centre."""
-    poly = np.asarray(quad, dtype=float).reshape(-1, 2)
-    segs = ink_segments(v, curve_samples)
-    total = sum(math.hypot(s[2] - s[0], s[3] - s[1]) for s in segs)
+    its bbox centre. One vectorised Cyrus-Beck clip over every ink segment
+    (`_clip_length_convex` is the per-segment reference). `geom` (from
+    `quad_geom`) and `ink` (`ink_segments(v, curve_samples)`) may be passed
+    precomputed."""
+    geom = geom or quad_geom(quad)
+    segs = ink if ink is not None else ink_segments(v, curve_samples)
+    if not segs:
+        total = 0.0
+    else:
+        rows = np.asarray(segs, dtype=float).reshape(-1, 4)
+        lengths = np.hypot(rows[:, 2] - rows[:, 0], rows[:, 3] - rows[:, 1])
+        total = float(lengths.sum())
     if total == 0.0:
         x0, y0, x1, y1 = v.bbox
-        return 1.0 if _point_in_convex(((x0 + x1) / 2.0, (y0 + y1) / 2.0), poly) else 0.0
-    inside = sum(_clip_length_convex(s, poly) for s in segs)
-    return min(1.0, inside / total)
+        return 1.0 if _point_in_convex(((x0 + x1) / 2.0, (y0 + y1) / 2.0), geom.poly) else 0.0
+    if geom.signed_area2 == 0.0:
+        return 0.0
+    t_lo, t_hi, parallel_out = _clip_params(rows, geom)
+    inside_t = np.where(parallel_out, 0.0, np.maximum(t_hi - t_lo, 0.0))
+    return min(1.0, float((inside_t * lengths).sum()) / total)
 
 
 def quad_area(quad) -> float:
@@ -540,12 +658,16 @@ def quad_area(quad) -> float:
     return abs(float(np.dot(x, np.roll(y, -1)) - np.dot(np.roll(x, -1), y))) / 2.0
 
 
-def bbox_inside_quad(bbox, quad) -> bool:
+def bbox_inside_quad(bbox, quad, *, geom: "QuadGeom | None" = None) -> bool:
     """True when all 4 corners of `bbox` lie inside (or on) the convex
     `quad`. Plain floats, no numpy -- it runs once per (vector, quad) pair
-    and decides most of them, where numpy's per-call overhead dominates."""
-    pts = [(float(p[0]), float(p[1])) for p in quad]
-    edges = [(ax, ay, bx - ax, by - ay) for (ax, ay), (bx, by) in zip(pts, pts[1:] + pts[:1])]
+    and decides most of them, where numpy's per-call overhead dominates.
+    `geom` (from `quad_geom`) skips rebuilding the edge list."""
+    if geom is not None:
+        edges = geom.edges
+    else:
+        pts = [(float(p[0]), float(p[1])) for p in quad]
+        edges = [(ax, ay, bx - ax, by - ay) for (ax, ay), (bx, by) in zip(pts, pts[1:] + pts[:1])]
     x0, y0, x1, y1 = bbox
     pos = neg = False
     for px, py in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
@@ -558,32 +680,28 @@ def bbox_inside_quad(bbox, quad) -> bool:
     return True
 
 
-def piece_overlap_fraction(v: Vector, quad) -> float:
+def piece_rows(v: Vector, pieces: "tuple[list[Segment], list[Cubic]] | None" = None) -> list[Segment]:
+    """`v`'s pieces as segments for `piece_overlap_fraction`: "l" segments,
+    "re"/"qu" edges, each "c" as its chord p0 -> p3."""
+    segs, cubics = pieces if pieces is not None else item_pieces(v)
+    return segs + [(c[0][0], c[0][1], c[3][0], c[3][1]) for c in cubics]
+
+
+def piece_overlap_fraction(
+    v: Vector, quad, *, geom: "QuadGeom | None" = None, rows: "list[Segment] | None" = None,
+) -> float:
     """Fraction (0..1) of `v`'s pieces that touch the convex `quad` -- "l"
     segments, "re"/"qu" edges, and each "c" as its chord p0->p3 (no curve
     sampling: a cheap gate, not a length measure). One vectorised
     Cyrus-Beck test over every piece. `nan` when `v` has no pieces; 0 for a
-    degenerate (zero-area) quad."""
-    segs, cubics = item_pieces(v)
-    rows = segs + [(c[0][0], c[0][1], c[3][0], c[3][1]) for c in cubics]
+    degenerate (zero-area) quad. `geom` (`quad_geom`) and `rows`
+    (`piece_rows(v)`) may be passed precomputed."""
+    rows = rows if rows is not None else piece_rows(v)
     if not rows:
         return math.nan
-    poly = np.asarray(quad, dtype=float).reshape(-1, 2)
-    x, y = poly[:, 0], poly[:, 1]
-    area = float(np.dot(x, np.roll(y, -1)) - np.dot(np.roll(x, -1), y))
-    if area == 0.0:
+    geom = geom or quad_geom(quad)
+    if geom.signed_area2 == 0.0:
         return 0.0
-    edges = np.roll(poly, -1, axis=0) - poly
-    normals = math.copysign(1.0, area) * np.stack([-edges[:, 1], edges[:, 0]], axis=1)
-    arr = np.asarray(rows, dtype=float)
-    p0 = arr[:, :2]
-    d = arr[:, 2:] - p0
-    num = np.einsum("sek,ek->se", p0[:, None, :] - poly[None, :, :], normals)  # >= 0 inside
-    den = d @ normals.T
-    with np.errstate(divide="ignore", invalid="ignore"):
-        t = -num / den
-    t_lo = np.maximum(np.where(den > 0.0, t, -np.inf).max(axis=1), 0.0)
-    t_hi = np.minimum(np.where(den < 0.0, t, np.inf).min(axis=1), 1.0)
-    parallel_out = ((den == 0.0) & (num < 0.0)).any(axis=1)
+    t_lo, t_hi, parallel_out = _clip_params(np.asarray(rows, dtype=float), geom)
     overlap = (t_lo <= t_hi) & ~parallel_out
     return float(overlap.mean())

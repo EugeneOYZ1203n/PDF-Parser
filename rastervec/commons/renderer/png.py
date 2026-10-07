@@ -53,6 +53,15 @@ from rastervec.commons.renderer._shapes import replay_drawing_paths
 # Pool-2 multiprocessing since each worker process gets its own.
 _render_doc: "fitz.Document | None" = None
 
+# `delete_page` only unlinks a page from the page tree: its content stream
+# and resources stay in the document as orphaned xrefs (measured: 1000
+# render+delete cycles left 3003 xrefs / 83 MB of streams behind). So the
+# shared document is closed and reopened every `_RENDER_DOC_RECYCLE`
+# renders, bounding what it can accumulate without paying `fitz.open()`
+# per render.
+_RENDER_DOC_RECYCLE = 200
+_render_doc_uses = 0
+
 # Floor (PDF points) on a cluster canvas's own width/height -- see
 # `render_vector_cluster`. Not padding: it only ever applies to an axis
 # whose extent is genuinely zero.
@@ -60,9 +69,17 @@ _MIN_CANVAS_SIDE = 1.0
 
 
 def _get_render_doc() -> "fitz.Document":
-    global _render_doc
+    """This process's shared render document, recycled every
+    `_RENDER_DOC_RECYCLE` calls. Callers add one page, render it and delete
+    it before the next call, so the document is always empty here."""
+    global _render_doc, _render_doc_uses
+    if _render_doc is not None and _render_doc_uses >= _RENDER_DOC_RECYCLE:
+        _render_doc.close()
+        _render_doc = None
     if _render_doc is None:
         _render_doc = fitz.open()
+        _render_doc_uses = 0
+    _render_doc_uses += 1
     return _render_doc
 
 

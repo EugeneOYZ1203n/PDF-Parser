@@ -94,6 +94,7 @@ def run_pipeline(
     compute=None,
     progress_counter=None,
     on_debug_layer=None,
+    on_debug_image=None,
     keep_debug_arrays: bool = True,
     stop_after: str | None = None,
 ) -> PipelineResult:
@@ -113,6 +114,14 @@ def run_pipeline(
     heavier step-local debug data (render crops, masks) for the whole run.
     Independent of `verbose`/`debug_out` -- a caller may use either, both,
     or neither.
+
+    `on_debug_image`, when given, is a `(folder_key, name, make_image) ->
+    None` callback forwarded (like `on_debug_layer`) to any `p2`/`p3` backend
+    that declares it: the backend calls it the moment each debug image's
+    source array exists (`make_image() -> PIL.Image`, called only if the
+    caller keeps that image), so a caller that samples debug images (the
+    report's capped reservoirs) never makes the backend hold every array of
+    the page in `debug_out`.
 
     `keep_debug_arrays` is forwarded to any `p2`/`p3` backend whose own
     signature declares it. `False` tells a backend given a `debug_out`
@@ -167,6 +176,8 @@ def run_pipeline(
                 p2_kwargs["debug_out"] = p2_debug
             if on_debug_layer is not None and "on_debug_layer" in p2_params:
                 p2_kwargs["on_debug_layer"] = on_debug_layer
+            if on_debug_image is not None and "on_debug_image" in p2_params:
+                p2_kwargs["on_debug_image"] = on_debug_image
             if compute is not None and "compute" in p2_params:
                 p2_kwargs["compute"] = compute
             if "keep_debug_arrays" in p2_params:
@@ -191,6 +202,8 @@ def run_pipeline(
                 p3_kwargs["debug_out"] = p3_debug
             if on_debug_layer is not None and "on_debug_layer" in sig.parameters:
                 p3_kwargs["on_debug_layer"] = on_debug_layer
+            if on_debug_image is not None and "on_debug_image" in sig.parameters:
+                p3_kwargs["on_debug_image"] = on_debug_image
             if "step_durations" in sig.parameters:
                 p3_kwargs["step_durations"] = p3_substeps
             p3_vectors, p3_texts = p3_fn(phase1.vectors, p2_vectors, phase1.page, **p3_kwargs)

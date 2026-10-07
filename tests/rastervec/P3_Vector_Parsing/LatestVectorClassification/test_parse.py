@@ -433,7 +433,8 @@ def test_quad_owns_falls_back_to_ink_fraction(vector):
 
 
 _TIMED_STEPS = {
-    "classify_separate", "classify_collinear", "classify_pattern", "classify_seqno", "classify_spatial",
+    "classify_separate", "classify_oversize", "classify_collinear", "classify_pattern", "classify_seqno",
+    "classify_spatial",
     "classify_outliers", "classify_crossings", "classify_collect",
     "ocr_render", "ocr_detect", "ocr_crop", "ocr_recognize", "ocr_assemble",
     "quad_ownership", "drawing",

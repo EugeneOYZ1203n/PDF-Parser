@@ -7,6 +7,8 @@ finalization (`_finalize_doc_dir`), and the GT-overlay writer
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 import zlib
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -111,51 +113,73 @@ def _merge_pdfs(page_bytes: list[bytes], out_path: Path) -> None:
 
 
 class _LayerWriter:
-    """Incremental per-layer multi-page PDF writer, replacing the old
-    "accumulate every page's rendered bytes for the whole document in a
-    `dict[str, list[bytes]]`, then merge everything in one pass at the
-    end" shape (`_merge_pdfs`, now used only for the smaller GT-overlay
-    outputs). Each call to `add` inserts that one page's bytes into its
-    layer's own already-open `fitz.Document` immediately and drops the
-    bytes right after -- so a layer's pages never sit duplicated in both a
-    growing Python list and a second, later re-parse pass. Combined with
-    each backend's own `on_debug_layer` streaming (see `core/registry.py`),
-    a debug layer's underlying heavy source data (render crops, masks) is
-    never held any longer than that one page/step's own rendering needs
-    it.
+    """Incremental per-layer multi-page PDF writer. Each call to `add`
+    spills that one page's bytes straight to disk
+    (`<spill_dir>/<n>/<seq>.pdf`, one sub-folder per layer) and keeps
+    nothing in memory but the file list -- an earlier version kept one open
+    `fitz.Document` per layer for the whole document, so every layer of
+    every page sat in RAM until `finalize`. `finalize` then builds each
+    layer's multi-page PDF one layer at a time (only that layer's document
+    open), in the order its pages were added, and removes the spill folder.
+    Combined with each backend's own `on_debug_layer` streaming (see
+    `core/registry.py`), a debug layer's heavy source data (render crops,
+    masks) is never held longer than that one page/step's rendering needs.
 
     A layer whose every page came out blank (no content stream at all --
     e.g. `phase2` under the `Stub` P2 backend, or a `_blank` fallback) is
-    never written and never listed in `filenames()`."""
+    never written and never listed in `filenames()`.
 
-    def __init__(self) -> None:
-        self._docs: dict[str, "fitz.Document"] = {}
+    `spill_dir` defaults to a fresh temporary folder."""
+
+    def __init__(self, spill_dir: "Path | None" = None) -> None:
+        self._spill_root = Path(spill_dir) if spill_dir is not None else Path(tempfile.mkdtemp(prefix="layers_"))
+        self._parts: dict[str, list[Path]] = {}
+        self._folder_index: dict[str, int] = {}
         self._has_content: set[str] = set()
         self.meta: dict[str, dict] = {}
 
     def add(self, fname: str, meta: dict, pdf_bytes: bytes) -> None:
-        doc = self._docs.get(fname)
-        if doc is None:
-            doc = fitz.open()
-            self._docs[fname] = doc
-        src = fitz.open("pdf", pdf_bytes)
-        try:
-            if fname not in self._has_content and _has_content(src):
-                self._has_content.add(fname)
-            doc.insert_pdf(src)
-        finally:
-            src.close()
+        parts = self._parts.get(fname)
+        if parts is None:
+            parts = self._parts[fname] = []
+        if fname not in self._has_content:
+            src = fitz.open("pdf", pdf_bytes)
+            try:
+                if _has_content(src):
+                    self._has_content.add(fname)
+            finally:
+                src.close()
+        # Layer filenames are slugged already; a numbered sub-folder keeps
+        # them out of the path anyway.
+        folder = self._spill_root / f"{self._folder_index.setdefault(fname, len(self._folder_index)):04d}"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{len(parts):05d}.pdf"
+        path.write_bytes(pdf_bytes)
+        parts.append(path)
         self.meta.setdefault(fname, meta)
 
     def filenames(self) -> list[str]:
-        return [f for f in self._docs if f in self._has_content]
+        return [f for f in self._parts if f in self._has_content]
 
     def finalize(self, doc_dir: Path) -> None:
-        for fname, doc in self._docs.items():
-            if fname in self._has_content:
-                doc.save(str(doc_dir / fname))
-            doc.close()
-        self._docs.clear()
+        try:
+            for fname, parts in self._parts.items():
+                if fname not in self._has_content:
+                    continue
+                out = fitz.open()
+                try:
+                    for part in parts:
+                        src = fitz.open(str(part))
+                        try:
+                            out.insert_pdf(src)
+                        finally:
+                            src.close()
+                    out.save(str(doc_dir / fname), garbage=3, deflate=True)
+                finally:
+                    out.close()
+        finally:
+            self._parts.clear()
+            shutil.rmtree(self._spill_root, ignore_errors=True)
 
 
 def _has_content(doc: "fitz.Document") -> bool:
@@ -315,6 +339,25 @@ def _debug_layer_sink(writer: _LayerWriter):
     def _sink(stage: str, label: str, hexc: str, pdf_bytes: bytes) -> None:
         fname = f"{stage}__{_layer_slug(label)}.pdf"
         writer.add(fname, {"stage": stage, "layer": label, "file": fname, "color": hexc}, pdf_bytes)
+
+    return _sink
+
+
+def _debug_image_sink(reservoirs: "dict[str, _ImageReservoir]", page_index: int):
+    """Builds the `on_debug_image` callback passed into `run_pipeline` (only
+    backends that declare it receive it -- LatestVectorClassification): the
+    backend calls `(folder_key, name, make_image)` the moment each debug
+    image's source array exists, and it goes straight to that folder's
+    capped reservoir -- `make_image` only runs for an image the reservoir
+    keeps -- instead of the backend holding every array of the page in its
+    `debug_out` until the run returns. `folder_key` is an `_image_dirs` key;
+    the page prefix is added here because a run on a converted one-page PDF
+    only learns its real page index from the caller (`_restamp_page`)."""
+
+    def _sink(folder_key: str, name: str, make_image) -> None:
+        reservoir = reservoirs.get(folder_key)
+        if reservoir is not None:
+            reservoir.offer(f"p{page_index}_{name}", make_image)
 
     return _sink
 

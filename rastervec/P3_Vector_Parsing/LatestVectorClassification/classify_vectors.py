@@ -1,8 +1,11 @@
 """LatestVectorClassification classification: turn raw vectors into text-candidate
 clusters + drawing content.
 
-Per `(layer, color, width)` bucket, `_classify_bucket` runs six named steps:
+Per `(layer, color, width)` bucket, `_classify_bucket` runs seven named steps:
 
+0. **Oversize** -- every Vector whose bbox area is at least
+   `MAX_VECTOR_PAGE_AREA_FRAC` of the page (a border, frame or background
+   fill) is dropped to drawing.
 1. **Collinear drawing** -- group the bucket's straight Vectors by same
    infinite line (`line_geometry.group_collinear`); a group with more than
    `COLLINEAR_DRAWING_MIN_COUNT` members whose length std is below
@@ -13,7 +16,10 @@ Per `(layer, color, width)` bucket, `_classify_bucket` runs six named steps:
    translation lattice; a lattice group with more than `PATTERN_MAX_GROUP`
    members is dropped to drawing.
 3. **Seq overlap merge** (`group_filters.combine_overlapping_seq`).
-4. **Spatial cluster** (`cluster_filters.cluster_spatial_groups`).
+4. **Spatial cluster** (`cluster_filters.cluster_spatial_groups`). Both
+   merges are capped: no group/cluster grows to a bbox of
+   `MAX_CLUSTER_PAGE_AREA_FRAC` of the page or more (bounds each cluster's
+   OCR render).
 5. **Length outliers** -- per cluster, pool the lengths of every straight
    Vector in a parallel group (>= `MIN_PARALLEL_GROUP_SIZE` same-angle
    members); drop the ones more than `LENGTH_OUTLIER_STD` std from the mean.
@@ -35,9 +41,15 @@ each detect quad's long-edge angle to the nearest one within
 `QUAD_ANGLE_SNAP_TOL_DEG`.
 
 Every step is timed through an optional `StepClock` (summed across
-buckets): `classify_separate`, `classify_collinear`, `classify_pattern`, `classify_seqno`,
-`classify_spatial`, `classify_outliers`, `classify_crossings`,
+buckets): `classify_separate`, `classify_oversize`, `classify_collinear`, `classify_pattern`,
+`classify_seqno`, `classify_spatial`, `classify_outliers`, `classify_crossings`,
 `classify_collect`.
+
+`keep_steps=False` (what `parse.py` passes when nothing will render the
+per-step debug layers) keeps only what the result needs -- every dropped
+category and the last step's `kept` -- instead of every intermediate step's
+kept groups (the oversize/collinear/pattern steps' one-list-per-Vector
+`kept` alone is ~3 small lists per Vector).
 """
 from __future__ import annotations
 
@@ -57,10 +69,13 @@ from rastervec.P3_Vector_Parsing.LatestVectorClassification.config import (
     COLLINEAR_DRAWING_MIN_COUNT,
     COLLINEAR_OFFSET_TOL_PT,
     CROSS_EPS_PT,
+    CROSS_PAIR_CHUNK,
     GLOBAL_ANGLE_MIN_GROUP_SIZE,
     GRID_ANGLE_TOL_DEG,
     GRID_DOMINANCE,
     LENGTH_OUTLIER_STD,
+    MAX_CLUSTER_PAGE_AREA_FRAC,
+    MAX_VECTOR_PAGE_AREA_FRAC,
     MIN_CROSSINGS,
     MIN_PARALLEL_GROUP_SIZE,
     SEQ_OVERLAP_TOLERANCE_PX,
@@ -82,10 +97,16 @@ from rastervec.P3_Vector_Parsing.LatestVectorClassification.line_geometry import
     split_straight,
 )
 
+OVERSIZE_CATEGORY = "oversize"  # step 0's dropped category
 PATTERN_CATEGORY = "pattern"  # step 2's dropped category (one entry per lattice group)
 CROSSED_CATEGORY = "crossed"  # step 6's dropped category (parse.py's `intersection` layer)
 FLAGGED_KEPT_CATEGORY = "crossed_off_grid"  # step 6's flagged-but-kept Vectors (role "info")
-STEP_LABELS = ("Collinear drawing", "Pattern lattice", "Seq overlap merge", "Spatial cluster", "Length outliers", "Crossings")
+STEP_LABELS = (
+    "Oversize", "Collinear drawing", "Pattern lattice", "Seq overlap merge", "Spatial cluster",
+    "Length outliers", "Crossings",
+)
+# The steps whose `kept` entries are single Vectors (no grouping yet).
+SINGLE_VECTOR_STEPS = STEP_LABELS[:3]
 
 
 @dataclass
@@ -112,6 +133,17 @@ class ClassificationResult:
     vectors_by_layer: dict | None = None
     vectors_by_layer_color: dict | None = None
     vectors_by_layer_color_width: dict | None = None
+
+
+def oversize(vectors: list[Vector], max_area: float) -> tuple[list[Vector], list[Vector]]:
+    """Step 0 for one bucket: `(kept, dropped)` -- `dropped` every Vector
+    whose bbox area is at least `max_area`, `kept` the rest, both in input
+    order."""
+    kept, dropped = [], []
+    for v in vectors:
+        x0, y0, x1, y1 = v.bbox
+        (dropped if (x1 - x0) * (y1 - y0) >= max_area else kept).append(v)
+    return kept, dropped
 
 
 def collinear_drawing(
@@ -157,7 +189,7 @@ def crossed_grid(cluster_vectors: list[Vector]) -> tuple[list[Vector], list[Vect
     """Step 6 for one cluster: `(dropped, flagged_kept)`. Flagged = "l"-only
     Vectors with at least `MIN_CROSSINGS` foreign crossings; dropped = the
     flagged Vectors on the dominant grid (see the module docstring)."""
-    counts = line_crossing_counts(cluster_vectors, eps=CROSS_EPS_PT)
+    counts = line_crossing_counts(cluster_vectors, eps=CROSS_EPS_PT, chunk=CROSS_PAIR_CHUNK)
     flagged = [v for v, n in zip(cluster_vectors, counts) if n is not None and n >= MIN_CROSSINGS]
     if not flagged:
         return [], []
@@ -189,40 +221,64 @@ def _remove_from_clusters(
 
 
 def _classify_bucket(
-    vectors: list[Vector], clock: "StepClock | None" = None,
+    vectors: list[Vector], clock: "StepClock | None" = None, *,
+    page_area: float | None = None, keep_steps: bool = True,
 ) -> tuple[list[StepResult], list[float]]:
-    """The six-step chain for one bucket (see module docstring), plus the
+    """The seven-step chain for one bucket (see module docstring), plus the
     bucket's collinear-group angles; each step is timed on `clock` (a
-    private one when `None`)."""
+    private one when `None`). `page_area` (pt^2) sets the oversize and
+    cluster-area caps; `None` disables both. `keep_steps=False` stores every
+    intermediate step's `kept` as `[]` (see the module docstring)."""
     clock = clock or StepClock()
     steps: list[StepResult] = []
+    vector_cap = MAX_VECTOR_PAGE_AREA_FRAC * page_area if page_area else None
+    cluster_cap = MAX_CLUSTER_PAGE_AREA_FRAC * page_area if page_area else None
+
+    def _kept_singles(kept: list[Vector]) -> list:
+        return [[v] for v in kept] if keep_steps else []
+
+    with clock("classify_oversize"):
+        if vector_cap is None:
+            kept, too_big = list(vectors), []
+        else:
+            kept, too_big = oversize(vectors, vector_cap)
+        steps.append(StepResult(STEP_LABELS[0], {
+            "kept": CategoryResult(_kept_singles(kept), "kept"),
+            OVERSIZE_CATEGORY: CategoryResult([[v] for v in too_big], "dropped"),
+        }))
 
     with clock("classify_collinear"):
-        kept, drawing_groups, angles = collinear_drawing(vectors)
-        steps.append(StepResult(STEP_LABELS[0], {
-            "kept": CategoryResult([[v] for v in kept], "kept"),
+        kept, drawing_groups, angles = collinear_drawing(kept)
+        steps.append(StepResult(STEP_LABELS[1], {
+            "kept": CategoryResult(_kept_singles(kept), "kept"),
             "drawing": CategoryResult(drawing_groups, "dropped"),
         }))
 
     with clock("classify_pattern"):
         kept, pattern_groups = pattern_drawing(kept)
-        steps.append(StepResult(STEP_LABELS[1], {
-            "kept": CategoryResult([[v] for v in kept], "kept"),
+        steps.append(StepResult(STEP_LABELS[2], {
+            "kept": CategoryResult(_kept_singles(kept), "kept"),
             PATTERN_CATEGORY: CategoryResult(pattern_groups, "dropped"),
         }))
 
     with clock("classify_seqno"):
-        groups, _ = grf.combine_overlapping_seq([[v] for v in kept], SEQ_OVERLAP_TOLERANCE_PX)
-        steps.append(StepResult(STEP_LABELS[2], {"kept": CategoryResult(groups, "kept")}))
+        groups, _ = grf.combine_overlapping_seq([[v] for v in kept], SEQ_OVERLAP_TOLERANCE_PX, cluster_cap)
+        steps.append(StepResult(STEP_LABELS[3], {
+            "kept": CategoryResult(groups if keep_steps else [], "kept"),
+        }))
 
     with clock("classify_spatial"):
-        clusters = clf.cluster_spatial_groups(groups, SPATIAL_CLUSTER_THRESHOLD, SPATIAL_SIZE_TOLERANCE)
-        steps.append(StepResult(STEP_LABELS[3], {"kept": CategoryResult(clusters, "kept")}))
+        clusters = clf.cluster_spatial_groups(
+            groups, SPATIAL_CLUSTER_THRESHOLD, SPATIAL_SIZE_TOLERANCE, cluster_cap,
+        )
+        steps.append(StepResult(STEP_LABELS[4], {
+            "kept": CategoryResult(clusters if keep_steps else [], "kept"),
+        }))
 
     with clock("classify_outliers"):
         clusters, outliers = _remove_from_clusters(clusters, length_outliers)
-        steps.append(StepResult(STEP_LABELS[4], {
-            "kept": CategoryResult(clusters, "kept"),
+        steps.append(StepResult(STEP_LABELS[5], {
+            "kept": CategoryResult(clusters if keep_steps else [], "kept"),
             "outliers": CategoryResult(outliers, "dropped"),
         }))
 
@@ -236,7 +292,7 @@ def _classify_bucket(
 
     with clock("classify_crossings"):
         clusters, crossed = _remove_from_clusters(clusters, _crossed)
-        steps.append(StepResult(STEP_LABELS[5], {
+        steps.append(StepResult(STEP_LABELS[6], {
             "kept": CategoryResult(clusters, "kept"),
             CROSSED_CATEGORY: CategoryResult(crossed, "dropped"),
             FLAGGED_KEPT_CATEGORY: CategoryResult(flagged_kept, "info"),
@@ -270,12 +326,17 @@ def _collect_dropped(clustering: dict) -> list[Vector]:
 
 def classify_vectors(
     vectors: list[Vector], page: Page, *, verbose: bool = False,
-    clock: "StepClock | None" = None,
+    clock: "StepClock | None" = None, keep_steps: bool = True,
 ) -> ClassificationResult:
     """Separate by (layer, color, width), run `_classify_bucket` per bucket,
     gather every bucket's final clusters, every dropped Vector (drawing)
-    and the page's deduped global potential angles. Steps are timed on `clock` (see the module docstring)."""
+    and the page's deduped global potential angles. Steps are timed on `clock` (see the module docstring).
+    The page area for the oversize/cluster caps comes from `page.meta`.
+    `keep_steps=False` drops intermediate step results and the
+    `vectors_by_layer*` dicts (see the module docstring)."""
     clock = clock or StepClock()
+    meta = getattr(page, "meta", None)
+    page_area = (meta.width * meta.height) if meta is not None and meta.width and meta.height else None
     with clock("classify_separate"):
         vectors_by_layer = separate_by_layer(vectors)
         vectors_by_layer_color = {
@@ -289,7 +350,7 @@ def classify_vectors(
     clustering: dict = {}
     all_angles: list[float] = []
     for key, bucket in _iter_buckets(vectors_by_layer_color_width):
-        steps, angles = _classify_bucket(bucket, clock)
+        steps, angles = _classify_bucket(bucket, clock, page_area=page_area, keep_steps=keep_steps)
         clustering[key] = ClusteringStageResult(steps=steps)
         all_angles.extend(angles)
 
@@ -305,7 +366,7 @@ def classify_vectors(
         drawing_vectors=drawing_vectors,
         clustering=clustering,
         global_angles=global_angles,
-        vectors_by_layer=vectors_by_layer if verbose else None,
-        vectors_by_layer_color=vectors_by_layer_color if verbose else None,
-        vectors_by_layer_color_width=vectors_by_layer_color_width if verbose else None,
+        vectors_by_layer=vectors_by_layer if verbose and keep_steps else None,
+        vectors_by_layer_color=vectors_by_layer_color if verbose and keep_steps else None,
+        vectors_by_layer_color_width=vectors_by_layer_color_width if verbose and keep_steps else None,
     )

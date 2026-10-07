@@ -14,6 +14,17 @@ SEQ_OVERLAP_TOLERANCE_PX = 1.0
 SPATIAL_CLUSTER_THRESHOLD = 10.0
 SPATIAL_SIZE_TOLERANCE = 0.30
 
+# Page-area caps, as fractions of the page's (unrotated CropBox) area. The
+# "Oversize" step drops any Vector whose bbox area is at least
+# MAX_VECTOR_PAGE_AREA_FRAC of the page to drawing (a border, title-block
+# frame or background fill is never text). During clustering, neither the
+# seqno merge nor the spatial merge ever grows a group/cluster to a bbox of
+# MAX_CLUSTER_PAGE_AREA_FRAC of the page or more -- this bounds each
+# cluster's OCR render (on A0 at 300 dpi, 30 % is ~42 MP / ~125 MB as BGR;
+# a whole-page cluster was ~416 MB).
+MAX_VECTOR_PAGE_AREA_FRAC = 0.30
+MAX_CLUSTER_PAGE_AREA_FRAC = 0.30
+
 # ======================================================================
 # Line geometry (line_geometry.py) -- straight Vectors, collinear/parallel
 # grouping, proper crossings.
@@ -78,6 +89,10 @@ GRID_DOMINANCE = 0.5
 # Proper-crossing epsilon (pt): an endpoint (or curve side) within this of
 # the other line is touching, not crossing.
 CROSS_EPS_PT = 0.01
+# Memory bound for the crossing test (line_geometry.line_crossing_counts):
+# at most this many (own segment, foreign segment) pairs are broadcast at
+# once, ~30 MB of float64 temporaries.
+CROSS_PAIR_CHUNK = 250_000
 
 # ======================================================================
 # OCR (paddle_engine.py, parse.py)
@@ -115,6 +130,14 @@ RENDER_PADDING_EXTRA_PT = 15.0
 # white border.
 CROP_EXPAND_FRACTION = 0.05
 CROP_BORDER_PX = 5
+
+# Max long:short side ratio of a detect quad sent to recognition as one
+# crop (parse.py). PaddleOCR's recogniser pads a whole batch to its widest
+# aspect ratio, so one very long crop inflates every crop in its batch; a
+# longer quad is split along its long side into ceil(aspect / this) pieces,
+# cut in the gaps between the cluster's vectors where possible (a hard cut
+# otherwise). Each piece is recognised as its own Text.
+MAX_CROP_ASPECT = 25.0
 
 # Recognition retry (parse.py): pass 1 runs PaddleOCR's 0/180 angle
 # classifier then recognises. A crop whose pass-1 score is below

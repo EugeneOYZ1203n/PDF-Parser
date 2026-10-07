@@ -7,16 +7,18 @@ line, minAreaRect or vector-direction estimate:
 1. `PaddleDetectBackend.detect` runs on the *unrotated* cluster render and
    returns PaddleOCR's own (rotated, minAreaRect-shaped) quads.
 2. `quad_long_edge_angle` takes the direction of the quad's longer edge;
-   `upright_crop` cuts a padded region around the quad, **rotates** it by
-   that angle about the quad's centre (`cv2.warpAffine`, a pure rotation --
-   never a re-boxed axis-aligned bbox and never a perspective warp) and
-   crops the now-axis-aligned quad out of it.
+   `upright_crop` **rotates** the image by that angle about the quad's
+   centre (`cv2.warpAffine`, a pure rotation -- never a re-boxed
+   axis-aligned bbox and never a perspective warp), warping straight into
+   the now-axis-aligned quad's own crop size.
 3. `PaddleRecBackend.recognize_crops` runs PaddleOCR's own angle
    classifier (0/180 flip) then recognises; `recognize_crops_raw` (no
-   classifier) is `parse.py`'s +90/180/270 low-score retry.
+   classifier) is `parse.py`'s +90/180/270 low-score retry. Both take BGR
+   crops.
 
-Engines are cached at class scope by `(ocr_version, lang)`. Own duplicated
-copy, per the "sibling P3 backends share zero code" rule. Imports `cv2`.
+One `PaddleOCR` engine per `(ocr_version, lang)` per process, shared by
+both backends (`_shared_engine`). Own duplicated copy, per the "sibling P3
+backends share zero code" rule. Imports `cv2`.
 """
 from __future__ import annotations
 
@@ -71,12 +73,43 @@ def _rows_to_boxes(rows, flips) -> list[OcrBox]:
     return out
 
 
-class PaddleRecBackend:
-    """paddleocr 2.x angle classification + recognition. One engine per
-    `(ocr_version, lang)`, cached at class scope -- every instance shares
-    it."""
+_ENGINES: dict[tuple[str, str], object] = {}
 
-    _ENGINE_CACHE: dict[tuple[str, str], object] = {}
+
+def _shared_engine(ocr_version: str, lang: str):
+    """The one `PaddleOCR` instance per `(ocr_version, lang)` in this process,
+    shared by `PaddleDetectBackend` and `PaddleRecBackend` -- each `PaddleOCR`
+    loads det + cls + rec, so a separate instance per backend held every
+    model twice. The merged settings are the union of what each backend
+    needed (`det_limit_side_len` only affects `text_detector`; the batch
+    sizes only `text_classifier`/`text_recognizer`), so outputs are
+    unchanged. Every Pool-1/Pool-2 worker is its own process with its own
+    cache, and within a process detect/recognise run sequentially on one
+    thread, so sharing is safe."""
+    key = (ocr_version, lang)
+    if key not in _ENGINES:
+        # torch must load before paddle on Windows: paddleocr 2.x pulls
+        # paddle (and, via albumentations, torch) at import, and a
+        # paddle-first process then fails torch's DLL load (shm.dll,
+        # WinError 127 -- clashing OpenMP runtimes).
+        import torch  # noqa: F401
+        from paddleocr import PaddleOCR
+
+        _ENGINES[key] = PaddleOCR(
+            ocr_version=ocr_version,
+            lang=lang,
+            use_angle_cls=True,  # PaddleOCR's own classifier resolves the 0/180 flip
+            show_log=False,
+            det_limit_side_len=_DETECT_LIMIT_SIDE_LEN,
+            rec_batch_num=OCR_BATCH_SIZE,
+            cls_batch_num=OCR_BATCH_SIZE,
+        )
+    return _ENGINES[key]
+
+
+class PaddleRecBackend:
+    """paddleocr 2.x angle classification + recognition, on the process's
+    shared engine (`_shared_engine`)."""
 
     def __init__(self, ocr_version: str = OCR_VERSION, lang: str = OCR_LANG) -> None:
         self.key = (ocr_version, lang)
@@ -88,35 +121,19 @@ class PaddleRecBackend:
         cls(ocr_version, lang)._engine()
 
     def _engine(self):
-        if self.key not in PaddleRecBackend._ENGINE_CACHE:
-            # torch must load before paddle on Windows: paddleocr 2.x pulls
-            # paddle (and, via albumentations, torch) at import, and a
-            # paddle-first process then fails torch's DLL load (shm.dll,
-            # WinError 127 -- clashing OpenMP runtimes).
-            import torch  # noqa: F401
-            from paddleocr import PaddleOCR
-
-            ocr_version, lang = self.key
-            PaddleRecBackend._ENGINE_CACHE[self.key] = PaddleOCR(
-                ocr_version=ocr_version,
-                lang=lang,
-                use_angle_cls=True,  # PaddleOCR's own classifier resolves the 0/180 flip
-                show_log=False,
-                rec_batch_num=OCR_BATCH_SIZE,
-                cls_batch_num=OCR_BATCH_SIZE,
-            )
-        return PaddleRecBackend._ENGINE_CACHE[self.key]
+        return _shared_engine(*self.key)
 
     def recognize_crops(self, crops: list[np.ndarray]) -> list[OcrBox]:
-        """One `OcrBox` per crop, in input order: PaddleOCR's angle
+        """One `OcrBox` per BGR crop, in input order: PaddleOCR's angle
         classifier labels each (already upright-rotated) crop 0 or 180, the
         180 ones are flipped, then the whole batch is recognised in one
         `text_recognizer` call. `flip_deg` records the flip."""
         if not crops:
             return []
-        bgr = [_normalize_bgr(c) for c in crops]
+        bgr = [_as_bgr(c) for c in crops]
         engine = self._engine()
-        _, cls_results, _ = engine.text_classifier([img.copy() for img in bgr])
+        # TextClassifier deep-copies its input itself (predict_cls.py).
+        _, cls_results, _ = engine.text_classifier(bgr)
         flips = [180 if str(label) == "180" else 0 for label, _score in cls_results]
         upright = [np.ascontiguousarray(np.rot90(img, 2)) if flip else img for img, flip in zip(bgr, flips)]
         rec = engine.text_recognizer(upright)
@@ -124,12 +141,12 @@ class PaddleRecBackend:
         return _rows_to_boxes(rows, flips)
 
     def recognize_crops_raw(self, crops: list[np.ndarray]) -> list[OcrBox]:
-        """Recognise `crops` as-is, no `text_classifier` call -- `parse.py`'s
-        retry sweep, which has already rotated each crop to the quarter-turn
-        it wants tried. `flip_deg` is always 0."""
+        """Recognise BGR `crops` as-is, no `text_classifier` call --
+        `parse.py`'s retry sweep, which has already rotated each crop to the
+        quarter-turn it wants tried. `flip_deg` is always 0."""
         if not crops:
             return []
-        bgr = [_normalize_bgr(c) for c in crops]
+        bgr = [_as_bgr(c) for c in crops]
         rec = self._engine().text_recognizer(bgr)
         rows = rec[0] if isinstance(rec, tuple) else rec
         return _rows_to_boxes(rows, [0] * len(bgr))
@@ -137,11 +154,9 @@ class PaddleRecBackend:
 
 class PaddleDetectBackend:
     """PaddleOCR's own text-DETECTION model (`engine.text_detector`, PP-OCR's
-    DB detector), run against an already-rendered cluster image. Cached
-    separately from `PaddleRecBackend`, built with a generous
-    `det_limit_side_len`."""
-
-    _ENGINE_CACHE: dict[tuple[str, str], object] = {}
+    DB detector), run against an already-rendered cluster image, on the
+    process's shared engine (`_shared_engine`, built with a generous
+    `det_limit_side_len`)."""
 
     def __init__(self, ocr_version: str = OCR_VERSION, lang: str = OCR_LANG) -> None:
         self.key = (ocr_version, lang)
@@ -151,16 +166,7 @@ class PaddleDetectBackend:
         cls(ocr_version, lang)._engine()
 
     def _engine(self):
-        if self.key not in PaddleDetectBackend._ENGINE_CACHE:
-            import torch  # noqa: F401 -- must import before paddle on Windows
-            from paddleocr import PaddleOCR
-
-            ocr_version, lang = self.key
-            PaddleDetectBackend._ENGINE_CACHE[self.key] = PaddleOCR(
-                ocr_version=ocr_version, lang=lang, use_angle_cls=True, show_log=False,
-                det_limit_side_len=_DETECT_LIMIT_SIDE_LEN,
-            )
-        return PaddleDetectBackend._ENGINE_CACHE[self.key]
+        return _shared_engine(*self.key)
 
     def detect(self, bgr: np.ndarray) -> list[np.ndarray]:
         """Every text quad PaddleOCR's detector finds in `bgr`, each a
@@ -233,11 +239,9 @@ def quad_region(
     """`(region, centre)`: the square, axis-aligned region of `bgr` centred
     on the quad's centre, big enough to hold the whole (expanded) quad at
     any rotation, white wherever it falls outside `bgr` -- `upright_crop`'s
-    rotation input -- plus the quad's centre in `region`'s pixel space."""
-    q = np.asarray(quad, dtype=np.float64).reshape(4, 2)
-    centre = q.mean(axis=0)
-    half = int(math.ceil(max(np.hypot(*(q - centre).T)) * (1.0 + expand))) + border + 2
-    cx, cy = int(round(centre[0])), int(round(centre[1]))
+    rotation frame (`upright_crop` itself no longer allocates it; kept for
+    debug images) -- plus the quad's centre in `region`'s pixel space."""
+    half, cx, cy, rc = _region_geometry(quad, expand, border)
     h, w = bgr.shape[:2]
     region = np.full((2 * half + 1, 2 * half + 1, 3), 255, dtype=np.uint8)
     x0, y0 = cx - half, cy - half
@@ -245,40 +249,86 @@ def quad_region(
     sx1, sy1 = min(w, cx + half + 1), min(h, cy + half + 1)
     if sx1 > sx0 and sy1 > sy0:
         region[sy0 - y0:sy1 - y0, sx0 - x0:sx1 - x0] = np.asarray(bgr[sy0:sy1, sx0:sx1], dtype=np.uint8)[:, :, :3]
-    return region, (half + (centre[0] - cx), half + (centre[1] - cy))
+    return region, rc
+
+
+def _region_geometry(
+    quad, expand: float, border: int,
+) -> "tuple[int, int, int, tuple[float, float]]":
+    """`quad_region`'s geometry without allocating the region:
+    `(half, cx, cy, rc)` -- the region spans `[cx - half, cx + half]` x
+    `[cy - half, cy + half]` of the source image (side `2 * half + 1`) and
+    `rc` is the quad's centre in region pixel space."""
+    q = np.asarray(quad, dtype=np.float64).reshape(4, 2)
+    centre = q.mean(axis=0)
+    half = int(math.ceil(max(np.hypot(*(q - centre).T)) * (1.0 + expand))) + border + 2
+    cx, cy = int(round(centre[0])), int(round(centre[1]))
+    return half, cx, cy, (half + (centre[0] - cx), half + (centre[1] - cy))
 
 
 def upright_crop(
     bgr: np.ndarray, quad, angle_deg: float,
     *, expand: float = CROP_EXPAND_FRACTION, border: int = CROP_BORDER_PX,
+    size: "tuple[float, float] | None" = None,
 ) -> np.ndarray:
-    """The quad's text, rotated upright: `quad_region` is rotated by
-    `angle_deg` about the quad's centre -- visually counter-clockwise, so a
-    quad whose long edge runs at `angle_deg` (y-down) comes out horizontal
-    -- and the quad's own `long x short` rectangle (expanded by `expand`)
-    is cropped from its centre, plus a flat `border` px white border."""
-    long_side, short_side = quad_size(quad)
-    region, rc = quad_region(bgr, quad, expand=expand, border=border)
-    if angle_deg % 360.0 != 0.0:
-        m = cv2.getRotationMatrix2D(rc, angle_deg, 1.0)
-        region = cv2.warpAffine(
-            region, m, (region.shape[1], region.shape[0]),
-            flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255),
-        )
+    """The quad's text, rotated upright: the image is rotated by `angle_deg`
+    about the quad's centre -- visually counter-clockwise, so a quad whose
+    long edge runs at `angle_deg` (y-down) comes out horizontal -- and the
+    quad's own `long x short` rectangle (expanded by `expand`) is cropped
+    from its centre, plus a flat `border` px white border.
+
+    Pixel-for-pixel what rotating `quad_region`'s square region and cropping
+    it would give (same window arithmetic, same sampling positions, white
+    outside the image), but done as one `cv2.warpAffine` straight from `bgr`
+    into the crop's own size -- the square region (side ~2x the quad's
+    diagonal) is never allocated, so a long text line no longer costs two
+    diagonal^2 buffers.
+
+    `size` = `(along, across)` overrides `quad_size`'s `(long, short)` -- for
+    a piece of a split quad, which can be shorter along the reading axis
+    than across it."""
+    long_side, short_side = size if size is not None else quad_size(quad)
+    half, cx, cy, rc = _region_geometry(quad, expand, border)
+    side = 2 * half + 1
     cw = long_side * (1.0 + expand)
     ch = short_side * (1.0 + expand)
     rx0 = max(0, int(math.floor(rc[0] - cw / 2.0)))
     ry0 = max(0, int(math.floor(rc[1] - ch / 2.0)))
-    rx1 = min(region.shape[1], int(math.ceil(rc[0] + cw / 2.0)))
-    ry1 = min(region.shape[0], int(math.ceil(rc[1] + ch / 2.0)))
+    rx1 = min(side, int(math.ceil(rc[0] + cw / 2.0)))
+    ry1 = min(side, int(math.ceil(rc[1] + ch / 2.0)))
     if rx1 <= rx0 or ry1 <= ry0:
         cropped = np.full((1, 1, 3), 255, dtype=np.uint8)
     else:
-        cropped = region[ry0:ry1, rx0:rx1]
+        # Region pixel (x, y) is source pixel (x + ox, y + oy); the crop
+        # window's (0, 0) is region pixel (rx0, ry0).
+        ox, oy = cx - half, cy - half
+        src = np.asarray(bgr, dtype=np.uint8)[:, :, :3]
+        if angle_deg % 360.0 != 0.0:
+            m = cv2.getRotationMatrix2D(rc, angle_deg, 1.0)
+            # Region-space rotation, conjugated into source -> crop space:
+            # crop = M (src - o) - (rx0, ry0).
+            m[:, 2] -= m[:, :2] @ np.array([ox, oy], dtype=np.float64) + np.array([rx0, ry0], dtype=np.float64)
+            cropped = cv2.warpAffine(
+                np.ascontiguousarray(src), m, (rx1 - rx0, ry1 - ry0),
+                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255),
+            )
+        else:
+            cropped = _white_window(src, ox + rx0, oy + ry0, rx1 - rx0, ry1 - ry0)
     return np.pad(
         cropped, ((border, border), (border, border), (0, 0)),
         mode="constant", constant_values=255,
     )
+
+
+def _white_window(src: np.ndarray, x0: int, y0: int, w: int, h: int) -> np.ndarray:
+    """The `w x h` window of `src` at `(x0, y0)`, white wherever it falls
+    outside `src`."""
+    out = np.full((h, w, 3), 255, dtype=np.uint8)
+    H, W = src.shape[:2]
+    sx0, sy0, sx1, sy1 = max(0, x0), max(0, y0), min(W, x0 + w), min(H, y0 + h)
+    if sx1 > sx0 and sy1 > sy0:
+        out[sy0 - y0:sy1 - y0, sx0 - x0:sx1 - x0] = src[sy0:sy1, sx0:sx1]
+    return out
 
 
 def reorder_quad_reading(quad, angle_deg: float) -> tuple:
@@ -296,9 +346,19 @@ def reorder_quad_reading(quad, angle_deg: float) -> tuple:
     return tuple((float(q[i][0]), float(q[i][1])) for i in order)
 
 
+def _as_bgr(crop: np.ndarray) -> np.ndarray:
+    """An already-BGR crop -> a contiguous 3-channel uint8 array, copying
+    only when it isn't one already (grayscale, extra channels, a strided
+    view)."""
+    arr = np.asarray(crop, dtype=np.uint8)
+    if arr.ndim == 2:
+        return np.ascontiguousarray(np.repeat(arr[:, :, None], 3, axis=2))
+    return np.ascontiguousarray(arr[:, :, :3])
+
+
 def _normalize_bgr(crop: np.ndarray) -> np.ndarray:
-    """A crop -> a 3-channel BGR array (paddleocr 2.x's
-    TextClassifier/TextRecognizer/TextDetector are cv2/BGR)."""
+    """An RGB image (e.g. a PIL render) -> a 3-channel BGR array (paddleocr
+    2.x's TextClassifier/TextRecognizer/TextDetector are cv2/BGR)."""
     arr = np.asarray(crop, dtype=np.uint8)
     if arr.ndim == 2:  # grayscale -- gray RGB and gray BGR are identical
         return np.ascontiguousarray(np.repeat(arr[:, :, None], 3, axis=2))

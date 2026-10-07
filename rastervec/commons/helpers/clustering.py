@@ -53,6 +53,7 @@ def cluster_spatial(
     *,
     threshold: float,
     extra_close: Callable[[Any, Any], bool] | None = None,
+    max_union_area: float | None = None,
 ) -> list[list]:
     """Connected-components clustering by bbox gap: items whose boxes are
     within `threshold` of some other item in the same cluster end up
@@ -60,13 +61,18 @@ def cluster_spatial(
     to linear time on large item counts. `extra_close`, if given, is an
     additional required condition (e.g. "similar max side length") checked
     on top of the bbox-gap rule -- two items only union when both the gap
-    and `extra_close` pass."""
+    and `extra_close` pass. `max_union_area`, if given, caps cluster size:
+    two clusters never merge when the bbox of their union would have an
+    area of at least `max_union_area` (each cluster's running bbox is
+    tracked at its union-find root), so the result depends on pair order
+    only where that cap bites."""
     if not items:
         return []
 
     cell = max(threshold, 1e-6)
     bboxes = [tuple(get_bbox(item)) for item in items]
     uf = _UnionFind(len(items))
+    root_bbox = list(bboxes) if max_union_area is not None else None
     grid: dict[tuple[int, int], list[int]] = defaultdict(list)
     cell_spans: list[tuple[int, int, int, int]] = []
 
@@ -74,6 +80,15 @@ def cluster_spatial(
         cx0, cy0 = int(x0 // cell), int(y0 // cell)
         cx1, cy1 = int(x1 // cell), int(y1 // cell)
         span = (cx1 - cx0 + 1) * (cy1 - cy0 + 1)
+        # NOTE (known limitation, not fixed): an item spanning more than
+        # `_MAX_CELLS_PER_ITEM` cells (~447 x 447 pt at a 10 pt threshold) is
+        # registered in its centre cell only, and neighbour search scans
+        # just the 3x3 cells around each item's registered span -- so a small
+        # item sitting next to a big item's *edge* (gap under `threshold`)
+        # is never compared with it from either side, and the two never
+        # merge. Breaks single-linkage for large items. Possible fixes: keep
+        # oversized items in a separate list checked against every item, or
+        # size `cell` from the largest item instead of `threshold`.
         if span > _MAX_CELLS_PER_ITEM:
             cx = int(((x0 + x1) / 2.0) // cell)
             cy = int(((y0 + y1) / 2.0) // cell)
@@ -94,7 +109,18 @@ def cluster_spatial(
                 continue
             if rect_gap(bboxes[index], bboxes[other]) <= threshold:
                 if extra_close is None or extra_close(items[index], items[other]):
-                    uf.union(index, other)
+                    if root_bbox is None:
+                        uf.union(index, other)
+                        continue
+                    ra, rb = uf.find(index), uf.find(other)
+                    if ra == rb:
+                        continue
+                    a, b = root_bbox[ra], root_bbox[rb]
+                    merged = (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+                    if (merged[2] - merged[0]) * (merged[3] - merged[1]) >= max_union_area:
+                        continue
+                    uf.union(ra, rb)
+                    root_bbox[uf.find(rb)] = merged
 
     clusters = _group_by_root(items, uf)
     _LOG.debug(
