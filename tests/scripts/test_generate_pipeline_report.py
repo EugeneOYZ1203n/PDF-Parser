@@ -287,10 +287,11 @@ def test_layer_writer_skips_all_blank_layers(tmp_path):
     blank = render_boxes_pdf(pm, [])
     drawn = render_boxes_pdf(pm, [((10, 10, 20, 20), (1, 0, 0))])
     writer = gpr._LayerWriter()
-    for page_bytes in (blank, blank):
-        writer.add("empty.pdf", {"file": "empty.pdf"}, page_bytes)
-    for page_bytes in (blank, drawn):  # blank on page 0 only -> still written
-        writer.add("some.pdf", {"file": "some.pdf"}, page_bytes)
+    for pos in range(2):
+        writer.begin_page(pos, 100, 100)
+        writer.add("empty.pdf", {"file": "empty.pdf"}, blank)
+        # blank on page 0 only -> still written
+        writer.add("some.pdf", {"file": "some.pdf"}, (blank, drawn)[pos])
     assert writer.filenames() == ["some.pdf"]
     writer.finalize(tmp_path)
     assert not (tmp_path / "empty.pdf").exists()
@@ -483,7 +484,8 @@ def test_layer_writer_spills_to_disk_and_cleans_up(tmp_path):
     out_dir.mkdir()
     writer = gpr._LayerWriter(spill)
     xs = (10, 30, 50)
-    for x in xs:  # one page per x, each box at a different place
+    for pos, x in enumerate(xs):  # one page per x, each box at a different place
+        writer.begin_page(pos, 100, 100)
         writer.add("boxes.pdf", {"file": "boxes.pdf"}, render_boxes_pdf(pm, [((x, 10, x + 5, 20), (1, 0, 0))]))
     assert spill.is_dir()
     assert not (out_dir / "boxes.pdf").exists()  # nothing merged before finalize
@@ -494,6 +496,58 @@ def test_layer_writer_spills_to_disk_and_cleans_up(tmp_path):
         # Pages stay in insertion order.
         lefts = [min(d["rect"].x0 for d in page.get_drawings()) for page in doc]
         assert lefts == pytest.approx([x for x in xs], abs=1.0)
+
+
+def test_layer_writer_keeps_sparse_and_repeated_layers_page_aligned(tmp_path):
+    """A layer emitted on only some report pages gets blank pages elsewhere,
+    and one emitted several times on a page is overlaid onto that one page --
+    every layer PDF has exactly one page per report page."""
+    from rastervec.commons.models import PageMeta
+    from rastervec.commons.renderer import render_boxes_pdf
+
+    pm = PageMeta(index=0, number=1, mediabox=(0, 0, 100, 100), rotation=90, width=100, height=100)
+
+    def box(x):
+        return render_boxes_pdf(pm, [((x, 10, x + 5, 20), (1, 0, 0))])
+
+    writer = gpr._LayerWriter(tmp_path / "spill")
+    for pos in range(3):
+        writer.begin_page(pos, 100, 100, 90)
+        writer.add("dense.pdf", {"file": "dense.pdf"}, box(10))
+        if pos == 1:
+            writer.add("sparse.pdf", {"file": "sparse.pdf"}, box(30))
+            writer.add("sparse.pdf", {"file": "sparse.pdf"}, box(60))
+    writer.finalize(tmp_path)
+
+    with fitz.open(str(tmp_path / "dense.pdf")) as doc:
+        assert doc.page_count == 3
+    with fitz.open(str(tmp_path / "sparse.pdf")) as doc:
+        assert doc.page_count == 3
+        assert [page.rotation for page in doc] == [90, 90, 90]
+        assert [len(page.get_drawings()) for page in doc] == [0, 2, 0]
+        lefts = sorted(d["rect"].x0 for d in doc[1].get_drawings())
+        assert lefts == pytest.approx([30, 60], abs=1.0)
+
+
+def test_debug_layer_sink_merges_per_page_count_labels_into_one_layer():
+    """`"snapped angle (25)"` on one page and `"(31)"` on the next are the
+    same layer -- one file, not one single-page file per page."""
+    import rastervec.Evaluation.Report.report_artifacts as ra
+
+    writer = gpr._LayerWriter()
+    added: list[tuple[str, dict]] = []
+    writer.add = lambda fname, meta, pdf_bytes: added.append((fname, meta))
+    sink = ra._debug_layer_sink(writer)
+    sink("rotation", "snapped angle (25)", "#000000", b"")
+    sink("rotation", "snapped angle (31)", "#000000", b"")
+    sink("classify", "dropped pattern (38 groups)", "#000000", b"")
+    sink("intersection", "flagged, kept (off-grid) (4)", "#000000", b"")
+    assert [f for f, _m in added] == [
+        "rotation__snapped_angle.pdf", "rotation__snapped_angle.pdf",
+        "classify__dropped_pattern.pdf",
+        f"intersection__{gpr._layer_slug('flagged, kept (off-grid)')}.pdf",
+    ]
+    assert added[0][1]["layer"] == "snapped angle"
 
 
 def test_debug_image_sink_prefixes_the_page_and_respects_the_reservoir(tmp_path):

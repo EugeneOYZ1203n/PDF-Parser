@@ -7,6 +7,7 @@ finalization (`_finalize_doc_dir`), and the GT-overlay writer
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import tempfile
 import zlib
@@ -129,19 +130,35 @@ class _LayerWriter:
     e.g. `phase2` under the `Stub` P2 backend, or a `_blank` fallback) is
     never written and never listed in `filenames()`.
 
+    Page-aligned: `begin_page(pos, ...)` (called before each report page's
+    run, since backends stream layers mid-run) tags every later `add` with
+    that report page, and `finalize` writes exactly one page per
+    `begin_page` -- a page where the layer never appeared is a blank page
+    (backends only emit a layer when it has something to show), and a layer
+    added several times on one page (one call per chunk/image) is overlaid
+    onto that one page. Without this a sparse or repeated layer shifted
+    every later page, so the viewer showed it on the wrong page.
+
     `spill_dir` defaults to a fresh temporary folder."""
 
     def __init__(self, spill_dir: "Path | None" = None) -> None:
         self._spill_root = Path(spill_dir) if spill_dir is not None else Path(tempfile.mkdtemp(prefix="layers_"))
-        self._parts: dict[str, list[Path]] = {}
+        self._parts: dict[str, dict[int, list[Path]]] = {}
         self._folder_index: dict[str, int] = {}
         self._has_content: set[str] = set()
+        self._geometry: dict[int, tuple[float, float, int]] = {}
+        self._pos = 0
         self.meta: dict[str, dict] = {}
 
+    def begin_page(self, pos: int, width: float, height: float, rotation: int = 0) -> None:
+        """Start report page `pos` (0-based position in the report's page
+        list); `width`/`height` (unrotated) + `rotation` size its blank page
+        in any layer that skips it."""
+        self._pos = pos
+        self._geometry[pos] = (width, height, rotation)
+
     def add(self, fname: str, meta: dict, pdf_bytes: bytes) -> None:
-        parts = self._parts.get(fname)
-        if parts is None:
-            parts = self._parts[fname] = []
+        parts = self._parts.setdefault(fname, {}).setdefault(self._pos, [])
         if fname not in self._has_content:
             src = fitz.open("pdf", pdf_bytes)
             try:
@@ -153,7 +170,7 @@ class _LayerWriter:
         # them out of the path anyway.
         folder = self._spill_root / f"{self._folder_index.setdefault(fname, len(self._folder_index)):04d}"
         folder.mkdir(parents=True, exist_ok=True)
-        path = folder / f"{len(parts):05d}.pdf"
+        path = folder / f"p{self._pos:04d}_{len(parts):05d}.pdf"
         path.write_bytes(pdf_bytes)
         parts.append(path)
         self.meta.setdefault(fname, meta)
@@ -163,23 +180,64 @@ class _LayerWriter:
 
     def finalize(self, doc_dir: Path) -> None:
         try:
-            for fname, parts in self._parts.items():
+            for fname, by_pos in self._parts.items():
                 if fname not in self._has_content:
                     continue
+                n_pages = max([*self._geometry, *by_pos]) + 1
                 out = fitz.open()
                 try:
-                    for part in parts:
-                        src = fitz.open(str(part))
-                        try:
-                            out.insert_pdf(src)
-                        finally:
-                            src.close()
+                    for pos in range(n_pages):
+                        parts = by_pos.get(pos)
+                        if parts:
+                            _insert_merged(out, parts)
+                        else:
+                            self._insert_blank(out, pos, by_pos)
                     out.save(str(doc_dir / fname), garbage=3, deflate=True)
                 finally:
                     out.close()
         finally:
             self._parts.clear()
             shutil.rmtree(self._spill_root, ignore_errors=True)
+
+    def _insert_blank(self, out: "fitz.Document", pos: int, by_pos: dict[int, list[Path]]) -> None:
+        geom = self._geometry.get(pos)
+        if geom is None:  # no begin_page for it: borrow any part's page size
+            with fitz.open(str(next(iter(by_pos.values()))[0])) as src:
+                p = src[0]
+                geom = (p.cropbox.width, p.cropbox.height, p.rotation)
+        width, height, rotation = geom
+        page = out.new_page(width=width, height=height)
+        if rotation:
+            page.set_rotation(rotation)
+
+
+def _insert_merged(out: "fitz.Document", parts: "list[Path]") -> None:
+    """Append `parts[0]`'s page to `out`, then overlay every further part on
+    it (several `add`s of one layer on one report page). Both sides are
+    overlaid at rotation 0 -- the parts share the page's unrotated geometry
+    -- and the target's `/Rotate` is restored afterwards."""
+    with fitz.open(str(parts[0])) as first:
+        out.insert_pdf(first)
+    if len(parts) == 1:
+        return
+    page = out[-1]
+    rotation = page.rotation
+    page.set_rotation(0)
+    for part in parts[1:]:
+        with fitz.open(str(part)) as src:
+            src[0].set_rotation(0)
+            page.show_pdf_page(page.rect, src, 0)
+    if rotation:
+        page.set_rotation(rotation)
+
+
+def _page_geometry(pdf_path: "str | Path", page_index: int) -> tuple[float, float, int]:
+    """`(width, height, rotation)` of one page -- the unrotated CropBox size
+    (= `PageMeta.width/height`) + `/Rotate` -- for `_LayerWriter.begin_page`,
+    read before the pipeline run since layers stream in during it."""
+    with fitz.open(str(pdf_path)) as doc:
+        page = doc[page_index]
+        return page.cropbox.width, page.cropbox.height, page.rotation
 
 
 def _has_content(doc: "fitz.Document") -> bool:
@@ -326,6 +384,18 @@ def _accumulate_page(
             _save_legacyrecreation_ocr_images(p3_debug, reservoirs["ocr"], page_index)
 
 
+_PAGE_COUNT_SUFFIX = re.compile(r"\s*\(\d[^()]*\)$")
+
+
+def _strip_page_count(label: str) -> str:
+    """Drop a trailing per-page count (`"snapped angle (25)"`, `"dropped
+    pattern (38 groups)"`) from a debug-layer label -- it differs per page,
+    and a different label is a different layer file, so one logical layer
+    split into one single-page file per page. Non-numeric parentheses
+    (`"(off-grid)"`) stay."""
+    return _PAGE_COUNT_SUFFIX.sub("", label)
+
+
 def _debug_layer_sink(writer: _LayerWriter):
     """Builds the `on_debug_layer` callback passed straight into
     `run_pipeline` for the `current` engine: each backend calls this the
@@ -337,6 +407,7 @@ def _debug_layer_sink(writer: _LayerWriter):
     let alone the whole document's page loop."""
 
     def _sink(stage: str, label: str, hexc: str, pdf_bytes: bytes) -> None:
+        label = _strip_page_count(label)
         fname = f"{stage}__{_layer_slug(label)}.pdf"
         writer.add(fname, {"stage": stage, "layer": label, "file": fname, "color": hexc}, pdf_bytes)
 

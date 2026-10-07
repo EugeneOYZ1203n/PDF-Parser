@@ -156,6 +156,7 @@ from rastervec.Evaluation.Report.report_artifacts import (  # noqa: F401 -- re-e
     _image_reservoirs,
     _LayerWriter,
     _merge_pdfs,
+    _page_geometry,
     _reached,
     _restamp_page,
     _write_hyperparams,
@@ -258,7 +259,7 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
     stats_pages: dict[str, list[tuple[int, dict]]] = {row[0]: [] for row in active}
     dumps: list[dump_io.PageDump] = []
 
-    for page_index in pages:
+    for pos, page_index in enumerate(pages):
         debug_durations: dict = {}
         clock = StepClock(debug_durations)
         run_input, run_page = str(pdf_path), page_index
@@ -267,6 +268,7 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
             with clock("conversion"):
                 _CONVERT[config.vectorise_mode](str(pdf_path), page_index, str(conv_path))
             run_input, run_page = str(conv_path), 0
+        writer.begin_page(pos, *_page_geometry(run_input, run_page))
 
         _LOG.info("running %s page %d (%s)", pdf_path.name, page_index, variant.name)
         if is_legacy:
@@ -486,12 +488,13 @@ def _process_pdf_benchmark(
     stats_pages: dict[str, list[tuple[int, dict]]] = {row[0]: [] for row in active}
     dumps: list[dump_io.PageDump] = []
 
-    for p in pages:
+    for pos, p in enumerate(pages):
         debug_durations: dict = {}
         clock = StepClock(debug_durations)
         conv_path = doc_dir / f"converted_p{p}.pdf"
         with clock("conversion"):
             conversion.convert_page_to_vector_text(str(bench.pdf_path), p, str(conv_path))
+        writer.begin_page(pos, *_page_geometry(conv_path, 0))
         _LOG.info("benchmark %s page %d (%s)", bench.key, p, variant.name)
         if is_legacy:
             res = run_legacy(str(conv_path), 0, verbose=True)

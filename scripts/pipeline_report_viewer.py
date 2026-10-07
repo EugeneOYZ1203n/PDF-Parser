@@ -188,8 +188,10 @@ class ViewerApp:
             for entry in panel.layers:
                 if not self._vars[(panel.idx, entry["file"])].get():
                     continue
-                layer = _page_image(panel.layer_docs[entry["file"]], self.page_pos,
-                                    self.zoom, alpha=True)
+                layer_doc = panel.layer_docs[entry["file"]]
+                if self.page_pos >= layer_doc.page_count:
+                    continue  # never clamp: that would show another page's layer
+                layer = _page_image(layer_doc, self.page_pos, self.zoom, alpha=True)
                 if layer.size != base.size:
                     layer = layer.resize(base.size)
                 base = Image.alpha_composite(base, layer)
