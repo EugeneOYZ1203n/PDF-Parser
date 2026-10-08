@@ -22,10 +22,11 @@ this a Multiply-blended line reconstructs fully opaque, painting solid over
 whatever is beneath it.
 
 The same run split also keys on each Vector's `scissor` (its enclosing
-clip's bbox, folded in at extraction): a clipped run's stream gets a
-`re W n` clip prefix too, so hatching / pattern fills clipped to a region
-don't spill past it. Only the clip's bbox is reproduced, not its exact path.
-Runs are consecutive, so paint order is always the input order.
+clips' bbox, folded in at extraction) and `clips` (the exact shape of every
+enclosing non-rectangular clip): a clipped run's stream gets a `re W n`
+prefix plus one `<path> W n` (`W*` for even-odd) per exact clip, so hatching /
+pattern fills -- or a rect clipped to a rounded/curved outline -- don't spill
+past it. Runs are consecutive, so paint order is always the input order.
 """
 from __future__ import annotations
 
@@ -105,6 +106,53 @@ def _clip_operator(page: "fitz.Page", clip: tuple, dx: float, dy: float) -> str:
     return f"{r.x0:g} {r.y0:g} {r.width:g} {r.height:g} re W n\n"
 
 
+_CURRENT_POINT_EPS = 1e-3
+
+
+def _clip_path_operator(
+    page: "fitz.Page", items: tuple, even_odd: bool, dx: float, dy: float,
+) -> str:
+    """One exact clip path -- `items` (plain `Vector.items`-shaped tuples, page
+    space, offset by `(dx, dy)`) as content-stream path operators in the page's
+    own PDF space, then `W n` (`W* n` when `even_odd`). A new subpath (`m`)
+    starts wherever an item doesn't begin at the current point."""
+    inv = ~page.transformation_matrix
+
+    def pt(p) -> str:
+        q = fitz.Point(p[0] + dx, p[1] + dy) * inv
+        return f"{q.x:g} {q.y:g}"
+
+    ops: list[str] = []
+    current = None
+    for item in items:
+        kind = item[0]
+        pts = item_points(item)
+        if kind == "re":
+            r = (fitz.Rect(pts[0][0] + dx, pts[0][1] + dy, pts[1][0] + dx, pts[1][1] + dy)
+                 * inv).normalize()
+            ops.append(f"{r.x0:g} {r.y0:g} {r.width:g} {r.height:g} re")
+            current = None
+            continue
+        if kind == "qu":
+            ops.append(f"{pt(pts[0])} m {pt(pts[1])} l {pt(pts[2])} l {pt(pts[3])} l h")
+            current = None
+            continue
+        if kind not in ("l", "c"):
+            continue
+        start = pts[0]
+        if current is None or (abs(start[0] - current[0]) > _CURRENT_POINT_EPS
+                               or abs(start[1] - current[1]) > _CURRENT_POINT_EPS):
+            ops.append(f"{pt(start)} m")
+        if kind == "l":
+            ops.append(f"{pt(pts[1])} l")
+        else:
+            ops.append(f"{pt(pts[1])} {pt(pts[2])} {pt(pts[3])} c")
+        current = pts[-1]
+    if not ops:
+        return ""
+    return "\n".join(ops) + (" W* n\n" if even_odd else " W n\n")
+
+
 def _extgstate_operator(page: "fitz.Page", blendmode: str | None, opacity: float | None) -> str:
     """`/GSx gs` for a fresh ExtGState carrying the run's blend mode and
     constant opacity, registered on `page`'s resources ("" if it can't be)."""
@@ -136,11 +184,13 @@ def _wrap_run(
     clip: tuple | None,
     dx: float = 0.0,
     dy: float = 0.0,
+    clips: tuple = (),
 ) -> None:
     """Wrap each content stream in `new_xrefs` (the ones a run's `commit`
-    just added) in `q [/GSx gs] [clip re W n] ... Q` -- `/GSx` a fresh
-    ExtGState carrying the run's blend mode and constant opacity, the clip
-    the run's shared `scissor` rect."""
+    just added) in `q [/GSx gs] [clip re W n] [<path> W n ...] ... Q` --
+    `/GSx` a fresh ExtGState carrying the run's blend mode and constant
+    opacity, the rect clip the run's shared `scissor`, then one exact clip
+    path per entry of the run's shared `clips` (nested clips intersect)."""
     if not new_xrefs:
         return
     prefix = "q\n"
@@ -148,6 +198,8 @@ def _wrap_run(
         prefix += _extgstate_operator(page, blendmode, opacity)
     if clip is not None:
         prefix += _clip_operator(page, clip, dx, dy)
+    for items, even_odd in clips:
+        prefix += _clip_path_operator(page, items, even_odd, dx, dy)
     doc = page.parent
     prefix = prefix.encode("latin-1")
     for xref in new_xrefs:
@@ -185,12 +237,13 @@ def replay_drawing_paths(
     `line_join`, `line_cap` and stroke/fill opacity. Points are offset by
     `(dx, dy)` (used to translate a cluster into its own isolated canvas).
 
-    Vectors are processed in consecutive `(blendmode, opacity, scissor)`
-    runs -- each run gets its own `Shape` + `commit()`; a run with a
+    Vectors are processed in consecutive `(blendmode, opacity, scissor,
+    clips)` runs -- each run gets its own `Shape` + `commit()`; a run with a
     non-Normal blend mode or a group opacity < 1 has its committed content
     stream wrapped in an ExtGState so it composites the way the source PDF
     did instead of painting fully opaque, and a run with a `scissor`
-    (enclosing clip bbox) is clipped to it (`_wrap_run`). A run of ordinary
+    (enclosing clip bbox) and/or `clips` (exact non-rectangular clip
+    shapes) is clipped to them (`_wrap_run`). A run of ordinary
     vectors is one `Shape` + one `commit()`.
 
     A `Vector` carrying neither `color` nor `fill` is skipped outright:
@@ -212,9 +265,10 @@ def replay_drawing_paths(
     too (a cluster render is an isolated canvas). Colour only belongs
     in the final reconstruction.
     """
-    for (blendmode, opacity, clip), run in groupby(
+    for (blendmode, opacity, clip, clips), run in groupby(
         vectors,
-        key=lambda v: (None, None, None) if monochrome else (v.blendmode, v.opacity, v.scissor),
+        key=lambda v: (None, None, None, ()) if monochrome
+        else (v.blendmode, v.opacity, v.scissor, v.clips),
     ):
         run = list(run)
         shape = page.new_shape()
@@ -267,7 +321,7 @@ def replay_drawing_paths(
 
         contents_before = set(page.get_contents())
         shape.commit(overlay=True)
-        if _is_trivial_blend(blendmode, opacity) and clip is None:
+        if _is_trivial_blend(blendmode, opacity) and clip is None and not clips:
             continue
         new_xrefs = [x for x in page.get_contents() if x not in contents_before]
-        _wrap_run(page, new_xrefs, blendmode, opacity, clip, dx, dy)
+        _wrap_run(page, new_xrefs, blendmode, opacity, clip, dx, dy, clips)

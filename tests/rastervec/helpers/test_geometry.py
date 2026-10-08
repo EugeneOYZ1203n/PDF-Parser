@@ -279,6 +279,18 @@ def test_transform_vector_translates_items_and_rect(vector):
     assert v.rect == (0.0, 0.0, 10.0, 5.0)
 
 
+
+def test_transform_vector_moves_clip_shapes(vector):
+    import dataclasses
+
+    clip = ((("c", (0.0, 0.0), (1.0, 2.0), (3.0, 2.0), (4.0, 0.0)),), True)
+    v = dataclasses.replace(vector(kind="l", bbox=(0.0, 0.0, 10.0, 5.0)), clips=(clip,))
+    moved = geometry.transform_vector(v, offset=(100.0, 200.0), rotation_deg=0.0)
+
+    (items, even_odd), = moved.clips
+    assert even_odd is True
+    assert items[0] == ("c", (100.0, 200.0), (101.0, 202.0), (103.0, 202.0), (104.0, 200.0))
+
 def test_transform_vector_rotation_recomputes_rect_from_new_items():
     from rastervec.commons.models import Vector
 

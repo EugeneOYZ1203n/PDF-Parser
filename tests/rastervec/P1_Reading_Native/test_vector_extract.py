@@ -192,3 +192,46 @@ def test_separation_invariants_hold_for_reference_pdf_vectors():
     for key, members in by_color.items():
         for v in members:
             assert (v.color, v.fill, v.stroke_opacity, v.fill_opacity) == key
+
+
+def _stream_page(tmp_pdf_path, stream: bytes) -> "Reader":
+    doc = fitz.open()
+    page = doc.new_page(width=200, height=200)
+    shape = page.new_shape()
+    shape.draw_line((0, 0), (1, 1))
+    shape.finish()
+    shape.commit()
+    doc.update_stream(page.get_contents()[0], stream)
+    return Reader(tmp_pdf_path(doc))
+
+
+@pytest.mark.parametrize("clip", [
+    b"50 50 100 100 re",                                # a single `re`
+    b"50 50 m 150 50 l 150 150 l 50 150 l h",           # four axis-aligned `l`s
+])
+def test_rectangular_clip_is_scissor_only(tmp_pdf_path, clip):
+    with _stream_page(tmp_pdf_path, b"q " + clip + b" W n 0 0 1 rg 20 20 160 160 re f Q") as reader:
+        (v,) = vector.extract_vectors(reader.get_page(0))
+    assert v.scissor == pytest.approx((50.0, 50.0, 150.0, 150.0))
+    assert v.clips == ()
+
+
+def test_nested_rect_and_curved_clip_keeps_only_the_curved_shape(tmp_pdf_path):
+    k = 0.5523 * 40
+    curved = (
+        f"100 60 m {100 + k:g} 60 140 {100 - k:g} 140 100 c "
+        f"140 {100 + k:g} {100 + k:g} 140 100 140 c 60 140 l 60 60 l h"
+    ).encode()
+    stream = b"q 10 10 180 180 re W n q " + curved + b" W n 0 0 1 rg 0 0 200 200 re f Q Q"
+    with _stream_page(tmp_pdf_path, stream) as reader:
+        (v,) = vector.extract_vectors(reader.get_page(0))
+    assert v.scissor == pytest.approx((60.0, 60.0, 140.0, 140.0))
+    assert len(v.clips) == 1
+    items, even_odd = v.clips[0]
+    assert [it[0] for it in items][:2] == ["c", "c"] and even_odd is False
+
+
+def test_unclipped_path_has_no_clips(tmp_pdf_path):
+    with _stream_page(tmp_pdf_path, b"0 0 1 rg 20 20 50 50 re f") as reader:
+        (v,) = vector.extract_vectors(reader.get_page(0))
+    assert v.scissor is None and v.clips == ()

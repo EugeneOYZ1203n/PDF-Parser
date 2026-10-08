@@ -358,7 +358,7 @@ def transform_direction(direction: Point, rotation_deg: float) -> Point:
 
 
 def transform_vector(v, *, offset: Point, rotation_deg: float):
-    """Rotate+translate every item of `v` (and its `rect`/`scissor`),
+    """Rotate+translate every item of `v` (and its `rect`/`scissor`/`clips`),
     returning a new Vector -- never touches item *structure*, only geometry.
     Used to normalize a Segment's Vectors to a canonical (origin, upright)
     frame, and to invert that transform when restoring an elected
@@ -380,4 +380,8 @@ def transform_vector(v, *, offset: Point, rotation_deg: float):
         sx1, sy1 = transform_point((v.scissor[2], v.scissor[3]), offset, rotation_deg)
         new_scissor = (min(sx0, sx1), min(sy0, sy1), max(sx0, sx1), max(sy0, sy1))
 
-    return replace(v, items=new_items, rect=new_rect, scissor=new_scissor)
+    new_clips = tuple(
+        (tuple(transform_item(item, offset, rotation_deg) for item in items), even_odd)
+        for items, even_odd in getattr(v, "clips", ())
+    )
+    return replace(v, items=new_items, rect=new_rect, scissor=new_scissor, clips=new_clips)

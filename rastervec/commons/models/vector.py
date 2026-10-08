@@ -46,6 +46,11 @@ class Vector:
     knockout: bool
     opacity: float | None
     page_index: int  # pipeline-added, not from PyMuPDF
+    # Exact shape of every enclosing *non-rectangular* clip, outermost first:
+    # `((items, even_odd), ...)`, `items` plain item tuples like `self.items`.
+    # Rectangular clips are already exact in `scissor` and not repeated here.
+    # Pipeline-added at extraction (`vector_extract`), not from a path dict.
+    clips: tuple = ()
 
     @property
     def bbox(self) -> tuple[float, float, float, float]:

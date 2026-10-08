@@ -63,6 +63,13 @@ def vector_from_json(d: dict) -> Vector:
             d[key] = tuple(d[key])
     if d.get("items") is not None:
         d["items"] = [_to_tuples(item) for item in d["items"]]
+    if d.get("clips"):
+        d["clips"] = tuple(
+            (tuple(_to_tuples(item) for item in items), bool(even_odd))
+            for items, even_odd in d["clips"]
+        )
+    elif "clips" in d:
+        d["clips"] = ()
     field_names = {f.name for f in dataclasses.fields(Vector)}
     return Vector(**{k: v for k, v in d.items() if k in field_names})
 

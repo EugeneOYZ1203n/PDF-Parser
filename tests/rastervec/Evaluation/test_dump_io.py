@@ -19,6 +19,22 @@ def test_vector_round_trip(vector):
     assert isinstance(back.color, tuple)
 
 
+
+def test_vector_round_trip_keeps_clips(vector):
+    import dataclasses
+
+    clip_items = (("c", (0.0, 0.0), (1.0, 2.0), (3.0, 2.0), (4.0, 0.0)), ("l", (4.0, 0.0), (0.0, 0.0)))
+    v = dataclasses.replace(vector(kind="l", bbox=(0.0, 0.0, 10.0, 5.0)), clips=((clip_items, True),))
+    back = dump_io.vector_from_json(dump_io.vector_to_json(v))
+    assert back == v
+    assert isinstance(back.clips, tuple) and isinstance(back.clips[0][0][0][1], tuple)
+
+
+def test_vector_without_clips_key_loads_with_default(vector):
+    d = dump_io.vector_to_json(vector(kind="l", bbox=(0.0, 0.0, 10.0, 5.0)))
+    d.pop("clips")
+    assert dump_io.vector_from_json(d).clips == ()
+
 def test_write_load_dump(tmp_path, text, vector, page_meta):
     pd = dump_io.PageDump(
         page_meta=page_meta(index=2, width=300, height=400),
