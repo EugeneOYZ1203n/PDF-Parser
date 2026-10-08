@@ -94,6 +94,8 @@ its own copy of the classical pipeline instead).
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.prep_dataset --pdf-dir PDFS/ [--pdf C.pdf] [--sample 50] [--workers 4] --out data/deepvec  # DeepVectoriser training set (run once)
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.train --data data/deepvec [--threads N] [--resume]  # train -> rastervec/weights/deep_vectoriser.pth (output explained in DeepVectoriser/TRAINING.md)
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1] [--weights W.pth] [--ocr]  # try the model -> viewer folder + command
+.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepTechVec.train --data data/deepvec --prim line|curve [--threads N] [--resume]  # DeepTechVec on DeepVectoriser's dataset -> rastervec/weights/deep_tech_vec_<prim>.pth (output explained in DeepTechVec/TRAINING.md)
+.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepTechVec.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1] [--weights W.pth] [--refine-iters N]  # try it (OCR never runs) -> viewer folder + command
 .venv/Scripts/python.exe scripts/rasterize_pdf.py SRC [DST] --dpi 300               # flatten a PDF to pure raster (DST defaults to outputs/rasterize/)
 .venv/Scripts/python.exe scripts/label/master_label.py PDF [--dpi 300]              # full native+vector+raster label workflow, one outputs/labels/<stem>_label/ folder per PDF
 .venv/Scripts/python.exe scripts/label/native_label.py PDF --page N [--out ...]     # auto-derive native-text ground truth (GUI-free)
@@ -253,7 +255,7 @@ terminology used throughout this section. `rastervec/` is organized into six buc
 raster→vector backends), `P3_Vector_Parsing/` (pluggable vector-parsing/OCR backends),
 `P4_Output_Organization/` (the one, always-run output-combination + coordinate-space-guard
 phase) — plus `Evaluation/`, `notebooks/`, `weights/` alongside them (benchmarking/dev tooling,
-not phase code). **Sibling P2 backends (`Stub`/`Junction`/`DeepVectoriser`) and sibling P3 backends
+not phase code). **Sibling P2 backends (`Stub`/`Junction`/`DeepVectoriser`/`DeepTechVec`) and sibling P3 backends
 (`LatestVectorClassification`/`OldVectorClassification`) import nothing from each other** —
 each is fully self-contained, duplicating its own copy of any infra it needs (a PaddleOCR engine
 wrapper, layer/color/width separation, a raster→vector tracer, ...) rather than sharing one. This
@@ -459,6 +461,38 @@ generic parallel-pool mechanics), never phase-specific business logic.
     `detected/vectors` — and prints the viewer command. Debug layers: `color_separation`, `ocr/*`, `text_removal`, `tiles/vectorizer
     tile grid` + `re-split tiles`, `strokes/raw tile strokes` + `raw endpoints`, `merge/merged
     vectors` + `merged endpoints`, `vector_diff/total`.
+  - **`DeepTechVec/`** — learned raster→primitive vectorizer: a from-scratch PyTorch
+    implementation of **Egiazarian et al., "Deep Vectorization of Technical Drawings", ECCV 2020**
+    (`references/Deep Vectorization of Technical Drawings 2003.05471v3.pdf`). `adapter.py` runs
+    DeepVectoriser's color separation → tiled OCR → text removal (**copied** files, not imported:
+    `color_separation.py`/`text_ocr.py`/`paddle_engine.py`/`text_removal.py`/`diff.py`/`masks.py`);
+    the paper's cleaning U-Net is **not** run (input is already a clean binary layer mask, and the
+    dataset has no degraded/clean pairs). Per ink layer, `inference.vectorize_layer`: 64 px patches /
+    16 px overlap at 300 dpi → **primitive network** (`model/network.py`: stride-2 stem + `n_res = 1`
+    ResNet18 block, c = 64 → `n_dec = 8` Transformer decoder blocks over `n_prim = 10` sine-table
+    queries, 4 heads, FFN 512, `d_emb` = 6 lines / 8 quadratic curves — heads attend at full
+    `d_emb` width since 6 isn't divisible by 4; sigmoid → coords/width normalised by the patch +
+    confidence, `< 0.5` dropped) → **refinement** (`refine.py`: the Appendix I charge energy —
+    soft coverage `clamp(w/2 + ½ − d)`, φ = two Gaussians (R_c 1 px, R_f 32 px at ¼ resolution,
+    λ_f 0.02), mean-field `E^pos`/`E^size`/`E^rdn` with saturating max charges, connected-area mask
+    and λ_pos, doubled-angle collinearity; gradients analytic per pixel (envelope theorem) + autograd
+    only params → vertices; Adam, `REFINE_ITERS` (50, 0 = off); join/move heuristics every 20) →
+    clip to each patch's core → **merge** (`merge.py`, Appendix C: line collinearity graph →
+    least-squares fit per component → dangling-end trim; quadratic pair re-fit per Eq. 15 with
+    brute-force u_q1). Output: one `Vector` per primitive (`"l"`, or one exact cubic `"c"` per
+    quadratic), layer color, the **predicted** width. Line and curve models are separate
+    checkpoints (`train.py --prim line|curve`; a checkpoint knows its kind), default
+    `rastervec/weights/deep_tech_vec_line.pth` or `$DEEPTECHVEC_WEIGHTS_PATH`. **No prep script —
+    trains on DeepVectoriser's `prep_dataset.py` output** (format read by copied readers in
+    `train_data.py`; shared `<data>/cache/`, rename tolerant of another trainer's lock): each 64 px
+    training patch is cut with a random rotation + scale, the same affine applied to the GT
+    Béziers, clipped, turned into lines / least-squares quadratics, sorted the paper's way and
+    zero-padded. **`train.py`**: Eq. 2-4 loss, batch 128, Adam + Noam schedule, best val IoU →
+    `--out`, `<out>.last.ckpt` / `--resume`, log `<out stem>_train_log.csv` (output explained in
+    `DeepTechVec/TRAINING.md`). **`predict.py`**: as DeepVectoriser's, OCR never runs,
+    `--refine-iters`. Debug layers: `color_separation`, `ocr/*`, `text_removal`, `tiles/patch grid`,
+    `primitives/raw (network)` + `raw endpoints`, `refine/refined`, `merge/merged endpoints` +
+    `merged vectors`, `vector_diff/total`.
 - **`P3_Vector_Parsing/`** — pluggable vector-parsing/OCR backends, selected by `p3=`, each
   implementing `parse(vectors_p1, vectors_p2, page, **kwargs) -> (vectors, texts)`:
   - **`LatestVectorClassification/`** *(the default)* — the merge of the former
@@ -849,7 +883,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
   current/legacy, `p2`, `p3`, `enable_fast`) + the `VARIANTS` registry (`current` [default p2/p3],
   `legacy`, plus named presets for benchmark comparisons across P3 backends —
   `current_latestvectorclassification`, `current_oldvectorclassification`,
-  `current_junction`, `current_deepvectoriser`) +
+  `current_junction`, `current_deepvectoriser`, `current_deeptechvec`) +
   `DEFAULT_VARIANTS` + `resolve_variant`. `engine="current"` threads `p2`/`p3`/`enable_fast` into
   `rastervec.core.pipeline.run_pipeline` (the pluggable P1→P2_REGISTRY[p2]→P3_REGISTRY[p3]
   orchestrator, see the `core/` section below); `engine="legacy"` ignores `p2`/`p3` entirely.

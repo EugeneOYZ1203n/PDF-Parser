@@ -32,6 +32,8 @@ whether it's supported."""
 from __future__ import annotations
 
 from rastervec.core.interfaces import Phase2Backend, Phase3Backend
+from rastervec.P2_Raster_To_Vec.DeepTechVec.adapter import extract as _deep_tech_vec_extract
+from rastervec.P2_Raster_To_Vec.DeepTechVec.adapter import render_debug as _deep_tech_vec_render_debug
 from rastervec.P2_Raster_To_Vec.DeepVectoriser.adapter import extract as _deep_vectoriser_extract
 from rastervec.P2_Raster_To_Vec.DeepVectoriser.adapter import render_debug as _deep_vectoriser_render_debug
 from rastervec.P2_Raster_To_Vec.Junction.adapter import extract as _junction_extract
@@ -50,6 +52,7 @@ P2_REGISTRY: dict[str, Phase2Backend] = {
     "Stub": _stub_extract,
     "Junction": _junction_extract,
     "DeepVectoriser": _deep_vectoriser_extract,
+    "DeepTechVec": _deep_tech_vec_extract,
 }
 
 P3_REGISTRY: dict[str, Phase3Backend] = {
@@ -61,6 +64,7 @@ P3_REGISTRY: dict[str, Phase3Backend] = {
 P2_RENDER_DEBUG: dict[str, object] = {
     "Junction": _junction_render_debug,
     "DeepVectoriser": _deep_vectoriser_render_debug,
+    "DeepTechVec": _deep_tech_vec_render_debug,
 }
 
 P3_RENDER_DEBUG: dict[str, object] = {
