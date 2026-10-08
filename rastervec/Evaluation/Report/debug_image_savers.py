@@ -20,7 +20,6 @@ quad-angle rotation ran on), `for_rotation_correction/paddle_classifier/`
 (the upright crop the recognizer's own 0/180 angle classifier saw), and
 `for_paddle_recog/{0_retry,1_retry,2_retry,3_retry,failed}/` (whichever
 recognize_crops/recognize_crops_raw pass decided a detection's outcome).
-LegacyRecreation keeps its own single `paddle_ocr_images/` folder.
 
 OldVectorClassification (the frozen 2026-09-29 snapshot) gets the savers
 the report used on that date, restored verbatim apart from their names
@@ -107,10 +106,9 @@ def _draw_boxes(img: Image.Image, boxes, outline=(220, 30, 30), width=2) -> Imag
 
 
 def _save_crop_text_images(crops: list, target, page_index: int) -> int:
-    """Shared body for LegacyRecreation's/OldVectorClassification's own
-    recog-image dumpers -- both hand PaddleOCR recognition a list of
+    """Body of OldVectorClassification's recog-image dumper -- a list of
     `(crop, text)` pairs (one per PaddleOCR-detected quad within a
-    rendered cluster/word-group), reads `p3_debug["ocr_crops"]`."""
+    rendered cluster), read from `p3_debug["ocr_crops"]`."""
     if not crops:
         return 0
     reservoir = _as_reservoir(target)
@@ -183,8 +181,9 @@ def _save_latestvectorclassification_recog_bucket_images(
     p3_debug: dict, target, page_index: int, bucket: str,
 ) -> int:
     """One PNG per detection whose outcome matches `bucket` -- exactly the
-    crop handed to `recognize_crops`/`recognize_crops_raw` for the pass that
-    decided this detection's result: `"0"` (recognized on pass 1), `"1"`/
+    crop the recogniser read on the pass that decided this detection's
+    result: `"0"` (recognized on pass 1 -- after the angle classifier's
+    180 flip, when it flipped), `"1"`/
     `"2"`/`"3"` (recovered on that blank-retry pass), or `"failed"` (still
     blank after every retry -- the last rotation variant tried). Reads
     `p3_debug["recog_bucket_crops"][bucket]` (`list[tuple[np.ndarray,
@@ -200,14 +199,6 @@ def _save_latestvectorclassification_recog_bucket_images(
             lambda crop=crop: Image.fromarray(np.asarray(crop)),
         )
     return n
-
-
-def _save_legacyrecreation_ocr_images(p3_debug: dict, target, page_index: int) -> int:
-    """One PNG per word group's own padded/DPI-boosted OCR render -- exactly
-    what PaddleOCR's (recognition-only) engine saw, recognised text in the
-    filename. Reads `p3_debug["ocr_crops"]` (`list[tuple[np.ndarray,
-    str]]`)."""
-    return _save_crop_text_images(p3_debug.get("ocr_crops") or [], target, page_index)
 
 
 # ---------------------------------------------------------------------------

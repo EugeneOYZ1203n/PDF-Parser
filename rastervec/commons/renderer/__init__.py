@@ -11,7 +11,7 @@ Split by output concern:
   (`dpi_for_cluster` / `render_cluster_with_dynamic_dpi`, composing
   `png.render_vector_cluster`) shared by the P3 backends' own
   `paddle_engine.py`/`radon.py`. Rotation helpers and BGR normalization
-  stay backend-local (`LatestVectorClassification`/`OldVectorClassification`/`LegacyRecreation` each keep
+  stay backend-local (`LatestVectorClassification`/`OldVectorClassification` each keep
   their own copy).
 - `draw.py` -- the one standard drawing layer: a spec builder + a drawer
   per primitive kind (text, bbox, quad, polyline, arrow, dot, vector,

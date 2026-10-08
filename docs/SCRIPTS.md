@@ -60,9 +60,8 @@ input), and `for_paddle_recog/{0_retry,1_retry,2_retry,3_retry,failed}/`
 `p3: "OldVectorClassification"` (the frozen 2026-09-29 snapshot) writes that
 date's folders with that date's savers (`paddle_detect_images/`,
 `paddle_recog_images/`, `hough_line_images/`, `minarea_rect_images/`,
-`paddle_classifier_{before,after}_images/` -- these draw quads/angle lines on top);
-`p3: "LegacyRecreation"` writes a single `paddle_ocr_images/` folder (one
-padded/DPI-boosted render per word group). There are no per-stage `.txt`
+`paddle_classifier_{before,after}_images/` -- these draw quads/angle lines on top).
+There are no per-stage `.txt`
 stats for the `current` engine -- `dump.json` is the reloadable source of
 truth. `pipeline: "legacy"` still only ever emits the single `reconstructed`
 row.
@@ -79,7 +78,7 @@ one of `input_dir` / `input_files`):
 |---|---|
 | `pipeline` | `current` (default, the pluggable `core.pipeline` engine) / `legacy` (archive/raster_parser, unmodified) |
 | `p2` | only meaningful when `pipeline: "current"` -- a `core.registry.P2_REGISTRY` name (`Stub` default, or `Junction`) |
-| `p3` | only meaningful when `pipeline: "current"` -- a `core.registry.P3_REGISTRY` name (`LatestVectorClassification` default, `OldVectorClassification` -- frozen 2026-09-29 baseline -- or `LegacyRecreation`) |
+| `p3` | only meaningful when `pipeline: "current"` -- a `core.registry.P3_REGISTRY` name (`LatestVectorClassification` default, `OldVectorClassification` -- the frozen 2026-09-29 baseline) |
 | `enable_fast` | forwarded to `p3` backends that accept it (default `true`) |
 | `final_stage` | last phase to run: `null` (default, all) / `phase1` / `phase2` / `phase3`. Passed to `run_pipeline(stop_after=...)`, so later phases really don't run (no debug layers/images, no OCR); Phase 4 still combines what was produced (raw P1+P2 vectors when P3 is skipped). Full table in `scripts/report_configs/README.md`. Ignored entirely for `pipeline: "legacy"`. |
 | `input_dir` | folder scanned for `*.pdf` |
@@ -404,7 +403,7 @@ per variant, with an aggregate + timing comparison.
 | `--reconstruct-dir DIR` | per-page reconstruction / input / box-overlay PDFs (default `outputs/benchmark_cli/reconstructions/`) |
 | `--workers N` | run pages across a spawn pool of size `N` (>1); default 1 serial |
 | `--compute-workers N` | run FAST tiles + OCR crops on a shared pool of size `N` (>0); default 0 local |
-| `--variants a,b` | `variants.VARIANTS` names to run/compare (default `current,legacy`) -- also `current_latestvectorclassification`, `current_oldvectorclassification`, `current_legacyrecreation`, `current_junction` (named P2/P3 combo presets for benchmark comparisons) |
+| `--variants a,b` | `variants.VARIANTS` names to run/compare (default `current,legacy`) -- also `current_latestvectorclassification`, `current_oldvectorclassification`, `current_junction` (named P2/P3 combo presets for benchmark comparisons) |
 
 `--variants current,legacy` needs LibreOffice (legacy). `main()`'s real
 OCR path is a manual smoke test; the pure formatting/aggregation helpers are

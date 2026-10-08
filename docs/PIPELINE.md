@@ -28,7 +28,7 @@ today is two pluggable phases sandwiched between two always-the-same phases, beh
 `core.pipeline.run_pipeline(pdf_path, page_index, *, p2, p3, ...)` (see `CLAUDE.md`'s architecture
 section) -- Phase 1 (always the same, native text + raw vectors + images), Phase 2 (pluggable
 raster→vector, `Stub`/`Junction`), Phase 3 (pluggable vector-parsing/OCR,
-`VectorClassification`/`LegacyRecreation`), Phase 4 (always the same, combines
+`VectorClassification`), Phase 4 (always the same, combines
 every phase's output into the final `(texts, vectors)` and guards the unrotated-MediaBox-space
 coordinate contract). This document's
 `classify → fast → segment → similarity → ocr → restore → drawing` sequence is
@@ -39,7 +39,7 @@ deprecated but still genuinely live today, not dead -- see `CLAUDE.md`'s top-of-
 `FastIntoPaddle` backend that used to be the default has been removed entirely (it was a
 materially different algorithm: similarity grouping → FAST filter → reclassify → layer/color/width
 separation → spatial clustering → per-cluster PaddleOCR detect → overlap reassignment → rotation
-refine → PaddleOCR recognize); the only other selectable P3 backend today is `LegacyRecreation`.
+refine → PaddleOCR recognize).
 
 ## The two core models
 

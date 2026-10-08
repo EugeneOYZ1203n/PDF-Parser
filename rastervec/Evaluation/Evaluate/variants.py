@@ -45,9 +45,6 @@ VARIANTS: dict[str, PipelineVariant] = {
     "current_oldvectorclassification": PipelineVariant(
         "current_oldvectorclassification", "current", DEFAULT_P2, "OldVectorClassification", True,
     ),
-    "current_legacyrecreation": PipelineVariant(
-        "current_legacyrecreation", "current", DEFAULT_P2, "LegacyRecreation", True,
-    ),
     "current_junction": PipelineVariant(
         "current_junction", "current", "Junction", DEFAULT_P3, True,
     ),

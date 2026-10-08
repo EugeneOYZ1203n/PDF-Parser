@@ -34,7 +34,6 @@ from rastervec.commons.step_timing import StepClock
 from rastervec.Evaluation.Report.debug_image_savers import (
     _DEBUG_IMAGE_CAP,
     _ImageReservoir,
-    _save_legacyrecreation_ocr_images,
     _save_latestvectorclassification_detect_images,
     _save_latestvectorclassification_quad_rotation_images,
     _save_latestvectorclassification_recog_bucket_images,
@@ -380,8 +379,6 @@ def _accumulate_page(
             _save_oldvectorclassification_classifier_after_images(
                 p3_debug, reservoirs["old_classifier_after"], page_index,
             )
-        elif p3 == "LegacyRecreation":
-            _save_legacyrecreation_ocr_images(p3_debug, reservoirs["ocr"], page_index)
 
 
 _PAGE_COUNT_SUFFIX = re.compile(r"\s*\(\d[^()]*\)$")

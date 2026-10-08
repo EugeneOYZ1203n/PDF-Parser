@@ -109,7 +109,7 @@ def _warm_paddle_engines() -> None:
     where the backend has one) per backend that has its own copy -- the
     deprecated top-level `OCR/` module (recognition-only, no detect
     backend), plus every P3 backend's own `paddle_engine.py`
-    (`LatestVectorClassification`, `OldVectorClassification`, `LegacyRecreation`). Each backend's import+call
+    (`LatestVectorClassification`, `OldVectorClassification`). Each backend's import+call
     is its own try/except, same reasoning as `_warm_fast_detectors`."""
     try:
         from rastervec.OCR.Paddle_OCR.ocr_backend import PaddleRecBackend
@@ -137,16 +137,6 @@ def _warm_paddle_engines() -> None:
         PaddleDetectBackend.warmup()
     except Exception as exc:  # noqa: BLE001
         _LOG.warning("PaddleOCR warmup skipped (OldVectorClassification): %s", exc)
-    try:
-        from rastervec.P3_Vector_Parsing.LegacyRecreation.paddle_engine import (
-            PaddleDetectBackend,
-            PaddleRecBackend,
-        )
-
-        PaddleRecBackend.warmup()
-        PaddleDetectBackend.warmup()
-    except Exception as exc:  # noqa: BLE001
-        _LOG.warning("PaddleOCR warmup skipped (LegacyRecreation): %s", exc)
 
 
 _PROGRESS_POLL_SECONDS = 0.5

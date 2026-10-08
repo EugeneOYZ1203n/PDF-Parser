@@ -151,6 +151,29 @@ def test_parse_classifier_flip_turns_the_text_180(page_meta, vector, monkeypatch
     assert ("rotation", "cls flipped (1)") in [(s, l) for s, l, _h, _p in layers]
 
 
+@pytest.mark.parametrize("flip", [0, 180])
+def test_recog_0_debug_crop_is_what_the_recogniser_read(page_meta, vector, monkeypatch, flip):
+    """A pass-1 win's saved crop includes the classifier's 180 flip --
+    the classifier crop itself is the pre-flip one."""
+    monkeypatch.setattr(PaddleDetectBackend, "detect", _rotated_quad(30.0))
+    _patch_rec(monkeypatch, "AB", flip=flip)
+    vectors = [vector(bbox=(10.0, 10.0, 60.0, 40.0), width=0.5, seqno=1)]
+    debug_out: dict = {}
+    lvc.parse(vectors, [], _page(page_meta), debug_out=debug_out)
+    (cls_crop,) = debug_out["paddle_classifier_crops"]
+    ((recog_crop, text),) = debug_out["recog_bucket_crops"]["0"]
+    expected = np.rot90(cls_crop, 2) if flip else cls_crop
+    assert text == "AB" and np.array_equal(recog_crop, expected)
+
+    streamed: dict = {}
+    lvc.parse(vectors, [], _page(page_meta),
+              on_debug_image=lambda folder, _name, make: streamed.setdefault(folder, []).append(make()))
+    (cls_img,) = streamed["rotation_classifier"]
+    (recog_img,) = streamed["recog_0"]
+    expected = np.rot90(np.asarray(cls_img), 2) if flip else np.asarray(cls_img)
+    assert np.array_equal(np.asarray(recog_img), expected)
+
+
 def _scripted_rec(monkeypatch, by_pass):
     """Pass 1 (`recognize_crops`, with the classifier) returns `by_pass[0]`;
     the n-th retry (`recognize_crops_raw`) returns `by_pass[n]`. Records

@@ -61,8 +61,7 @@ class ReportConfig(BaseModel):
     # Per-page PNG dumps of what PaddleOCR's detector/recognizer/classifier
     # actually received (LatestVectorClassification's `for_paddle_detect/`,
     # `for_rotation_correction/`, `for_paddle_recog/`; OldVectorClassification's
-    # 2026-09-29 `paddle_*_images/` folders; LegacyRecreation's
-    # `paddle_ocr_images/`) -- one file per cluster/detection, so the bulk of
+    # 2026-09-29 `paddle_*_images/` folders) -- one file per cluster/detection, so the bulk of
     # a report's files.
     debug_images: bool = True
     # Per-leaf-folder cap on how many debug images `debug_images` writes

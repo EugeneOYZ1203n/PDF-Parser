@@ -41,8 +41,6 @@ from rastervec.P3_Vector_Parsing.LatestVectorClassification.parse import parse a
 from rastervec.P3_Vector_Parsing.LatestVectorClassification.parse import (
     render_debug as _latest_vector_classification_render_debug,
 )
-from rastervec.P3_Vector_Parsing.LegacyRecreation.parse import parse as _legacy_recreation_parse
-from rastervec.P3_Vector_Parsing.LegacyRecreation.parse import render_debug as _legacy_recreation_render_debug
 from rastervec.P3_Vector_Parsing.OldVectorClassification.parse import parse as _old_vector_classification_parse
 from rastervec.P3_Vector_Parsing.OldVectorClassification.parse import (
     render_debug as _old_vector_classification_render_debug,
@@ -58,7 +56,6 @@ P3_REGISTRY: dict[str, Phase3Backend] = {
     "LatestVectorClassification": _latest_vector_classification_parse,
     # Frozen 2026-09-29 snapshot -- see P3_Vector_Parsing/OldVectorClassification/README.md.
     "OldVectorClassification": _old_vector_classification_parse,
-    "LegacyRecreation": _legacy_recreation_parse,
 }
 
 P2_RENDER_DEBUG: dict[str, object] = {
@@ -69,7 +66,6 @@ P2_RENDER_DEBUG: dict[str, object] = {
 P3_RENDER_DEBUG: dict[str, object] = {
     "LatestVectorClassification": _latest_vector_classification_render_debug,
     "OldVectorClassification": _old_vector_classification_render_debug,
-    "LegacyRecreation": _legacy_recreation_render_debug,
 }
 
 DEFAULT_P2 = "Stub"

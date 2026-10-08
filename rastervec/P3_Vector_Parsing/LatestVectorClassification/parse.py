@@ -526,11 +526,14 @@ def parse(
         owned_parents: set[int] = set()
         for idx, (pq, box, k) in enumerate(zip(page_quads, boxes, winning_k)):
             if keep_arrays or on_debug_image is not None:
-                # The crop that decided this detection: the winning
-                # rotation, or (blank) the last one tried -- +270 when
-                # retried, since every retried crop runs k = 1, 2, 3.
+                # The crop that decided this detection, exactly as the
+                # recogniser read it: the winning rotation (a pass-1 win
+                # includes the classifier's 180 flip), or (blank) the last
+                # one tried -- +270 when retried, since every retried crop
+                # runs k = 1, 2, 3.
                 if box.text:
-                    bucket, kk = str(k), k
+                    bucket = str(k)
+                    kk = k if k else (2 if box.flip_deg == 180 else 0)
                 else:
                     bucket, kk = "failed", (3 if idx in retried else 0)
                 if keep_arrays:

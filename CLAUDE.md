@@ -14,8 +14,7 @@ between two always-the-same phases, behind one shared harness**, not a fixed ste
 vectors + page/embedded images; **Phase 2** (`P2_Raster_To_Vec/`, pluggable — `Stub` no-op, or
 `Junction`, a ported classical raster→vector pipeline) turns Phase 1's images into additional
 vectors; **Phase 3** (`P3_Vector_Parsing/`, pluggable — `LatestVectorClassification` (the default),
-`OldVectorClassification` (a frozen 2026-09-29 baseline — never edit it), or
-`LegacyRecreation`) takes Phase 1's + Phase 2's vectors and produces the final vectors + OCR'd
+or `OldVectorClassification` (a frozen 2026-09-29 baseline — never edit it)) takes Phase 1's + Phase 2's vectors and produces the final vectors + OCR'd
 text; **Phase 4** (`P4_Output_Organization/`, always the same) combines every phase's text/vector
 output into the final `(texts, vectors)` pair and is a coordinate-space consistency backstop (logs
 a warning if any item's bbox doesn't fit the page's own unrotated MediaBox — see "Coordinate
@@ -28,9 +27,7 @@ duplicating whatever infra it needs rather than importing a sibling's.
 A separate, unrelated **`legacy`** engine (`pipelines/legacy.py` + `Evaluation/Evaluate/
 legacy_adapter.py`) runs `archive/raster_parser`'s own pre-`rastervec` pipeline unmodified, kept
 only as a benchmark comparison baseline — it's not one of the three phases and ignores `p2`/`p3`
-entirely (see the `variants.py`/`legacy_adapter.py` bullets below). `P3_Vector_Parsing/
-LegacyRecreation/` is a *different* thing: a genuine from-scratch port of that same old
-algorithm onto `commons.models` types, selectable as a normal P3 backend.
+entirely (see the `variants.py`/`legacy_adapter.py` bullets below).
 
 Several top-level `rastervec/` folders/files from before this phase split are genuinely gone —
 `rastervec/Reader/` (superseded by `P1_Reading_Native/reader.py` + `core/parallel/`) and
@@ -152,7 +149,7 @@ replacing the old `OCR/Paddle_OCR/ink_segment.py`. There is one OCR backend in t
 its own independent, duplicated copy of the OCR machinery this paragraph describes (see that
 section) — neither current P3 backend has a Radon module (deskewing is done differently, or not
 at all), and FAST is used differently (`OldVectorClassification` keeps its own pre-OCR FAST
-filter copy; `LatestVectorClassification` and `LegacyRecreation` have none) — this paragraph is
+filter copy; `LatestVectorClassification` has none) — this paragraph is
 about the original, shared `OCR/` copy only.
 
 ## `scripts/inspector/` architecture
@@ -257,7 +254,7 @@ raster→vector backends), `P3_Vector_Parsing/` (pluggable vector-parsing/OCR ba
 `P4_Output_Organization/` (the one, always-run output-combination + coordinate-space-guard
 phase) — plus `Evaluation/`, `notebooks/`, `weights/` alongside them (benchmarking/dev tooling,
 not phase code). **Sibling P2 backends (`Stub`/`Junction`/`DeepVectoriser`) and sibling P3 backends
-(`LatestVectorClassification`/`OldVectorClassification`/`LegacyRecreation`) import nothing from each other** —
+(`LatestVectorClassification`/`OldVectorClassification`) import nothing from each other** —
 each is fully self-contained, duplicating its own copy of any infra it needs (a PaddleOCR engine
 wrapper, layer/color/width separation, a raster→vector tracer, ...) rather than sharing one. This
 is deliberate: it lets each backend be rewritten or torn out without ever
@@ -307,7 +304,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
     parameter, via `inspect.signature`; `on_debug_layer` is the streaming counterpart to
     `debug_out`/`render_debug` — see `registry.py`'s docstring. `enable_fast`/`progress_counter`
     are only declared by the frozen `OldVectorClassification` (its 2026-09-29 pre-OCR FAST
-    stage) — `LatestVectorClassification` and `LegacyRecreation` have no FAST — but stay on this
+    stage) — `LatestVectorClassification` has no FAST — but stay on this
     signature as generic, backend-agnostic plumbing). CLI:
     `python -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 LatestVectorClassification]
     [--no-fast] [--stop-after phase1|phase2|phase3] [-v]`. `stop_after` (`STEP_NAMES`) really
@@ -559,21 +556,6 @@ generic parallel-pool mechanics), never phase-specific business logic.
     savers (`_save_oldvectorclassification_*`, folders `paddle_detect_images/`,
     `paddle_recog_images/`, `hough_line_images/`, `minarea_rect_images/`,
     `paddle_classifier_{before,after}_images/`). See its `README.md`.
-  - **`LegacyRecreation/`** — a genuine from-scratch port (not a wrapper) of
-    `archive/raster_parser`'s own Type-2 algorithm onto `commons.models` types, selectable as a
-    normal P3 backend (distinct from the separate `legacy`/`legacy_adapter.py` engine axis, which
-    shells out to the real unmodified archive codebase — see that bullet below). `parse.py`:
-    `filters.py::filter_text_vectors` classifies filled vectors into glyph-ink candidates vs.
-    everything else (drawing) → `wordgrouping.py::cluster_by_seqno` groups glyph candidates by
-    content-stream draw-order adjacency into `WordGroup`s → each group is rendered once
-    (`commons.renderer.render_vector_cluster`), padded, and run through this folder's own
-    detect+recognize pair (`paddle_engine.py::PaddleDetectBackend.detect` — PaddleOCR's own
-    text-detector — then `PaddleRecBackend.recognize_crops` on each detected quad's own
-    perspective-cropped region, `_rotate_crop`), so a `WordGroup` yields zero, one, or several
-    `Text`s, each positioned/rotated from its own detected quad mapped back to page space
-    (`commons.renderer.pixel_to_page_bbox`) rather than from the group's own vector geometry.
-    `parse.py::render_debug` (`P3_RENDER_DEBUG["LegacyRecreation"]`) renders
-    `filter_fill`/`group_words`/`ocr`/`drawing` layers.
 
   **Clustering/filtering always operates within one `(layer, color)` bucket, never across
   buckets**, in every P3 backend that separates by layer/color at all — two vectors in different
@@ -605,7 +587,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
   above for what each backend actually does now), so no *new* P3 backend should import this
   folder. `fast_detect.py` here is the full original (incl. `detect_tiled`);
   `OldVectorClassification` keeps its own trimmed copy for its pre-OCR FAST filter
-  (`LatestVectorClassification`/`LegacyRecreation` have none). This whole
+  (`LatestVectorClassification` has none). This whole
   folder is still genuinely imported by `core/parallel/pool.py::warmup()`, `commons/renderer/
   stages.py`, the Junction P2 backend, and the old `pipelines/current.py`+`_steps.py` — see the
   top-of-file "not dead" note and
@@ -866,7 +848,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
 - **`Evaluation/Evaluate/variants.py`** *(implemented)*: `PipelineVariant` (name, `engine`
   current/legacy, `p2`, `p3`, `enable_fast`) + the `VARIANTS` registry (`current` [default p2/p3],
   `legacy`, plus named presets for benchmark comparisons across P3 backends —
-  `current_latestvectorclassification`, `current_oldvectorclassification`, `current_legacyrecreation`,
+  `current_latestvectorclassification`, `current_oldvectorclassification`,
   `current_junction`, `current_deepvectoriser`) +
   `DEFAULT_VARIANTS` + `resolve_variant`. `engine="current"` threads `p2`/`p3`/`enable_fast` into
   `rastervec.core.pipeline.run_pipeline` (the pluggable P1→P2_REGISTRY[p2]→P3_REGISTRY[p3]
@@ -1149,7 +1131,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
   {quad_rotation,paddle_classifier}/`, `for_paddle_recog/
   {0_retry,1_retry,2_retry,3_retry,failed}/` — OldVectorClassification's restored 2026-09-29
   `paddle_*_images/`/`hough_line_images/`/`minarea_rect_images/` folders (those savers draw
-  quads/angle lines on top, as they did then), plus LegacyRecreation's single `paddle_ocr_images/`,
+  quads/angle lines on top, as they did then),
   organized by which model/algorithm call each saved image was the exact input to (never an
   overlay/annotation — only a BGR/RGB channel reorder for display; per-P3-backend savers in
   `rastervec/Evaluation/Report/debug_image_savers.py`) are written unless the config sets `debug_images: false`

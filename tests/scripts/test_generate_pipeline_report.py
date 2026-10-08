@@ -191,11 +191,11 @@ def test_bench_ground_truth_by_type_synthesizes_native_to_raster(tmp_path):
 import numpy as np
 
 
-def test_save_legacyrecreation_ocr_images_reads_ocr_crops(tmp_path):
+def test_save_oldvectorclassification_recog_images_reads_ocr_crops(tmp_path):
     crop = np.zeros((3, 3, 3), dtype=np.uint8)
     p3_debug = {"ocr_crops": [(crop, "HELLO")]}
     folder = tmp_path / "ocr"
-    n = gpr._save_legacyrecreation_ocr_images(p3_debug, folder, page_index=2)
+    n = gpr._save_oldvectorclassification_recog_images(p3_debug, folder, page_index=2)
     assert n == 1
     files = list(folder.glob("*.png"))
     assert len(files) == 1
@@ -203,9 +203,9 @@ def test_save_legacyrecreation_ocr_images_reads_ocr_crops(tmp_path):
     assert "p2_" in files[0].name
 
 
-def test_save_legacyrecreation_ocr_images_missing_key_no_crash(tmp_path):
+def test_save_oldvectorclassification_recog_images_missing_key_no_crash(tmp_path):
     folder = tmp_path / "ocr"
-    assert gpr._save_legacyrecreation_ocr_images({}, folder, 0) == 0
+    assert gpr._save_oldvectorclassification_recog_images({}, folder, 0) == 0
     assert not folder.exists()
 
 
@@ -325,13 +325,13 @@ def test_debug_images_flag_default_and_off(tmp_path):
     assert gpr.ReportConfig().debug_images is True
     crop = np.zeros((4, 4, 3), dtype=np.uint8)
     res = SimpleNamespace(extra={"p3_debug": {"ocr_crops": [(crop, "A")]}})
-    ocr_dir = gpr._image_dirs(tmp_path)["ocr"]
-    gpr._accumulate_page(res, 0, [], gpr._LayerWriter(), {}, None, p3="LegacyRecreation")
+    ocr_dir = gpr._image_dirs(tmp_path)["old_recog"]
+    gpr._accumulate_page(res, 0, [], gpr._LayerWriter(), {}, None, p3="OldVectorClassification")
     assert not ocr_dir.exists()
     reservoirs = gpr._image_reservoirs(gpr._image_dirs(tmp_path), seed_name="doc")
     debug: dict = {}
     gpr._accumulate_page(
-        res, 0, [], gpr._LayerWriter(), {}, reservoirs, p3="LegacyRecreation",
+        res, 0, [], gpr._LayerWriter(), {}, reservoirs, p3="OldVectorClassification",
         clock=gpr.StepClock(debug),
     )
     assert len(list(ocr_dir.glob("*.png"))) == 1

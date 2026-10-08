@@ -39,7 +39,7 @@ from rastervec.P3_Vector_Parsing.LatestVectorClassification.config import (
 
 # PaddleOCR's own DB detector's det_limit_side_len -- a cluster render is
 # rarely anywhere near this, so it's a generous ceiling rather than a tuned
-# value (same constant/rationale as LegacyRecreation's own copy).
+# value.
 _DETECT_LIMIT_SIDE_LEN = 4000
 
 
