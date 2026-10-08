@@ -65,3 +65,15 @@ def test_clip_prim_line_and_curve():
     assert len(parts) == 1
     xs = geo.prim_points(parts[0], 16)[:, 0]
     assert xs.min() == pytest.approx(10, abs=0.05) and xs.max() == pytest.approx(30, abs=0.05)
+
+
+@pytest.mark.parametrize("total", [1000, 300, 64, 200])
+def test_patch_cores_partition_the_axis(total):
+    """The last patch is shifted back to the edge; ownership must still be
+    exactly one patch per pixel."""
+    xs = np.arange(total) + 0.5
+    owners = np.zeros(total, int)
+    for s in geo.tile_starts(total, 64, 16):
+        a, b = geo.core_spans(total, 64, 16)[s]
+        owners += (xs >= a) & (xs < b)
+    assert (owners == 1).all()

@@ -96,6 +96,8 @@ its own copy of the classical pipeline instead).
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1] [--weights W.pth] [--ocr]  # try the model -> viewer folder + command
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepTechVec.train --data data/deepvec --prim line|curve [--threads N] [--resume]  # DeepTechVec on DeepVectoriser's dataset -> rastervec/weights/deep_tech_vec_<prim>.pth (output explained in DeepTechVec/TRAINING.md)
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepTechVec.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1] [--weights W.pth] [--refine-iters N]  # try it (OCR never runs) -> viewer folder + command
+.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.ImplicitSketchVec.train --data data/deepvec --stage dfp|ndc|joint [--basic] [--threads N] [--resume]  # ImplicitSketchVec on DeepVectoriser's dataset: dfp + ndc (concurrently), then joint -> rastervec/weights/implicit_sketch_vec.pth (ImplicitSketchVec/TRAINING.md)
+.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.ImplicitSketchVec.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1] [--weights W.pth]  # try it (OCR never runs) -> viewer folder + command
 .venv/Scripts/python.exe scripts/rasterize_pdf.py SRC [DST] --dpi 300               # flatten a PDF to pure raster (DST defaults to outputs/rasterize/)
 .venv/Scripts/python.exe scripts/label/master_label.py PDF [--dpi 300]              # full native+vector+raster label workflow, one outputs/labels/<stem>_label/ folder per PDF
 .venv/Scripts/python.exe scripts/label/native_label.py PDF --page N [--out ...]     # auto-derive native-text ground truth (GUI-free)
@@ -255,7 +257,7 @@ terminology used throughout this section. `rastervec/` is organized into six buc
 raster→vector backends), `P3_Vector_Parsing/` (pluggable vector-parsing/OCR backends),
 `P4_Output_Organization/` (the one, always-run output-combination + coordinate-space-guard
 phase) — plus `Evaluation/`, `notebooks/`, `weights/` alongside them (benchmarking/dev tooling,
-not phase code). **Sibling P2 backends (`Stub`/`Junction`/`DeepVectoriser`/`DeepTechVec`) and sibling P3 backends
+not phase code). **Sibling P2 backends (`Stub`/`Junction`/`DeepVectoriser`/`DeepTechVec`/`ImplicitSketchVec`) and sibling P3 backends
 (`LatestVectorClassification`/`OldVectorClassification`) import nothing from each other** —
 each is fully self-contained, duplicating its own copy of any infra it needs (a PaddleOCR engine
 wrapper, layer/color/width separation, a raster→vector tracer, ...) rather than sharing one. This
@@ -493,6 +495,36 @@ generic parallel-pool mechanics), never phase-specific business logic.
     `--refine-iters`. Debug layers: `color_separation`, `ocr/*`, `text_removal`, `tiles/patch grid`,
     `primitives/raw (network)` + `raw endpoints`, `refine/refined`, `merge/merged endpoints` +
     `merged vectors`, `vector_diff/total`.
+  - **`ImplicitSketchVec/`** — learned raster→stroke vectorizer: a from-scratch PyTorch
+    implementation of **Yan et al., "Deep Sketch Vectorization via Implicit Surface Extraction",
+    SIGGRAPH 2024** (`references/Deep Sketch Vectorization 3658197.pdf`). Front end copied from
+    DeepVectoriser (color separation → tiled OCR → text removal; `masks.py`, `diff.py`). Per ink
+    layer (`inference.vectorize_layer`), 256 px tiles / 32 px overlap at 300 dpi through two
+    networks (`model/network.py`): **Distance Field Prediction** (ResNeXt FCN after Puhachov et al.
+    2021, cardinality 8, dilations 1→8, heavy blocks at ½ res, 2× head; Appendix B 2×2 pad-1
+    domain conversion) → six UDFs at 2× super-resolution on the (2W+1)×(2H+1) lattice
+    (centerline, under-sampling map, end/sharp/junction keypoints, all), and **Line
+    Reconstruction** (2D NDC: 2×2 no-pad lattice→cell conversion, three residual branches at
+    dilation 1/2/3, trunk, 1×1 heads) → per 0.5 px cell 4-class edge flags (none/right/bottom/
+    both), vertex offset, skeleton. Each tile's **core** (`geometry.core_spans`: neighbouring
+    tiles split their *actual* overlap at its middle) is harvested into page-wide sparse data,
+    then `postprocess.py`: thick-only skeleton flag refinement (Fig. 5) → DC graph → break repair
+    (Fig. 6 stand-in) → USM/keypoint topology surgery (Fig. 7) → DC downsampling (Fig. 10,
+    `DC_DOWNSAMPLE` 2) → straight-through junction splitting (ours) → longest-shortest-path line
+    grouping (linear chain fallback above `GROUP_EXACT_MAX_NODES`) + end-to-end chaining →
+    Schneider Bézier fit (or RDP). Output: one `Vector` per stroke (`"c"`/`"l"`), width from the
+    ink distance transform. **No prep script — trains on DeepVectoriser's `prep_dataset.py`
+    output**; `train_data.make_targets` builds every target from the vector strokes after
+    rotation/flip augmentation (KD-tree UDFs, dense-sample grid crossings → edge flags / USM /
+    vertex map, Zhang–Suen skeleton, keypoints). **`train.py --stage dfp|ndc|joint`**: dfp (Eq. 2
+    masked L1, summed over six UDFs) and ndc (Eq. 4 on GT UDF + 1 % noise) are independent and
+    run concurrently; joint (`--init-dfp/--init-ndc`) fine-tunes end to end and writes
+    `rastervec/weights/implicit_sketch_vec.pth` (`$IMPLICITSKETCHVEC_WEIGHTS_PATH`); `--basic`;
+    log `<out stem>_train_log.csv` (output explained in `ImplicitSketchVec/TRAINING.md`).
+    **`predict.py`**: as DeepVectoriser's, OCR never runs. Debug layers: `dfp/udf centerline` +
+    `keypoints end|sharp|junc` + `under-sampling map`, `ndc/raw edges`, `refine/refined edges`,
+    `topology/refined regions`, `group/strokes`, `fit/stroke endpoints` + `fitted vectors`, plus
+    the copied ones.
 - **`P3_Vector_Parsing/`** — pluggable vector-parsing/OCR backends, selected by `p3=`, each
   implementing `parse(vectors_p1, vectors_p2, page, **kwargs) -> (vectors, texts)`:
   - **`LatestVectorClassification/`** *(the default)* — the merge of the former
@@ -883,7 +915,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
   current/legacy, `p2`, `p3`, `enable_fast`) + the `VARIANTS` registry (`current` [default p2/p3],
   `legacy`, plus named presets for benchmark comparisons across P3 backends —
   `current_latestvectorclassification`, `current_oldvectorclassification`,
-  `current_junction`, `current_deepvectoriser`, `current_deeptechvec`) +
+  `current_junction`, `current_deepvectoriser`, `current_deeptechvec`, `current_implicitsketchvec`) +
   `DEFAULT_VARIANTS` + `resolve_variant`. `engine="current"` threads `p2`/`p3`/`enable_fast` into
   `rastervec.core.pipeline.run_pipeline` (the pluggable P1→P2_REGISTRY[p2]→P3_REGISTRY[p3]
   orchestrator, see the `core/` section below); `engine="legacy"` ignores `p2`/`p3` entirely.

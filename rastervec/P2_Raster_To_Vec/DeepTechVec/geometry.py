@@ -394,12 +394,24 @@ def tile_grid(h: int, w: int, tile: int, overlap: int) -> list[tuple[int, int]]:
     return [(x, y) for y in tile_starts(h, tile, overlap) for x in tile_starts(w, tile, overlap)]
 
 
+def core_spans(total: int, tile: int, overlap: int) -> dict[int, tuple[float, float]]:
+    """Tile start -> the range `[a, b)` along one axis that tile owns.
+    Neighbouring tiles split their *actual* overlap at its middle (the last
+    tile is shifted back to the edge, so its overlap with the previous one
+    can be much more than `overlap`); image borders stay open (+-inf), so
+    geometry slightly past the edge is kept."""
+    starts = tile_starts(total, tile, overlap)
+    out = {}
+    for i, s in enumerate(starts):
+        a = float("-inf") if i == 0 else (s + starts[i - 1] + tile) / 2.0
+        b = float("inf") if i == len(starts) - 1 else (starts[i + 1] + s + tile) / 2.0
+        out[s] = (a, b)
+    return out
+
+
 def core_rect(x0: int, y0: int, size: int, h: int, w: int, overlap: int) -> tuple[float, float, float, float]:
-    """The part of a tile it "owns": its rect shrunk by half the overlap on
-    every side that has a neighbour (image borders keep their full extent)."""
-    half = overlap / 2.0
-    cx0 = x0 + half if x0 > 0 else float("-inf")
-    cy0 = y0 + half if y0 > 0 else float("-inf")
-    cx1 = x0 + size - half if x0 + size < w else float("inf")
-    cy1 = y0 + size - half if y0 + size < h else float("inf")
-    return (cx0, cy0, cx1, cy1)
+    """The part of a tile it "owns" (`core_spans` on both axes), so
+    neighbouring cores tile the image without gaps or double ownership."""
+    ax, bx = core_spans(w, size, overlap)[x0]
+    ay, by = core_spans(h, size, overlap)[y0]
+    return (ax, ay, bx, by)
