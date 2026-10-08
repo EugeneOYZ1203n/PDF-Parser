@@ -64,7 +64,9 @@ from rastervec.commons.step_timing import StepClock
 from rastervec.P3_Vector_Parsing.LatestVectorClassification.classify_vectors import (
     CROSSED_CATEGORY,
     FLAGGED_KEPT_CATEGORY,
+    PATTERN_BUCKET_CATEGORY,
     PATTERN_CATEGORY,
+    PATTERN_REJECTED_CATEGORY,
     SINGLE_VECTOR_STEPS,
     classify_vectors,
 )
@@ -639,6 +641,7 @@ _C_OCR_DETECT = "#2563eb"
 _C_DRAWING = "#111827"
 _C_DROPPED = "#dc2626"
 _C_FLAGGED = "#f59e0b"
+_C_PATTERN_REJECTED = "#2563eb"
 _C_ANGLE_QUAD = "#0891b2"
 _C_ANGLE_FINAL = "#65a30d"
 _C_ANGLE_SNAPPED = "#7c3aed"
@@ -690,8 +693,10 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
     differ from the previous step's (skipped for the oversize, collinear
     and pattern steps, whose kept entries are single Vectors the inspector
     already shows), plus one `dropped <category>` vector layer per dropped category
-    with any content -- the pattern step's colours each lattice group with
-    its own hue -- except the crossings step's, which is its own
+    with any content -- the pattern step's (`pattern` and `pattern_bucket`)
+    colour each lattice group with its own hue, and it also emits `kept
+    pattern, too much between (N groups)` for the groups that passed the
+    size check but failed the in-between test -- except the crossings step's, which is its own
     `intersection` stage: `dropped to drawing (N)` (the dominant-grid
     Vectors) and `flagged, kept (off-grid) (N)` (crossed often enough, but
     not on the dominant grid)."""
@@ -711,6 +716,7 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
         kept_groups: list = []
         dropped: dict[str, list] = {}
         flagged: list = []
+        pattern_rejected: list = []
         for steps in steps_per_bucket:
             if i >= len(steps):
                 continue
@@ -721,6 +727,8 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
                     dropped.setdefault(name, []).extend(cat.groups)
                 elif name == FLAGGED_KEPT_CATEGORY:
                     flagged.extend(cat.groups)
+                elif name == PATTERN_REJECTED_CATEGORY:
+                    pattern_rejected.extend(cat.groups)
         for name, entries in dropped.items():
             vectors = _flatten_entries(entries)
             if name == CROSSED_CATEGORY:
@@ -733,7 +741,7 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
                             render_vectors_pdf(page_meta, flagged_vectors,
                                                color_of=lambda _v: _hex_rgb(_C_FLAGGED))))
                 continue
-            if name == PATTERN_CATEGORY and vectors:
+            if name in (PATTERN_CATEGORY, PATTERN_BUCKET_CATEGORY) and vectors:
                 colors = _group_colors(entries)
                 out.append((stage, f"dropped {name} ({len(entries)} groups)", _C_DROPPED, render_vectors_pdf(
                     page_meta, vectors, color_of=lambda v, c=colors: c[id(v)],
@@ -743,6 +751,12 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
                 out.append((stage, f"dropped {name}", _C_DROPPED, render_vectors_pdf(
                     page_meta, vectors, color_of=lambda _v: _hex_rgb(_C_DROPPED),
                 )))
+        if pattern_rejected:
+            colors = _group_colors(pattern_rejected)
+            out.append((stage, f"kept pattern, too much between ({len(pattern_rejected)} groups)",
+                        _C_PATTERN_REJECTED, render_vectors_pdf(
+                            page_meta, _flatten_entries(pattern_rejected), color_of=lambda v, c=colors: c[id(v)],
+                        )))
         if label in SINGLE_VECTOR_STEPS:
             continue
         kept_boxes = sorted(

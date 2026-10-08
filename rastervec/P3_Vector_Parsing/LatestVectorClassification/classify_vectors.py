@@ -15,9 +15,13 @@ Per `(layer, color, width)` bucket, `_classify_bucket` runs seven named steps:
    Vectors (same item kinds + per-item lengths, hashed into 3 pt buckets)
    repeated on a regular translation lattice (each member within
    `PATTERN_GRID_TOL_PT` of the global grid point); a lattice group with
-   more than `PATTERN_MAX_GROUP` members *and* no link between adjacent
-   members crossing `PATTERN_LINK_FOREIGN_LIMIT`+ foreign bboxes is dropped
-   to drawing.
+   more than `PATTERN_MAX_GROUP` members (1D: `PATTERN_MAX_GROUP_1D`) *and*
+   fewer than `PATTERN_LINK_FOREIGN_MEAN_LIMIT` unique foreign bboxes per
+   link between adjacent members is dropped to drawing (`pattern`); a
+   similarity bucket with more than `PATTERN_BUCKET_DRAWING_GROUPS` such
+   groups drops its other groups of more than `PATTERN_MAX_GROUP` members
+   too (`pattern_bucket`). Groups failing only the in-between test are
+   recorded in an `info` category (`pattern_rejected`).
 3. **Seq overlap merge** (`group_filters.combine_overlapping_seq`).
 4. **Spatial cluster** (`cluster_filters.cluster_spatial_groups`). Both
    merges are capped: no group/cluster grows to a bbox of
@@ -102,6 +106,8 @@ from rastervec.P3_Vector_Parsing.LatestVectorClassification.line_geometry import
 
 OVERSIZE_CATEGORY = "oversize"  # step 0's dropped category
 PATTERN_CATEGORY = "pattern"  # step 2's dropped category (one entry per lattice group)
+PATTERN_BUCKET_CATEGORY = "pattern_bucket"  # step 2's bucket-wide dropped groups
+PATTERN_REJECTED_CATEGORY = "pattern_rejected"  # step 2's too-much-between groups (role "info")
 CROSSED_CATEGORY = "crossed"  # step 6's dropped category (parse.py's `intersection` layer)
 FLAGGED_KEPT_CATEGORY = "crossed_off_grid"  # step 6's flagged-but-kept Vectors (role "info")
 STEP_LABELS = (
@@ -258,10 +264,12 @@ def _classify_bucket(
         }))
 
     with clock("classify_pattern"):
-        kept, pattern_groups = pattern_drawing(kept)
+        kept, pattern_groups, bucket_groups, rejected_groups = pattern_drawing(kept)
         steps.append(StepResult(STEP_LABELS[2], {
             "kept": CategoryResult(_kept_singles(kept), "kept"),
             PATTERN_CATEGORY: CategoryResult(pattern_groups, "dropped"),
+            PATTERN_BUCKET_CATEGORY: CategoryResult(bucket_groups, "dropped"),
+            PATTERN_REJECTED_CATEGORY: CategoryResult(rejected_groups, "info"),
         }))
 
     with clock("classify_seqno"):

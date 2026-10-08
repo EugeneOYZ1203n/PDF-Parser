@@ -536,17 +536,26 @@ generic parallel-pool mechanics), never phase-specific business logic.
     > 50 members and length std < 5 pt → drawing), **pattern lattice** (`pattern_lattice.py`:
     Vectors bucketed by similarity — same item kinds in order + same per-item lengths hashed into
     `PATTERN_SIM_LENGTH_TOL_PT` (3 pt) buckets, rotation-invariant, bucket-boundary splits accepted;
-    in a similarity bucket of > `PATTERN_MIN_BUCKET` (20), seeds in `seqno` order take v1 = nearest
+    in a similarity bucket of > `PATTERN_MIN_BUCKET` (10), seeds in `seqno` order take v1 = nearest
     unassigned neighbour's anchor offset (anchor = first point of the first item; the query reaches
     past coincident duplicates), v2 = nearest one not parallel to it (none → 1D), least-squares
     *prefit* the basis to the seed's KNN neighbours, then *flood-fill* a connected patch over integer
     lattice sites one unit step ±v1/±v2 at a time: a Vector is claimed at a site only within
     `PATTERN_GRID_TOL_PT` (3 pt) of the **global** grid point `origin + n1·v1 + n2·v2` (and nearer
     that site than any other); an empty site is a dead end — the flood never jumps a gap; basis
-    refitted on the members whenever the site count doubles. A group → drawing only when it has >
-    `PATTERN_MAX_GROUP` (100) members **and** every link between lattice-adjacent members (segment
-    between bbox centres) crosses < `PATTERN_LINK_FOREIGN_LIMIT` (3) bboxes of foreign same-bucket
-    Vectors — interleaved content keeps the group; O(N log N) via `cKDTree`), **seqno merge**
+    refitted on the members whenever the site count doubles. A group → drawing (`pattern`) only when it has >
+    `PATTERN_MAX_GROUP` (10) members (a 1D lattice: > `PATTERN_MAX_GROUP_1D` (50), so short rows of
+    repeated glyphs/leader dots stay text) **and** the *unique* foreign same-bucket Vectors whose
+    bbox any link between lattice-adjacent members (segment between bbox centres) touches, ÷ the
+    number of links, is < `PATTERN_LINK_FOREIGN_MEAN_LIMIT` (1.0) — interleaved content keeps the
+    group, one dirty link no longer vetoes it; a group with no links (coincident copies on one site)
+    never drops. When > `PATTERN_BUCKET_DRAWING_GROUPS` (2) groups of one similarity bucket drop,
+    every other group of that bucket with > `PATTERN_MAX_GROUP` members drops too (`pattern_bucket`;
+    singletons and small groups stay); groups failing only the in-between test are recorded as
+    `role="info"` `pattern_rejected` (debug layer `kept pattern, too much between (N groups)`).
+    Any Vector with a first point is a candidate — no item-count/kind limit, polylines included.
+    O(N log N) via `cKDTree`, incl. a per-call centre tree so each group's foreign candidates are a
+    local query), **seqno merge**
     (`group_filters.combine_overlapping_seq`), **spatial cluster** (`cluster_filters.
     cluster_spatial_groups`), **length outliers** (per cluster, pool the lengths of every stroke in
     a parallel group — ≥ 2 same-angle straight Vectors — and drop those > 2 std from the mean),

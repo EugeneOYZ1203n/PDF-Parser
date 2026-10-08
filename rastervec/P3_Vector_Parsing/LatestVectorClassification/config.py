@@ -63,16 +63,23 @@ QUAD_ANGLE_SNAP_TOL_DEG = 5.0
 # flood-filled from a seed one unit step (+-v1/+-v2) at a time; a member must
 # lie within PATTERN_GRID_TOL_PT of the *global* grid point
 # origin + n1 v1 + n2 v2 (and nearer that site than any other). It is dropped
-# to drawing only when it has more than PATTERN_MAX_GROUP members AND every
-# link between lattice-adjacent members crosses fewer than
-# PATTERN_LINK_FOREIGN_LIMIT foreign (same-bucket, non-member) bboxes.
+# to drawing only when it has more than PATTERN_MAX_GROUP members (a 1D
+# lattice: more than PATTERN_MAX_GROUP_1D) AND the unique foreign (same-bucket,
+# non-member) Vectors whose bbox any link between lattice-adjacent members
+# touches, divided by the number of links, is below
+# PATTERN_LINK_FOREIGN_MEAN_LIMIT (a group with no links never drops). When
+# more than PATTERN_BUCKET_DRAWING_GROUPS groups of one similarity bucket drop,
+# every other group of that bucket with more than PATTERN_MAX_GROUP members
+# drops with them (singletons and small groups stay).
 # Neighbours closer than PATTERN_MIN_STEP_PT (coincident duplicates) never
 # define a lattice step; PATTERN_KNN neighbours are searched per seed for v1/v2.
 PATTERN_SIM_LENGTH_TOL_PT = 3.0
-PATTERN_MIN_BUCKET = 20
-PATTERN_MAX_GROUP = 100
+PATTERN_MIN_BUCKET = 10
+PATTERN_MAX_GROUP = 10
+PATTERN_MAX_GROUP_1D = 50
+PATTERN_BUCKET_DRAWING_GROUPS = 2
 PATTERN_GRID_TOL_PT = 3.0
-PATTERN_LINK_FOREIGN_LIMIT = 3
+PATTERN_LINK_FOREIGN_MEAN_LIMIT = 1.0
 PATTERN_MIN_STEP_PT = 0.05
 PATTERN_KNN = 16
 # Per cluster, strokes in parallel groups whose length is more than this many

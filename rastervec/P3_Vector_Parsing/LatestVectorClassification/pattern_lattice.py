@@ -25,19 +25,31 @@ arrays) laid out on a regular translation lattice -> drawing.
    members found so far whenever the site count doubles (sites found empty
    under the old basis may be retried after a refit).
 3. A group is **drawing** only when it has more than `PATTERN_MAX_GROUP`
-   members **and** every link (segment between the bbox centres of two
-   lattice-adjacent members) crosses fewer than `PATTERN_LINK_FOREIGN_LIMIT`
-   bboxes of foreign Vectors (the same bucket, not in the group) -- a
-   repeated glyph with other text between its copies stays a text candidate.
+   members (a 1D lattice: more than `PATTERN_MAX_GROUP_1D`, so a short row
+   of repeated glyphs or leader dots stays text) **and** the unique foreign
+   Vectors (the same bucket, not in the group) whose bbox any link (segment
+   between the bbox centres of two lattice-adjacent members) touches,
+   divided by the number of links, is below `PATTERN_LINK_FOREIGN_MEAN_LIMIT`
+   -- a repeated glyph with other text between its copies stays a text
+   candidate. A group with no links (coincident copies on one site) is no
+   pattern and never drops.
+4. **Bucket-wide drop**: when more than `PATTERN_BUCKET_DRAWING_GROUPS`
+   groups of one similarity bucket are drawing, every other group of that
+   bucket with more than `PATTERN_MAX_GROUP` members is drawing too
+   (`bucket` groups); singletons and small groups stay. Once a bucket is
+   past that count, its later large groups skip the in-between test.
 
 Cost: O(N k) hashed signatures; flooding is O(m log m) per similarity
 bucket (one static KD-tree for the site queries, the neighbour tree over
 the unassigned set rebuilt whenever that set has halved and queried past a
 seed's coincident duplicates, refits on a doubling schedule). The
 in-between test runs only for groups past the size check, builds its bbox
-arrays lazily once per call, queries short links against a KD-tree of small
-foreign bboxes (large ones brute-forced in bounded chunks) and stops at the
-first dirty link.
+arrays and a KD-tree over the bbox centres lazily once per call (so each
+group's foreign candidates are a local tree query, never a scan of the whole
+bucket), queries short links against a KD-tree of small foreign bboxes
+(large ones brute-forced in bounded chunks), tracks hits in an array sized
+to the group's own foreign candidates and stops once the unique count
+reaches the budget.
 """
 from __future__ import annotations
 
@@ -53,8 +65,10 @@ from rastervec.P3_Vector_Parsing.LatestVectorClassification.config import (
     ANGLE_TOL_DEG,
     PATTERN_GRID_TOL_PT,
     PATTERN_KNN,
-    PATTERN_LINK_FOREIGN_LIMIT,
+    PATTERN_BUCKET_DRAWING_GROUPS,
+    PATTERN_LINK_FOREIGN_MEAN_LIMIT,
     PATTERN_MAX_GROUP,
+    PATTERN_MAX_GROUP_1D,
     PATTERN_MIN_BUCKET,
     PATTERN_MIN_STEP_PT,
     PATTERN_SIM_LENGTH_TOL_PT,
@@ -65,6 +79,7 @@ _LINK_CHUNK = 4096  # links per in-between-test chunk
 _PAIR_CHUNK = 100_000  # link x large-bbox pairs per brute-force chunk
 _FIRST_REFIT = 4  # site count at the first basis refit (then doubling)
 _PREFIT_TOL = 0.25  # KNN neighbours within this of an integer site seed the prefit
+_LARGE_BOX_FACTOR = 4.0  # bboxes past this x the median half-diagonal skip the centre tree
 _STEPS_1D = ((1, 0), (-1, 0))
 _STEPS_2D = ((1, 0), (-1, 0), (0, 1), (0, -1))
 
@@ -266,10 +281,11 @@ def _claim(grid: _Grid, site: tuple[int, int], tree: cKDTree, xy: np.ndarray,
 
 
 def _flood(i: int, v1: np.ndarray, v2: np.ndarray | None, nbrs: list[int], tree: cKDTree,
-           xy: np.ndarray, assigned: np.ndarray) -> tuple[list[int], np.ndarray]:
+           xy: np.ndarray, assigned: np.ndarray) -> tuple[list[int], np.ndarray, bool]:
     """Flood-fill seed `i`'s lattice group (marks members `assigned`).
-    Returns the members in visiting order and the `(L, 2)` links between
-    lattice-adjacent sites (one representative member per site)."""
+    Returns the members in visiting order, the `(L, 2)` links between
+    lattice-adjacent sites (one representative member per site) and whether
+    the lattice is 1D."""
     grid = _Grid(xy[i].copy(), v1, v2)
     prefit_n = grid.prefit(xy[[i, *nbrs]])
     steps = _STEPS_1D if grid.one_d else _STEPS_2D
@@ -304,17 +320,17 @@ def _flood(i: int, v1: np.ndarray, v2: np.ndarray | None, nbrs: list[int], tree:
     links = [(rep, sites[(n1 + d1, n2 + d2)])
              for (n1, n2), rep in sites.items() for d1, d2 in forward
              if (n1 + d1, n2 + d2) in sites]
-    return members, np.asarray(links, dtype=np.int64).reshape(-1, 2)
+    return members, np.asarray(links, dtype=np.int64).reshape(-1, 2), grid.one_d
 
 
-def _lattice_groups(xy: np.ndarray, seqnos: list[int]) -> list[tuple[list[int], np.ndarray]]:
-    """`(members, links)` per lattice group (singletons included), seeds in
-    `seqno` order; indices into `xy`."""
+def _lattice_groups(xy: np.ndarray, seqnos: list[int]) -> list[tuple[list[int], np.ndarray, bool]]:
+    """`(members, links, one_d)` per lattice group (singletons included,
+    `one_d` True for them), seeds in `seqno` order; indices into `xy`."""
     assigned = np.zeros(len(xy), dtype=bool)
     tree = cKDTree(xy)
     live = _LiveTree(xy, assigned)
     no_links = np.zeros((0, 2), dtype=np.int64)
-    groups: list[tuple[list[int], np.ndarray]] = []
+    groups: list[tuple[list[int], np.ndarray, bool]] = []
     for i in sorted(range(len(xy)), key=lambda k: (seqnos[k], k)):
         if assigned[i]:
             continue
@@ -324,7 +340,7 @@ def _lattice_groups(xy: np.ndarray, seqnos: list[int]) -> list[tuple[list[int], 
         if v1 is None:  # no lattice: the seed and its stacked duplicates stay singletons
             for j in [i, *sorted(dups)]:
                 assigned[j] = True
-                groups.append(([j], no_links))
+                groups.append(([j], no_links, True))
             continue
         groups.append(_flood(i, v1, v2, nbrs, tree, xy, assigned))
     return groups
@@ -335,12 +351,13 @@ def ordered_groups(similar: list[Vector]) -> list[list[Vector]]:
     included), seeds in `seqno` order."""
     xy = np.asarray([anchor(v) for v in similar], dtype=float)
     return [[similar[j] for j in members]
-            for members, _links in _lattice_groups(xy, [v.seqno for v in similar])]
+            for members, _links, _one_d in _lattice_groups(xy, [v.seqno for v in similar])]
 
 
 class _Foreign:
-    """One bucket's bbox geometry for the in-between test, plus a reusable
-    member mask (cleared after every group)."""
+    """One bucket's bbox geometry for the in-between test, a KD-tree over
+    the centres of its non-large bboxes (so a group's foreign candidates are
+    a local query), plus a reusable member mask (cleared after every group)."""
 
     def __init__(self, vectors: list[Vector]):
         raw = np.asarray([v.bbox for v in vectors], dtype=float).reshape(-1, 4)
@@ -352,6 +369,28 @@ class _Foreign:
         size = self.bboxes[:, 2:] - self.bboxes[:, :2]
         self.half_diag = 0.5 * np.hypot(size[:, 0], size[:, 1])
         self.member = np.zeros(len(vectors), dtype=bool)
+        median = float(np.median(self.half_diag)) if len(self.half_diag) else 0.0
+        self.reach_cap = max(_LARGE_BOX_FACTOR * median, _EPS)
+        small = self.half_diag <= self.reach_cap
+        self.small_idx = np.flatnonzero(small)
+        self.large_idx = np.flatnonzero(~small)
+        self.tree = cKDTree(self.centres[self.small_idx]) if len(self.small_idx) else None
+
+    def near(self, box: tuple[float, float, float, float]) -> np.ndarray:
+        """Sorted indices of the non-member bboxes overlapping `box`. A small
+        bbox overlapping it has its centre within its half-diagonal (<=
+        `reach_cap`) of some point of `box`, so within `box`'s half-diagonal
+        + `reach_cap` of its centre; large ones are tested directly."""
+        x0, y0, x1, y1 = box
+        parts = [self.large_idx]
+        if self.tree is not None:
+            r = 0.5 * math.hypot(x1 - x0, y1 - y0) + self.reach_cap
+            hits = self.tree.query_ball_point(((x0 + x1) * 0.5, (y0 + y1) * 0.5), r)
+            parts.append(self.small_idx[np.asarray(hits, dtype=np.int64)])
+        cand = np.concatenate(parts)
+        b = self.bboxes[cand]
+        ok = ~self.member[cand] & (b[:, 0] <= x1) & (b[:, 2] >= x0) & (b[:, 1] <= y1) & (b[:, 3] >= y0)
+        return np.sort(cand[ok])
 
 
 def _segments_hit_boxes(p: np.ndarray, q: np.ndarray, boxes: np.ndarray) -> np.ndarray:
@@ -373,31 +412,32 @@ def _segments_hit_boxes(p: np.ndarray, q: np.ndarray, boxes: np.ndarray) -> np.n
     return ok & (t0 <= t1)
 
 
-def _links_clean(members: np.ndarray, links: np.ndarray, fg: _Foreign) -> bool:
-    """True when every link crosses fewer than `PATTERN_LINK_FOREIGN_LIMIT`
-    foreign bboxes (`members`/`links` index the bucket's Vectors)."""
+def _links_mean_clean(members: np.ndarray, links: np.ndarray, fg: _Foreign) -> bool:
+    """True when the unique foreign bboxes touched by any link, divided by
+    the number of links, is below `PATTERN_LINK_FOREIGN_MEAN_LIMIT`
+    (`members`/`links` index the bucket's Vectors); False with no links."""
     if len(links) == 0:
-        return True
+        return False
+    budget = PATTERN_LINK_FOREIGN_MEAN_LIMIT * len(links)  # clean iff unique hits < budget
     gb = fg.bboxes[members]
-    gx0, gy0 = gb[:, 0].min(), gb[:, 1].min()
-    gx1, gy1 = gb[:, 2].max(), gb[:, 3].max()
+    box = (gb[:, 0].min(), gb[:, 1].min(), gb[:, 2].max(), gb[:, 3].max())
     fg.member[members] = True
-    b = fg.bboxes
-    near = ~fg.member & (b[:, 0] <= gx1) & (b[:, 2] >= gx0) & (b[:, 1] <= gy1) & (b[:, 3] >= gy0)
+    foreign = fg.near(box)
     fg.member[members] = False
-    foreign = np.flatnonzero(near)
-    if len(foreign) < PATTERN_LINK_FOREIGN_LIMIT:
+    if len(foreign) < budget:
         return True
     a, c = fg.centres[links[:, 0]], fg.centres[links[:, 1]]
     seg_len = np.hypot(*(c - a).T)
     reach = 2.0 * float(seg_len.max())
+    # positions into `foreign`, so `hit` stays sized to this group's candidates
     small_mask = fg.half_diag[foreign] <= reach
-    small, large = foreign[small_mask], foreign[~small_mask]
-    tree = cKDTree(fg.centres[small]) if len(small) else None
+    small, large = np.flatnonzero(small_mask), np.flatnonzero(~small_mask)
+    tree = cKDTree(fg.centres[foreign[small]]) if len(small) else None
+    large_boxes = fg.bboxes[foreign[large]]
     large_chunk = max(1, _PAIR_CHUNK // max(len(large), 1))
+    hit = np.zeros(len(foreign), dtype=bool)
     for s in range(0, len(links), _LINK_CHUNK):
         ca, cc, cl = a[s:s + _LINK_CHUNK], c[s:s + _LINK_CHUNK], seg_len[s:s + _LINK_CHUNK]
-        counts = np.zeros(len(ca), dtype=np.int64)
         if tree is not None:
             # a small box touching the segment has its centre within
             # half_diag <= reach of it, so within len/2 + reach of its midpoint
@@ -407,38 +447,63 @@ def _links_clean(members: np.ndarray, links: np.ndarray, fg: _Foreign) -> bool:
             if total:
                 li = np.repeat(np.arange(len(ca)), lens)
                 fi = small[np.fromiter(chain.from_iterable(hits), dtype=np.int64, count=total)]
-                hit = _segments_hit_boxes(ca[li], cc[li], fg.bboxes[fi])
-                counts += np.bincount(li[hit], minlength=len(ca))
+                touched = _segments_hit_boxes(ca[li], cc[li], fg.bboxes[foreign[fi]])
+                hit[fi[touched]] = True
         for t in range(0, len(ca) if len(large) else 0, large_chunk):
             k = min(large_chunk, len(ca) - t)
             li = np.repeat(np.arange(t, t + k), len(large))
-            fi = np.tile(large, k)
-            hit = _segments_hit_boxes(ca[li], cc[li], fg.bboxes[fi])
-            counts += np.bincount(li[hit], minlength=len(ca))
-        if (counts >= PATTERN_LINK_FOREIGN_LIMIT).any():
+            touched = _segments_hit_boxes(ca[li], cc[li], np.tile(large_boxes, (k, 1)))
+            hit[np.tile(large, k)[touched]] = True
+        if np.count_nonzero(hit) >= budget:
             return False
     return True
 
 
-def pattern_drawing(vectors: list[Vector]) -> tuple[list[Vector], list[list[Vector]]]:
-    """`(kept, drawing_groups)` -- `kept` in input order, `drawing_groups`
-    every lattice group with more than `PATTERN_MAX_GROUP` members whose
-    links are all clean of foreign content (see the module docstring)."""
+def pattern_drawing(
+    vectors: list[Vector],
+) -> tuple[list[Vector], list[list[Vector]], list[list[Vector]], list[list[Vector]]]:
+    """`(kept, drawing_groups, bucket_groups, rejected_groups)` -- `kept` in
+    input order; `drawing_groups` every lattice group past the size check
+    (`PATTERN_MAX_GROUP`, 1D `PATTERN_MAX_GROUP_1D`) whose links pass the
+    in-between test; `bucket_groups` the other groups of more than
+    `PATTERN_MAX_GROUP` members of a similarity bucket with more than
+    `PATTERN_BUCKET_DRAWING_GROUPS` drawing groups (also dropped);
+    `rejected_groups` groups that passed the size check but failed the
+    in-between test and stay kept (debug only). See the module docstring."""
     anchors = [anchor(v) for v in vectors]
     fg: _Foreign | None = None
     dropped = np.zeros(len(vectors), dtype=bool)
-    drawing_groups: list[list[Vector]] = []
+    drawing: list[np.ndarray] = []
+    bucket: list[np.ndarray] = []
+    rejected: list[np.ndarray] = []
     for sim in _similarity_index_groups(vectors, anchors, PATTERN_MIN_BUCKET + 1):
         xy = np.asarray([anchors[i] for i in sim], dtype=float)
-        for members, links in _lattice_groups(xy, [vectors[i].seqno for i in sim]):
+        sim_drawing: list[np.ndarray] = []
+        sim_large: list[tuple[np.ndarray, bool]] = []  # (group, failed the in-between test)
+        for members, links, one_d in _lattice_groups(xy, [vectors[i].seqno for i in sim]):
             if len(members) <= PATTERN_MAX_GROUP:
+                continue
+            group = sim[members]
+            if (len(members) <= (PATTERN_MAX_GROUP_1D if one_d else PATTERN_MAX_GROUP)
+                    or len(sim_drawing) > PATTERN_BUCKET_DRAWING_GROUPS):  # dropped by the bucket rule anyway
+                sim_large.append((group, False))
                 continue
             if fg is None:
                 fg = _Foreign(vectors)
-            group = sim[members]
-            if _links_clean(group, sim[links], fg):
-                dropped[group] = True
-                drawing_groups.append([vectors[i] for i in group])
-    if not drawing_groups:
-        return list(vectors), drawing_groups
-    return [v for v, d in zip(vectors, dropped) if not d], drawing_groups
+            if _links_mean_clean(group, sim[links], fg):
+                sim_drawing.append(group)
+            else:
+                sim_large.append((group, True))
+        drawing.extend(sim_drawing)
+        if len(sim_drawing) > PATTERN_BUCKET_DRAWING_GROUPS:
+            bucket.extend(group for group, _failed in sim_large)
+        else:
+            rejected.extend(group for group, failed in sim_large if failed)
+    for group in chain(drawing, bucket):
+        dropped[group] = True
+
+    def _as_vectors(groups: list[np.ndarray]) -> list[list[Vector]]:
+        return [[vectors[i] for i in group] for group in groups]
+
+    kept = [v for v, d in zip(vectors, dropped) if not d] if dropped.any() else list(vectors)
+    return kept, _as_vectors(drawing), _as_vectors(bucket), _as_vectors(rejected)
