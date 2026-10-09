@@ -10,6 +10,9 @@ L_rec (Eq. 4) = L_edge + 0.5 L_vertex + 0.01 L_skeleton: masked
 cross-entropy over the 4 edge-flag classes (same mask, at cell centres), L2
 on the vertex positions of cells the path passes through, BCE on the 1 px
 skeleton.
+
+Both return `(loss, terms)` with the terms as detached 0-d tensors (read back
+with `float()` -- no host sync here). Pass fp32 predictions under AMP.
 """
 from __future__ import annotations
 
@@ -28,7 +31,7 @@ def udf_loss(pred: torch.Tensor, gt_px: torch.Tensor, mask: torch.Tensor) -> tup
     err = (pred * UDF_TRUNC_PX - gt_px).abs()
     per_ch = [_masked_mean(err[:, c:c + 1], mask) for c in range(err.shape[1])]
     loss = sum(per_ch)
-    return loss, {"L_line": loss.item(), "L_line_center_px": per_ch[0].item()}
+    return loss, {"L_line": loss.detach(), "L_line_center_px": per_ch[0].detach()}
 
 
 def rec_loss(out: dict, b: dict) -> tuple[torch.Tensor, dict]:
@@ -40,4 +43,4 @@ def rec_loss(out: dict, b: dict) -> tuple[torch.Tensor, dict]:
     l_vertex = ((out["vertex"] - b["vert"]) ** 2 * vm).sum() / vm.sum().clamp_min(1.0)
     l_skel = F.binary_cross_entropy_with_logits(out["skeleton"][:, 0], b["skel"])
     loss = l_edge + LAMBDA_VERTEX * l_vertex + LAMBDA_SKELETON * l_skel
-    return loss, {"L_edge": l_edge.item(), "L_vertex": l_vertex.item(), "L_skel": l_skel.item()}
+    return loss, {"L_edge": l_edge.detach(), "L_vertex": l_vertex.detach(), "L_skel": l_skel.detach()}

@@ -107,6 +107,10 @@ MIN_PATCH_INK_PX = 8
 INK_GRAY_THRESHOLD = 200
 # Patches are run through the network in batches of this many.
 INFER_BATCH_PATCHES = 256
+# torch CPU threads for inference, applied once per process when the model is
+# first loaded; None leaves torch's own choice (Pool-1/2 workers already pin
+# OMP/MKL to one thread each -- `core/parallel/pool.py::worker_init`).
+INFER_THREADS: "int | None" = None
 
 # Primitive confidence below this is discarded (paper: 0.5).
 CONFIDENCE_THRESHOLD = 0.5

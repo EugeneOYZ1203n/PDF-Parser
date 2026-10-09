@@ -115,3 +115,35 @@ This writes a `scripts/pipeline_report_viewer.py` folder with these layers:
 
 OCR never runs in `predict.py`. `--refine-iters 0` skips refinement, which
 is the slowest stage (the paper's Table 4 makes the same point).
+
+## 7. Training on GPU
+
+The repo's `requirements.txt` pins the **CPU** torch wheel (`+cpu`). On the
+training machine install a CUDA build instead, e.g.
+`pip install torch --index-url https://download.pytorch.org/whl/cu126`
+(match your driver), then check `python -c "import torch; print(torch.cuda.is_available())"`.
+`--device` defaults to `cuda` whenever it is available.
+
+On CUDA, `train.py` turns on by default:
+
+- **mixed precision** -- bf16 where the GPU supports it (Ampere and newer;
+  no loss scaling needed), else fp16 with a `GradScaler`. Losses are always
+  computed in fp32. `--no-amp` trains in fp32 (TF32 matmuls still on).
+- **cuDNN autotuning** (`cudnn.benchmark`) and **TF32** matmuls/convolutions.
+- **fused Adam**, **pinned host memory** and non-blocking host-to-GPU copies.
+- **fewer host syncs** -- loss terms are summed on the GPU and the bar's
+  running means are refreshed every `--log-every` steps (default 20), not
+  every step. The epoch line is exact.
+
+The banner shows the GPU and the AMP dtype, e.g.
+`device cuda (NVIDIA GeForce RTX 4090) | AMP bfloat16`.
+If the data side can't keep up (GPU utilisation low, the bar stalls between
+steps), raise `--workers`; the batches are built on CPU worker processes.
+
+```
+python -m rastervec.P2_Raster_To_Vec.DeepTechVec.train --data data/deepvec --prim line --workers 6
+```
+
+A checkpoint trained on GPU loads unchanged for CPU inference (weights are
+saved device-free and loaded with `map_location="cpu"`); `--resume` works
+across CPU/GPU and AMP on/off.

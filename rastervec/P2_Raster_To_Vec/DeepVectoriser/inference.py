@@ -30,7 +30,7 @@ from rastervec.commons.logging_setup import get_logger
 
 from . import geometry as geo
 from .config import (
-    CONFIDENCE_THRESHOLD, INFER_BATCH_TILES, INK_GRAY_THRESHOLD, MERGE_SNAP_PX, MIN_TILE_INK_PX,
+    CONFIDENCE_THRESHOLD, INFER_BATCH_TILES, INFER_THREADS, INK_GRAY_THRESHOLD, MERGE_SNAP_PX, MIN_TILE_INK_PX,
     SATURATION_FRAC, TILE_OVERLAP_PX, TILE_PX, WEIGHTS_ENV_VAR, WEIGHTS_FILENAME,
 )
 
@@ -64,6 +64,18 @@ def default_weights_path() -> Path:
     return Path(__file__).resolve().parents[2] / "weights" / WEIGHTS_FILENAME
 
 
+def _for_cpu_inference(model):
+    """Eval mode with frozen parameters (no autograd bookkeeping), plus the
+    `INFER_THREADS` setting for this process."""
+    import torch
+
+    if INFER_THREADS:
+        torch.set_num_threads(INFER_THREADS)
+    model.eval()
+    model.requires_grad_(False)
+    return model
+
+
 def load_model(path: "str | Path | None" = None):
     path = Path(path) if path is not None else default_weights_path()
     key = str(path)
@@ -78,8 +90,7 @@ def load_model(path: "str | Path | None" = None):
 
         from .model.liu_model import load_weights
 
-        model = load_weights(path, map_location="cpu")
-        model.eval()
+        model = _for_cpu_inference(load_weights(path, map_location="cpu"))
         _MODEL_CACHE[key] = model
         _LOG.info("DeepVectoriser model loaded from %s", path)
     return _MODEL_CACHE[key]
@@ -105,7 +116,7 @@ def predict_tiles(model, tiles: list[np.ndarray], conf_thresh: float = CONFIDENC
     if not tiles:
         return []
     device = next(model.parameters()).device
-    with torch.no_grad():
+    with torch.inference_mode():
         size_h, size_w = tiles[0].shape
         x = prepare_input(torch.from_numpy(np.stack(tiles)).to(device))
         if enc is None:

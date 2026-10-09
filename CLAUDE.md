@@ -525,6 +525,17 @@ generic parallel-pool mechanics), never phase-specific business logic.
     `keypoints end|sharp|junc` + `under-sampling map`, `ndc/raw edges`, `refine/refined edges`,
     `topology/refined regions`, `group/strokes`, `fit/stroke endpoints` + `fitted vectors`, plus
     the copied ones.
+
+  **Training is GPU-tuned, inference CPU-tuned (all three learned backends, each its own copy).**
+  `train.py` on CUDA: AMP by default (bf16 where supported, else fp16 + `GradScaler`; `--no-amp`;
+  losses always in fp32 — DeepTechVec's BCE isn't autocast-safe), cuDNN benchmark, TF32, fused
+  Adam, pinned DataLoader memory, loss terms summed on-device and read back every `--log-every`
+  steps (loss functions return detached tensors, not floats). Each `_to_device` must accept
+  **tensors as well as arrays** — a `DataLoader(batch_size=None)` converts every array to a CPU
+  tensor, and skipping those left batches on the CPU ("Input type and weight type should be the
+  same" on CUDA). `inference.py::load_model` → `_for_cpu_inference`: eval, frozen params,
+  optional `config.INFER_THREADS`; `predict_*` run under `torch.inference_mode()`;
+  ImplicitSketchVec also uses `channels_last` (~20 % faster on CPU). GPU setup: each `TRAINING.md`.
 - **`P3_Vector_Parsing/`** — pluggable vector-parsing/OCR backends, selected by `p3=`, each
   implementing `parse(vectors_p1, vectors_p2, page, **kwargs) -> (vectors, texts)`:
   - **`LatestVectorClassification/`** *(the default)* — the merge of the former

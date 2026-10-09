@@ -120,6 +120,10 @@ FLAT_TOL_PX = 0.75
 MERGE_SNAP_PX = 3.0
 # Vectorizer tiles are run through the model in batches of this many.
 INFER_BATCH_TILES = 64
+# torch CPU threads for inference, applied once per process when the model is
+# first loaded; None leaves torch's own choice (Pool-1/2 workers already pin
+# OMP/MKL to one thread each -- `core/parallel/pool.py::worker_init`).
+INFER_THREADS: "int | None" = None
 
 # ======================================================================
 # Model (model/) -- the paper's own values where it gives them; the rest

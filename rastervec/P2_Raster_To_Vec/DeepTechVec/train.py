@@ -3,7 +3,8 @@ dataset DeepVectoriser's `prep_dataset.py` writes (this backend has no prep
 script of its own -- see `train_data.py`).
 
     python -m rastervec.P2_Raster_To_Vec.DeepTechVec.train --data data/deepvec --prim line \\
-        [--epochs 17] [--batch 128] [--threads N] [--resume] [--out rastervec/weights/deep_tech_vec_line.pth]
+        [--epochs 17] [--batch 128] [--no-amp] [--threads N] [--resume] \\
+        [--out rastervec/weights/deep_tech_vec_line.pth]
 
 How to read what this prints: `TRAINING.md` next to this file.
 
@@ -28,6 +29,11 @@ a line and a curve run writing to the same folder don't share a log).
 `<out>.last.ckpt` is saved every epoch (`--resume` continues from it);
 `--out` gets the model with the best validation IoU -- the file the P2
 adapter loads. A non-finite loss saves `<out>.last.ckpt` and exits 2.
+
+On CUDA: mixed precision by default (bf16 where the GPU supports it, else
+fp16 + loss scaling; --no-amp for fp32; the loss itself is always fp32),
+fused Adam, cuDNN autotuning, TF32 matmuls, pinned host memory, and loss
+terms summed on the GPU, read back only every --log-every steps.
 """
 from __future__ import annotations
 
@@ -117,6 +123,41 @@ def fixed_patches(layers: _Layers, probs: np.ndarray, n: int, cfg: dict, seed: i
 
 
 # ---------------------------------------------------------------------------
+# Device setup
+# ---------------------------------------------------------------------------
+def _setup_device(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True        # fixed patch size: autotuned kernels pay off
+        torch.set_float32_matmul_precision("high")   # TF32 for the fp32 parts
+
+
+def _amp_dtype(device: torch.device, enabled: bool):
+    """bf16 where the GPU has it (no loss scaling needed), else fp16; None
+    = full precision (always on CPU)."""
+    if not enabled or device.type != "cuda":
+        return None
+    return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
+
+def _loader(stream, workers: int, device: torch.device) -> torch.utils.data.DataLoader:
+    # persistent_workers stays off: each epoch's workers must see the new `stream.epoch`
+    extra = {"prefetch_factor": 4} if workers > 0 else {}
+    return torch.utils.data.DataLoader(stream, batch_size=None, num_workers=workers, persistent_workers=False,
+                                       pin_memory=device.type == "cuda", **extra)
+
+
+def _accumulate(sums: dict, terms: dict) -> None:
+    """Sum loss terms without a host sync (tensors stay on the device)."""
+    for k, v in terms.items():
+        v = v.detach().float() if torch.is_tensor(v) else float(v)
+        sums[k] = sums[k] + v if k in sums else v
+
+
+def _means(sums: dict, n: int) -> dict[str, float]:
+    return {k: float(v) / max(n, 1) for k, v in sums.items()}
+
+
+# ---------------------------------------------------------------------------
 # Schedule + step
 # ---------------------------------------------------------------------------
 def noam_lr(step: int, d_model: int, warmup: int, factor: float) -> float:
@@ -125,11 +166,13 @@ def noam_lr(step: int, d_model: int, warmup: int, factor: float) -> float:
     return factor * d_model ** -0.5 * min(step ** -0.5, step * warmup ** -1.5)
 
 
-def train_step(model: PrimitiveNet, batch: dict, device) -> tuple[torch.Tensor, dict]:
-    gray = torch.as_tensor(batch["gray"]).to(device)
-    target = torch.as_tensor(batch["target"]).to(device)
-    pred = model(prepare_input(gray))
-    return primitive_loss(pred, target)
+def train_step(model: PrimitiveNet, batch: dict, device, amp_dtype=None) -> tuple[torch.Tensor, dict]:
+    device = torch.device(device)
+    gray = torch.as_tensor(batch["gray"]).to(device, non_blocking=True)
+    target = torch.as_tensor(batch["target"]).to(device, non_blocking=True)
+    with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
+        pred = model(prepare_input(gray))
+    return primitive_loss(pred.float(), target.float())
 
 
 # ---------------------------------------------------------------------------
@@ -179,10 +222,11 @@ def validate(model: PrimitiveNet, patches: list[td.Patch], device, batch: int) -
 # ---------------------------------------------------------------------------
 # Checkpoints
 # ---------------------------------------------------------------------------
-def save_last(path: Path, model, opt, step: int, epoch: int, best: float) -> None:
+def save_last(path: Path, model, opt, step: int, epoch: int, best: float, scaler=None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save({"config": model.cfg, "model": model.state_dict(), "opt": opt.state_dict(),
+                "scaler": scaler.state_dict() if scaler is not None else {},
                 "step": step, "epoch": epoch, "best": best}, tmp)
     tmp.replace(path)
 
@@ -205,6 +249,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--lr-factor", type=float, default=1.0, help="Noam schedule factor")
     ap.add_argument("--val-crops", type=int, default=512)
     ap.add_argument("--workers", type=int, default=2, help="DataLoader workers")
+    ap.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True,
+                    help="mixed precision on CUDA (bf16 where supported, else fp16); --no-amp for fp32")
+    ap.add_argument("--log-every", type=int, default=20, help="progress-bar refresh interval (steps)")
     ap.add_argument("--threads", type=int, default=None,
                     help="torch CPU threads (default: torch's own choice, ~all cores)")
     ap.add_argument("--cache-dir", default=None,
@@ -222,6 +269,8 @@ def main(argv: list[str] | None = None) -> int:
     last = out.with_name(out.name + ".last.ckpt")
     log_csv = out.with_name(f"{out.stem}_train_log.csv")
     device = torch.device(args.device)
+    _setup_device(device)
+    amp_dtype = _amp_dtype(device, args.amp)
     if args.threads:
         torch.set_num_threads(args.threads)
     cache_dir = Path(args.cache_dir) if args.cache_dir else None
@@ -240,7 +289,9 @@ def main(argv: list[str] | None = None) -> int:
         resume_blob = torch.load(last, map_location="cpu", weights_only=False)
     cfg = resume_blob["config"] if resume_blob else {**(TINY_CONFIG if args.tiny else MODEL_DEFAULTS),
                                                      "prim_kind": args.prim}
-    banner(f"DeepTechVec training ({cfg['prim_kind']}) | device {device}"
+    gpu = f" ({torch.cuda.get_device_name(device)})" if device.type == "cuda" else ""
+    banner(f"DeepTechVec training ({cfg['prim_kind']}) | device {device}{gpu}"
+           f"{f' | AMP ' + str(amp_dtype).split('.')[-1] if amp_dtype else ''}"
            f"{f' | {torch.get_num_threads()} threads' if device.type == 'cpu' else ''} | data {data}\n"
            f"train layers {len(index['train'])}, val layers {len(index['val'])} | out {out}\nmodel {cfg}")
 
@@ -259,11 +310,16 @@ def main(argv: list[str] | None = None) -> int:
                f"{sum(p.overflow for p in val)} truncated to n_prim={cfg['n_prim']}")
 
     model = build_model(cfg).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=0.0, betas=(0.9, 0.98), eps=1e-9)
+    opt = torch.optim.Adam(model.parameters(), lr=0.0, betas=(0.9, 0.98), eps=1e-9,
+                           fused=device.type == "cuda" or None)
+    # loss scaling only for fp16 (bf16 has fp32's range); disabled = pass-through
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_dtype == torch.float16)
     step, epoch0, best = 0, 0, -1.0
     if resume_blob:
         model.load_state_dict(resume_blob["model"])
         opt.load_state_dict(resume_blob["opt"])
+        if resume_blob.get("scaler"):  # absent / empty for older or fp32 checkpoints
+            scaler.load_state_dict(resume_blob["scaler"])
         step, epoch0, best = resume_blob["step"], resume_blob["epoch"], resume_blob["best"]
         tqdm.write(f"resumed from {last}: epoch {epoch0}, step {step}, best val IoU {best:.4f}")
 
@@ -284,8 +340,7 @@ def main(argv: list[str] | None = None) -> int:
             ctx["epoch"] = ep
             stream.epoch = ep
             t_ep = time.perf_counter()
-            loader = torch.utils.data.DataLoader(stream, batch_size=None, num_workers=args.workers,
-                                                 persistent_workers=False)
+            loader = _loader(stream, args.workers, device)
             sums: dict[str, float] = {}
             n = 0
             opt.zero_grad(set_to_none=True)
@@ -293,28 +348,30 @@ def main(argv: list[str] | None = None) -> int:
                        unit="batch")
             for i, batch in enumerate(bar):
                 ctx["step"] = i
-                loss, terms = train_step(model, batch, device)
+                loss, terms = train_step(model, batch, device, amp_dtype)
                 if not torch.isfinite(loss):
                     raise TrainError(f"non-finite loss {loss.item()} (terms {terms})")
-                (loss / args.accum).backward()
+                scaler.scale(loss / args.accum).backward()
                 if (i + 1) % args.accum == 0:
                     step += 1
                     lr = noam_lr(step, model.d_emb, args.warmup, args.lr_factor)
                     for g in opt.param_groups:
                         g["lr"] = lr
+                    scaler.unscale_(opt)
                     nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    opt.step()
+                    scaler.step(opt)
+                    scaler.update()
                     opt.zero_grad(set_to_none=True)
                 n += 1
-                for k, v in {"loss": loss.item(), **terms, "overflow": batch["overflow"]}.items():
-                    sums[k] = sums.get(k, 0.0) + v
-                bar.set_postfix({k: f"{v / n:.4f}" for k, v in sums.items()}, refresh=False)
+                _accumulate(sums, {"loss": loss, **terms, "overflow": batch["overflow"]})
+                if n % args.log_every == 0:  # a host sync -- not every step
+                    bar.set_postfix({k: f"{v:.4f}" for k, v in _means(sums, n).items()}, refresh=False)
             bar.close()
             ctx["step"] = "validation"
             metrics = validate(model, val, device, args.batch)
             row = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "prim": cfg["prim_kind"], "epoch": ep, "steps": n,
                    "lr": f"{noam_lr(step, model.d_emb, args.warmup, args.lr_factor):.3e}",
-                   **{k: round(v / max(n, 1), 6) for k, v in sums.items()},
+                   **{k: round(v, 6) for k, v in _means(sums, n).items()},
                    **{k: round(v, 4) for k, v in metrics.items()},
                    "seconds": round(time.perf_counter() - t_ep, 1)}
             writer.writerow(row)
@@ -325,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
                 best = metrics["val_iou"]
                 save_weights(out, model, {"epoch": ep, "step": step, **metrics})
                 tqdm.write(f"  new best val IoU {best:.4f} -> {out}")
-            save_last(last, model, opt, step, ep + 1, best)
+            save_last(last, model, opt, step, ep + 1, best, scaler)
         if not out.exists():
             save_weights(out, model, {"note": "no validation improvement"})
             tqdm.write(f"saved final model -> {out}")
@@ -337,7 +394,7 @@ def main(argv: list[str] | None = None) -> int:
             raise
         tqdm.write(f"\nTRAINING FAILED at epoch={ctx['epoch']} step={ctx['step']}: {type(exc).__name__}: {exc}")
         try:
-            save_last(last, model, opt, step, ctx["epoch"] or 0, best)
+            save_last(last, model, opt, step, ctx["epoch"] or 0, best, scaler)
             tqdm.write(f"state saved to {last} (resume with --resume; the failed epoch restarts)")
         except Exception as save_exc:  # noqa: BLE001
             tqdm.write(f"could not save {last}: {save_exc}")

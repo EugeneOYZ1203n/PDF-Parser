@@ -33,8 +33,8 @@ from rastervec.commons.logging_setup import get_logger
 
 from . import geometry as geo
 from .config import (
-    CONFIDENCE_THRESHOLD, DEFAULT_PRIM_KIND, INFER_BATCH_PATCHES, INK_GRAY_THRESHOLD, MERGE, MIN_PATCH_INK_PX,
-    MIN_PRIM_LEN_PX, PATCH_OVERLAP_PX, PATCH_PX, REFINE_ITERS, WEIGHTS_ENV_VAR, WEIGHTS_FILENAMES,
+    CONFIDENCE_THRESHOLD, DEFAULT_PRIM_KIND, INFER_BATCH_PATCHES, INFER_THREADS, INK_GRAY_THRESHOLD, MERGE,
+    MIN_PATCH_INK_PX, MIN_PRIM_LEN_PX, PATCH_OVERLAP_PX, PATCH_PX, REFINE_ITERS, WEIGHTS_ENV_VAR, WEIGHTS_FILENAMES,
 )
 
 _LOG = get_logger("P2.DeepTechVec.infer")
@@ -52,6 +52,18 @@ def default_weights_path(kind: str = DEFAULT_PRIM_KIND) -> Path:
     return Path(__file__).resolve().parents[2] / "weights" / WEIGHTS_FILENAMES[kind]
 
 
+def _for_cpu_inference(model):
+    """Eval mode with frozen parameters (no autograd bookkeeping), plus the
+    `INFER_THREADS` setting for this process."""
+    import torch
+
+    if INFER_THREADS:
+        torch.set_num_threads(INFER_THREADS)
+    model.eval()
+    model.requires_grad_(False)
+    return model
+
+
 def load_model(path: "str | Path | None" = None):
     path = Path(path) if path is not None else default_weights_path()
     key = str(path)
@@ -66,8 +78,7 @@ def load_model(path: "str | Path | None" = None):
 
         from .model.network import load_weights
 
-        model = load_weights(path, map_location="cpu")
-        model.eval()
+        model = _for_cpu_inference(load_weights(path, map_location="cpu"))
         _MODEL_CACHE[key] = model
         _LOG.info("DeepTechVec model (%s) loaded from %s", model.kind, path)
     return _MODEL_CACHE[key]
@@ -92,7 +103,7 @@ def predict_patches(model, patches: list[np.ndarray], conf_thresh: float = CONFI
         return []
     size = patches[0].shape[0]
     device = next(model.parameters()).device
-    with torch.no_grad():
+    with torch.inference_mode():
         out = model(prepare_input(torch.from_numpy(np.stack(patches)).to(device))).cpu().numpy()
     return [decode_output(row, model.kind, size, conf_thresh) for row in out]
 

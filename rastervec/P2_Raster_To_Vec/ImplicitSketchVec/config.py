@@ -172,6 +172,10 @@ TILE_OVERLAP_PX = 32
 MIN_TILE_INK_PX = 8
 # Tiles per network batch.
 INFER_BATCH_TILES = 4
+# torch CPU threads for inference, applied once per process when the model is
+# first loaded; None leaves torch's own choice (Pool-1/2 workers already pin
+# OMP/MKL to one thread each -- `core/parallel/pool.py::worker_init`).
+INFER_THREADS: "int | None" = None
 # A cell's vertex is stored only where the predicted centerline UDF at the
 # cell centre is below this (px, ours) -- vertices exist only next to flagged
 # edges, and flags only near strokes.

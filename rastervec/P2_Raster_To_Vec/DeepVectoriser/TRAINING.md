@@ -38,7 +38,7 @@ model {'d_model': 32, 'd_emb': 8, 'n_stroke': 16, ... 'max_prims': 4, 'dropout':
 
 | field | meaning |
 |---|---|
-| `device` | `cpu` or `cuda`; `(AMP)` is added when mixed precision is on (CUDA only) |
+| `device` | `cpu` or `cuda` (with the GPU name); `AMP bfloat16` / `AMP float16` is added when mixed precision is on (CUDA, default) |
 | `16 threads` | torch's CPU threads for the model (CPU only); change it with `--threads` |
 | `train layers` / `val layers` | (page × colour layer) samples from `index.json`. Val layers come from **held-out pages**, so val scores measure drawings the model never trained on |
 | `out` | where the best weights go; the P2 adapter loads `rastervec/weights/deep_vectoriser.pth` by default |
@@ -101,7 +101,8 @@ joint ep 1/3:  55%|#####5    | 11/20 [04:22<02:59, 19.89s/batch, loss=1693.0473,
 ```
 
 The numbers after the timing are **running means over the epoch so far**, so
-they settle as the epoch progresses.
+they settle as the epoch progresses (refreshed every `--log-every` steps,
+default 20; they appear after the first 20 steps).
 
 | term | stages | what it measures (paper eq.) | scale |
 |---|---|---|---|
@@ -195,8 +196,9 @@ saves `<out>.last.ckpt`, and exits with code **2**. Run again with `--resume`.
   extra processes building joint-stage crops. They share the CPU, so if the
   joint bar stalls waiting for data, raise `--workers`. If the machine is
   oversubscribed, lower `--threads`.
-- `--amp` and `--grad-checkpoint` are GPU memory and speed options. They do
-  nothing useful on CPU.
+- Mixed precision (on by default, `--no-amp` to disable) and
+  `--grad-checkpoint` are GPU memory and speed options. AMP is never used on
+  CPU; `--grad-checkpoint` does nothing useful there.
 - You can stop at any time (Ctrl+C) and continue with `--resume`. The
   checkpoint is written after every epoch, so the epoch in progress is lost.
 
@@ -217,3 +219,39 @@ python -m rastervec.P2_Raster_To_Vec.DeepVectoriser.predict --pdf X.pdf --pages 
 
 It writes a viewer folder and prints the `pipeline_report_viewer.py` command
 to open it.
+
+## 10. Training on GPU
+
+The repo's `requirements.txt` pins the **CPU** torch wheel (`+cpu`). On the
+training machine install a CUDA build instead, e.g.
+`pip install torch --index-url https://download.pytorch.org/whl/cu126`
+(match your driver), then check `python -c "import torch; print(torch.cuda.is_available())"`.
+`--device` defaults to `cuda` whenever it is available.
+
+On CUDA, `train.py` turns on by default:
+
+- **mixed precision** -- bf16 where the GPU supports it (Ampere and newer;
+  no loss scaling needed), else fp16 with a `GradScaler`. Losses are always
+  computed in fp32. `--no-amp` trains in fp32 (TF32 matmuls still on).
+- **cuDNN autotuning** (`cudnn.benchmark`) and **TF32** matmuls/convolutions.
+- **fused Adam**, **pinned host memory** and non-blocking host-to-GPU copies.
+- **fewer host syncs** -- loss terms are summed on the GPU and the bar's
+  running means are refreshed every `--log-every` steps (default 20), not
+  every step. The epoch line is exact.
+- `--grad-checkpoint` trades compute for memory in the UNet decoder if the
+  joint stage runs out of GPU memory at 256 px crops; so does lowering
+  `--max-decode-strokes` or `--batch` (with `--accum` to keep the
+  effective batch).
+
+The banner shows the GPU and the AMP dtype, e.g.
+`device cuda (NVIDIA GeForce RTX 4090) | AMP bfloat16`.
+If the data side can't keep up (GPU utilisation low, the bar stalls between
+steps), raise `--workers`; the batches are built on CPU worker processes.
+
+```
+python -m rastervec.P2_Raster_To_Vec.DeepVectoriser.train --data data/deepvec --workers 6
+```
+
+A checkpoint trained on GPU loads unchanged for CPU inference (weights are
+saved device-free and loaded with `map_location="cpu"`); `--resume` works
+across CPU/GPU and AMP on/off.

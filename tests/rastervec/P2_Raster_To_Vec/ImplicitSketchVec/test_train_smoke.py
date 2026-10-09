@@ -99,3 +99,18 @@ def test_each_stage_overfits_one_batch():
             opt.step()
             losses.append(loss.item())
         assert losses[-1] < 0.6 * losses[0], (stage, losses[0], losses[-1])
+
+
+def test_to_device_moves_dataloader_tensor_batches(tmp_path):
+    """Training batches come out of a DataLoader as CPU *tensors*; they must
+    reach the model's device with the right dtypes."""
+    data = _fake_dataset(tmp_path / "data")
+    index = json.loads((data / "index.json").read_text())
+    stream = train.CropStream(data, index["train"], np.ones(1), batch=2, steps=1, seed=0)
+    batch = next(iter(torch.utils.data.DataLoader(stream, batch_size=None, num_workers=0)))
+    assert isinstance(batch["gray"], torch.Tensor)
+    moved = train._to_device(batch, "meta")
+    for k, v in batch.items():
+        if isinstance(v, (np.ndarray, torch.Tensor)):
+            assert moved[k].device.type == "meta", k
+    assert moved["edge"].dtype == torch.long and moved["udf"].dtype == torch.float32

@@ -1,7 +1,7 @@
 """Train DeepVectoriser (Liu et al., AAAI-22) on a `prep_dataset.py` output.
 
     python -m rastervec.P2_Raster_To_Vec.DeepVectoriser.train --data data/deepvec \\
-        [--device cuda] [--amp] [--epochs 50] [--batch 16] [--accum 1] [--resume] \\
+        [--device cuda] [--no-amp] [--epochs 50] [--batch 16] [--accum 1] [--resume] \\
         [--threads N] [--cache-dir DIR] [--out rastervec/weights/deep_vectoriser.pth]
 
 How to read what this prints: `TRAINING.md` next to this file.
@@ -18,9 +18,12 @@ The paper's schedule ("Training" section), run automatically, stage by stage:
              step; all three modules end to end on Eq. 10, conditioned on
              the encoder's own predicted F_i.
 
-Three Adam optimizers (encoder / decoder+UNet / vectorizer, lr 1e-4), AMP
-(--amp, CUDA only), gradient accumulation (--accum), gradient checkpointing
-of the UNet decoder (--grad-checkpoint).
+Three Adam optimizers (encoder / decoder+UNet / vectorizer, lr 1e-4; fused
+on CUDA), gradient accumulation (--accum), gradient checkpointing of the
+UNet decoder (--grad-checkpoint). On CUDA, mixed precision is on by default
+(bf16 where the GPU supports it, else fp16 + loss scaling; --no-amp for
+fp32), with cuDNN autotuning, TF32 matmuls and pinned host memory; loss
+terms are summed on the GPU and read back only every --log-every steps.
 
 Progress: one tqdm bar per epoch with the live loss terms, a banner per
 stage, validation after every epoch (endpoint L1 px; for the supervise and
@@ -192,10 +195,61 @@ def _has_grad(opt) -> bool:
 
 
 def _to_device(batch: dict, device) -> dict:
+    """Arrays *and* tensors to `device`: the joint stage's DataLoader has
+    already turned every array into a (CPU) tensor, the other stages hand
+    numpy straight from `_prefetch`."""
     out = {}
     for k, v in batch.items():
-        out[k] = torch.as_tensor(v).to(device, non_blocking=True) if isinstance(v, np.ndarray) else v
+        if isinstance(v, (np.ndarray, torch.Tensor)):
+            out[k] = torch.as_tensor(v).to(device, non_blocking=True)
+        else:
+            out[k] = v
     return out
+
+
+def _pinned(batch: dict) -> dict:
+    """numpy batch -> page-locked tensors, so the host->GPU copy is async."""
+    return {k: torch.from_numpy(np.ascontiguousarray(v)).pin_memory() if isinstance(v, np.ndarray) else v
+            for k, v in batch.items()}
+
+
+# ---------------------------------------------------------------------------
+# Device setup
+# ---------------------------------------------------------------------------
+def _setup_device(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True        # crop sizes repeat: autotuned kernels pay off
+        torch.set_float32_matmul_precision("high")   # TF32 for the fp32 parts
+
+
+def _amp_dtype(device: torch.device, enabled: bool):
+    """bf16 where the GPU has it (no loss scaling needed), else fp16; None
+    = full precision (always on CPU)."""
+    if not enabled or device.type != "cuda":
+        return None
+    return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
+
+def _adam(params, device: torch.device, lr: float) -> torch.optim.Adam:
+    return torch.optim.Adam(params, lr=lr, fused=device.type == "cuda" or None)
+
+
+def _loader(stream, workers: int, device: torch.device) -> torch.utils.data.DataLoader:
+    # persistent_workers stays off: each epoch's workers must see the new `stream.epoch`
+    extra = {"prefetch_factor": 4} if workers > 0 else {}
+    return torch.utils.data.DataLoader(stream, batch_size=None, num_workers=workers, persistent_workers=False,
+                                       pin_memory=device.type == "cuda", **extra)
+
+
+def _accumulate(sums: dict, terms: dict) -> None:
+    """Sum loss terms without a host sync (tensors stay on the device)."""
+    for k, v in terms.items():
+        v = v.detach().float() if torch.is_tensor(v) else float(v)
+        sums[k] = sums[k] + v if k in sums else v
+
+
+def _means(sums: dict, n: int) -> dict[str, float]:
+    return {k: float(v) / max(n, 1) for k, v in sums.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +273,7 @@ def step_bootstrap(model: LiuVectorizer, emb: nn.Embedding, b: dict, cap: int):
     skips = model.unet.encode(x)
     logits = model.decoder_head(model.unet.decode(skips, cond, img, stop_level=0))
     l_r = L.recon_loss_sum(logits, b["raster"][sel][:, None]) / len(sel)
-    return LAMBDA_RECON * l_r, {"L_R": l_r.item()}
+    return LAMBDA_RECON * l_r, {"L_R": l_r.detach()}
 
 
 def step_supervise(model: LiuVectorizer, emb: nn.Embedding, b: dict, cap: int, beta: float):
@@ -228,7 +282,7 @@ def step_supervise(model: LiuVectorizer, emb: nn.Embedding, b: dict, cap: int, b
     l_f = L.feature_loss(enc, b["endpoints"], b["valid"], beta)
     m = len(b["stroke_img"])
     if m == 0:
-        return l_f, {"L_F": l_f.item()}
+        return l_f, {"L_F": l_f.detach()}
     img, slot = b["stroke_img"], b["stroke_slot"]
     target = torch.zeros_like(enc["emb"])
     target[img, slot] = emb(b["stroke_ids"]).detach().to(target.dtype)
@@ -243,7 +297,7 @@ def step_supervise(model: LiuVectorizer, emb: nn.Embedding, b: dict, cap: int, b
     pc, pe = model.vectorizer(mem, cond, b["seq_in"][sel], pad_mask=pad)
     l_p = L.primitive_loss_sum(pc, pe, b["curves"][sel], b["prim_mask"][sel], b["n_prims"][sel], beta) / len(sel)
     loss = l_f + l_emb + LAMBDA_PRIM * l_p
-    return loss, {"L_F": l_f.item(), "L_emb": l_emb.item(), "L_P": l_p.item()}
+    return loss, {"L_F": l_f.detach(), "L_emb": l_emb.detach(), "L_P": l_p.detach()}
 
 
 def step_joint(model: LiuVectorizer, b: dict, cap: int, beta: float):
@@ -252,7 +306,7 @@ def step_joint(model: LiuVectorizer, b: dict, cap: int, beta: float):
     l_f = L.feature_loss(enc, b["endpoints"], b["valid"], beta)
     m = len(b["stroke_img"])
     if m == 0:
-        return l_f, {"L_F": l_f.item()}
+        return l_f, {"L_F": l_f.detach()}
     sel = _subsample(m, cap, x.device)
     img, slot = b["stroke_img"][sel], b["stroke_slot"][sel]
     cond = model.make_cond(enc["endpoints"][img, slot], enc["emb"][img, slot],
@@ -266,7 +320,7 @@ def step_joint(model: LiuVectorizer, b: dict, cap: int, beta: float):
     l_p_sum = L.primitive_loss_sum(pc, pe, b["curves"][sel], b["prim_mask"][sel], b["n_prims"][sel], beta)
     loss = L.total_loss(l_f, l_r_sum, l_p_sum, len(sel))
     n = len(sel)
-    return loss, {"L_F": l_f.item(), "L_R": l_r_sum.item() / n, "L_P": l_p_sum.item() / n}
+    return loss, {"L_F": l_f.detach(), "L_R": l_r_sum.detach() / n, "L_P": l_p_sum.detach() / n}
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +421,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--accum", type=int, default=1, help="gradient accumulation steps")
     ap.add_argument("--lr", type=float, default=1e-4)
-    ap.add_argument("--amp", action="store_true", help="mixed precision (CUDA only)")
+    ap.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True,
+                    help="mixed precision on CUDA (bf16 where supported, else fp16); --no-amp for fp32")
     ap.add_argument("--grad-checkpoint", action="store_true", help="checkpoint the UNet decoder")
     ap.add_argument("--max-decode-strokes", type=int, default=128,
                     help="strokes per batch through the raster/vector branches (memory cap)")
@@ -377,6 +432,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="torch CPU threads for the model (default: torch's own choice, ~all cores)")
     ap.add_argument("--cache-dir", default=None,
                     help="where layer PNGs are decoded once for memory-mapping (default: <data>/cache)")
+    ap.add_argument("--log-every", type=int, default=20, help="progress-bar refresh interval (steps)")
     ap.add_argument("--resume", action="store_true", help="continue from <out>.last.ckpt")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--tiny", action="store_true", help="tiny model (smoke tests only)")
@@ -390,7 +446,8 @@ def main(argv: list[str] | None = None) -> int:
     last = out.with_name(out.name + ".last.ckpt")
     log_csv = out.parent / "train_log.csv"
     device = torch.device(args.device)
-    amp = bool(args.amp and device.type == "cuda")
+    _setup_device(device)
+    amp_dtype = _amp_dtype(device, args.amp)
     if args.threads:
         torch.set_num_threads(args.threads)
     cache_dir = Path(args.cache_dir) if args.cache_dir else None
@@ -408,7 +465,9 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"--resume: {last} not found")
         resume_blob = torch.load(last, map_location="cpu", weights_only=False)
     cfg = resume_blob["config"] if resume_blob else dict(TINY_CONFIG if args.tiny else MODEL_DEFAULTS)
-    banner(f"DeepVectoriser training | device {device}{' (AMP)' if amp else ''}"
+    gpu = f" ({torch.cuda.get_device_name(device)})" if device.type == "cuda" else ""
+    banner(f"DeepVectoriser training | device {device}{gpu}"
+           f"{f' | AMP ' + str(amp_dtype).split('.')[-1] if amp_dtype else ''}"
            f"{f' | {torch.get_num_threads()} threads' if device.type == 'cpu' else ''} | data {data}\n"
            f"train layers {len(index['train'])}, val layers {len(index['val'])} | out {out}\n"
            f"model {cfg}")
@@ -437,11 +496,12 @@ def main(argv: list[str] | None = None) -> int:
     nn.init.normal_(emb.weight, std=0.1)
     groups = model.module_groups()
     optims = {
-        "encoder": torch.optim.Adam(groups["encoder"], lr=args.lr),
-        "decoder": torch.optim.Adam(groups["decoder"] + list(emb.parameters()), lr=args.lr),
-        "vectorizer": torch.optim.Adam(groups["vectorizer"], lr=args.lr),
+        "encoder": _adam(groups["encoder"], device, args.lr),
+        "decoder": _adam(groups["decoder"] + list(emb.parameters()), device, args.lr),
+        "vectorizer": _adam(groups["vectorizer"], device, args.lr),
     }
-    scaler = torch.amp.GradScaler("cuda", enabled=amp)
+    # loss scaling only for fp16 (bf16 has fp32's range); disabled = pass-through
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_dtype == torch.float16)
     stage_i, epoch0, best = 0, 0, float("inf")
     if resume_blob:
         model.load_state_dict(resume_blob["model"])
@@ -452,7 +512,8 @@ def main(argv: list[str] | None = None) -> int:
                 o.load_state_dict(resume_blob["optims"][k])
             except (KeyError, ValueError) as exc:
                 tqdm.write(f"WARNING: optimizer '{k}' state not restored ({exc})")
-        scaler.load_state_dict(resume_blob["scaler"])
+        if resume_blob.get("scaler"):  # empty when saved from a disabled scaler
+            scaler.load_state_dict(resume_blob["scaler"])
         stage_i, epoch0, best = resume_blob["stage_i"], resume_blob["epoch"], resume_blob["best"]
         tqdm.write(f"resumed from {last}: stage {STAGES[stage_i]}, epoch {epoch0}, best {best:.3f}")
 
@@ -486,13 +547,12 @@ def main(argv: list[str] | None = None) -> int:
                 t_ep = time.perf_counter()
                 if stage == "joint":
                     stream.epoch = ep
-                    loader = torch.utils.data.DataLoader(stream, batch_size=None, num_workers=args.workers,
-                                                         persistent_workers=False)
+                    loader = _loader(stream, args.workers, device)
                     total = args.steps_per_epoch
                 else:
                     # supervise never reads the stroke rasters -- don't draw them
-                    loader = _prefetch(_batches_from(boot, args.batch, cfg, rng, boot_offsets,
-                                                     with_raster=stage == "bootstrap"))
+                    gen = _batches_from(boot, args.batch, cfg, rng, boot_offsets, with_raster=stage == "bootstrap")
+                    loader = _prefetch(map(_pinned, gen) if device.type == "cuda" else gen)
                     total = math.ceil(len(boot) / args.batch)
                 sums: dict[str, float] = {}
                 n_steps = 0
@@ -503,7 +563,7 @@ def main(argv: list[str] | None = None) -> int:
                     ctx.update(step=step, size=int(batch["size"]))
                     b = _to_device(batch, device)
                     beta = float(batch["size"])
-                    with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp):
+                    with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
                         if stage == "bootstrap":
                             loss, terms = step_bootstrap(model, emb, b, args.max_decode_strokes)
                         elif stage == "supervise":
@@ -529,15 +589,14 @@ def main(argv: list[str] | None = None) -> int:
                         for o in optims.values():
                             o.zero_grad(set_to_none=True)
                     n_steps += 1
-                    sums["loss"] = sums.get("loss", 0.0) + loss.item()
-                    for k, v in terms.items():
-                        sums[k] = sums.get(k, 0.0) + v
-                    bar.set_postfix({k: f"{v / n_steps:.4f}" for k, v in sums.items()}, refresh=False)
+                    _accumulate(sums, {"loss": loss, **terms})
+                    if n_steps % args.log_every == 0:  # a host sync -- not every step
+                        bar.set_postfix({k: f"{v:.4f}" for k, v in _means(sums, n_steps).items()}, refresh=False)
                 bar.close()
                 ctx.update(step="validation")
                 metrics = validate(model, val_set, device, full=stage != "bootstrap")
                 row = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "stage": stage, "epoch": ep, "steps": n_steps,
-                       **{k: round(v / max(n_steps, 1), 6) for k, v in sums.items()},
+                       **{k: round(v, 6) for k, v in _means(sums, n_steps).items()},
                        **{k: round(v, 4) for k, v in metrics.items()},
                        "seconds": round(time.perf_counter() - t_ep, 1)}
                 writer.writerow(row)

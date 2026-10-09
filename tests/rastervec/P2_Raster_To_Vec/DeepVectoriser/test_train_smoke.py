@@ -77,3 +77,18 @@ def test_joint_step_loss_decreases_when_overfitting_one_batch():
         opt.step()
         losses.append(loss.item())
     assert losses[-1] < 0.5 * losses[0]
+
+
+def test_to_device_moves_dataloader_tensor_batches(tmp_path):
+    """The joint stage's DataLoader yields CPU *tensors*, not arrays; they must
+    still reach the model's device (else CUDA training fails with "Input type
+    and weight type should be the same")."""
+    data = _fake_prep(tmp_path / "prep")
+    index = json.loads((data / "index.json").read_text())
+    stream = train.CropStream(data, index["train"], np.ones(1), train.TINY_CONFIG, batch=2, steps=1, seed=0)
+    batch = next(iter(torch.utils.data.DataLoader(stream, batch_size=None, num_workers=0)))
+    assert isinstance(batch["gray"], torch.Tensor)
+    moved = train._to_device(batch, "meta")
+    for k, v in batch.items():
+        if isinstance(v, (np.ndarray, torch.Tensor)):
+            assert moved[k].device.type == "meta", k
