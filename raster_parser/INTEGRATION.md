@@ -114,6 +114,7 @@ uv sync --group dev --group notebook --group test
 | `scripts/dto_reconstruct_pipeline.py` | Replay `NativePDFElements` JSON / PDF → drawings |
 | `scripts/debug/ocr_test_script.py` | Staged Type-2 native-vs-OCR (single page) |
 | `scripts/debug/batch_test_script.py` | Staged Type-2 batch eval |
+| `scripts/inspector/` | PDF layer inspector GUI (`python -m scripts.inspector.inspector [pdf]`) — see its `README.md` |
 
 Helpers for batch eval live in `raster_parser.native_vs_ocr` (e.g. `text_to_vector`,
 `page_stats`). That path writes `onlyfill.pdf`, `ocr.pdf`, `out_results.txt`, etc.,
