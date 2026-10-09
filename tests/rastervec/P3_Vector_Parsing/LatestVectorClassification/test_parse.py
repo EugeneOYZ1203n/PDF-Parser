@@ -55,7 +55,7 @@ def _strokes(vector):
 
 def test_parse_empty_input_returns_empty_output(page_meta):
     debug_out: dict = {}
-    drawing, texts = lvc.parse([], [], _page(page_meta), verbose=True, debug_out=debug_out)
+    drawing, texts = lvc.parse([], _page(page_meta), verbose=True, debug_out=debug_out)
     assert drawing == [] and texts == []
     assert debug_out["rotation"] == []
     assert debug_out["retry_stats"] == {"0": 0, "1": 0, "2": 0, "3": 0, "failed": 0}
@@ -75,7 +75,7 @@ def test_parse_detects_on_the_unrotated_render(page_meta, vector, monkeypatch):
     _patch_rec(monkeypatch, "III")
     strokes = _strokes(vector)
     debug_out: dict = {}
-    drawing, texts = lvc.parse(strokes, [], _page(page_meta), debug_out=debug_out)
+    drawing, texts = lvc.parse(strokes, _page(page_meta), debug_out=debug_out)
     # The render is taller than wide (4 pt x 10 pt + padding) -- not rotated.
     h, w = seen_shapes[0][:2]
     assert h > w
@@ -96,7 +96,7 @@ def test_parse_quad_angle_drives_the_text_direction(page_meta, vector, monkeypat
     _patch_rec(monkeypatch, "AB")
     debug_out: dict = {}
     _drawing, texts = lvc.parse(
-        [vector(bbox=(10.0, 10.0, 60.0, 40.0), width=0.5, seqno=1)], [], _page(page_meta), debug_out=debug_out,
+        [vector(bbox=(10.0, 10.0, 60.0, 40.0), width=0.5, seqno=1)], _page(page_meta), debug_out=debug_out,
     )
     (entry,) = debug_out["rotation"]
     assert entry["quad_angle_deg"] == pytest.approx(30.0, abs=0.5)
@@ -128,7 +128,7 @@ def test_parse_quad_angle_snaps_to_global_angle_within_tolerance(
     _patch_rec(monkeypatch, "AB")
     debug_out: dict = {}
     text_vec = vector(bbox=(10.0, 10.0, 60.0, 40.0), width=0.5, seqno=1)
-    lvc.parse([text_vec] + _collinear_pair(vector, 30.0), [], _page(page_meta), debug_out=debug_out)
+    lvc.parse([text_vec] + _collinear_pair(vector, 30.0), _page(page_meta), debug_out=debug_out)
     assert debug_out["global_angles"] == pytest.approx([30.0], abs=0.01)
     entry = next(e for e in debug_out["rotation"] if e["quad_angle_raw_deg"] == pytest.approx(quad_deg, abs=0.5))
     assert entry["snapped"] is snapped
@@ -141,7 +141,7 @@ def test_parse_classifier_flip_turns_the_text_180(page_meta, vector, monkeypatch
     _patch_rec(monkeypatch, "AB", flip=180)
     debug_out: dict = {}
     _drawing, texts = lvc.parse(
-        [vector(bbox=(10.0, 10.0, 60.0, 40.0), width=0.5, seqno=1)], [], _page(page_meta), debug_out=debug_out,
+        [vector(bbox=(10.0, 10.0, 60.0, 40.0), width=0.5, seqno=1)], _page(page_meta), debug_out=debug_out,
     )
     (entry,) = debug_out["rotation"]
     assert entry["cls_flip_deg"] == 180
@@ -159,14 +159,14 @@ def test_recog_0_debug_crop_is_what_the_recogniser_read(page_meta, vector, monke
     _patch_rec(monkeypatch, "AB", flip=flip)
     vectors = [vector(bbox=(10.0, 10.0, 60.0, 40.0), width=0.5, seqno=1)]
     debug_out: dict = {}
-    lvc.parse(vectors, [], _page(page_meta), debug_out=debug_out)
+    lvc.parse(vectors, _page(page_meta), debug_out=debug_out)
     (cls_crop,) = debug_out["paddle_classifier_crops"]
     ((recog_crop, text),) = debug_out["recog_bucket_crops"]["0"]
     expected = np.rot90(cls_crop, 2) if flip else cls_crop
     assert text == "AB" and np.array_equal(recog_crop, expected)
 
     streamed: dict = {}
-    lvc.parse(vectors, [], _page(page_meta),
+    lvc.parse(vectors, _page(page_meta),
               on_debug_image=lambda folder, _name, make: streamed.setdefault(folder, []).append(make()))
     (cls_img,) = streamed["rotation_classifier"]
     (recog_img,) = streamed["recog_0"]
@@ -199,7 +199,7 @@ def _one_vector_run(page_meta, vector, monkeypatch):
     v = vector(bbox=(10.0, 10.0, 30.0, 15.0), width=0.5, seqno=1)  # wider than tall -> quad angle 0
     monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: _whole_image_quad(bgr))
     debug_out: dict = {}
-    _drawing, texts = lvc.parse([v], [], _page(page_meta), debug_out=debug_out)
+    _drawing, texts = lvc.parse([v], _page(page_meta), debug_out=debug_out)
     return texts, debug_out
 
 
@@ -265,7 +265,7 @@ def test_parse_all_blank_is_failed_and_its_vectors_are_drawing(page_meta, vector
     v = vector(bbox=(10.0, 10.0, 30.0, 15.0), width=0.5, seqno=1)
     monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: _whole_image_quad(bgr))
     debug_out: dict = {}
-    drawing, texts = lvc.parse([v], [], _page(page_meta), debug_out=debug_out)
+    drawing, texts = lvc.parse([v], _page(page_meta), debug_out=debug_out)
     assert texts == [] and drawing == [v]  # a blank quad owns nothing
     assert debug_out["rotation"][0]["retry_count"] is None
     assert debug_out["retry_stats"]["failed"] == 1
@@ -292,7 +292,7 @@ def test_parse_dispatches_detect_and_recognize_through_compute(page_meta, vector
     _patch_rec(monkeypatch, "X")
     compute = _FakeComputePool()
     _drawing, texts = lvc.parse(
-        [vector(bbox=(10.0, 10.0, 20.0, 20.0), width=0.5, seqno=1)], [], _page(page_meta), compute=compute,
+        [vector(bbox=(10.0, 10.0, 20.0, 20.0), width=0.5, seqno=1)], _page(page_meta), compute=compute,
     )
     assert [t.text for t in texts] == ["X"]
     assert compute.starmap_calls[0][0] is lvc._detect_job
@@ -304,9 +304,9 @@ def test_parse_streaming_matches_batch_render_debug(page_meta, vector, monkeypat
     _patch_rec(monkeypatch, "X")
     page = _page(page_meta)
     streamed: list[tuple] = []
-    lvc.parse(_strokes(vector), [], page, verbose=True, on_debug_layer=lambda *layer: streamed.append(layer))
+    lvc.parse(_strokes(vector), page, verbose=True, on_debug_layer=lambda *layer: streamed.append(layer))
     debug_out: dict = {}
-    lvc.parse(_strokes(vector), [], page, verbose=True, debug_out=debug_out)
+    lvc.parse(_strokes(vector), page, verbose=True, debug_out=debug_out)
     batch = lvc.render_debug(debug_out, page.meta)
 
     assert [(s, l) for s, l, _h, _p in streamed] == [(s, l) for s, l, _h, _p in batch]
@@ -472,12 +472,12 @@ def test_parse_times_every_step_without_nesting(page_meta, vector, monkeypatch):
     page = _page(page_meta)
 
     steps: dict = {}
-    lvc.parse(_strokes(vector), [], page, step_durations=steps)
+    lvc.parse(_strokes(vector), page, step_durations=steps)
     assert set(steps) == _TIMED_STEPS  # no outer `classify`, no `debug_render`
     assert all(secs >= 0.0 for secs in steps.values())
 
     steps = {}
-    lvc.parse(_strokes(vector), [], page, step_durations=steps, on_debug_layer=lambda *layer: None)
+    lvc.parse(_strokes(vector), page, step_durations=steps, on_debug_layer=lambda *layer: None)
     assert set(steps) == _TIMED_STEPS | {"debug_render"}
 
     # The sub-steps partition phase3: none is nested inside another, so a

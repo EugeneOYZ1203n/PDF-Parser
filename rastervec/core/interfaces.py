@@ -14,5 +14,5 @@ class Phase2Backend(Protocol):
 
 class Phase3Backend(Protocol):
     def __call__(
-        self, vectors_p1: list[Vector], vectors_p2: list[Vector], page: Page,
+        self, vectors: list[Vector], page: Page,
     ) -> tuple[list[Vector], list[Text]]: ...

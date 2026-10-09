@@ -12,10 +12,11 @@ the standalone PDF-layer inspector tool lives outside it, at `scripts/inspector/
 between two always-the-same phases, behind one shared harness**, not a fixed step sequence:
 **Phase 1** (`P1_Reading_Native/`, always the same) opens the PDF and extracts native text + raw
 vectors + page/embedded images; **Phase 2** (`P2_Raster_To_Vec/`, pluggable — `Stub` no-op, or
-`Junction`, a ported classical raster→vector pipeline) turns Phase 1's images into additional
-vectors; **Phase 3** (`P3_Vector_Parsing/`, pluggable — `LatestVectorClassification` (the default),
-or `OldVectorClassification` (a frozen 2026-09-29 baseline — never edit it)) takes Phase 1's + Phase 2's vectors and produces the final vectors + OCR'd
-text; **Phase 4** (`P4_Output_Organization/`, always the same) combines every phase's text/vector
+`Junction`, a ported classical raster→vector pipeline) gets **only Phase 1's images** and turns them
+into vectors + OCR'd text; **Phase 3** (`P3_Vector_Parsing/`, pluggable — `LatestVectorClassification` (the default),
+or `OldVectorClassification` (a frozen 2026-09-29 baseline — never edit it)) gets **only Phase 1's
+vectors** and produces classified vectors + OCR'd text — P2 and P3 are independent branches, P3
+never sees P2's output; **Phase 4** (`P4_Output_Organization/`, always the same) combines every phase's text/vector
 output into the final `(texts, vectors)` pair and is a coordinate-space consistency backstop (logs
 a warning if any item's bbox doesn't fit the page's own unrotated MediaBox — see "Coordinate
 spaces" below). `core/` is the orchestrator + registry + the stable public API surface, and
@@ -86,7 +87,7 @@ its own copy of the classical pipeline instead).
 ```
 .venv/Scripts/python.exe -m pip install -r requirements.txt                        # install deps
 .venv/Scripts/python.exe -m scripts.inspector.inspector [path/to.pdf]              # run the PDF layer inspector
-.venv/Scripts/python.exe -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 LatestVectorClassification]  # run the pluggable pipeline (P1 -> P2_REGISTRY[p2] -> P3_REGISTRY[p3])
+.venv/Scripts/python.exe -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 LatestVectorClassification]  # run the pluggable pipeline (P1 -> {P2_REGISTRY[p2] on images, P3_REGISTRY[p3] on vectors} -> P4)
 .venv/Scripts/python.exe scripts/generate_pipeline_report.py --config run.json      # config-driven per-stage report (PDFs + stats + dump.json per source PDF)
 .venv/Scripts/python.exe scripts/pipeline_report_viewer.py <run>/<stem> [<run2>/<stem>]  # Tkinter viewer: source page + toggleable stage-PDF overlays (1-2 folders side by side)
 .venv/Scripts/python.exe scripts/pipeline_report_benchmark.py --run DIR1 [--run DIR2]  # multiclass-score + chart benchmark report folders (1 or 2) on shared inputs
@@ -301,9 +302,9 @@ generic parallel-pool mechanics), never phase-specific business logic.
     p3="LatestVectorClassification", enable_fast=True, verbose=False, compute=None, progress_counter=None,
     on_debug_layer=None) -> PipelineResult`. Body: `phase1 = P1.read_and_extract(...)` →
     `p2_vectors, p2_texts = P2_REGISTRY[p2](phase1.images, phase1.page)` → `p3_vectors, p3_texts =
-    P3_REGISTRY[p3](phase1.vectors, p2_vectors, phase1.page, **forwarded_kwargs)` →
-    `texts, vectors = P4.organize_outputs(phase1.texts, p2_texts, p3_texts, p3_vectors,
-    phase1.page)` (forwarded kwargs — `enable_fast`/`verbose`/`compute`/`progress_counter`/
+    P3_REGISTRY[p3](phase1.vectors, phase1.page, **forwarded_kwargs)` (P1 vectors only — P2's
+    vectors bypass P3) → `texts, vectors = P4.organize_outputs(phase1.texts, p2_texts, p3_texts,
+    p2_vectors, p3_vectors, phase1.page)` (forwarded kwargs — `enable_fast`/`verbose`/`compute`/`progress_counter`/
     `debug_out`/`on_debug_layer` — are only passed to a backend whose own signature declares that
     parameter, via `inspect.signature`; `on_debug_layer` is the streaming counterpart to
     `debug_out`/`render_debug` — see `registry.py`'s docstring. `enable_fast`/`progress_counter`
@@ -314,7 +315,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
     [--no-fast] [--stop-after phase1|phase2|phase3] [-v]`. `stop_after` (`STEP_NAMES`) really
     stops the run after that phase — later backends are never called and get no
     `step_durations` entry; Phase 4 still runs, with the raw P1(+P2) vectors as output when P3
-    was skipped.
+    was skipped (P2's vectors reach P4 either way).
   - **`registry.py`** — `P2_REGISTRY`/`P3_REGISTRY` (name → backend callable),
     `resolve_p2`/`resolve_p3` (`ValueError` listing valid names on a miss), `DEFAULT_P2="Stub"`,
     `DEFAULT_P3="LatestVectorClassification"`. Also `P2_RENDER_DEBUG`/`P3_RENDER_DEBUG` — a *separate*,
@@ -333,7 +334,9 @@ generic parallel-pool mechanics), never phase-specific business logic.
     in each applicable dict here.
   - **`interfaces.py`** — the `Phase2Backend`/`Phase3Backend` `Protocol`s (structural, not
     enforced at runtime): `Phase2Backend.__call__(images, page) -> (vectors, texts)`;
-    `Phase3Backend.__call__(vectors_p1, vectors_p2, page) -> (vectors, texts)`.
+    `Phase3Backend.__call__(vectors, page) -> (vectors, texts)` (P1's vectors only). The frozen
+    `OldVectorClassification` keeps its old `(vectors_p1, vectors_p2, page)` signature;
+    `registry.py` registers a `functools.wraps` adapter that passes `[]` for `vectors_p2`.
   - **`result.py`** — `PipelineResult`: `page` (`page.fitz_page` is `None` — use
     `PipelineResult.open_page()` to reopen the source PDF), `texts`, `vectors`, `step_durations`,
     `p2`, `p3`, `extra: dict` (verbose-only: `extra["phase1"]` — the whole `Phase1Result`,
@@ -537,10 +540,10 @@ generic parallel-pool mechanics), never phase-specific business logic.
   optional `config.INFER_THREADS`; `predict_*` run under `torch.inference_mode()`;
   ImplicitSketchVec also uses `channels_last` (~20 % faster on CPU). GPU setup: each `TRAINING.md`.
 - **`P3_Vector_Parsing/`** — pluggable vector-parsing/OCR backends, selected by `p3=`, each
-  implementing `parse(vectors_p1, vectors_p2, page, **kwargs) -> (vectors, texts)`:
+  implementing `parse(vectors_p1, page, **kwargs) -> (vectors, texts)` — Phase 1's vectors only:
   - **`LatestVectorClassification/`** *(the default)* — the merge of the former
     `VectorClassification` and experimental `CollinearVectorClass` backends (Collinear was the
-    base). `parse.py` combines `vectors_p1 + vectors_p2` into one flat pool, then
+    base). `parse.py` takes `vectors_p1` as one flat pool, then
     `classify_vectors.py` runs six steps per `(layer, color, width)` bucket (width key =
     `layer_color_separation.width_key`: stroke width rounded to 0.01 pt, `None` for fill-only
     `"f"` vectors): **collinear drawing** (a same-infinite-line group of straight Vectors with
@@ -650,9 +653,9 @@ generic parallel-pool mechanics), never phase-specific business logic.
   (`(layer, color, width)`, see above); `OldVectorClassification` uses `(layer, color)` only.
 - **`P4_Output_Organization/`** — the one, always-run output-organization phase (not pluggable,
   same style as `P1_Reading_Native/` — no reason for this to vary by backend):
-  `organize.py::organize_outputs(texts_p1, texts_p2, texts_p3, vectors_p3, page) -> (texts,
-  vectors)`. Two jobs: (1) combine every phase's text output (`phase1.texts + p2_texts +
-  p3_texts`) with Phase 3's already-final vectors into the one `(texts, vectors)` pair
+  `organize.py::organize_outputs(texts_p1, texts_p2, texts_p3, vectors_p2, vectors_p3, page) ->
+  (texts, vectors)`. Two jobs: (1) combine every phase's text output (`phase1.texts + p2_texts +
+  p3_texts`) with Phase 2's and Phase 3's vectors (disjoint branches, merged in seqno paint order) into the one `(texts, vectors)` pair
   `core.pipeline.run_pipeline` returns — moved out of `pipeline.py` itself into this named seam;
   (2) a coordinate-space consistency backstop — every `Text`/`Vector` is supposed to stay in
   unrotated MediaBox space end-to-end (see "Coordinate spaces" above), so this logs a warning
@@ -937,7 +940,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
   `current_latestvectorclassification`, `current_oldvectorclassification`,
   `current_junction`, `current_deepvectoriser`, `current_deeptechvec`, `current_implicitsketchvec`) +
   `DEFAULT_VARIANTS` + `resolve_variant`. `engine="current"` threads `p2`/`p3`/`enable_fast` into
-  `rastervec.core.pipeline.run_pipeline` (the pluggable P1→P2_REGISTRY[p2]→P3_REGISTRY[p3]
+  `rastervec.core.pipeline.run_pipeline` (the pluggable P1→{P2_REGISTRY[p2] ∥ P3_REGISTRY[p3]}→P4
   orchestrator, see the `core/` section below); `engine="legacy"` ignores `p2`/`p3` entirely.
   `scripts/generate_pipeline_report.py`'s `ReportConfig` doesn't go through this registry for the
   `current` engine — its own `p2`/`p3` fields build a `PipelineVariant` directly, so a report run
@@ -1294,7 +1297,7 @@ for unit tests since those are gitignored and give no exact expected values to a
 
 1. New folder under `P2_Raster_To_Vec/` or `P3_Vector_Parsing/`, implementing `Phase2Backend`/
    `Phase3Backend` (`core/interfaces.py`): `extract(images, page) -> (vectors, texts)` or
-   `parse(vectors_p1, vectors_p2, page, **kwargs) -> (vectors, texts)`. **Fully self-contained**
+   `parse(vectors_p1, page, **kwargs) -> (vectors, texts)`. **Fully self-contained**
    — duplicate whatever infra (FAST detector, PaddleOCR engine wrapper, layer/color separation,
    Radon deskew, ...) the backend needs internally rather than importing a sibling P2/P3 backend;
    `commons/` is the only shared layer. Split real logic into small private functions per

@@ -15,7 +15,7 @@ def test_organize_outputs_combines_every_source_in_order(page_meta, text, vector
     t1, t2, t3 = text(text="a"), text(text="b"), text(text="c")
     v1 = vector(bbox=(0, 0, 10, 10))
 
-    texts, vectors = organize_outputs([t1], [t2], [t3], [v1], page)
+    texts, vectors = organize_outputs([t1], [t2], [t3], [], [v1], page)
 
     assert texts == [t1, t2, t3]
     assert vectors == [v1]
@@ -27,7 +27,7 @@ def test_organize_outputs_leaves_in_bounds_geometry_untouched(page_meta, text, v
     v = vector(bbox=(10.0, 10.0, 190.0, 90.0))
 
     with caplog.at_level(logging.WARNING):
-        texts, vectors = organize_outputs([t], [], [], [v], page)
+        texts, vectors = organize_outputs([t], [], [], [], [v], page)
 
     assert texts == [t]
     assert vectors == [v]
@@ -42,7 +42,7 @@ def test_organize_outputs_warns_on_out_of_bounds_text(page_meta, text, caplog):
     t = text(bbox=(5.0, 5.0, 50.0, 150.0))
 
     with caplog.at_level(logging.WARNING):
-        organize_outputs([t], [], [], [], page)
+        organize_outputs([t], [], [], [], [], page)
 
     assert any("outside the unrotated MediaBox" in r.message for r in caplog.records)
 
@@ -52,7 +52,7 @@ def test_organize_outputs_warns_on_out_of_bounds_vector(page_meta, vector, caplo
     v = vector(bbox=(-5.0, 0.0, 10.0, 10.0))
 
     with caplog.at_level(logging.WARNING):
-        organize_outputs([], [], [], [v], page)
+        organize_outputs([], [], [], [], [v], page)
 
     assert any("outside the unrotated MediaBox" in r.message for r in caplog.records)
 
@@ -62,7 +62,7 @@ def test_organize_outputs_tolerates_tiny_float_overrun(page_meta, vector, caplog
     v = vector(bbox=(0.0, 0.0, 200.0001, 100.0001))
 
     with caplog.at_level(logging.WARNING):
-        organize_outputs([], [], [], [v], page)
+        organize_outputs([], [], [], [], [v], page)
 
     assert not caplog.records
 
@@ -72,7 +72,7 @@ def test_organize_outputs_returns_vectors_in_seqno_paint_order(page_meta, vector
     page = _page(page_meta, width=200.0, height=100.0)
     a, b, c = vector(seqno=5), vector(seqno=-2), vector(seqno=1)
 
-    _texts, vectors = organize_outputs([], [], [], [a, b, c], page)
+    _texts, vectors = organize_outputs([], [], [], [], [a, b, c], page)
 
     assert vectors == [b, c, a]
 
@@ -81,7 +81,18 @@ def test_organize_outputs_seqno_sort_is_stable_on_ties(page_meta, vector):
     page = _page(page_meta, width=200.0, height=100.0)
     first, second, earlier = vector(seqno=3), vector(seqno=3), vector(seqno=0)
 
-    _texts, vectors = organize_outputs([], [], [], [first, second, earlier], page)
+    _texts, vectors = organize_outputs([], [], [], [], [first, second, earlier], page)
 
     assert vectors[0] is earlier
     assert vectors[1] is first and vectors[2] is second
+
+
+def test_organize_outputs_merges_p2_and_p3_vectors_in_seqno_order(page_meta, vector):
+    # P2 and P3 are independent branches; P4 is where their vectors meet.
+    page = _page(page_meta, width=200.0, height=100.0)
+    p2_a, p2_b = vector(seqno=-5), vector(seqno=-4)
+    p3_a, p3_b = vector(seqno=2), vector(seqno=0)
+
+    _texts, vectors = organize_outputs([], [], [], [p2_a, p2_b], [p3_a, p3_b], page)
+
+    assert vectors == [p2_a, p2_b, p3_b, p3_a]

@@ -1,12 +1,15 @@
-"""The pluggable pipeline: Phase 1 (always the same) -> Phase 2 (P2_REGISTRY
-choice) -> Phase 3 (P3_REGISTRY choice) -> Phase 4 (always the same). See
+"""The pluggable pipeline: Phase 1 (always the same) feeds two independent
+branches -- Phase 2 (P2_REGISTRY choice, P1's images only) and Phase 3
+(P3_REGISTRY choice, P1's vectors only) -- whose texts + vectors all meet,
+with P1's native texts, in Phase 4 (always the same). See
 `core/registry.py` for the backend names and `core/interfaces.py` for the
 contract each implements.
 
     phase1 = P1.read_and_extract(pdf_path, page_index)             # texts, images, vectors
     p2_vectors, p2_texts = P2_REGISTRY[p2](phase1.images, phase1.page)
-    p3_vectors, p3_texts = P3_REGISTRY[p3](phase1.vectors, p2_vectors, phase1.page)
-    texts, vectors = P4.organize_outputs(phase1.texts, p2_texts, p3_texts, p3_vectors, phase1.page)
+    p3_vectors, p3_texts = P3_REGISTRY[p3](phase1.vectors, phase1.page)
+    texts, vectors = P4.organize_outputs(
+        phase1.texts, p2_texts, p3_texts, p2_vectors, p3_vectors, phase1.page)
     -> PipelineResult(texts=texts, vectors=vectors, ...)
 
 CLI: `python -m rastervec.core.pipeline --pdf PATH --page N [--p2 Stub] [--p3 LatestVectorClassification]
@@ -35,10 +38,9 @@ STEP_NAMES = ("phase1", "phase2", "phase3")
 def _rebase_p2_seqnos(p2_vectors: list, p2_texts: list, phase1) -> tuple[list, list]:
     """Shift Phase 2's seqnos into one block entirely below Phase 1's,
     keeping P2's own relative order. P2 backends number from 0 and can't see
-    Phase 1, so without this their seqnos collide with native ones: P4's
-    paint-order sort would interleave them and P3's seqno merge would treat
-    unrelated native/traced vectors as draw-order neighbours. Below, not
-    above: traced raster content paints first, native vectors on top.
+    Phase 1, so without this their seqnos collide with native ones and P4's
+    paint-order sort would interleave them. Below, not above: traced raster
+    content paints first, native vectors on top.
     Seqnos may go negative -- they are only ever compared for order."""
     p2_items = list(p2_vectors) + list(p2_texts)
     if not p2_items:
@@ -134,8 +136,12 @@ def run_pipeline(
     `stop_after` (`None` or one of `STEP_NAMES`) really stops the run after
     that phase: later P2/P3 backends are never called and get no
     `step_durations` entry. Phase 4 still runs on what exists -- with P3
-    skipped, the output vectors are the raw, unclassified P1 (+ P2) vectors
+    skipped, the output vectors are the raw, unclassified P1 vectors (+ P2's)
     and the texts are native (+ P2) only.
+
+    P2 and P3 are independent: P2 gets only P1's images, P3 only P1's
+    vectors, and P2's vectors/texts go straight to Phase 4 alongside P3's.
+    They still run in sequence, P2 first.
 
     Phase 2's seqnos are rebased below Phase 1's (`_rebase_p2_seqnos`), so
     in Phase 4's seqno paint order traced raster vectors sit under native
@@ -186,7 +192,7 @@ def run_pipeline(
             p2_vectors, p2_texts = _rebase_p2_seqnos(p2_vectors, p2_texts, phase1)
 
     if run_p3:
-        _LOG.info("phase3 (p3=%s): %d P1 + %d P2 vector(s)", p3, len(phase1.vectors), len(p2_vectors))
+        _LOG.info("phase3 (p3=%s): %d P1 vector(s)", p3, len(phase1.vectors))
         with timer("phase3"):
             p3_kwargs = {}
 
@@ -206,15 +212,15 @@ def run_pipeline(
                 p3_kwargs["on_debug_image"] = on_debug_image
             if "step_durations" in sig.parameters:
                 p3_kwargs["step_durations"] = p3_substeps
-            p3_vectors, p3_texts = p3_fn(phase1.vectors, p2_vectors, phase1.page, **p3_kwargs)
+            p3_vectors, p3_texts = p3_fn(phase1.vectors, phase1.page, **p3_kwargs)
     else:
-        # P3 is what classifies vectors; without it the raw P1 + P2 vectors
-        # are the run's output.
-        p3_vectors = list(phase1.vectors) + list(p2_vectors)
+        # P3 is what classifies P1's vectors; without it they pass through
+        # raw (P2's vectors reach Phase 4 on their own either way).
+        p3_vectors = list(phase1.vectors)
 
     with timer("phase4"):
         texts, vectors = organize_outputs(
-            phase1.texts, p2_texts, p3_texts, p3_vectors, phase1.page,
+            phase1.texts, p2_texts, p3_texts, p2_vectors, p3_vectors, phase1.page,
         )
 
     if verbose:

@@ -31,6 +31,8 @@ call-time callback, not a lookup) -- see each backend's own module for
 whether it's supported."""
 from __future__ import annotations
 
+import functools
+
 from rastervec.core.interfaces import Phase2Backend, Phase3Backend
 from rastervec.P2_Raster_To_Vec.DeepTechVec.adapter import extract as _deep_tech_vec_extract
 from rastervec.P2_Raster_To_Vec.DeepTechVec.adapter import render_debug as _deep_tech_vec_render_debug
@@ -50,6 +52,17 @@ from rastervec.P3_Vector_Parsing.OldVectorClassification.parse import (
     render_debug as _old_vector_classification_render_debug,
 )
 
+
+@functools.wraps(_old_vector_classification_parse)
+def _old_vector_classification_p3(vectors_p1, page, **kwargs):
+    """Adapts the frozen backend's 2026-09-29 `parse(vectors_p1, vectors_p2,
+    page)` signature to the current P3 contract (P1 vectors only -- P2's
+    vectors go straight to Phase 4). `functools.wraps` keeps
+    `inspect.signature` reporting the frozen function's kwargs, so
+    `run_pipeline`'s kwarg forwarding still sees them."""
+    return _old_vector_classification_parse(vectors_p1, [], page, **kwargs)
+
+
 P2_REGISTRY: dict[str, Phase2Backend] = {
     "Stub": _stub_extract,
     "Junction": _junction_extract,
@@ -61,7 +74,7 @@ P2_REGISTRY: dict[str, Phase2Backend] = {
 P3_REGISTRY: dict[str, Phase3Backend] = {
     "LatestVectorClassification": _latest_vector_classification_parse,
     # Frozen 2026-09-29 snapshot -- see P3_Vector_Parsing/OldVectorClassification/README.md.
-    "OldVectorClassification": _old_vector_classification_parse,
+    "OldVectorClassification": _old_vector_classification_p3,
 }
 
 P2_RENDER_DEBUG: dict[str, object] = {

@@ -279,7 +279,7 @@ def test_parse_splits_a_long_quad_between_vectors(page_meta, vector, monkeypatch
     monkeypatch.setattr(lvc, "MAX_CROP_ASPECT", 2.0)
     _patch_rec(monkeypatch)
     strokes = _row_of_strokes(vector)
-    drawing, texts = lvc.parse(strokes, [], _page(page_meta))
+    drawing, texts = lvc.parse(strokes, _page(page_meta))
     assert len(texts) >= 2
     xs = sorted(t.bbox[0] for t in texts)[1:]
     # Every interior cut lies midway between two strokes (x = 15, 25, ...).
@@ -291,7 +291,7 @@ def test_parse_splits_a_long_quad_between_vectors(page_meta, vector, monkeypatch
 def test_parse_does_not_split_a_short_quad(page_meta, vector, monkeypatch):
     monkeypatch.setattr(PaddleDetectBackend, "detect", _whole_image_quad)
     _patch_rec(monkeypatch)
-    _drawing, texts = lvc.parse(_row_of_strokes(vector, 3), [], _page(page_meta))
+    _drawing, texts = lvc.parse(_row_of_strokes(vector, 3), _page(page_meta))
     assert len(texts) == 1
 
 
@@ -308,7 +308,7 @@ def test_on_debug_image_streams_images_and_keeps_no_arrays(page_meta, vector, mo
         seen.append((folder, name, img.size))
 
     debug_out: dict = {}
-    lvc.parse(_row_of_strokes(vector, 3), [], _page(page_meta), verbose=True,
+    lvc.parse(_row_of_strokes(vector, 3), _page(page_meta), verbose=True,
               debug_out=debug_out, on_debug_image=_sink, keep_debug_arrays=True)
     folders = {f for f, _n, _s in seen}
     assert folders == {"detect", "rotation_quad", "rotation_classifier", "recog_0"}
@@ -323,7 +323,7 @@ def test_without_on_debug_image_debug_out_keeps_rgb_arrays(page_meta, vector, mo
     monkeypatch.setattr(PaddleDetectBackend, "detect", _whole_image_quad)
     _patch_rec(monkeypatch)
     debug_out: dict = {}
-    lvc.parse(_row_of_strokes(vector, 3), [], _page(page_meta), verbose=True, debug_out=debug_out)
+    lvc.parse(_row_of_strokes(vector, 3), _page(page_meta), verbose=True, debug_out=debug_out)
     assert len(debug_out["cluster_detections"]) == 1
     assert len(debug_out["paddle_classifier_crops"]) == 1
     assert len(debug_out["recog_bucket_crops"]["0"]) == 1
@@ -345,7 +345,7 @@ def test_debug_image_time_is_not_counted_inside_computation_steps(page_meta, vec
     monkeypatch.setattr(PaddleDetectBackend, "detect", _whole_image_quad)
     _patch_rec(monkeypatch)
     steps: dict = {}
-    lvc.parse(_row_of_strokes(vector, 3), [], _page(page_meta), step_durations=steps,
+    lvc.parse(_row_of_strokes(vector, 3), _page(page_meta), step_durations=steps,
               on_debug_image=lambda _f, _n, _m: time.sleep(0.05))
     assert steps["debug_render"] >= 0.2  # 4+ images x 50 ms
     assert steps["ocr_crop"] < 0.05 and steps["ocr_assemble"] < 0.05 and steps["ocr_render"] < 0.05

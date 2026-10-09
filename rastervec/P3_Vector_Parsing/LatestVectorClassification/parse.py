@@ -305,13 +305,13 @@ def _rgb_image(bgr: np.ndarray):
 
 
 def parse(
-    vectors_p1: list[Vector], vectors_p2: list[Vector], page: Page,
+    vectors_p1: list[Vector], page: Page,
     *, verbose: bool = False, compute=None,
     debug_out: "dict | None" = None, on_debug_layer: "OnDebugLayer | None" = None,
     on_debug_image: "OnDebugImage | None" = None,
     step_durations: "dict | None" = None, keep_debug_arrays: bool = True,
 ) -> tuple[list[Vector], list[Text]]:
-    """Phase 1 + Phase 2 vectors -> `(drawing, texts)`; see the module
+    """Phase 1 vectors -> `(drawing, texts)`; see the module
     docstring for the stages. Render+detect run in chunks of
     `DETECT_RENDER_CHUNK_SIZE` clusters; recognition batches page-wide
     (`OCR_BATCH_SIZE`). `compute` (a Pool-2 proxy) dispatches detect and
@@ -324,7 +324,7 @@ def parse(
     `_outliers`/`_crossings`/`_collect`, `ocr_render`/`ocr_detect`/`ocr_crop`/
     `ocr_recognize`/`ocr_assemble`, `quad_ownership`, `drawing`,
     `debug_render`)."""
-    all_vectors = list(vectors_p1) + list(vectors_p2)
+    all_vectors = list(vectors_p1)
     page_meta = page.meta
     clock = StepClock(step_durations)
     debugging = debug_out is not None or on_debug_layer is not None

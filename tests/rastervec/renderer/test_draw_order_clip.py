@@ -64,7 +64,7 @@ def test_shuffled_p3_output_is_painted_in_source_order(tmp_pdf_path):
     assert len(vectors) == 2
 
     # A P3 backend handing them back mask-first must not bury the mask.
-    _texts, ordered = organize_outputs([], [], [], list(reversed(vectors)), page)
+    _texts, ordered = organize_outputs([], [], [], [], list(reversed(vectors)), page)
     image = render_output_page(page.meta, [], ordered)
 
     assert _rgb(image, 100, 100) == (255, 255, 255)   # masked

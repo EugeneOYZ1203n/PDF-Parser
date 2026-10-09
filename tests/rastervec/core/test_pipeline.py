@@ -13,7 +13,7 @@ def _fake_p2(images, page, *, debug_out=None, on_debug_layer=None):
     return [], []
 
 
-def _fake_p3(vectors_p1, vectors_p2, page, *, debug_out=None, on_debug_layer=None, **_kwargs):
+def _fake_p3(vectors_p1, page, *, debug_out=None, on_debug_layer=None, **_kwargs):
     fake_vector = Vector(
         type="s", items=[("l", (0.0, 0.0), (10.0, 10.0))], color=(0, 0, 0), fill=None,
         width=1.0, dashes=None, closePath=None, lineCap=0, lineJoin=0, even_odd=False,
@@ -22,7 +22,7 @@ def _fake_p3(vectors_p1, vectors_p2, page, *, debug_out=None, on_debug_layer=Non
         page_index=page.meta.index,
     )
     if debug_out is not None:
-        debug_out["vectors_in"] = len(vectors_p1) + len(vectors_p2)
+        debug_out["vectors_in"] = len(vectors_p1)
     if on_debug_layer is not None:
         on_debug_layer("phase3", "fake", "#ffffff", b"%PDF-fake-p3")
     return [fake_vector], []
@@ -85,7 +85,7 @@ def test_run_pipeline_forwards_keep_debug_arrays_by_signature(
         seen["p2"] = keep_debug_arrays
         return [], []
 
-    def p3_with_flag(vectors_p1, vectors_p2, page, *, keep_debug_arrays=True):
+    def p3_with_flag(vectors_p1, page, *, keep_debug_arrays=True):
         seen["p3"] = keep_debug_arrays
         return [], []
 
@@ -126,7 +126,7 @@ def test_run_pipeline_streams_on_debug_layer_independent_of_verbose(
 def test_run_pipeline_collects_p3_substep_durations(
     synthetic_pdf_factory, tmp_pdf_path, monkeypatch,
 ):
-    def _timed_p3(vectors_p1, vectors_p2, page, *, step_durations=None):
+    def _timed_p3(vectors_p1, page, *, step_durations=None):
         step_durations["fake_step"] = 0.25
         return [], []
 
@@ -228,9 +228,9 @@ def _p2_two_vectors(images, page):
     return [_v(0, 50.0), _v(1, 60.0)], []
 
 
-def _p3_passthrough(vectors_p1, vectors_p2, page, **_kwargs):
-    # Deliberately P2-last, so the final order can only come from P4's sort.
-    return list(vectors_p1) + list(vectors_p2), []
+def _p3_passthrough(vectors_p1, page, **_kwargs):
+    # P3 never sees P2's vectors; P4 merges them in and restores paint order.
+    return list(vectors_p1), []
 
 
 def test_run_pipeline_paints_p2_vectors_below_p1_vectors(
@@ -254,3 +254,42 @@ def test_run_pipeline_paints_p2_vectors_below_p1_vectors(
     assert [v.bbox[1] for v in p2_out] == [50.0, 60.0]
     # ... so in paint order P2 comes first and P1 is drawn on top.
     assert result.vectors[:2] == p2_out
+
+
+def test_p3_gets_only_p1_vectors_and_p2_output_reaches_phase4(
+    synthetic_pdf_factory, tmp_pdf_path, monkeypatch, text,
+):
+    seen: dict = {}
+
+    def p2_with_text(images, page):
+        vectors, _ = _p2_two_vectors(images, page)
+        return vectors, [text(text="traced", bbox=(0.0, 40.0, 30.0, 48.0), source="ocr")]
+
+    def p3_recording(vectors_p1, page, **_kwargs):
+        seen["p3_in"] = list(vectors_p1)
+        return list(vectors_p1), []
+
+    monkeypatch.setitem(registry.P2_REGISTRY, "P2Text", p2_with_text)
+    monkeypatch.setitem(registry.P3_REGISTRY, "P3Rec", p3_recording)
+    doc = synthetic_pdf_factory([{
+        "width": 200, "height": 100,
+        "texts": [{"point": (10, 20), "text": "hello"}],
+        "drawings": [{"lines": [((5, 5), (100, 5))], "color": (0, 0, 0)}],
+    }])
+    path = tmp_pdf_path(doc)
+
+    result = run_pipeline(path, 0, p2="P2Text", p3="P3Rec", verbose=True)
+
+    # P3 saw exactly P1's vectors, none of P2's (red) ones ...
+    assert seen["p3_in"] == list(result.extra["phase1"].vectors)
+    assert all(v.color != (1, 0, 0) for v in seen["p3_in"])
+    # ... while P2's vectors and texts still reach the final output via P4.
+    assert sum(v.color == (1, 0, 0) for v in result.vectors) == 2
+    assert [t.text for t in result.texts] == ["hello", "traced"]
+
+
+def test_old_vector_classification_adapter_keeps_frozen_kwargs():
+    import inspect
+
+    params = inspect.signature(registry.P3_REGISTRY["OldVectorClassification"]).parameters
+    assert {"enable_fast", "progress_counter", "debug_out", "on_debug_layer"} <= set(params)

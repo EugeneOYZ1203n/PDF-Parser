@@ -5,10 +5,11 @@ see `core/registry.py`'s docstring for why P2/P3 are pluggable and this
 isn't).
 
 Two jobs:
-  1. Combine Phase 1's native text with Phase 2's/Phase 3's own text/vector
-     output into the one final `(texts, vectors)` pair `core.pipeline.
-     run_pipeline` returns -- previously done inline in `run_pipeline`
-     itself.
+  1. Combine Phase 1's native text with Phase 2's and Phase 3's own
+     text/vector output into the one final `(texts, vectors)` pair
+     `core.pipeline.run_pipeline` returns. P2 (raster -> vector, fed only
+     P1's images) and P3 (vector parsing, fed only P1's vectors) are
+     independent branches; this is where they meet.
   2. A coordinate-space consistency backstop: every `Text`/`Vector` in the
      pipeline is supposed to stay in unrotated MediaBox space end-to-end
      (`commons/models/__init__.py`'s documented contract). A P2/P3 backend
@@ -38,14 +39,15 @@ def organize_outputs(
     texts_p1: list[Text],
     texts_p2: list[Text],
     texts_p3: list[Text],
+    vectors_p2: list[Vector],
     vectors_p3: list[Vector],
     page: Page,
 ) -> tuple[list[Text], list[Vector]]:
-    """Combine every phase's text output with Phase 3's final vectors, and
-    warn about any item whose bbox doesn't fit the page's own unrotated
-    MediaBox dims. `vectors_p3` is already Phase 3's complete final vector
-    output (it supersedes `vectors_p2`, which fed into Phase 3 as an
-    input).
+    """Combine every phase's text output with Phase 2's and Phase 3's
+    vectors, and warn about any item whose bbox doesn't fit the page's own
+    unrotated MediaBox dims. `vectors_p2` (traced from P1's images) and
+    `vectors_p3` (P3's parse of P1's vectors) are disjoint -- P3 never sees
+    P2's output.
 
     The returned vectors are in paint order -- sorted by `seqno` (stable,
     so ties keep the backend's order). P3 backends emit vectors grouped by
@@ -54,7 +56,7 @@ def organize_outputs(
     sat under in the source. `core.pipeline` rebases Phase 2's seqnos below
     Phase 1's, so traced raster vectors paint under native ones."""
     texts = list(texts_p1) + list(texts_p2) + list(texts_p3)
-    vectors = sorted(vectors_p3, key=lambda v: v.seqno)
+    vectors = sorted(list(vectors_p2) + list(vectors_p3), key=lambda v: v.seqno)
 
     width, height = page.meta.width, page.meta.height
     for t in texts:

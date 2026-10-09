@@ -348,8 +348,9 @@ Accepts either the source PDF path or the `<stem>_label` folder itself.
 
 ### `rastervec.core.pipeline`
 
-Run the pluggable Phase1 -> P2_REGISTRY[p2] -> P3_REGISTRY[p3] pipeline on
-one page; prints texts/vectors counts + per-phase wall-clock
+Run the pluggable pipeline on one page -- Phase1, then P2_REGISTRY[p2] (on P1's
+images) and P3_REGISTRY[p3] (on P1's vectors) as independent branches, all
+outputs combined by Phase 4; prints texts/vectors counts + per-phase wall-clock
 (`step_durations`). This is the primary CLI now -- new code should always
 use it. The old `rastervec.pipelines.current` module (with its own `python
 -m rastervec.pipelines.current` CLI) still exists and is genuinely called by
