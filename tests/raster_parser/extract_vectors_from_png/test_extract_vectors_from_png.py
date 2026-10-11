@@ -119,7 +119,7 @@ def print_expected_vectors(
 
 
 TEST_DIR = Path(__file__).resolve().parent
-img_path = TEST_DIR.parent / "scripts_test" / "references" / "10.png"
+img_path = TEST_DIR / "references" / "10.png"
 
 def test_extract_vectors_from_png(tmp_path: Path) -> None:
     vectors = extract_vectors_from_png(
