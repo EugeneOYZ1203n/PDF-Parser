@@ -11,11 +11,14 @@ import numpy as np
 import pymupdf
 import pymupdf as pymupdf
 
+from raster_parser.delete_natives.libreoffice_setup.libreoffice_macro import ensure_macro_registered
+
 DEFAULT_OUTPUT_DUMP_DIR = Path("./tmp")
 
 
 def delete_drawing_page(fp: str | Path) -> None:
     """Assumes that pdf file at ``fp`` is only a single page."""
+    ensure_macro_registered()
     cmd = [
         "libreoffice",
         "--headless",
