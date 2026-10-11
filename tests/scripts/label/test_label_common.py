@@ -12,6 +12,8 @@ import pytest
 from raster_parser.P1_Reading_Native.reader import Reader
 from raster_parser.P1_Reading_Native.vector_extract import extract_vectors
 
+pytest.importorskip("tkinter")  # _common.py is Tk plumbing; Ubuntu ships Tk as python3-tk
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 REFERENCE_PDFS = sorted((REPO_ROOT / "tests" / "references").glob("test_pdfs_*.pdf"))
 
