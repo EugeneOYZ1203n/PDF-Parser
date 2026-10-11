@@ -11,8 +11,9 @@ pip install -e .
 ```
 
 **System dependency (Type-4 / `enable_raster_pass=True`):** LibreOffice with the
-`DeleteDrawings` macro registered (installed on package import via
-`raster_parser/libreoffice_setup/`).
+`DeleteDrawings` macro registered (installed on the first LibreOffice call, via
+`raster_parser/delete_natives/libreoffice_setup/`; importing the package does not need
+LibreOffice).
 
 ## API
 
@@ -115,6 +116,8 @@ uv sync --group dev --group notebook --group test
 | `scripts/debug/ocr_test_script.py` | Staged Type-2 native-vs-OCR (single page) |
 | `scripts/debug/batch_test_script.py` | Staged Type-2 batch eval |
 | `scripts/inspector/` | PDF layer inspector GUI (`python -m scripts.inspector.inspector [pdf]`) — see its `README.md` |
+| `scripts/label/` | Ground-truth labelling tools (native / vector / raster labels, `master_label.py` runs them all) — see its `README.md` |
+| `scripts/rasterize_pdf.py` | Flatten a PDF to pure raster: `python scripts/rasterize_pdf.py SRC [DST] --dpi 300` (default DST `outputs/rasterize/<stem>_raster.pdf`) |
 
 Helpers for batch eval live in `raster_parser.native_vs_ocr` (e.g. `text_to_vector`,
 `page_stats`). That path writes `onlyfill.pdf`, `ocr.pdf`, `out_results.txt`, etc.,
@@ -125,7 +128,9 @@ and is separate from `extract()`.
 ```bash
 uv sync --group test && uv pip install -e .
 uv run pytest tests/ -m "not slow"
-uv run pytest tests/logic_test/ -m "not slow"    # library logic
-uv run pytest tests/scripts_test/                # scripts/ CLI helpers
-uv run pytest tests/logic_test/test_main_pipeline_extract.py -m slow
+uv run pytest tests/raster_parser/ -m "not slow"  # library logic (mirrors raster_parser/)
+uv run pytest tests/scripts/                      # scripts/ helpers (mirrors scripts/)
+uv run pytest tests/raster_parser/test_main_pipeline_extract.py -m slow
 ```
+
+`tests/references/test_pdfs_*.pdf` are committed fixture PDFs.
