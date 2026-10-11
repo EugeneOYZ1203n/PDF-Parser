@@ -1,0 +1,35 @@
+"""Shared dataclasses that flow between pipeline stages.
+
+Coordinate convention
+----------------------
+All geometry fields here are in PDF page **unrotated MediaBox space** -- the
+same space PyMuPDF's `get_text`/`get_drawings`/`get_image_info`/`annots()`
+return. This stays the pipeline's canonical space throughout every stage;
+only `Renderer`/reconstruction converts to rotated *display* space at the
+very end (matching `page.get_pixmap()`/`page.rect`).
+
+Two core models
+---------------
+`Vector` mirrors one whole `get_drawings()` drawing, never decomposed into
+its own items. `Text` mirrors `get_text()`'s field surface and doubles as
+the OCR result type. `Segment`/`SegmentMeta` are the
+Radon-segmentation-through-OCR handoff types. `Page`/`PageMeta` are Reader's
+own output. See `docs/PIPELINE.md` for the full data flow.
+"""
+from __future__ import annotations
+
+from raster_parser.commons.models.image import Image
+from raster_parser.commons.models.page import Page, PageMeta
+from raster_parser.commons.models.segment import Segment, SegmentMeta
+from raster_parser.commons.models.text import Text
+from raster_parser.commons.models.vector import Vector
+
+__all__ = [
+    "Page",
+    "PageMeta",
+    "Vector",
+    "Text",
+    "Segment",
+    "SegmentMeta",
+    "Image",
+]
