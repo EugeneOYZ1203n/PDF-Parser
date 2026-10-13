@@ -27,6 +27,7 @@ Every field is optional except that you need at least one of `input_dir` /
 | `debug_images` | write the `for_paddle_detect/` / `for_rotation_correction/` / `for_paddle_recog/` PNG crops (max `debug_image_cap` random per leaf folder per input, default `true`). `false` also stops backends keeping the full-size image arrays those crops come from |
 | `debug_image_cap` | per-leaf-folder cap on `debug_images` PNGs (default `100`); `null` = uncapped |
 | `debug_layers` | write the layer PDFs the viewer toggles (default `true`): every backend debug layer (`<stage>__<layer>.pdf`), `phase2`/`reconstructed`, `benchmark__extra_*`, and the benchmark `<type>_{bbox,text}.pdf` overlays. `false` skips all of them **and** the work done only to render them; `dump.json`, ground truth, stats and debug images are still written, so `pipeline_report_benchmark.py` still scores the run (the viewer then shows only the source page). With `p2: "Junction"`, also set `debug_images: false` for the fastest run |
+| `keep_converted_pdfs` | keep the per-page pipeline-input PDFs vectorise/benchmark mode writes (`converted_p<N>.pdf`, `rasterised_p<N>.pdf`; default `true`). `false` deletes each right after its page's run — with `debug_layers`/`debug_images` also off, a run writes no PDFs at all |
 
 ## `final_stage` values
 
@@ -54,6 +55,13 @@ For timing or benchmark-only runs, turn off both kinds of debug output:
   "input_files": ["references/some.pdf"],
   "pages": [0],
   "debug_layers": false,
-  "debug_images": false
+  "debug_images": false,
+  "keep_converted_pdfs": false
 }
 ```
+
+`native_to_vector_accuracy.json` is exactly that as a benchmark run: P3
+`LatestVectorClassification`, no PDFs/PNGs written, OCR scored against the
+native-text auto ground truth (`ground_truth_native_to_vector.json`). Score it
+with `scripts/pipeline_report_benchmark.py --run <run dir>`; it is also the
+template `rastervec/notebooks/pdf_dataset_stats.ipynb` uses.

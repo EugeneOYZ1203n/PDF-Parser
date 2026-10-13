@@ -1,0 +1,14 @@
+{
+  "pipeline": "current",
+  "p2": "Stub",
+  "p3": "LatestVectorClassification",
+  "final_stage": null,
+  "benchmark": true,
+  "input_files": ["references/240118-Proposed OW Shopdrawings for Thomson Height CC.pdf"],
+  "pages": [0],
+  "iou_edge_min": 0.1,
+  "debug_layers": false,
+  "debug_images": false,
+  "keep_converted_pdfs": false,
+  "output_root": "outputs/pipeline_report"
+}

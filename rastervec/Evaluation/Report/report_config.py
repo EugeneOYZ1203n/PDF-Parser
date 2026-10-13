@@ -75,6 +75,11 @@ class ReportConfig(BaseModel):
     # debug images still written, so `pipeline_report_benchmark.py` still
     # scores the run; the viewer then shows only the source page.
     debug_layers: bool = True
+    # Keep the per-page pipeline-input PDFs (`converted_p<N>.pdf` from
+    # vectorise/benchmark mode, `rasterised_p<N>.pdf` from a master_label
+    # folder's raster run). Off: each is deleted right after its page's run
+    # -- with `debug_layers`/`debug_images` also off, a run writes no PDFs.
+    keep_converted_pdfs: bool = True
 
     @field_validator("p2")
     @classmethod

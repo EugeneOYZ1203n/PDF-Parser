@@ -560,3 +560,26 @@ def test_debug_image_sink_prefixes_the_page_and_respects_the_reservoir(tmp_path)
     sink("detect", "cluster_000.png", lambda: Image.new("RGB", (4, 4), "white"))
     sink("unknown_folder", "x.png", lambda: (_ for _ in ()).throw(AssertionError("never built")))
     assert [p.name for p in (tmp_path / "detect").iterdir()] == ["p7_cluster_000.png"]
+
+
+def test_benchmark_without_converted_pdfs_writes_no_pdfs(tmp_path, synthetic_pdf_factory):
+    doc = synthetic_pdf_factory([{"texts": [{"point": (20, 50), "text": "HELLO"}],
+                                  "drawings": [{"lines": [((10, 80), (150, 80))]}]}])
+    pdf = tmp_path / "in" / "A.pdf"
+    pdf.parent.mkdir()
+    doc.save(str(pdf))
+    doc.close()
+    config_path = tmp_path / "cfg.json"
+    config_path.write_text(gpr.ReportConfig(
+        benchmark=True, input_files=[pdf], pages=[0], final_stage="phase1",
+        debug_layers=False, debug_images=False, keep_converted_pdfs=False,
+        output_root=tmp_path / "out",
+    ).model_dump_json(), encoding="utf-8")
+
+    assert gpr.ReportConfig().keep_converted_pdfs is True
+    assert gpr.main(["--config", str(config_path)]) == 0
+    (run_dir,) = (tmp_path / "out").iterdir()
+    assert (run_dir / "A" / "dump.json").is_file()
+    assert (run_dir / "A" / "ground_truth_native_to_vector.json").is_file()
+    assert list(run_dir.rglob("*.pdf")) == []
+    assert list(run_dir.rglob("*.png")) == []

@@ -20,6 +20,10 @@ timestamped run folder:
             and debug images are still written, so the benchmark still
             scores the run.
 
+            `converted_p<N>.pdf` / `rasterised_p<N>.pdf` (vectorise/benchmark
+            pipeline inputs) are deleted after each page's run with
+            `keep_converted_pdfs: false`.
+
             Pre-OCR debug image folders (skipped with `debug_images: false`,
             each leaf folder capped at `debug_image_cap` images -- default
             100, `None` uncapped) -- each `p3` backend's own distinct set
@@ -293,6 +297,8 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
             fast_cluster_stats=_fast_cluster_stats(res, variant.p3),
             retry_stats=_retry_stats(res, variant.p3),
         ))
+        if config.vectorise and not config.keep_converted_pdfs:
+            conv_path.unlink(missing_ok=True)
         # Drop this page's verbose result (Phase-1 images, debug_out, the
         # classification) before the next page runs -- otherwise two pages'
         # results are alive at once.
@@ -551,6 +557,9 @@ def _process_pdf_benchmark(
                 _LOG.warning(
                     "%s: rasterised-PDF run failed for page %d: %s", bench.key, p, exc,
                 )
+            finally:
+                if not config.keep_converted_pdfs:
+                    raster_page_path.unlink(missing_ok=True)
 
         dumps.append(dump_io.PageDump(
             page_meta=res.page.meta, texts=list(res.texts or []),
@@ -564,6 +573,8 @@ def _process_pdf_benchmark(
             fast_cluster_stats=_fast_cluster_stats(res, variant.p3),
             retry_stats=_retry_stats(res, variant.p3),
         ))
+        if not config.keep_converted_pdfs:
+            conv_path.unlink(missing_ok=True)
         del res
         gc.collect()
 
