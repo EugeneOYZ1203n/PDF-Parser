@@ -24,6 +24,11 @@ reference PDFs plus 3 synthetic A1 sheets:
 
 Long paths are shortened to `…`.
 
+Before training, it is worth looking at the data itself:
+`python -m rastervec.P2_Raster_To_Vec.DeepVectoriser.view_dataset --data data/deepvec`
+shows every layer mask with its GT strokes, plus training crops drawn exactly
+as `train.py` draws them (crop mode, `c` / `n`).
+
 ---
 
 ## 1. Start banner

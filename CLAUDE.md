@@ -93,6 +93,7 @@ its own copy of the classical pipeline instead).
 .venv/Scripts/python.exe scripts/pipeline_report_benchmark.py --run DIR1 [--run DIR2]  # multiclass-score + chart benchmark report folders (1 or 2) on shared inputs
 .venv/Scripts/python.exe -m pytest tests/ -v                                        # run rastervec's test suite
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.prep_dataset --pdf-dir PDFS/ [--pdf C.pdf] [--sample 50] [--workers 4] --out data/deepvec  # DeepVectoriser training set (run once)
+.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.view_dataset --data data/deepvec [--key KEY] [--seed 0]  # browse that set (Tk, read-only): masks + GT strokes + training crops
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.train --data data/deepvec [--threads N] [--resume]  # train -> rastervec/weights/deep_vectoriser.pth (output explained in DeepVectoriser/TRAINING.md)
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1] [--weights W.pth] [--ocr]  # try the model -> viewer folder + command
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepTechVec.train --data data/deepvec --prim line|curve [--threads N] [--resume]  # DeepTechVec on DeepVectoriser's dataset -> rastervec/weights/deep_tech_vec_<prim>.pth (output explained in DeepTechVec/TRAINING.md)
@@ -459,7 +460,12 @@ generic parallel-pool mechanics), never phase-specific business logic.
     `<out>.last.ckpt` per epoch / `--resume`; best joint val Chamfer → `--out`; `--tiny` for
     smoke runs; PNG masks decoded once into `--cache-dir` (default `<data>/cache/`) and
     memory-mapped — an old full-page `.gray.npy` dataset still loads; `--threads`; terminal
-    output explained in `DeepVectoriser/TRAINING.md`). **`predict.py`** (`--pdf --pages --clip
+    output explained in `DeepVectoriser/TRAINING.md`). **`view_dataset.py`** (`--data DIR [--key] [--seed]`): read-only
+    Tk browser over a `prep_dataset.py` folder -- layer list (train/val/unsaved), the mask tinted
+    with its layer color + GT strokes (endpoints/joints/bboxes/ink samples toggleable, hover for
+    details), and a crop mode drawing `train_data.sample_crop` (+ `augment`) crops exactly as
+    `train.py` does (strokes numbered in slot order, window outlined via `Crop.window`); decodes
+    masks in memory, never writes `<data>/cache/`. **`predict.py`** (`--pdf --pages --clip
     [--weights] [--ocr]`): renders a page region, runs `adapter.extract` on it as one image (OCR
     off by default, as in prep) and writes a `scripts/pipeline_report_viewer.py` folder —
     every backend debug layer plus `original/vectors`, `original/clip region`,

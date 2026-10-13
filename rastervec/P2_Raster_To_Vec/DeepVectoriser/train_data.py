@@ -357,6 +357,10 @@ class Crop:
     gray: np.ndarray                                   # (S, S) uint8
     strokes: list[np.ndarray] = field(default_factory=list)  # sorted, oriented, local px
     widths: list[float] = field(default_factory=list)
+    # `sample_crop` only (not kept by augment): the (x0, y0, side) window it
+    # cut from the layer, and how many strokes it held before truncation
+    window: "tuple[int, int, int] | None" = None
+    n_found: int = 0
 
 
 def _cut_window(gray: np.ndarray, x0: int, y0: int, size: int) -> np.ndarray:
@@ -418,8 +422,9 @@ def sample_crop(layer: LayerData, size: int, rng: np.random.Generator, n_stroke:
         full = np.full((size, size), 255, np.uint8)
         full[:win, :win] = gray
         gray = full
+    n_found = len(strokes)
     strokes, widths = _sorted_pairs(strokes, widths)
-    return Crop(gray, strokes[:n_stroke], widths[:n_stroke])
+    return Crop(gray, strokes[:n_stroke], widths[:n_stroke], window=(x0, y0, win), n_found=n_found)
 
 
 # ---------------------------------------------------------------------------
