@@ -40,6 +40,8 @@ from rastervec.P2_Raster_To_Vec.DeepVectoriser.adapter import extract as _deep_v
 from rastervec.P2_Raster_To_Vec.DeepVectoriser.adapter import render_debug as _deep_vectoriser_render_debug
 from rastervec.P2_Raster_To_Vec.ImplicitSketchVec.adapter import extract as _implicit_sketch_vec_extract
 from rastervec.P2_Raster_To_Vec.ImplicitSketchVec.adapter import render_debug as _implicit_sketch_vec_render_debug
+from rastervec.P2_Raster_To_Vec.InvolutionStroke.adapter import extract as _involution_stroke_extract
+from rastervec.P2_Raster_To_Vec.InvolutionStroke.adapter import render_debug as _involution_stroke_render_debug
 from rastervec.P2_Raster_To_Vec.Junction.adapter import extract as _junction_extract
 from rastervec.P2_Raster_To_Vec.Junction.adapter import render_debug as _junction_render_debug
 from rastervec.P2_Raster_To_Vec.Stub.stub import extract as _stub_extract
@@ -69,6 +71,7 @@ P2_REGISTRY: dict[str, Phase2Backend] = {
     "DeepVectoriser": _deep_vectoriser_extract,
     "DeepTechVec": _deep_tech_vec_extract,
     "ImplicitSketchVec": _implicit_sketch_vec_extract,
+    "InvolutionStroke": _involution_stroke_extract,
 }
 
 P3_REGISTRY: dict[str, Phase3Backend] = {
@@ -82,6 +85,7 @@ P2_RENDER_DEBUG: dict[str, object] = {
     "DeepVectoriser": _deep_vectoriser_render_debug,
     "DeepTechVec": _deep_tech_vec_render_debug,
     "ImplicitSketchVec": _implicit_sketch_vec_render_debug,
+    "InvolutionStroke": _involution_stroke_render_debug,
 }
 
 P3_RENDER_DEBUG: dict[str, object] = {

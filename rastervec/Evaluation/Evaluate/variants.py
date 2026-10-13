@@ -57,6 +57,9 @@ VARIANTS: dict[str, PipelineVariant] = {
     "current_implicitsketchvec": PipelineVariant(
         "current_implicitsketchvec", "current", "ImplicitSketchVec", DEFAULT_P3, True,
     ),
+    "current_involutionstroke": PipelineVariant(
+        "current_involutionstroke", "current", "InvolutionStroke", DEFAULT_P3, True,
+    ),
 }
 
 # Default selection for the CLI / notebook when none is given.

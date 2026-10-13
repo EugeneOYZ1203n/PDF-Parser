@@ -100,6 +100,8 @@ its own copy of the classical pipeline instead).
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepTechVec.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1] [--weights W.pth] [--refine-iters N]  # try it (OCR never runs) -> viewer folder + command
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.ImplicitSketchVec.train --data data/deepvec --stage dfp|ndc|joint [--basic] [--threads N] [--resume]  # ImplicitSketchVec on DeepVectoriser's dataset: dfp + ndc (concurrently), then joint -> rastervec/weights/implicit_sketch_vec.pth (ImplicitSketchVec/TRAINING.md)
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.ImplicitSketchVec.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1] [--weights W.pth]  # try it (OCR never runs) -> viewer folder + command
+.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.InvolutionStroke.download_weights  # fetch the authors' pretrained InvolutionStroke checkpoints -> rastervec/weights/involution_{centerline,intersection}.pt (no training)
+.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.InvolutionStroke.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1]  # try it (OCR never runs) -> viewer folder + command
 .venv/Scripts/python.exe scripts/rasterize_pdf.py SRC [DST] --dpi 300               # flatten a PDF to pure raster (DST defaults to outputs/rasterize/)
 .venv/Scripts/python.exe scripts/label/master_label.py PDF [--dpi 300]              # full native+vector+raster label workflow, one outputs/labels/<stem>_label/ folder per PDF
 .venv/Scripts/python.exe scripts/label/native_label.py PDF --page N [--out ...]     # auto-derive native-text ground truth (GUI-free)
@@ -259,7 +261,7 @@ terminology used throughout this section. `rastervec/` is organized into six buc
 raster→vector backends), `P3_Vector_Parsing/` (pluggable vector-parsing/OCR backends),
 `P4_Output_Organization/` (the one, always-run output-combination + coordinate-space-guard
 phase) — plus `Evaluation/`, `notebooks/`, `weights/` alongside them (benchmarking/dev tooling,
-not phase code). **Sibling P2 backends (`Stub`/`Junction`/`DeepVectoriser`/`DeepTechVec`/`ImplicitSketchVec`) and sibling P3 backends
+not phase code). **Sibling P2 backends (`Stub`/`Junction`/`DeepVectoriser`/`DeepTechVec`/`ImplicitSketchVec`/`InvolutionStroke`) and sibling P3 backends
 (`LatestVectorClassification`/`OldVectorClassification`) import nothing from each other** —
 each is fully self-contained, duplicating its own copy of any infra it needs (a PaddleOCR engine
 wrapper, layer/color/width separation, a raster→vector tracer, ...) rather than sharing one. This
@@ -534,6 +536,42 @@ generic parallel-pool mechanics), never phase-specific business logic.
     `keypoints end|sharp|junc` + `under-sampling map`, `ndc/raw edges`, `refine/refined edges`,
     `topology/refined regions`, `group/strokes`, `fit/stroke endpoints` + `fitted vectors`, plus
     the copied ones.
+  - **`InvolutionStroke/`** — raster→stroke vectorization with the **authors' pretrained weights**
+    (no training here): **Gerstner, Magne & Sorkine-Hornung, "Stroke Vectorization via Involution
+    Prediction", VMV 2026**, reference code github.com/verven/InvolutionStrokeVectorization vendored
+    @ `178eede` (**upstream has no LICENSE** — internal research use; see its `README.md`). Front end
+    copied from ImplicitSketchVec (color separation → tiled OCR → text removal; `masks.py`,
+    `diff.py`). Per ink layer (`inference.vectorize_layer`), 300 dpi, **1024 px tiles / 96 px
+    overlap, each running upstream's whole `main.process_image` chain**: invert to white-on-black →
+    centerline UNet (`model/centerline.py`, `ResNextUNetLarge`, padded to a multiple of 16) →
+    `_upstream/graph_extraction/build_linegraph.process` + `compute_polylines` (planar line graph,
+    pure Python: networkx/shapely/skimage) → half-edges + constraint matrix R → pairing network
+    (`model/intersection.py`, `SceneGraphVectorModel`: polylines only, Fourier MLP + set transformer
+    → symmetric scores) → `involutive_assignment2` (networkx max-weight matching) →
+    `get_matched_lines`; a tile whose graph extraction raises is logged and skipped. Strokes are
+    clipped to each tile's **core** (`geometry.clip_polyline`/`core_spans`), ends from different
+    tiles on a core border joined (`join_seams`, `MERGE_SNAP_PX`), then `geometry.smooth_stroke`:
+    split at corners (`CORNER_DEG` on the `CORNER_EPS_PX`-RDP'd stroke), straight runs → one line
+    on their least-squares fit with corners moved to the neighbouring lines' intersection (undoes
+    the centerline's chamfer), curved runs → ~1 px Gaussian pre-smoothing (upstream polylines are
+    0.5 px staircases) + Schneider fit. Output: one `Vector` per stroke (`"l"`/`"c"`), width from the
+    ink distance transform. **No TorchScript/Lightning/torchvision**: the two classes are vendored
+    and the raw checkpoints load with `weights_only=True, strict=True` (`model/weights.py`; the
+    Lightning ckpt's `model.` prefix stripped, `d_dim` read off the state_dict; torchvision's
+    `Bottleneck` re-implemented with identical key names). `_upstream/` is otherwise verbatim except
+    for mechanical py3.10/numpy-1 ports listed in each file's header (`np.concat`, `np.bool`,
+    `a[*idx]`, `print` → debug log, debug-SVG plotting dropped). Weights:
+    `download_weights.py` → `rastervec/weights/involution_{centerline,intersection}.pt`
+    (`$INVOLUTIONSTROKE_{CENTERLINE,INTERSECTION}_WEIGHTS`); missing → `FileNotFoundError`. CPU cost
+    ~35-55 s per 1024 px tile (the UNet). The released pairing model often *ends* both strokes at an
+    isolated `+` crossing rather than pairing them (its training lets a stroke end at any
+    intersection); crossings in denser drawings pair. **`predict.py`**: as ImplicitSketchVec's
+    (`--centerline-weights`/`--intersection-weights`). Debug layers: `tiles/tile grid` + `failed
+    tiles`, `centerline/predicted centerline`, `graph/polylines` + `junction nodes`,
+    `pairing/matched strokes`, `merge/seam joins`, `fit/stroke endpoints` + `fitted vectors`, plus
+    the copied ones. Tests use a skeleton "centerline" + an angle-based "pairing" fake
+    (`tests/.../InvolutionStroke/_fakes.py`); `RASTERVEC_RUN_INVOLUTION_TESTS=1` runs one
+    real-weights test.
 
   **Training is GPU-tuned, inference CPU-tuned (all three learned backends, each its own copy).**
   `train.py` on CUDA: AMP by default (bf16 where supported, else fp16 + `GradScaler`; `--no-amp`;
@@ -944,7 +982,8 @@ generic parallel-pool mechanics), never phase-specific business logic.
   current/legacy, `p2`, `p3`, `enable_fast`) + the `VARIANTS` registry (`current` [default p2/p3],
   `legacy`, plus named presets for benchmark comparisons across P3 backends —
   `current_latestvectorclassification`, `current_oldvectorclassification`,
-  `current_junction`, `current_deepvectoriser`, `current_deeptechvec`, `current_implicitsketchvec`) +
+  `current_junction`, `current_deepvectoriser`, `current_deeptechvec`, `current_implicitsketchvec`,
+  `current_involutionstroke`) +
   `DEFAULT_VARIANTS` + `resolve_variant`. `engine="current"` threads `p2`/`p3`/`enable_fast` into
   `rastervec.core.pipeline.run_pipeline` (the pluggable P1→{P2_REGISTRY[p2] ∥ P3_REGISTRY[p3]}→P4
   orchestrator, see the `core/` section below); `engine="legacy"` ignores `p2`/`p3` entirely.
