@@ -93,6 +93,7 @@ its own copy of the classical pipeline instead).
 .venv/Scripts/python.exe scripts/generate_pipeline_report.py --config run.json      # config-driven per-stage report (PDFs + stats + dump.json per source PDF)
 .venv/Scripts/python.exe scripts/pipeline_report_viewer.py <run>/<stem> [<run2>/<stem>]  # Tkinter viewer: source page + toggleable stage-PDF overlays (1-2 folders side by side)
 .venv/Scripts/python.exe scripts/pipeline_report_benchmark.py --run DIR1 [--run DIR2]  # multiclass-score + chart benchmark report folders (1 or 2) on shared inputs
+.venv/Scripts/python.exe scripts/estimate_dataset_time.py --run outputs/pdf_dataset_stats/<tag> --input-folder DIR [--scan F]  # whole-dataset time estimate from a notebooks/pdf_dataset_stats.ipynb run (samples interpolated by vector count; Evaluation/Evaluate/time_estimate.py)
 .venv/Scripts/python.exe -m pytest tests/ -v                                        # run rastervec's test suite
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.prep_dataset --pdf-dir PDFS/ [--pdf C.pdf] [--sample 50] [--workers 4] --out data/deepvec  # DeepVectoriser training set (run once)
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.view_dataset --data data/deepvec [--key KEY] [--seed 0]  # browse that set (Tk, read-only): masks + GT strokes + training crops
