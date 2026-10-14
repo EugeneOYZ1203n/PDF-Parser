@@ -66,8 +66,10 @@ def parse(vectors: list[Vector], page: Page, settings: RunSettings) -> tuple[lis
 
 - The protocols are structural (`typing.Protocol`); nothing checks them at runtime.
 - `settings` (`core/settings.py`) carries the run options every backend receives, whichever
-  backend it is: `ocr_dpi`, `use_angle_cls`, `workers`, `dump_dir`. A backend reads the fields it
-  needs and ignores the rest. A new option goes on `RunSettings`, not on one backend's signature.
+  backend it is: `ocr_dpi`, `use_angle_cls`, `workers`, `dump_dir`, plus the debug callbacks
+  `on_debug_layer` / `on_debug_image` ([Debug output](#debug-output)). A backend reads the
+  fields it needs and ignores the rest. A new option goes on `RunSettings`, not on one
+  backend's signature.
 - Both return `(vectors, texts)` in unrotated page space. A Phase 3 backend returns the vectors
   it keeps as drawing; the ones it classified as text are left out.
 - `core/registry.py` maps names to functions (`P2_REGISTRY`, `P3_REGISTRY`, with `DEFAULT_P2` /
@@ -109,6 +111,43 @@ The rule is enforced by review. All current backends follow it.
    are not in the repository and give no exact values to assert against.
 5. **Dependencies**: add new third-party packages to `pyproject.toml` only in the change that
    adds the backend that needs them.
+6. **Debug output** (optional): render each step through the debug callbacks so the pipeline
+   report can show it ([Debug output](#debug-output)).
+
+## Debug output
+
+`RunSettings` carries two optional callbacks for tools that want to see inside a run (the
+pipeline report, `docs/SCRIPTS.md`). `extract()` never sets them.
+
+| Field | Called as | Meaning |
+|---|---|---|
+| `on_debug_layer` | `(stage, label, "#rrggbb", pdf_bytes)` | one rendered debug layer: a one-page PDF of the page, in unrotated page space |
+| `on_debug_image` | `(folder, name, make_image)` | one debug image; `make_image()` builds the PIL image and is only called if the tool keeps it |
+
+Rules for a backend:
+
+- **Only when set.** Render and keep nothing extra when the callbacks are `None`. The output
+  must be identical either way, so adding debug output is never a behaviour change.
+- **Stream.** Emit each step's layer as soon as that step is done, instead of collecting debug
+  data until the end. The tool writes it to disk straight away.
+- **Use the standard renderer.** Build layers from `commons/renderer/draw.py` (a spec builder +
+  a drawer per primitive, `render_specs_pdf`) or its one-layer wrappers in `pdf.py`
+  (`render_boxes_pdf`, `render_quads_pdf`, `render_text_pdf`, `render_vectors_pdf`). Text is
+  rotated to its angle, then scaled to fit its box, never sheared. Don't place geometry with
+  PyMuPDF calls directly.
+- **Name layers by step.** `stage` is the step (`ocr`, `word_grouping`, ...), `label` what the
+  layer shows. A trailing per-page count such as `"word groups (25)"` is stripped by the report,
+  so one layer keeps one file.
+- Document the layers in the backend's `README.md` ("Debug output"). The v1 backends keep theirs
+  in `debug_layers.py`.
+
+`run_pipeline(..., stop_after="phase1" | "phase2" | "phase3")` stops after that phase: later
+backends are not called. Phase 4 still runs on what ran (with Phase 3 skipped, Phase 1's raw
+vectors are the output). `extract()` always runs every phase.
+
+Phase 4's `render_output_pdf(page_meta, texts, vectors)` draws a run's final output as a page
+(vectors in their real paint, text in its box); the report uses it for its `reconstructed`
+layer. `extract()` does not call it.
 
 ## Coordinate spaces
 

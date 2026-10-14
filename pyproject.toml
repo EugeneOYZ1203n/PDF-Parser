@@ -18,6 +18,7 @@ dependencies = [
 [dependency-groups]
 test = ["pytest"]
 notebook = ["matplotlib", "scikit-learn"]
+report = ["matplotlib"]  # scripts/pipeline_report_benchmark.py charts
 
 [build-system]
 requires = ["hatchling"]

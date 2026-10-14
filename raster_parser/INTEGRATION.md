@@ -136,6 +136,9 @@ uv sync --group dev --group notebook --group test
 | `scripts/debug/batch_test_script.py` | Staged Type-2 batch eval |
 | `scripts/inspector/` | PDF layer inspector GUI (`python -m scripts.inspector.inspector [pdf]`) — see its `README.md` |
 | `scripts/label/` | Ground-truth labelling tools (native / vector / raster labels, `master_label.py` runs them all) — see its `README.md` |
+| `scripts/generate_pipeline_report.py` | Config-driven pipeline report: debug layers, debug images, `dump.json`; benchmark mode adds ground truth — see `docs/SCRIPTS.md` |
+| `scripts/pipeline_report_viewer.py` | Tk viewer over 1–2 report folders, a checkbox per layer — see `docs/SCRIPTS.md` |
+| `scripts/pipeline_report_benchmark.py` | Scores 1–2 benchmark report folders, writes `report.html` (needs `uv sync --group report`) — see `docs/SCRIPTS.md` |
 | `scripts/rasterize_pdf.py` | Flatten a PDF to pure raster: `python scripts/rasterize_pdf.py SRC [DST] --dpi 300` (default DST `outputs/rasterize/<stem>_raster.pdf`) |
 
 Helpers for batch eval live in `raster_parser.native_vs_ocr` (e.g. `text_to_vector`,
