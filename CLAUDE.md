@@ -100,8 +100,8 @@ its own copy of the classical pipeline instead).
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.train --data data/deepvec [--threads N] [--resume]  # train -> rastervec/weights/deep_vectoriser.pth (output explained in DeepVectoriser/TRAINING.md)
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.Junction.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1] [--dpi 300] [--no-ocr]  # try Junction (OCR + text erase on by default) -> viewer folder + histogram PNGs + command
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1] [--weights W.pth] [--ocr]  # try the model -> viewer folder + command
-.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepTechVec.train --data data/deepvec --prim line|curve [--threads N] [--resume]  # DeepTechVec on DeepVectoriser's dataset -> rastervec/weights/deep_tech_vec_<prim>.pth (output explained in DeepTechVec/TRAINING.md)
-.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepTechVec.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1] [--weights W.pth] [--refine-iters N]  # try it (OCR never runs) -> viewer folder + command
+.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepTechVec.download_weights [--prim line|curve|all] [--force]  # fetch the authors' pretrained DeepTechVec checkpoints (Yandex Disk, sha256-checked) -> rastervec/weights/deep_tech_vec_{lines,curves}.weights (no training)
+.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepTechVec.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1] [--weights W.weights] [--refine-iters N]  # try it (OCR never runs) -> viewer folder + command
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.ImplicitSketchVec.train --data data/deepvec --stage dfp|ndc|joint [--basic] [--threads N] [--resume]  # ImplicitSketchVec on DeepVectoriser's dataset: dfp + ndc (concurrently), then joint -> rastervec/weights/implicit_sketch_vec.pth (ImplicitSketchVec/TRAINING.md)
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.ImplicitSketchVec.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1] [--weights W.pth]  # try it (OCR never runs) -> viewer folder + command
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.InvolutionStroke.download_weights  # fetch the authors' pretrained InvolutionStroke checkpoints -> rastervec/weights/involution_{centerline,intersection}.pt (no training)
@@ -505,35 +505,39 @@ generic parallel-pool mechanics), never phase-specific business logic.
     layers: the RasterText prelude's, `tiles/vectorizer
     tile grid` + `re-split tiles`, `strokes/raw tile strokes` + `raw endpoints`, `merge/merged
     vectors` + `merged endpoints`, `vector_diff/total`.
-  - **`DeepTechVec/`** — learned raster→primitive vectorizer: a from-scratch PyTorch
-    implementation of **Egiazarian et al., "Deep Vectorization of Technical Drawings", ECCV 2020**
-    (`references/Deep Vectorization of Technical Drawings 2003.05471v3.pdf`). `adapter.py` runs
-    the RasterText prelude (`diff.py`/`masks.py` **copied** from DeepVectoriser);
-    the paper's cleaning U-Net is **not** run (input is already a clean binary layer mask, and the
-    dataset has no degraded/clean pairs). Per ink layer, `inference.vectorize_layer`: 64 px patches /
-    16 px overlap at 300 dpi → **primitive network** (`model/network.py`: stride-2 stem + `n_res = 1`
-    ResNet18 block, c = 64 → `n_dec = 8` Transformer decoder blocks over `n_prim = 10` sine-table
-    queries, 4 heads, FFN 512, `d_emb` = 6 lines / 8 quadratic curves — heads attend at full
-    `d_emb` width since 6 isn't divisible by 4; sigmoid → coords/width normalised by the patch +
-    confidence, `< 0.5` dropped) → **refinement** (`refine.py`: the Appendix I charge energy —
-    soft coverage `clamp(w/2 + ½ − d)`, φ = two Gaussians (R_c 1 px, R_f 32 px at ¼ resolution,
-    λ_f 0.02), mean-field `E^pos`/`E^size`/`E^rdn` with saturating max charges, connected-area mask
-    and λ_pos, doubled-angle collinearity; gradients analytic per pixel (envelope theorem) + autograd
-    only params → vertices; Adam, `REFINE_ITERS` (50, 0 = off); join/move heuristics every 20) →
-    clip to each patch's core → **merge** (`merge.py`, Appendix C: line collinearity graph →
-    least-squares fit per component → dangling-end trim; quadratic pair re-fit per Eq. 15 with
-    brute-force u_q1). Output: one `Vector` per primitive (`"l"`, or one exact cubic `"c"` per
-    quadratic), layer color, the **predicted** width. Line and curve models are separate
-    checkpoints (`train.py --prim line|curve`; a checkpoint knows its kind), default
-    `rastervec/weights/deep_tech_vec_line.pth` or `$DEEPTECHVEC_WEIGHTS_PATH`. **No prep script —
-    trains on DeepVectoriser's `prep_dataset.py` output** (format read by copied readers in
-    `train_data.py`; shared `<data>/cache/`, rename tolerant of another trainer's lock): each 64 px
-    training patch is cut with a random rotation + scale, the same affine applied to the GT
-    Béziers, clipped, turned into lines / least-squares quadratics, sorted the paper's way and
-    zero-padded. **`train.py`**: Eq. 2-4 loss, batch 128, Adam + Noam schedule, best val IoU →
-    `--out`, `<out>.last.ckpt` / `--resume`, log `<out stem>_train_log.csv` (output explained in
-    `DeepTechVec/TRAINING.md`). **`predict.py`**: as DeepVectoriser's, OCR never runs,
-    `--refine-iters`. Debug layers: the RasterText prelude's, `tiles/patch grid`,
+  - **`DeepTechVec/`** — learned raster→primitive vectorizer with the **authors' pretrained
+    weights** (no training here): **Egiazarian et al., "Deep Vectorization of Technical Drawings",
+    ECCV 2020** (`references/Deep Vectorization of Technical Drawings 2003.05471v3.pdf`), reference
+    code github.com/Vahe1994/Deep-Vectorization-of-Technical-Drawings @ `63cbc67` (**MPL-2.0** —
+    `model/network.py` is derived from it and stays MPL; see `DeepTechVec/README.md`). `adapter.py`
+    runs the RasterText prelude (`diff.py`/`masks.py` **copied** from DeepVectoriser); the paper's
+    cleaning U-Net is **not** run (input is already a clean binary layer mask; no cleaning weights
+    were released). Per ink layer, `inference.vectorize_layer`: 64 px patches (fixed — the weights
+    assume it) / 16 px overlap at 300 dpi (`TARGET_PX_PER_PT`, tunable; upstream's training dpi is
+    unknown) → **primitive network** (`model/network.py`: upstream's `GenericVectorizationNet`
+    rebuilt with its exact module names so the raw checkpoint loads `strict=True` — ResNet18
+    features → conv1x1 adapter to 256 → jadore801120-style Transformer decoder over 10 sine queries
+    → conv1x1 to 512 → Linear; specs `config.UPSTREAM_SPECS`: lines = 3 ResNet layers/256 ch/4
+    decoder layers/out 6, curves = 1 layer/64 ch/8 decoder layers/out 8; input
+    `prepare_input` = `[ink, x·mask, y·mask]` as upstream's `preprocess_image`; output × 64 for
+    coords **and** width (`inference.decode_output`), line coords `(tanh+1)/2`, curve coords raw
+    (clamped to patch ± 16 px), sigmoid confidence `< 0.5` dropped) → **refinement** (ours, after
+    the paper — upstream's is CUDA-bound and not vendored; `refine.py`: the Appendix I charge
+    energy — soft coverage `clamp(w/2 + ½ − d)`, φ = two Gaussians (R_c 1 px, R_f 32 px at ¼
+    resolution, λ_f 0.02), mean-field `E^pos`/`E^size`/`E^rdn` with saturating max charges,
+    connected-area mask and λ_pos, doubled-angle collinearity; gradients analytic per pixel
+    (envelope theorem) + autograd only params → vertices; Adam, `REFINE_ITERS` (50, 0 = off);
+    join/move heuristics every 20) → clip to each patch's core → **merge** (`merge.py`, Appendix C:
+    line collinearity graph → least-squares fit per component → dangling-end trim; quadratic pair
+    re-fit per Eq. 15 with brute-force u_q1). Output: one `Vector` per primitive (`"l"`, or one
+    exact cubic `"c"` per quadratic), layer color, the **predicted** width. Weights:
+    **`download_weights.py`** (`--prim line|curve|all`, Yandex Disk public API → href, retries,
+    sha256 pinned in `config.WEIGHTS_SHA256`) → `rastervec/weights/deep_tech_vec_lines.weights`
+    (default) / `deep_tech_vec_curves.weights`, or `$DEEPTECHVEC_WEIGHTS_PATH`; the kind is read off
+    the checkpoint's output width; upstream's `hidden.transformer.*` → `hidden.decoder.transformer.*`
+    key rename applied on load; missing → `FileNotFoundError` naming the script.
+    `RASTERVEC_RUN_DEEPTECHVEC_TESTS=1` runs one real-weights test. **`predict.py`**: as
+    DeepVectoriser's, OCR never runs, `--refine-iters`. Debug layers: the RasterText prelude's, `tiles/patch grid`,
     `primitives/raw (network)` + `raw endpoints`, `refine/refined`, `merge/merged endpoints` +
     `merged vectors`, `vector_diff/total`.
   - **`ImplicitSketchVec/`** — learned raster→stroke vectorizer: a from-scratch PyTorch
@@ -602,9 +606,10 @@ generic parallel-pool mechanics), never phase-specific business logic.
     (`tests/.../InvolutionStroke/_fakes.py`); `RASTERVEC_RUN_INVOLUTION_TESTS=1` runs one
     real-weights test.
 
-  **Training is GPU-tuned, inference CPU-tuned (all three learned backends, each its own copy).**
+  **Training is GPU-tuned, inference CPU-tuned (both trained-here backends, DeepVectoriser and
+  ImplicitSketchVec, each its own copy).**
   `train.py` on CUDA: AMP by default (bf16 where supported, else fp16 + `GradScaler`; `--no-amp`;
-  losses always in fp32 — DeepTechVec's BCE isn't autocast-safe), cuDNN benchmark, TF32, fused
+  losses always in fp32), cuDNN benchmark, TF32, fused
   Adam, pinned DataLoader memory, loss terms summed on-device and read back every `--log-every`
   steps (loss functions return detached tensors, not floats). Each `_to_device` must accept
   **tensors as well as arrays** — a `DataLoader(batch_size=None)` converts every array to a CPU

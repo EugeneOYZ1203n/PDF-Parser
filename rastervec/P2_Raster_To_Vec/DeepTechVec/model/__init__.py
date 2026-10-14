@@ -1,1 +1,1 @@
-"""DeepTechVec model: primitive extraction network + loss."""
+"""DeepTechVec model: the authors' primitive extraction network (MPL-2.0, vendored)."""

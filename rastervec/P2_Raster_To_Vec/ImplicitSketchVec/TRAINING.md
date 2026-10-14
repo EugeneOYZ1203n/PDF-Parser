@@ -23,7 +23,7 @@ python -m rastervec.P2_Raster_To_Vec.ImplicitSketchVec.train --data data/deepvec
 `dfp` and `ndc` don't depend on each other, so run them **at the same time**
 as separate processes. On a CPU, split the cores between them with
 `--threads`. Run `joint` once both have finished. All of them, plus
-DeepVectoriser's and DeepTechVec's trainers, share `<data>/cache/`.
+DeepVectoriser's trainer, share `<data>/cache/`.
 
 `--basic` builds the paper's reduced-size model (128-channel DFP), which is
 easier on a CPU.

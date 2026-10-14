@@ -8,8 +8,9 @@ hands over goes through, in order,
   4. learned vectorizing   per ink color layer: the layer's binary mask (ink
                            0, everything else 255), resampled to the canonical
                            `TARGET_PX_PER_PT`, through Egiazarian et al.'s
-                           (ECCV 2020) pipeline -- 64 px patches -> primitive
-                           network -> energy refinement -> merging
+                           (ECCV 2020) pipeline -- 64 px patches -> the
+                           authors' pretrained primitive network -> energy
+                           refinement -> merging
                            (`inference.py`, `refine.py`, `merge.py`, `model/`)
   5. diff (debug only)     the primitives rasterized and compared back against
                            their own layer's ink (`diff.py`)
@@ -19,7 +20,7 @@ share); step 5's diff is Junction's, *copied*. The paper's step (1), a
 cleaning U-Net turning a degraded scan into a clean black-and-white drawing,
 is not run: its input here is already the clean binary mask of one of the
 prelude's colour layers (the same input DeepVectoriser reads), and the
-shared dataset has no degraded/clean pairs to train it on.
+authors released no cleaning weights.
 
 Output: one `Vector` per merged primitive -- a line as one `"l"` item, a
 quadratic Bezier as one exact cubic `"c"` item (`"l"` when flat,

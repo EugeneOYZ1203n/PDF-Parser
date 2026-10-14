@@ -1,8 +1,8 @@
-"""Try a trained DeepTechVec model on a small sample and look at it in the
+"""Try the pretrained DeepTechVec model on a small sample and look at it in the
 pipeline report viewer.
 
     python -m rastervec.P2_Raster_To_Vec.DeepTechVec.predict --pdf X.pdf \\
-        [--pages 0,1] [--clip x0,y0,x1,y1] [--dpi 300] [--weights W.pth] \\
+        [--pages 0,1] [--clip x0,y0,x1,y1] [--dpi 300] [--weights W.weights] \\
         [--refine-iters N] [--out DIR] [-v]
 
 Per page, the region `--clip` (PDF points, unrotated page space -- the
@@ -16,13 +16,13 @@ prelude's included) is written, plus:
   original / clip region   the sampled region's outline
   detected / vectors       the model's output vectors, in their layer colors
 
-OCR + text erasing never run here: this script only tests the model, and
-the shared training data (DeepVectoriser's `prep_dataset.py`) keeps text
-glyphs as strokes to vectorize, so the model sees the same kind of input.
+OCR + text erasing never run here: this script only tests the model, so
+text glyphs stay as strokes to vectorize.
 
-`--weights` picks the model (a line or a curve checkpoint -- it knows its
-own kind); `--refine-iters` overrides `config.REFINE_ITERS` (0 = the
-network's raw primitives, merged).
+`--weights` picks the model (the lines or the curves checkpoint from
+`download_weights.py` -- its kind is read off the file);
+`--refine-iters` overrides `config.REFINE_ITERS` (0 = the network's raw
+primitives, merged).
 
 Output: `<out>/manifest.json` + one multi-page PDF per layer, the folder
 `scripts/pipeline_report_viewer.py` opens, plus one hue/lightness histogram
@@ -168,7 +168,7 @@ def _paint(v: Vector) -> tuple[float, float, float]:
 def run(pdf: Path, pages: list[int], out: Path, *, clip=None, dpi: float = 300.0,
         refine_iters: "int | None" = None, model_fn=None, say=print) -> dict:
     """Predict every page into `out`; returns the manifest. `model_fn`
-    replaces the trained model (tests)."""
+    replaces the pretrained model (tests)."""
     out.mkdir(parents=True, exist_ok=True)
     layers = LayerSet()
     summary = []

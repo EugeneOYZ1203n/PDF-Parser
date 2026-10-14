@@ -1,77 +1,21 @@
-"""Pure numpy geometry shared by inference (`inference.py`, `merge.py`,
-`adapter.py`) and training (`train_data.py`).
+"""Pure numpy geometry for inference (`inference.py`, `refine.py`,
+`merge.py`, `adapter.py`).
 
-Two shapes of geometry live here:
-
-* a *stroke* -- the shared dataset's ground truth: a chain of cubic Bezier
-  pieces `(K, 4, 2)` (helpers copied from DeepVectoriser/geometry.py);
-* a `Prim` -- this backend's output primitive, the paper's line segment
-  `(p1, p2)` or quadratic Bezier `(p1, p2 control, p3)`, plus a width.
+A `Prim` is this backend's output primitive: the paper's line segment
+`(p1, p2)` or quadratic Bezier `(p1, p2 control, p3)`, plus a width.
 
 Coordinates are pixels of whatever frame the caller works in.
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
 import numpy as np
 
-Stroke = np.ndarray  # (K, 4, 2)
-
 
 # ---------------------------------------------------------------------------
-# Cubic strokes (copied from DeepVectoriser/geometry.py)
+# Region tests (shared by primitive clipping)
 # ---------------------------------------------------------------------------
-def line_to_cubic(a, b) -> np.ndarray:
-    a = np.asarray(a, float)
-    b = np.asarray(b, float)
-    return np.stack([a, a + (b - a) / 3.0, a + (b - a) * 2.0 / 3.0, b])
-
-
-def bezier_eval(piece: np.ndarray, t) -> np.ndarray:
-    """Points `(len(t), 2)` of one cubic at parameters `t`."""
-    t = np.asarray(t, float)[:, None]
-    mt = 1.0 - t
-    p0, c1, c2, p3 = piece
-    return mt ** 3 * p0 + 3 * mt ** 2 * t * c1 + 3 * mt * t ** 2 * c2 + t ** 3 * p3
-
-
-def sample_stroke(stroke: Stroke, per_piece: int = 16) -> np.ndarray:
-    """Polyline `(N, 2)` through every piece (shared joints not repeated)."""
-    if len(stroke) == 0:
-        return np.zeros((0, 2))
-    t = np.linspace(0.0, 1.0, per_piece + 1)
-    pts = [bezier_eval(stroke[0], t)]
-    for piece in stroke[1:]:
-        pts.append(bezier_eval(piece, t)[1:])
-    return np.concatenate(pts, axis=0)
-
-
-def stroke_length(stroke: Stroke) -> float:
-    pts = sample_stroke(stroke, 8)
-    return float(np.sum(np.linalg.norm(np.diff(pts, axis=0), axis=1))) if len(pts) > 1 else 0.0
-
-
-def split_cubic_at(p: np.ndarray, t: float) -> tuple[np.ndarray, np.ndarray]:
-    a = p[0] + (p[1] - p[0]) * t
-    b = p[1] + (p[2] - p[1]) * t
-    c = p[2] + (p[3] - p[2]) * t
-    ab = a + (b - a) * t
-    bc = b + (c - b) * t
-    m = ab + (bc - ab) * t
-    return np.stack([p[0], a, ab, m]), np.stack([m, bc, c, p[3]])
-
-
-def split_bezier(piece: np.ndarray, t0: float, t1: float) -> np.ndarray:
-    """The sub-cubic of `piece` over `[t0, t1]` (de Casteljau)."""
-    piece = np.asarray(piece, float)
-    right = piece if t1 >= 1.0 else split_cubic_at(piece, t1)[0]
-    if t0 <= 0.0:
-        return right
-    return split_cubic_at(right, t0 / t1 if t1 > 0 else 0.0)[1]
-
-
 def piece_is_flat(piece: np.ndarray, tol: float) -> bool:
     """Both controls within `tol` of the chord (or a degenerate chord)."""
     p0, c1, c2, p3 = np.asarray(piece, float)
@@ -129,40 +73,6 @@ def _inside_runs(evaluate, inside, samples: int) -> list[tuple[float, float]]:
             runs.append((ta, tb))
         i = j + 1
     return runs
-
-
-def clip_stroke(stroke: Stroke, rect, samples: int = 32, min_len: float = 1.5) -> list[Stroke]:
-    """The parts of `stroke` inside axis-aligned `rect`, each a stroke of its
-    own (leaving and re-entering splits it); parts shorter than `min_len`
-    are dropped."""
-    inside = rect_predicate(rect)
-    out: list[Stroke] = []
-    cur: list[np.ndarray] = []
-
-    def flush():
-        if cur:
-            s = np.stack(cur)
-            if stroke_length(s) >= min_len:
-                out.append(s)
-            cur.clear()
-
-    for piece in stroke:
-        piece = np.asarray(piece, float)
-        runs = _inside_runs(lambda t, p=piece: bezier_eval(p, t), inside, samples)
-        if runs == [(0.0, 1.0)]:
-            cur.append(piece)
-            continue
-        if not runs:
-            flush()
-            continue
-        for ta, tb in runs:
-            if ta > 0.0:
-                flush()
-            cur.append(split_bezier(piece, ta, tb))
-            if tb < 1.0:
-                flush()
-    flush()
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -278,102 +188,6 @@ def _clip_segment(a, b, rect):
         if t0 > t1:
             return None
     return a + d * t0, a + d * t1
-
-
-def transform_prim(p: Prim, matrix: np.ndarray, scale: float = 1.0) -> Prim:
-    """Apply a 2x3 affine to the control points (exact for Beziers); the
-    width is multiplied by `scale`."""
-    pts = np.asarray(p.pts, float) @ matrix[:, :2].T + matrix[:, 2]
-    return Prim(pts, p.width * scale, p.conf, dict(p.meta))
-
-
-# ---------------------------------------------------------------------------
-# Cubic stroke -> primitives (training targets)
-# ---------------------------------------------------------------------------
-def cubic_to_lines(piece: np.ndarray, tol: float, depth: int = 10) -> list[np.ndarray]:
-    """Flatten one cubic into chords `(2, 2)` within `tol` (recursive halving)."""
-    piece = np.asarray(piece, float)
-    if depth <= 0 or piece_is_flat(piece, tol):
-        return [np.stack([piece[0], piece[3]])]
-    a, b = split_cubic_at(piece, 0.5)
-    return cubic_to_lines(a, tol, depth - 1) + cubic_to_lines(b, tol, depth - 1)
-
-
-def merge_chords(chords: list[np.ndarray], angle_deg: float) -> list[np.ndarray]:
-    """Join consecutive chords (each starting where the last ended) whose
-    directions stay within `angle_deg` of the running line's."""
-    out: list[np.ndarray] = []
-    cos_tol = math.cos(math.radians(angle_deg))
-    for c in chords:
-        if np.hypot(*(c[1] - c[0])) < 1e-9:
-            continue
-        if out:
-            last = out[-1]
-            if np.allclose(last[1], c[0], atol=1e-6):
-                d0 = last[1] - last[0]
-                d1 = c[1] - c[0]
-                cos = float(np.dot(d0, d1)) / (np.hypot(*d0) * np.hypot(*d1))
-                d2 = c[1] - last[0]
-                cos2 = float(np.dot(d0, d2)) / (np.hypot(*d0) * max(np.hypot(*d2), 1e-9))
-                if cos >= cos_tol and cos2 >= cos_tol:
-                    out[-1] = np.stack([last[0], c[1]])
-                    continue
-        out.append(np.array(c, float))
-    return out
-
-
-def stroke_to_lines(stroke: Stroke, tol: float, angle_deg: float) -> list[np.ndarray]:
-    chords = [c for piece in stroke for c in cubic_to_lines(piece, tol)]
-    return merge_chords(chords, angle_deg)
-
-
-def fit_quad(piece: np.ndarray, samples: int = 16) -> tuple[np.ndarray, float]:
-    """Least-squares quadratic with the cubic's endpoints fixed; returns the
-    quadratic and its max sample error (px)."""
-    piece = np.asarray(piece, float)
-    t = np.linspace(0.0, 1.0, samples + 1)
-    pts = bezier_eval(piece, t)
-    b0, b1, b2 = (1 - t) ** 2, 2 * t * (1 - t), t ** 2
-    resid = pts - b0[:, None] * piece[0] - b2[:, None] * piece[3]
-    den = float(np.sum(b1 * b1))
-    ctrl = (b1[:, None] * resid).sum(axis=0) / den if den > 0 else 0.5 * (piece[0] + piece[3])
-    q = np.stack([piece[0], ctrl, piece[3]])
-    err = float(np.max(np.linalg.norm(quad_eval(q, t) - pts, axis=1)))
-    return q, err
-
-
-def cubic_to_quads(piece: np.ndarray, tol: float, depth: int = 8) -> list[np.ndarray]:
-    q, err = fit_quad(piece)
-    if err <= tol or depth <= 0:
-        return [q]
-    a, b = split_cubic_at(np.asarray(piece, float), 0.5)
-    return cubic_to_quads(a, tol, depth - 1) + cubic_to_quads(b, tol, depth - 1)
-
-
-def stroke_to_quads(stroke: Stroke, tol: float) -> list[np.ndarray]:
-    return [q for piece in stroke for q in cubic_to_quads(piece, tol)]
-
-
-# ---------------------------------------------------------------------------
-# Paper's canonical ordering (Sec. 3.2: "we sort the endpoints in each target
-# primitive and the target primitives by their parameters lexicographically")
-# ---------------------------------------------------------------------------
-def _lex(p) -> tuple[float, float]:
-    return (round(float(p[0]), 3), round(float(p[1]), 3))
-
-
-def orient_pts(pts: np.ndarray) -> np.ndarray:
-    """Endpoints in lexicographic order (a quadratic is reversed whole, so
-    its control point stays in the middle)."""
-    pts = np.asarray(pts, float)
-    if _lex(pts[-1]) < _lex(pts[0]):
-        return pts[::-1].copy()
-    return pts
-
-
-def sort_prims(prims: list[Prim]) -> list[Prim]:
-    oriented = [Prim(orient_pts(p.pts), p.width, p.conf, p.meta) for p in prims]
-    return sorted(oriented, key=lambda p: tuple(v for pt in p.pts for v in _lex(pt)) + (round(p.width, 3),))
 
 
 # ---------------------------------------------------------------------------

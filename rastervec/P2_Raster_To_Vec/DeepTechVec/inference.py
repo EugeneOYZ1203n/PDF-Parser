@@ -1,4 +1,5 @@
-"""Running the trained Egiazarian et al. pipeline over one ink layer.
+"""Running the Egiazarian et al. pipeline (the authors' pretrained network)
+over one ink layer.
 
 `vectorize_layer(gray, ...)` -- `gray` is one color layer's mask (ink 0,
 everything else 255) at the canonical scale (`config.TARGET_PX_PER_PT`):
@@ -7,7 +8,8 @@ everything else 255) at the canonical scale (`config.TARGET_PX_PER_PT`):
      (paper: 64 x 64), skipping patches with fewer than `MIN_PATCH_INK_PX`
      ink pixels;
   2. estimate every patch's primitives with the network, in batches
-     (paper Sec. 3.2), keeping those with confidence >= 0.5;
+     (paper Sec. 3.2), keeping those with confidence >= 0.5 (outputs are
+     normalised by the patch: x `PATCH_PX` for px, width included);
   3. refine them against the patch raster (`refine.py`, Sec. 3.3);
   4. move them into the layer frame, clip each patch's primitives to the
      part of the patch it owns (its core rect) so the overlap isn't counted
@@ -17,8 +19,9 @@ everything else 255) at the canonical scale (`config.TARGET_PX_PER_PT`):
 Steps 2-3 run in-process, or on Pool 2 via `_infer_job` when `compute` is
 given. The model is loaded lazily from `rastervec/weights/
 deep_tech_vec_line.pth` (or `$DEEPTECHVEC_WEIGHTS_PATH`) and cached per
-process; a missing file raises `FileNotFoundError` naming where to put it.
-A checkpoint knows its own primitive kind (line / curve)."""
+process; a missing file raises `FileNotFoundError` naming the download
+script. A checkpoint's primitive kind (line / curve) is read off its output
+layer."""
 from __future__ import annotations
 
 import os
@@ -70,15 +73,15 @@ def load_model(path: "str | Path | None" = None):
     if key not in _MODEL_CACHE:
         if not path.is_file():
             raise FileNotFoundError(
-                f"DeepTechVec weights not found at {path}. Train them with "
-                f"`python -m rastervec.P2_Raster_To_Vec.DeepTechVec.train --data <DeepVectoriser prep dir> "
-                f"--prim line --out {path}` (or point ${WEIGHTS_ENV_VAR} at an existing .pth)."
+                f"DeepTechVec weights not found at {path}. Download the authors' pretrained models with "
+                f"`python -m rastervec.P2_Raster_To_Vec.DeepTechVec.download_weights` "
+                f"(or point ${WEIGHTS_ENV_VAR} at an existing .weights file)."
             )
         import torch  # noqa: F401  (lazy: keep torch off the import path of the pipeline)
 
         from .model.network import load_weights
 
-        model = _for_cpu_inference(load_weights(path, map_location="cpu"))
+        model = _for_cpu_inference(load_weights(path))
         _MODEL_CACHE[key] = model
         _LOG.info("DeepTechVec model (%s) loaded from %s", model.kind, path)
     return _MODEL_CACHE[key]
@@ -92,19 +95,41 @@ def warmup() -> None:
         pass
 
 
+# Curve control points are unbounded (no tanh on upstream's curve head):
+# clamp them to the patch plus this margin (px, ours).
+_CURVE_COORD_MARGIN_PX = 16.0
+
+
+def decode_output(row: np.ndarray, kind: str, size: int = PATCH_PX, conf_thresh: float = CONFIDENCE_THRESHOLD) -> list[geo.Prim]:
+    """One patch's network output `(n, out)` -> primitives in patch px
+    (coordinates and width x `size`; confidence below `conf_thresh` dropped)."""
+    n_pts = 2 if kind == "line" else 3
+    out = []
+    for r in np.asarray(row, float):
+        if r[-1] < conf_thresh:
+            continue
+        pts = r[:2 * n_pts].reshape(n_pts, 2) * size
+        if kind != "line":
+            pts = np.clip(pts, -_CURVE_COORD_MARGIN_PX, size + _CURVE_COORD_MARGIN_PX)
+        out.append(geo.Prim(pts, max(float(r[-2] * size), 0.0), float(r[-1])))
+    return out
+
+
 def predict_patches(model, patches: list[np.ndarray], conf_thresh: float = CONFIDENCE_THRESHOLD) -> list[list[geo.Prim]]:
     """Same-size uint8 gray patches -> primitives (patch px) per patch."""
     import torch
 
     from .model.network import prepare_input
-    from .train_data import decode_output
 
     if not patches:
         return []
     size = patches[0].shape[0]
+    if size != PATCH_PX:
+        raise ValueError(f"the pretrained network takes {PATCH_PX} px patches, got {size}")
     device = next(model.parameters()).device
     with torch.inference_mode():
-        out = model(prepare_input(torch.from_numpy(np.stack(patches)).to(device))).cpu().numpy()
+        x = prepare_input(torch.from_numpy(np.stack(patches)).to(device))
+        out = model(x, model.n_prim).cpu().numpy()
     return [decode_output(row, model.kind, size, conf_thresh) for row in out]
 
 

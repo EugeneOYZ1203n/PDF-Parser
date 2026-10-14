@@ -4,9 +4,10 @@ references/Deep Vectorization of Technical Drawings 2003.05471v3.pdf).
 
 Flow: the shared raster prelude (`RasterText/` -- OCR, colour CLAHE,
 colour layers, text removal; its tunables are in `RasterText/config.py`) ->
-per ink layer: binary layer mask -> 64 px patches -> primitive network
-(lines or quadratic Beziers + width + confidence) -> energy refinement ->
-merging.
+per ink layer: binary layer mask -> 64 px patches -> the authors' pretrained
+primitive network (lines or quadratic Beziers + width + confidence;
+github.com/Vahe1994/Deep-Vectorization-of-Technical-Drawings, MPL-2.0) ->
+energy refinement -> merging (both ours, after the paper).
 
 The diff constants are *copied* from `P2_Raster_To_Vec/Junction/config.py`
 (not imported), per CLAUDE.md's "sibling backends share zero code" rule.
@@ -27,11 +28,14 @@ DIFF_TOLERANCE_PX = 2
 # Patching (inference.py / geometry.py)
 # ======================================================================
 
-# Canonical scale the model is trained and run at: 300 dpi -- the scale of
-# the shared DeepVectoriser `prep_dataset.py` data. Every image is resampled
-# to this many px per page point before patching.
+# Scale the model is run at (ours: 300 dpi -- the upstream models were
+# trained on PFP floor-plan / ABC CAD renders, whose dpi isn't given; tune
+# with `predict.py --dpi`). Every image is resampled to this many px per page
+# point before patching.
 TARGET_PX_PER_PT = 300.0 / 72.0
-# Patch side (paper: 64 x 64) and overlap between neighbouring patches (ours).
+# Patch side (paper + pretrained weights: 64 x 64 -- fixed, the network's
+# coordinate channels and x64 output scaling assume it) and overlap between
+# neighbouring patches (ours; upstream runs without overlap).
 PATCH_PX = 64
 PATCH_OVERLAP_PX = 16
 # A patch with fewer ink pixels than this is skipped (never run).
@@ -51,52 +55,25 @@ CONFIDENCE_THRESHOLD = 0.5
 MIN_PRIM_LEN_PX = 1.0
 
 # ======================================================================
-# Primitive network (model/) -- paper Appendix A. A checkpoint stores its
-# own copy, so a trained .pth always rebuilds the architecture it was
-# trained with.
+# Primitive network (model/) -- the authors' released architecture, copied
+# from upstream's vectorization/models/specs/*.json (lines:
+# resnet18_blocks3_bn_256__c2h__trans_heads4_feat256_blocks4_ffmaps512__h2o__out512,
+# curves: resnet18_blocks1_bn_64__c2h__trans_heads4_feat256_blocks8_ffmaps512__h2o__out512).
 # ======================================================================
 
 # The kind of primitive the adapter loads weights for when nothing else says
 # (paper: lines for floor plans -- PFP -- quadratic curves for ABC).
 DEFAULT_PRIM_KIND = "line"
 PRIM_KINDS = ("line", "curve")
-# Geometric parameters per primitive (excluding confidence): line
-# (x1,y1,x2,y2,w), quadratic Bezier (x1,y1,x2,y2,x3,y3,w).
-N_PARAMS = {"line": 5, "curve": 7}
 
-MODEL_DEFAULTS = {
-    "prim_kind": DEFAULT_PRIM_KIND,
-    "n_prim": 10,        # paper: "more than 97% of patches ... no more than 10 primitives"
-    "res_ch": 64,        # paper: c = 64 channels
-    "n_res": 1,          # paper: n_res = 1 ResNet18 block
-    "n_dec": 8,          # paper: n_dec = 8 Transformer blocks
-    "n_heads": 4,        # paper: 4 heads
-    "ff_dim": 512,       # paper: 512 neurons in the last fully-connected layer
-    "dropout": 0.1,      # ours (Transformer default)
-    # d_emb = parameters incl. confidence (paper: 6 lines / 8 curves) -- derived
-    # from prim_kind, not stored separately.
+UPSTREAM_SPECS = {
+    "line": {"in_channels": 3, "convmap_channels": 256, "blocks": 3, "feature_dim": 256, "ffn_dim": 512,
+             "n_head": 4, "num_layers": 4, "in_features": 512, "out_features": 6},
+    "curve": {"in_channels": 3, "convmap_channels": 64, "blocks": 1, "feature_dim": 256, "ffn_dim": 512,
+              "n_head": 4, "num_layers": 8, "in_features": 512, "out_features": 8},
 }
-
-# Loss (paper Eq. 2-4): BCE + (1 - LAMBDA_LOC) * L1 + LAMBDA_LOC * L2^2.
-LAMBDA_LOC = 0.5     # ours (paper: "weighted sum", weight not given)
-
-# ======================================================================
-# Training data (train_data.py)
-# ======================================================================
-
-# Random rotation (any angle) and scale of each training crop (paper:
-# "random rotation and scaling"; the scale range is ours).
-AUG_SCALE_RANGE = (0.8, 1.25)
-# A cubic is split until its controls are within this of the chord before
-# becoming line primitives (px, ours).
-LINE_FLAT_TOL_PX = 0.5
-# Consecutive chords are merged into one line while within this angle (deg, ours).
-LINE_MERGE_ANGLE_DEG = 3.0
-# A cubic is split at t = 1/2 until its least-squares quadratic is within this (px, ours).
-QUAD_FIT_TOL_PX = 0.5
-# Crops with more than n_prim primitives are re-drawn this many times before
-# keeping the n_prim longest (ours).
-OVERFLOW_RETRIES = 5
+# Primitive queries per patch (upstream `--model_output_count` / `-c`, default 10).
+N_PRIM_QUERIES = 10
 
 # ======================================================================
 # Refinement (refine.py) -- paper Sec. 3.3 + Appendix I
@@ -168,10 +145,22 @@ MERGE_CURVE_U_STEPS = 32
 FLAT_TOL_PX = 0.75
 
 # ======================================================================
-# Weights
+# Weights -- `download_weights.py`
 # ======================================================================
 
-# Default trained-weights file per primitive kind (rastervec/weights/ is
-# gitignored); the DEEPTECHVEC_WEIGHTS_PATH environment variable overrides.
-WEIGHTS_FILENAMES = {"line": "deep_tech_vec_line.pth", "curve": "deep_tech_vec_curve.pth"}
+# Default weights file per primitive kind (rastervec/weights/ is gitignored);
+# the DEEPTECHVEC_WEIGHTS_PATH environment variable overrides.
+WEIGHTS_FILENAMES = {"line": "deep_tech_vec_lines.weights", "curve": "deep_tech_vec_curves.weights"}
 WEIGHTS_ENV_VAR = "DEEPTECHVEC_WEIGHTS_PATH"
+# The authors' public Yandex Disk links (upstream README) and the released
+# files' sha256 (checked after download, and before a full unpickle).
+WEIGHTS_URLS = {
+    "line": "https://disk.yandex.ru/d/FKJuMvNJuy-K9g",    # model_lines.weights, 149 MB
+    "curve": "https://disk.yandex.ru/d/yOZzCSrd-QSACA",   # model_curves.weights, 231 MB
+}
+WEIGHTS_SHA256 = {
+    "line": "c92f62f1d6582efe9f51df8d991d6a561a424a46051be2f1b54d9fd326b9363e",
+    "curve": "bac97280f52fa049e9f7f6a03dbc6921f2e67709b505a7139a7768f88038dc26",
+}
+# Yandex Disk public API: public link -> one-off download href.
+YANDEX_DOWNLOAD_API = "https://cloud-api.yandex.net/v1/disk/public/resources/download"

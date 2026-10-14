@@ -1,6 +1,6 @@
 # P2 learned backends: where the implementations differ from their papers
 
-This page lists every place where the two from-scratch P2 backends depart
+This page lists every place where two of the learned P2 backends depart
 from, or fill gaps in, the paper they implement:
 
 - `rastervec/P2_Raster_To_Vec/ImplicitSketchVec/` follows **Yan et al.,
@@ -9,14 +9,12 @@ from, or fill gaps in, the paper they implement:
 - `rastervec/P2_Raster_To_Vec/DeepTechVec/` follows **Egiazarian et al.,
   "Deep Vectorization of Technical Drawings"**, ECCV 2020
   (`references/Deep Vectorization of Technical Drawings 2003.05471v3.pdf`).
+  Its network is the authors' own release, with their pretrained weights;
+  only the code around it is ours.
 
 The same choices are marked "ours" in each backend's `config.py` and module
 docstrings. Shared by both backends:
 
-- Neither has a prep script. Both train on the dataset
-  `DeepVectoriser/prep_dataset.py` writes, through copied readers.
-- Both derive every training target from that dataset's vector strokes on
-  the fly.
 - Both run DeepVectoriser's copied colour separation → tiled OCR → text
   removal front end before the model.
 
@@ -140,73 +138,71 @@ docstrings. Shared by both backends:
 
 ### Pipeline
 1. **Cleaning U-Net (paper step 1) is not run.** The input is already a
-   clean binary layer mask from colour separation, and the shared dataset
-   has no degraded/clean pairs to train it on.
+   clean binary layer mask from colour separation, and the authors released
+   no cleaning weights.
 
 ### Primitive network
-2. **Full-width attention heads.** The paper gives d_emb = 6 for lines with
-   4 heads, and 6 doesn't divide by 4. So each head attends at the full
-   d_emb width, projected d_emb → 4·d_emb → d_emb. This is our reading of
-   the paper.
-3. **Stem stride.** The stem's stride of 2 (32×32 = 1024 feature tokens) is
-   ours.
-4. **Normalisation.** GroupNorm replaces BatchNorm.
-5. **Loss weight.** λ = 0.5 in L_loc is ours (the paper says "weighted sum").
-
-### Training
-6. **Data.** We use our data at 300 dpi instead of PFP/ABC plus synthetic
-   data. The random rotation (any angle) and scale (0.8–1.25, ours) are
-   drawn on the fly instead of pre-computed.
-7. **Targets from cubic ground truth.** Lines come from flattening each
-   cubic to 0.5 px and merging consecutive chords within 3°. Quadratics come
-   from a least-squares fit per cubic, split until within 0.5 px.
-8. **Overflow.** A patch with more than n_prim = 10 primitives is re-drawn
-   up to 5 times, then only the 10 longest are kept.
-9. **Optimiser.** The batch of 128, Adam with the Transformer schedule and
-   4000 warmup steps follow the paper. Gradient clipping is ours.
-10. **Validation.** The best checkpoint is chosen by validation IoU.
+2. **The authors' network and weights, not a rebuild.** `model/network.py`
+   is a copy of `GenericVectorizationNet` from
+   github.com/Vahe1994/Deep-Vectorization-of-Technical-Drawings @ `63cbc67`
+   (MPL-2.0). It uses the released lines spec (ResNet18 × 3 layers → 256
+   ch, 4 decoder layers) and curves spec (ResNet18 × 1 → 64 ch, 8 decoder
+   layers), and `download_weights.py` fetches the released checkpoints.
+   Nothing is trained here. The upstream code itself differs from the paper's
+   Appendix A: it uses 3-channel input (ink plus ink-masked x/y coordinate
+   channels), 256-wide decoder layers with 1×1 adapters on either side, and
+   BatchNorm.
+3. **Decoding follows upstream.** Every output is × 64, coordinates and
+   width alike, and confidence < 0.5 is dropped. Line coordinates are
+   `(tanh + 1) / 2`. Curve coordinates are unbounded, so we clamp them to the
+   patch ± 16 px (ours).
+4. **Scale.** The weights were trained on PFP / ABC renders at a dpi the
+   paper doesn't give. We run at 300 dpi (`TARGET_PX_PER_PT`, tunable).
 
 ### Refinement (Sec. 3.3, Appendix I)
-11. **Coverage.** The paper uses analytic integrals; we use the soft
+Refinement and merging are our CPU implementations of the paper. Upstream's
+own refinement and merging code is CUDA-bound and isn't vendored.
+
+5. **Coverage.** The paper uses analytic integrals; we use the soft
     rasterisation `clamp(w/2 + ½ − d, 0, 1)`. Curves are flattened to 8
     segments.
-12. **Potential.** φ(r) is the paper's (R_c 1 px, R_f 32 px, λ_f 0.02), but
+6. **Potential.** φ(r) is the paper's (R_c 1 px, R_f 32 px, λ_f 0.02), but
     the far Gaussian runs on a ¼-resolution grid with a truncated kernel,
     for speed.
-13. **Curve parameterisation.** A curve is parameterised by its point at
+7. **Curve parameterisation.** A curve is parameterised by its point at
     t = ½ plus the two arm lengths and angles. The paper uses the curve's
     intersection with the control-angle bisector.
-14. **Connected-area mask c_k.** It is symmetric (the max of the two
+8. **Connected-area mask c_k.** It is symmetric (the max of the two
     normal-direction extents) instead of the paper's two-sided rectangle.
     For curves, the run along the extended parabola is approximated with
     sampled points.
-15. **Collinearity term.** Directions in E^rdn are summed in doubled-angle
+9. **Collinearity term.** Directions in E^rdn are summed in doubled-angle
     form, so a segment and its reverse count the same.
-16. **Gradients.** Per-pixel gradients are analytic (envelope theorem), with
+10. **Gradients.** Per-pixel gradients are analytic (envelope theorem), with
     autograd only from parameters to vertices. This is mathematically the
     same mean-field split, just faster.
-17. **Join/move heuristics are ours.** The paper only names them ("join
+11. **Join/move heuristics are ours.** The paper only names them ("join
     lined-up primitives, move collapsed ones onto uncovered ink"). Our
     rules:
     - only lines are joined, using the merge thresholds, every 20 iterations;
     - a collapsed primitive moves onto the most uncovered ink pixel with a
       2 px length.
-18. **Iterations and steps are ours**: 50 iterations by default (0
+12. **Iterations and steps are ours**: 50 iterations by default (0
     disables refinement), Adam steps of 0.1 px and 0.01 rad, and
     λ_pos = 2.0.
 
 ### Merging (Sec. 3.4, Appendix C)
-19. **Thresholds are ours.** Lines are linked when the shorter one's ends
+13. **Thresholds are ours.** Lines are linked when the shorter one's ends
     lie within 1.5 px of the longer one's line, the angle is under 5°, the
     gap is at most 2 px, and the widths are within 2×. A dangling end is cut
     if it is under 5 % of the line. For curves, the distance is 2 px and the
     fit error 1 px.
-20. **Curve pair fit.** It uses t_b = s_b = ½, matching the midpoint
+14. **Curve pair fit.** It uses t_b = s_b = ½, matching the midpoint
     definition above. The pair is oriented so that Q's start is nearest P's
     end.
 
 ### Inference
-21. **Patching.** Patches are 64 px with a 16 px overlap (the overlap is
+15. **Patching.** Patches are 64 px with a 16 px overlap (the overlap is
     ours). Each patch's primitives are clipped to its core before merging,
     with neighbouring patches splitting their actual overlap at its middle.
-22. **Output width.** It is the network's predicted width, converted to pt.
+16. **Output width.** It is the network's predicted width, converted to pt.
