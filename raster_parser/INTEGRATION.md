@@ -1,7 +1,7 @@
 # Main application integration
 
-How a host app calls the raster-parser library. Results serialize as
-`NativePDFElements` (`TextDTO` / `VectorDTO`).
+How a host app calls the raster-parser library. `extract()` returns an `ExtractResult` of the
+shared `Text` / `Vector` models (it used to return `NativePDFElements`: see `docs/model_migration.md`).
 
 ## Setup
 
@@ -12,19 +12,23 @@ pip install -e .
 
 **System dependency (Type-4 / `enable_raster_pass=True`):** LibreOffice with the
 `DeleteDrawings` macro registered (installed on the first LibreOffice call, via
-`raster_parser/delete_natives/libreoffice_setup/`; importing the package does not need
+`raster_parser/P2_Raster_To_Vec/v1RasterToVec/s1_libreoffice_macro.py`; importing the package does not need
 LibreOffice).
 
 ## API
 
 ```python
-from raster_parser import extract, NativePDFElements
+from raster_parser import extract, ExtractResult
 
 result = extract("/path/to/drawing.pdf", page_index=0)
-json_str = result.model_dump_json()
-result.words     # list[TextDTO] — native + Type-2 OCR + Type-4 OCR
-result.vectors   # list[VectorDTO] — non-fill drawings + Type-4 colour-fill autotrace
+result.page      # PageMeta: size, /Rotate, MediaBox, CropBox
+result.texts     # list[Text] -- native words + Phase 3 OCR + Phase 2 (raster) OCR
+result.vectors   # list[Vector] -- non-glyph drawings + Phase 2 colour-fill autotrace
+json_str = result.to_json()
+again = ExtractResult.from_json(json_str)
 ```
+
+`docs/model_migration.md` maps every old `TextDTO` / `VectorDTO` field to the new models.
 
 ### Parameters
 
@@ -38,17 +42,30 @@ result.vectors   # list[VectorDTO] — non-fill drawings + Type-4 colour-fill au
 | `workers` | `1` | Process pool size for Type-4 tile det / recog / colour autotrace |
 | `dump_dir` | `./tmp` | LO + Type-4 dump root (passed to `clear_page`) |
 | `debug` | `False` | Keep dumps on disk; otherwise removed after `extract()` |
+| `p2` | `"v1RasterToVec"` | Phase 2 (raster pass) backend — `raster_parser.core.registry.P2_REGISTRY` |
+| `p3` | `"v1VectorClass"` | Phase 3 (vector parsing) backend — `raster_parser.core.registry.P3_REGISTRY` |
+
+An unknown `p2` / `p3` name raises `ValueError` listing the valid ones. `enable_raster_pass=False`
+skips Phase 2 whatever `p2` is (same as `p2="Stub"`).
 
 ### Flow
 
-1. Native `get_text` + `get_drawings`; Type-2 OCR on fill glyphs; keep non-fill vectors.
-2. If `enable_raster_pass`: LibreOffice `DeleteDrawings` via `clear_page(..., dump_dir=...)`
-   on a temp single-page copy (native text/vector shapes removed; embedded images remain).
-3. If the cleared page is non-empty: Type-4 via
-   `raster_parser.type4_methods.extract_raster_page` — text/drawing split, clean-raster
-   re-detection, recognition, then **colour-fill autotrace** on `drawing_final`
-   (no soft/adaptive preprocess; masks are already binary). Merge words/vectors.
-4. No native-vs-OCR comparison. The original native page is not rasterized for Type-2.
+`extract()` runs one page through four phases (`raster_parser.core.pipeline.run_pipeline`):
+
+1. **Phase 1** (`P1_Reading_Native`) — native words (`get_text`), vector paths
+   (`get_drawings(extended=True)`, clip / group info folded into each path) and embedded images.
+2. **Phase 2** (`p2`, default `v1RasterToVec`) — the raster pass: LibreOffice `DeleteDrawings`
+   via `clear_page(..., dump_dir=...)` on a one-page copy (native text / vector shapes removed,
+   embedded images kept); if anything is left, `extract_raster_page` runs on it — text/drawing
+   split, tiled OCR detection + recognition, then **colour-fill autotrace** of the drawing layer.
+3. **Phase 3** (`p3`, default `v1VectorClass`) — fill-glyph OCR on Phase 1's vectors: filled,
+   non-white, non-box paths are grouped into words by content-stream order and read with
+   PaddleOCR; every other vector is kept as drawing. Phase 3 never sees Phase 2's output.
+4. **Phase 4** (`P4_Output_Organization`) — native words, then Phase 3 text, then Phase 2 text,
+   with `block_no` renumbered per phase; Phase 3 vectors, then Phase 2 vectors with seqnos moved
+   past Phase 3's (raster traces paint on top). Out-of-page items are logged.
+
+No native-vs-OCR comparison. The original native page is not rasterized for Phase 3.
 
 ### Guarantees
 
