@@ -59,3 +59,52 @@ def test_backends_get_the_phase_inputs_and_settings(tmp_pdf_path, monkeypatch):
     assert seen["p2"] == ([], 0, settings)
     assert seen["p3"] == (2, settings)
     assert len(result.vectors) == 1
+
+
+def _counting_backends(monkeypatch) -> list[str]:
+    called: list[str] = []
+
+    def fake_p2(images, page, settings):
+        called.append("p2")
+        return [], []
+
+    def fake_p3(vectors, page, settings):
+        called.append("p3")
+        return [], []
+
+    monkeypatch.setitem(registry.P2_REGISTRY, "Count", fake_p2)
+    monkeypatch.setitem(registry.P3_REGISTRY, "Count", fake_p3)
+    return called
+
+
+@pytest.mark.parametrize(
+    "stop_after, backends, steps",
+    [
+        ("phase1", [], {"phase1", "phase4"}),
+        ("phase2", ["p2"], {"phase1", "phase2", "phase4"}),
+        ("phase3", ["p2", "p3"], {"phase1", "phase2", "phase3", "phase4"}),
+        (None, ["p2", "p3"], {"phase1", "phase2", "phase3", "phase4"}),
+    ],
+)
+def test_stop_after_skips_later_backends(tmp_pdf_path, monkeypatch, stop_after, backends, steps):
+    called = _counting_backends(monkeypatch)
+    result = run_pipeline(_pdf(tmp_pdf_path), 0, p2="Count", p3="Count", stop_after=stop_after)
+    assert called == backends
+    assert set(result.step_durations) == steps
+
+
+def test_stop_before_phase3_outputs_phase1_vectors(tmp_pdf_path, monkeypatch):
+    _counting_backends(monkeypatch)
+    result = run_pipeline(_pdf(tmp_pdf_path), 0, p2="Count", p3="Count", stop_after="phase2")
+    assert len(result.vectors) == 2  # P3 would have returned none
+    assert [t.text for t in result.texts] == ["hello", "world"]
+
+
+def test_bad_stop_after_fails_before_reading():
+    with pytest.raises(ValueError, match="stop_after"):
+        run_pipeline("does-not-exist.pdf", 0, p2="Stub", p3="Stub", stop_after="phase4")
+
+
+def test_debug_hooks_default_to_off():
+    settings = RunSettings()
+    assert settings.on_debug_layer is None and settings.on_debug_image is None
