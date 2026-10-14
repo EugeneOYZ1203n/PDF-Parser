@@ -67,6 +67,8 @@ skips Phase 2 whatever `p2` is (same as `p2="Stub"`).
 
 No native-vs-OCR comparison. The original native page is not rasterized for Phase 3.
 
+How the phases and backends fit together, and how to add a backend: `docs/ARCHITECTURE.md`.
+
 ### Guarantees
 
 - **Intermediates** — LO + Type-4 dumps under `dump_dir` (default: `./tmp`).

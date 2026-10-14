@@ -2,6 +2,7 @@
 
 Adding a backend: a new folder under `P2_Raster_To_Vec/` or `P3_Vector_Parsing/` exposing a
 function that matches `core.interfaces.Phase2Backend` / `Phase3Backend`, plus one line here.
+See `docs/ARCHITECTURE.md`.
 """
 from __future__ import annotations
 
