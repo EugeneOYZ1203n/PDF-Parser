@@ -124,26 +124,12 @@ uv sync --group dev --group notebook --group test
 
 | Script | Role |
 |--------|------|
-| `scripts/type4_pipeline.py` | Type-4 CLI: text/drawing split + colour-fill + native-vs-OCR stats |
-| `scripts/type2_nativetext_to_vector_pipeline.py` | Native text → vector PDF / SVG dump |
-| `scripts/type2_dump_extraction_pipeline.py` | Type-2 dump + optional OCR |
-| `scripts/type2_full_native_to_ocr_pipeline.py` | Native → vector → OCR → compare |
-| `scripts/type2_native_wordgroup_png_pipeline.py` | Paddle-prep word-group PNGs from native text |
-| `scripts/raster_drawing_autotrace.py` | Standalone PNG → autotrace (no soft/adaptive preprocess) |
-| `scripts/raster_drawing_colour_fill_autotrace.py` | Standalone colour-fill autotrace on a PNG |
-| `scripts/dto_reconstruct_pipeline.py` | Replay `NativePDFElements` JSON / PDF → drawings |
-| `scripts/debug/ocr_test_script.py` | Staged Type-2 native-vs-OCR (single page) |
-| `scripts/debug/batch_test_script.py` | Staged Type-2 batch eval |
 | `scripts/inspector/` | PDF layer inspector GUI (`python -m scripts.inspector.inspector [pdf]`) — see its `README.md` |
 | `scripts/label/` | Ground-truth labelling tools (native / vector / raster labels, `master_label.py` runs them all) — see its `README.md` |
 | `scripts/generate_pipeline_report.py` | Config-driven pipeline report: debug layers, debug images, `dump.json`; benchmark mode adds ground truth — see `docs/SCRIPTS.md` |
 | `scripts/pipeline_report_viewer.py` | Tk viewer over 1–2 report folders, a checkbox per layer — see `docs/SCRIPTS.md` |
 | `scripts/pipeline_report_benchmark.py` | Scores 1–2 benchmark report folders, writes `report.html` (needs `uv sync --group report`) — see `docs/SCRIPTS.md` |
 | `scripts/rasterize_pdf.py` | Flatten a PDF to pure raster: `python scripts/rasterize_pdf.py SRC [DST] --dpi 300` (default DST `outputs/rasterize/<stem>_raster.pdf`) |
-
-Helpers for batch eval live in `raster_parser.native_vs_ocr` (e.g. `text_to_vector`,
-`page_stats`). That path writes `onlyfill.pdf`, `ocr.pdf`, `out_results.txt`, etc.,
-and is separate from `extract()`.
 
 ## Tests
 

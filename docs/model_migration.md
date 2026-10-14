@@ -101,7 +101,7 @@ own field names (above), not the old DTO layout.
 as a private record because the autotrace steps are built around it. Converting it at the edge
 keeps their output as before.
 
-Still on the removed classes, kept unchanged until they are ported or removed:
-`evaluation/native_vs_ocr/`, `evaluation/native_vs_raster/`, `native_vs_ocr/` and the
-`scripts/type2_*`, `type4_pipeline.py`, `dto_reconstruct_pipeline.py` and `raster_drawing_*`
-scripts. Their tests are skipped.
+The tools that were still on the removed classes (`evaluation/native_vs_ocr/`,
+`evaluation/native_vs_raster/` and the `scripts/type2_*`, `type4_pipeline.py`,
+`dto_reconstruct_pipeline.py` and `raster_drawing_*` scripts) have been removed; the pipeline
+report and benchmark (`docs/SCRIPTS.md`) replace them.
