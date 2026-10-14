@@ -1,9 +1,8 @@
-"""DeepTechVec's own (copied from DeepVectoriser, originally Junction) PaddleOCR detect + recognize pair, plus the raster-refined
-deskew used before recognition.
+"""The shared P2 raster prelude's own PaddleOCR detect + recognize pair, plus
+the raster-refined deskew used before recognition.
 
 An independent duplicate of `P3_Vector_Parsing/OldVectorClassification/
-paddle_engine.py` (per CLAUDE.md's "sibling backends share zero code" rule
--- P2 must not import a P3 backend): `PaddleDetectBackend.detect` returns
+paddle_engine.py` (P2 must not import a P3 backend): `PaddleDetectBackend.detect` returns
 text quads in the given image's pixel space; `PaddleRecBackend.
 recognize_crops` classifies 0/180 then recognizes; `recognize_crops_raw`
 recognizes as-is (the +90/180/270 blank-retry sweep); `hough_deskew` crops
@@ -26,7 +25,7 @@ from skimage.color import rgb2gray
 from skimage.morphology import binary_dilation, disk
 from skimage.transform import hough_line, hough_line_peaks, rotate
 
-from rastervec.P2_Raster_To_Vec.DeepTechVec.config import (
+from rastervec.P2_Raster_To_Vec.RasterText.config import (
     CROP_BORDER_PX,
     CROP_EXPAND_FRACTION,
     DETECT_LIMIT_SIDE_LEN,

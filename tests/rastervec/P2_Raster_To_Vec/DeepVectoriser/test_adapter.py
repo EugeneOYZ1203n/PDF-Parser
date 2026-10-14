@@ -6,7 +6,7 @@ import pytest
 from rastervec.commons.models import Image, Page
 from rastervec.P2_Raster_To_Vec.DeepVectoriser import adapter, geometry as geo
 from rastervec.P2_Raster_To_Vec.DeepVectoriser.inference import TilePrediction
-from rastervec.P2_Raster_To_Vec.DeepVectoriser.paddle_engine import OcrBox
+from rastervec.P2_Raster_To_Vec.RasterText.paddle_engine import OcrBox
 
 _NO_OCR = {
     "detect_many": lambda images: [[] for _ in images],
@@ -81,7 +81,7 @@ def test_debug_layers_stream_and_batch_match(page_meta):
     adapter.extract([_image()], page, debug_out=debug_out, ocr_fns=_NO_OCR, model_fn=_fake_model)
     assert [(s, label) for s, label, _h, _b in adapter.render_debug(debug_out, page.meta)] == streamed
     stages = {s for s, _ in streamed}
-    for stage in ("color_separation", "ocr", "text_removal", "tiles", "strokes", "merge",
+    for stage in ("enhance", "ink", "color_layers", "ocr", "text_removal", "tiles", "strokes", "merge",
                   "vector_diff"):
         assert stage in stages
     assert all(b[:4] == b"%PDF" for *_x, b in seen)

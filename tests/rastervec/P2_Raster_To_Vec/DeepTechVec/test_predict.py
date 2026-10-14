@@ -41,7 +41,7 @@ def test_run_writes_viewer_folder(tmp_path, synthetic_pdf_factory):
     on_disk = json.loads((out / "manifest.json").read_text())
     assert on_disk["pages"] == [0, 1] and on_disk["engine"] == "DeepTechVec"
     stages = {e["stage"] for e in on_disk["layers"]}
-    assert {"original", "detected", "color_separation", "tiles", "primitives", "merge"} <= stages
+    assert {"original", "detected", "color_layers", "tiles", "primitives", "merge"} <= stages
     for entry in manifest["layers"]:
         with fitz.open(out / entry["file"]) as doc:
             assert doc.page_count == 2

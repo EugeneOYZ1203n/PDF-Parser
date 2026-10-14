@@ -10,7 +10,7 @@ from rastervec.commons.models import Image, Page
 from rastervec.core.registry import P2_REGISTRY, P2_RENDER_DEBUG
 from rastervec.Evaluation.Evaluate.variants import resolve_variant
 from rastervec.P2_Raster_To_Vec.InvolutionStroke import adapter, predict
-from rastervec.P2_Raster_To_Vec.InvolutionStroke.paddle_engine import OcrBox
+from rastervec.P2_Raster_To_Vec.RasterText.paddle_engine import OcrBox
 
 from ._fakes import FAKE_MODELS
 
@@ -80,7 +80,7 @@ def test_debug_layers_stream_and_batch_match(page_meta):
     adapter.extract([_image()], page, debug_out=debug_out, ocr_fns=_NO_OCR, model_fns=FAKE_MODELS)
     assert [(s, label) for s, label, _h, _b in adapter.render_debug(debug_out, page.meta)] == streamed
     stages = {s for s, _ in streamed}
-    for stage in ("color_separation", "ocr", "text_removal", "tiles", "centerline", "graph", "pairing",
+    for stage in ("enhance", "ink", "color_layers", "ocr", "text_removal", "tiles", "centerline", "graph", "pairing",
                   "merge", "fit", "vector_diff"):
         assert stage in stages
     assert all(b[:4] == b"%PDF" for *_x, b in seen)

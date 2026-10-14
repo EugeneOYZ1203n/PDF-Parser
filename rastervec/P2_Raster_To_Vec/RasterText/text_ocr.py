@@ -1,4 +1,4 @@
-"""Steps 2-5 of DeepVectoriser's pre-vectorizing flow (copied from Junction): find and read text in a raster.
+"""Steps 2-5 of the shared P2 raster prelude: find and read text in a raster.
 
 1. `tile_grid` -- cut the image into `OCR_TILE_PX` tiles overlapping by
    `OCR_TILE_OVERLAP_FRAC` (960 px = PaddleOCR's own det_limit_side_len, so
@@ -35,7 +35,7 @@ from tqdm import tqdm
 
 from rastervec.commons.logging_setup import get_logger
 
-from rastervec.P2_Raster_To_Vec.DeepVectoriser.config import (
+from rastervec.P2_Raster_To_Vec.RasterText.config import (
     MAX_UPSCALE,
     MIN_RENDER_SIDE_PX,
     OCR_BATCH_SIZE,
@@ -46,7 +46,7 @@ from rastervec.P2_Raster_To_Vec.DeepVectoriser.config import (
     RENDER_PADDING_EXTRA_PT,
     TILE_MERGE_GAP_PX,
 )
-from rastervec.P2_Raster_To_Vec.DeepVectoriser.paddle_engine import (
+from rastervec.P2_Raster_To_Vec.RasterText.paddle_engine import (
     PaddleDetectBackend,
     PaddleRecBackend,
     _detect_job,
@@ -56,7 +56,7 @@ from rastervec.P2_Raster_To_Vec.DeepVectoriser.paddle_engine import (
     normalize_rotation,
 )
 
-_LOG = get_logger("P2.DeepVectoriser.ocr")
+_LOG = get_logger("P2.RasterText.ocr")
 
 BBox = tuple[float, float, float, float]
 # Images per detect dispatch -- bounds how many tile/crop copies are pickled
@@ -229,10 +229,10 @@ def _make_recognize(compute):
         return out
 
     def recognize(crops):
-        return run(crops, _recognize_crops_job, rec.recognize_crops, "DeepVectoriser OCR recognize")
+        return run(crops, _recognize_crops_job, rec.recognize_crops, "Raster OCR recognize")
 
     def recognize_raw(crops):
-        return run(crops, _recognize_crops_raw_job, rec.recognize_crops_raw, "DeepVectoriser OCR retry")
+        return run(crops, _recognize_crops_raw_job, rec.recognize_crops_raw, "Raster OCR retry")
 
     return recognize, recognize_raw
 
@@ -243,7 +243,7 @@ def _make_recognize(compute):
 def detect_tiles(bgr: np.ndarray, tiles: list[tuple[int, int, int, int]], detect_many) -> list[TileBox]:
     """Detect per tile (tiles are views into `bgr`, never copied locally)."""
     out: list[TileBox] = []
-    bar = tqdm(total=len(tiles), desc="DeepVectoriser OCR tile detect", unit="tile", leave=False)
+    bar = tqdm(total=len(tiles), desc="Raster OCR tile detect", unit="tile", leave=False)
     for chunk_start in range(0, len(tiles), _DETECT_CHUNK):
         chunk = tiles[chunk_start:chunk_start + _DETECT_CHUNK]
         quads_per_tile = detect_many([bgr[y0:y1, x0:x1] for x0, y0, x1, y1 in chunk])
@@ -286,7 +286,7 @@ def refine_and_recognize(
     angles: list[float] = []
     kept_bboxes: list[BBox] = []
 
-    bar = tqdm(total=len(merged), desc="DeepVectoriser OCR refine detect", unit="box", leave=False)
+    bar = tqdm(total=len(merged), desc="Raster OCR refine detect", unit="box", leave=False)
     for chunk in _chunks(merged, _DETECT_CHUNK):
         prepared = [(_padded_crop(bgr, box, pad_px), box) for box in chunk]
         prepared = [(p, box) for p, box in prepared if p is not None]

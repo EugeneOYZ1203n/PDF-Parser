@@ -65,6 +65,12 @@ timestamped run folder:
                 hough_line_images/ minarea_rect_images/
                 paddle_classifier_before_images/
                 paddle_classifier_after_images/
+              every p2 backend except Stub (the shared raster prelude,
+              streamed via `on_debug_image`, an annotated chart rather than
+              a model input):
+                color_layer_histograms/  (one PNG per embedded image: L
+                                         histogram + Otsu threshold, hue
+                                         histogram + peaks + layer arcs)
 
 Replaces `rastervec/notebooks/pipeline_stage_visualization.ipynb`.
 
@@ -235,6 +241,10 @@ def _image_dirs(doc_dir: Path) -> "dict[str, Path]":
         "old_minarea": doc_dir / "minarea_rect_images",
         "old_classifier_before": doc_dir / "paddle_classifier_before_images",
         "old_classifier_after": doc_dir / "paddle_classifier_after_images",
+        # Every P2 backend's shared raster prelude streams one hue/lightness
+        # histogram per embedded image here via `on_debug_image`
+        # (`RasterText.raster_text.HISTOGRAM_FOLDER`).
+        "color_layer_histograms": doc_dir / "color_layer_histograms",
     }
 
 

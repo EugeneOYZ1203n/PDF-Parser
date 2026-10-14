@@ -1,13 +1,14 @@
 """Tunables for the DeepVectoriser P2 backend (Liu et al., AAAI-22,
 "End-to-End Line Drawing Vectorization" -- references/00052-LiuH.pdf).
 
-Flow: color separation -> tiled OCR (960 px tiles) -> text removal ->
+Flow: the shared raster prelude (`RasterText/` -- OCR, colour CLAHE,
+colour layers, text removal; its tunables are in `RasterText/config.py`) ->
 per ink layer: binary layer mask -> 128 px vectorizer tiles -> learned
 stroke vectorizer -> tile merge.
 
-The pre-vectorizing constants (color separation / OCR / text removal /
-diff) are *copied* from `P2_Raster_To_Vec/Junction/config.py`
-(not imported), per CLAUDE.md's "sibling backends share zero code" rule.
+The color separation constants are kept for `prep_dataset.py` only (the
+training set is still built with DBSCAN layers); the diff constants are
+*copied* from `P2_Raster_To_Vec/Junction/config.py` (not imported).
 """
 from __future__ import annotations
 
@@ -32,53 +33,6 @@ DBSCAN_MIN_PIXELS = 200
 # paper into one layer.
 VALUE_SPLIT_RANGE = 0.5
 VALUE_SPLIT_MAX_DEPTH = 2
-
-# ======================================================================
-# Tiled OCR (text_ocr.py)
-# ======================================================================
-
-# 960 = PaddleOCR's own default det_limit_side_len, so a tile is never
-# resized by the detector. 20% overlap (192 px) exceeds one text line's
-# height at 150-300 dpi, so every line appears whole in at least one tile.
-OCR_TILE_PX = 960
-OCR_TILE_OVERLAP_FRAC = 0.20
-# Two boxes from *different* tiles merge when they intersect or come within
-# this many pixels of each other.
-TILE_MERGE_GAP_PX = 2
-
-# Pad 1 (before the second, per-box detect) -- OldVectorClassification's
-# RENDER_PADDING_EXTRA_PT, in page points, converted with each image's own
-# px-per-pt scale.
-RENDER_PADDING_EXTRA_PT = 15.0
-# The padded box is upscaled until its short side is at least this many px
-# (OldVectorClassification's MIN_RENDER_SIDE_PX / dynamic-dpi analogue), but
-# never by more than MAX_UPSCALE (the MAX_RENDER_DPI analogue: 4800 / 300 dpi
-# would be 16x; 8x is plenty for a raster that has no more detail to give).
-MIN_RENDER_SIDE_PX = 100
-MAX_UPSCALE = 8.0
-# Pad 2 (before recognition) -- OldVectorClassification/paddle_engine.py's
-# _CROP_EXPAND_FRACTION / _CROP_BORDER_PX.
-CROP_EXPAND_FRACTION = 0.05
-CROP_BORDER_PX = 5
-
-# Raster-refined rotation (paddle_engine.py::hough_deskew) -- copied values.
-HOUGH_INK_THRESHOLD = 200
-HOUGH_DILATE_RADIUS_PX = 2
-MINAREA_INK_THRESHOLD = 200
-HOUGH_ANGLE_SNAP_DEG = 10.0
-
-OCR_VERSION = "PP-OCRv4"
-OCR_LANG = "en"
-OCR_BATCH_SIZE = 128
-DETECT_LIMIT_SIDE_LEN = 4000
-
-# ======================================================================
-# Text removal (text_removal.py)
-# ======================================================================
-
-# Dilation (px) of a recognized box's ink-label mask before erasing, to
-# catch antialiased fringe pixels.
-ERASE_DILATE_PX = 1
 
 # ======================================================================
 # Vector/ink diff debug (diff.py)

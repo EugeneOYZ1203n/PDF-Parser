@@ -5,7 +5,8 @@ import pytest
 
 from rastervec.commons.models import Image, Page
 from rastervec.P2_Raster_To_Vec.Junction import adapter
-from rastervec.P2_Raster_To_Vec.Junction.paddle_engine import OcrBox
+from rastervec.P2_Raster_To_Vec.RasterText.paddle_engine import OcrBox
+from rastervec.P2_Raster_To_Vec.RasterText.raster_text import image_px_per_pt, make_to_page
 
 # No PaddleOCR in unit tests: detection finds nothing unless a test says so.
 _NO_OCR = {
@@ -47,7 +48,7 @@ def test_extract_streams_layers_and_matches_batch_render_debug(page_meta):
 
     assert streamed == batch
     assert len(vectors) == len(vectors2)
-    for stage in ("color_separation", "text_removal", "enhance", "vector_render", "vector_diff", "ocr"):
+    for stage in ("enhance", "ink", "color_layers", "text_removal", "vector_render", "vector_diff", "ocr"):
         assert stage in {s for s, _ in streamed}
     for _stage, _label, hexcolor, pdf_bytes in seen:
         assert pdf_bytes[:4] == b"%PDF"
@@ -100,7 +101,7 @@ def test_ocr_hits_become_texts_and_are_erased(page_meta):
     t = texts[0]
     assert t.source == "ocr"
     r, g, b = (t.color >> 16) & 255, (t.color >> 8) & 255, t.color & 255
-    assert max(r, g, b) < 20  # ink centroid is (quantized) black
+    assert max(r, g, b) < 20  # the ink layer's colour is black
     assert t.bbox == pytest.approx((20, 20, 120, 32), abs=1.5)
     assert t.direction == pytest.approx((1.0, 0.0), abs=1e-6)
     # the text block was erased before tracing; only the real line is traced
@@ -113,11 +114,11 @@ def test_transform_maps_quarter_turn_placement():
         array=np.zeros((10, 20), np.uint8), bbox=(50, 0, 60, 20), dpi=72.0,
         source="embedded", transform=(0.0, 20.0, -10.0, 0.0, 60.0, 0.0),
     )
-    to_page = adapter._make_to_page(img, 20, 10)
+    to_page = make_to_page(img, 20, 10)
     assert to_page((0, 0)) == pytest.approx((60, 0))
     assert to_page((20, 0)) == pytest.approx((60, 20))
     assert to_page((0, 10)) == pytest.approx((50, 0))
-    assert adapter._px_per_pt(img, 20, 10) == pytest.approx(1.0)
+    assert image_px_per_pt(img, 20, 10) == pytest.approx(1.0)
     from rastervec.commons.renderer.draw import orient_for_page
 
     oriented = orient_for_page(np.arange(200).reshape(10, 20), img.transform)

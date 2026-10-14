@@ -23,7 +23,9 @@ spaces" below). `core/` is the orchestrator + registry + the stable public API s
 `commons/` is the shared foundation (dataclasses, geometry/rendering/logging/paths helpers) every phase builds
 on. See "`rastervec/` architecture" below for the full breakdown, including the hard rule that
 sibling P2/P3 backends share **zero** code with each other — each is fully self-contained,
-duplicating whatever infra it needs rather than importing a sibling's.
+duplicating whatever infra it needs rather than importing a sibling's. The one exception is
+`P2_Raster_To_Vec/RasterText/`, the shared raster prelude (OCR + colour CLAHE + colour layers +
+text removal) every P2 backend calls first.
 
 A separate, unrelated **`legacy`** engine (`pipelines/legacy.py` + `Evaluation/Evaluate/
 legacy_adapter.py`) runs `archive/raster_parser`'s own pre-`rastervec` pipeline unmodified, kept
@@ -95,6 +97,7 @@ its own copy of the classical pipeline instead).
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.prep_dataset --pdf-dir PDFS/ [--pdf C.pdf] [--sample 50] [--workers 4] --out data/deepvec  # DeepVectoriser training set (run once)
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.view_dataset --data data/deepvec [--key KEY] [--seed 0]  # browse that set (Tk, read-only): masks + GT strokes + training crops
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.train --data data/deepvec [--threads N] [--resume]  # train -> rastervec/weights/deep_vectoriser.pth (output explained in DeepVectoriser/TRAINING.md)
+.venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.Junction.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1] [--dpi 300] [--no-ocr]  # try Junction (OCR + text erase on by default) -> viewer folder + histogram PNGs + command
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepVectoriser.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1] [--weights W.pth] [--ocr]  # try the model -> viewer folder + command
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepTechVec.train --data data/deepvec --prim line|curve [--threads N] [--resume]  # DeepTechVec on DeepVectoriser's dataset -> rastervec/weights/deep_tech_vec_<prim>.pth (output explained in DeepTechVec/TRAINING.md)
 .venv/Scripts/python.exe -m rastervec.P2_Raster_To_Vec.DeepTechVec.predict --pdf X.pdf [--pages 0] [--clip x0,y0,x1,y1] [--weights W.pth] [--refine-iters N]  # try it (OCR never runs) -> viewer folder + command
@@ -266,7 +269,9 @@ not phase code). **Sibling P2 backends (`Stub`/`Junction`/`DeepVectoriser`/`Deep
 each is fully self-contained, duplicating its own copy of any infra it needs (a PaddleOCR engine
 wrapper, layer/color/width separation, a raster→vector tracer, ...) rather than sharing one. This
 is deliberate: it lets each backend be rewritten or torn out without ever
-touching a sibling's files. `commons/` is the only layer every phase may depend on, and it stays
+touching a sibling's files. **The one exception: `P2_Raster_To_Vec/RasterText/`** — the shared
+raster prelude (OCR, colour CLAHE, colour layers, text removal) every P2 backend calls first; it
+isn't a backend itself and imports no backend. `commons/` is the only layer every phase may depend on, and it stays
 thin — pure foundation (dataclasses, geometry math, rendering primitives, logging, paths,
 generic parallel-pool mechanics), never phase-specific business logic.
 
@@ -384,22 +389,45 @@ generic parallel-pool mechanics), never phase-specific business logic.
   - **`Stub/stub.py`** — `extract(images, page) -> ([], [])`, a documented no-op. The default
     (`p2="Stub"`) — matches the old (pre-phase-split) pipeline's behaviour of never deriving
     vectors from raster content.
-  - **`Junction/`** — raster→vector + raster OCR. `adapter.py` (the `Phase2Backend` entrypoint)
-    runs, per embedded `Image`: **(1)** `color_separation.py` — DBSCAN (scikit-learn) over the
-    distinct `COLOR_QUANT_LEVELS`-quantized colors weighted by pixel count, in HSV *cone* space
-    `(S·V·cosH, S·V·sinH, V)` (hue wraps; dark/unsaturated collapse onto the gray axis), plus a
-    weighted-Otsu V split of any cluster spanning > `VALUE_SPLIT_RANGE` (DBSCAN density-chains
-    ink↔paper through a blurred scan's gray ramp otherwise); noise → nearest centroid; background =
-    largest layer. **(2)** `text_ocr.py` — 960 px / 20 % overlapping tiles → PaddleOCR detect →
-    `merge_cross_tile_boxes` (union-find, *cross-tile only*, extreme x/y) → pad 1 (15 pt, P3's
-    render padding) + upscale to ≥100 px short side → detect again → `hough_deskew` (pad 2: 5 %
-    expand + 5 px border, P3's crop padding) → page-wide batched recognize + 90/180/270 blank
-    retry. Own `paddle_engine.py` copy (P2 may not import P3); `compute` (Pool 2) supported.
-    **(3)** `text_removal.py` — ink = most frequent non-background layer inside the refined quad;
-    erase only that layer's pixels in the pad-2 region (1 px dilate), background-colored, only
-    for non-blank recognitions — a differently-colored crossing line survives. Emits `Text`
-    (`source="ocr"`, `color` = ink centroid). **(4)** `enhance.py` — CLAHE (2.0, 8×8) + unsharp
-    mask (σ 1, amount 1.5). **(5)** per ink color layer, `components.py::iter_layer_components`
+  - **`RasterText/`** — **the shared raster prelude, the one deliberate exception to the
+    "siblings share zero code" rule**: every P2 backend except Stub calls
+    `raster_text.prepare_images(images, page, *, compute, ocr_fns, keep_debug, on_debug_layer,
+    on_debug_image) -> RasterPrelude(texts, images: list[PreparedImage], debug)` first, then
+    vectorizes each `PreparedImage` (`enhanced_rgb`, `layers`, `to_page`, `px_per_pt`) layer by
+    layer. Per embedded `Image`: **(1)** `text_ocr.py` on the **raw** image — 960 px / 20 %
+    overlapping tiles → PaddleOCR detect → `merge_cross_tile_boxes` (union-find, *cross-tile only*,
+    extreme x/y) → pad 1 (15 pt, P3's render padding) + upscale to ≥100 px short side → detect
+    again → `hough_deskew` (pad 2: 5 % expand + 5 px border, P3's crop padding; border filled with
+    the image's median colour) → page-wide batched recognize + 90/180/270 blank retry. Own
+    `paddle_engine.py` copy (P2 may not import P3); `compute` (Pool 2) supported. **(2)**
+    `enhance.py::clahe_lab` — CLAHE (2.0, 8×8) + unsharp mask (σ 1, amount 1.5) on **LAB L
+    only**, so hue/chroma are untouched. **(3)** `color_layers.py::split_layers` (replaced the
+    per-backend DBSCAN `color_separation.py`) — ink = `L <=` Otsu(L) (only when the two classes'
+    means are ≥ `OTSU_MIN_SEPARATION` apart, so near-uniform paper isn't half-ink) **or** chroma >
+    `INK_CHROMA_MIN` (keeps pale yellow/cyan lines); ink with chroma ≤ `ACHROMATIC_CHROMA_MAX` → one
+    achromatic layer; the rest → chroma-weighted, circularly smoothed LAB hue histogram, each local
+    max ≥ `HUE_PEAK_MIN_FRAC` of the top a layer, every hue bin to its circularly nearest peak;
+    layers < `LAYER_MIN_PIXELS` folded into the nearest (smallest first). `labels` is −1 on paper;
+    layer colour = median *original* RGB. Hue only — same-hue colours of different lightness
+    (pink vs magenta) share a layer. **(4)** `text_removal.py` — ink = most frequent layer inside
+    the refined quad; erase only that layer's pixels in the pad-2 region (1 px dilate, never into
+    another layer), painted the paper's median colour, labels → paper, only for non-blank
+    recognitions — a differently-colored crossing line survives. Emits `Text` (`source="ocr"`,
+    `color` = the ink layer's colour, seqnos 0..n-1 — backends continue after them). Debug:
+    `enhance/enhanced colour image`, `ink/ink mask` + `chroma map`, `color_layers/all layers` + one
+    `color_layers/layer N #rrggbb` mask per layer, `text_removal/cleaned image` + `erased pixels`,
+    and the `ocr/*` layers (`tiles`, `tile detect bbox`/`passed bbox`/`failed bbox` as the
+    detector's own rotated quads, `merged bbox`, `passed text`) — streamed at the end of
+    `prepare_images`, or kept (`keep_debug`) and rendered by `prelude_debug_layers` (each backend's
+    `render_debug` prepends them; `debug_out["raster_prelude"]` holds the prelude). Plus one
+    hue/lightness histogram PNG per image (`_histogram_png`: L histogram + Otsu line, log-scale hue
+    histogram + peaks + layer arcs) — on `prelude.debug.histograms` (written by every `predict.py`
+    to `<out>/color_layer_histograms/`) and offered to `on_debug_image` under
+    `HISTOGRAM_FOLDER` (the report generator's `color_layer_histograms/` folder). Tunables in
+    `RasterText/config.py`.
+  - **`Junction/`** — raster→vector. `adapter.py` (the `Phase2Backend` entrypoint) runs the
+    RasterText prelude, then **(5)** per colour layer of each prepared image (gray of the CLAHE'd
+    colour image), `components.py::iter_layer_components`
     (a generator — one crop alive at a time) splits the layer into components at
     `COMPONENT_TOLERANCE_PT` (10 pt) and each is traced by `junction_test.pipeline.run`
     at **native resolution** (no downscale): `binarize` (Otsu | gray<245, specks removed by
@@ -416,21 +444,21 @@ generic parallel-pool mechanics), never phase-specific business logic.
     layer's color. Pixel → page mapping goes
     through `Image.transform` (unit square → page), falling back to a bbox fill. **This module uses
     `cv2`** — there is no repo-wide "no cv2" rule. Debug (`render_debug` in `P2_RENDER_DEBUG` +
-    streaming `on_debug_layer`, same helpers): full-resolution PNG layers embedded in page PDFs
-    (`color_separation/clusters`, `text_removal/cleaned image`, `enhance/enhanced image`,
-    `vector_render/rendered vectors`, `vector_diff/total` + `vector_diff/layer #rrggbb` —
-    `diff.py`: red = ink with no vector within `DIFF_TOLERANCE_PX` (missed), blue = vector with no
-    ink (spurious), for future missed-line recovery) plus ocr/component box layers (`tile detect
-    bbox`/`passed bbox`/`failed bbox` drawn as the detector's own rotated quads, kept on
-    `TileBox.quad`/`_PageState.quads`; OCR `Text`s carry theirs as `quad_points`) and tracing point/line layers (`graph_build/chains|junctions|endpoints`, `vectorize/polylines|polyline endpoints` -- real geometry, not bboxes);
-    each (stage, label) appears once per page. `debug_out["diff_codes"]` keeps the raw uint8
-    code canvases. Tunables in `Junction/config.py`.
+    streaming `on_debug_layer`, same helpers): the RasterText prelude's layers, then
+    full-resolution PNG layers embedded in page PDFs (`vector_render/rendered vectors`,
+    `vector_diff/total` + `vector_diff/layer #rrggbb` — `diff.py`: red = ink with no vector within
+    `DIFF_TOLERANCE_PX` (missed), blue = vector with no ink (spurious), for future missed-line
+    recovery) plus the `components/component bbox` layer and tracing point/line layers
+    (`graph_build/chains|junctions|endpoints`, `vectorize/polylines|polyline endpoints` -- real
+    geometry, not bboxes), `final_vectors/vectors` in their layer colours; each (stage, label)
+    appears once per page. `debug_out["diff_codes"]` keeps the raw uint8 code canvases. Tunables
+    in `Junction/config.py` (tracing/diff only). **`predict.py`** (`--pdf --pages --clip --dpi
+    [--no-ocr]`): as DeepVectoriser's, but OCR + text erase **on** by default (Junction has no
+    training data to match); writes `outputs/junction_predict/<ts>__<stem>/` + histogram PNGs.
   - **`DeepVectoriser/`** — learned raster→stroke vectorizer: a from-scratch PyTorch
     implementation of **Liu et al., "End-to-End Line Drawing Vectorization", AAAI-22**
-    (`references/00052-LiuH.pdf`, no public code). `adapter.py` runs, per embedded `Image`,
-    Junction's color separation → tiled OCR → text removal (**copied** files, not imported:
-    `color_separation.py`/`text_ocr.py`/`paddle_engine.py`/`text_removal.py`/`diff.py`; no
-    enhancement — the model reads binary masks), then per ink color layer: the layer's
+    (`references/00052-LiuH.pdf`, no public code). `adapter.py` runs the RasterText prelude
+    (`diff.py` is a **copied** Junction file), then per colour layer: the layer's
     **binary mask** (`adapter.layer_image`, ink 0 — so a pale line is as visible as a black one)
     resampled to the canonical 300 dpi (`TARGET_PX_PER_PT`) → `inference.vectorize_layer`:
     128 px tiles / 16 px overlap, empty tiles skipped, batched through the model, a
@@ -452,7 +480,8 @@ generic parallel-pool mechanics), never phase-specific business logic.
     into strokes (`train_data.chain_annotations`, duplicate/retraced pieces dropped), **no text
     cleanup** (no OCR/erase, and no OCR module is even imported — `layer_image` lives in
     `masks.py`, not the OCR-importing `adapter.py`; text glyph strokes stay in the GT), color
-    layers (a stroke goes to every layer covering ≥ 50 % of it; `assign_layers`/
+    layers from DeepVectoriser's own DBSCAN `color_separation.py` (kept for prep only — inference
+    uses RasterText's layers; prep is due to be rewritten) (a stroke goes to every layer covering ≥ 50 % of it; `assign_layers`/
     `chain_annotations` are vectorized), one `layers/<key>.gray.png` (lossless, cropped to the
     layer's content + 256 px) + `.strokes.npz` (crop frame) per (page, layer) **with GT strokes**
     (stroke-less layers are listed in the manifest, not stored), `--sample N` random pages (`--seed`, reproducible so re-runs resume), `--workers N` page processes,
@@ -471,14 +500,14 @@ generic parallel-pool mechanics), never phase-specific business logic.
     [--weights] [--ocr]`): renders a page region, runs `adapter.extract` on it as one image (OCR
     off by default, as in prep) and writes a `scripts/pipeline_report_viewer.py` folder —
     every backend debug layer plus `original/vectors`, `original/clip region`,
-    `detected/vectors` — and prints the viewer command. Debug layers: `color_separation`, `ocr/*`, `text_removal`, `tiles/vectorizer
+    `detected/vectors`, plus `<out>/color_layer_histograms/` — and prints the viewer command. Debug
+    layers: the RasterText prelude's, `tiles/vectorizer
     tile grid` + `re-split tiles`, `strokes/raw tile strokes` + `raw endpoints`, `merge/merged
     vectors` + `merged endpoints`, `vector_diff/total`.
   - **`DeepTechVec/`** — learned raster→primitive vectorizer: a from-scratch PyTorch
     implementation of **Egiazarian et al., "Deep Vectorization of Technical Drawings", ECCV 2020**
     (`references/Deep Vectorization of Technical Drawings 2003.05471v3.pdf`). `adapter.py` runs
-    DeepVectoriser's color separation → tiled OCR → text removal (**copied** files, not imported:
-    `color_separation.py`/`text_ocr.py`/`paddle_engine.py`/`text_removal.py`/`diff.py`/`masks.py`);
+    the RasterText prelude (`diff.py`/`masks.py` **copied** from DeepVectoriser);
     the paper's cleaning U-Net is **not** run (input is already a clean binary layer mask, and the
     dataset has no degraded/clean pairs). Per ink layer, `inference.vectorize_layer`: 64 px patches /
     16 px overlap at 300 dpi → **primitive network** (`model/network.py`: stride-2 stem + `n_res = 1`
@@ -503,13 +532,13 @@ generic parallel-pool mechanics), never phase-specific business logic.
     zero-padded. **`train.py`**: Eq. 2-4 loss, batch 128, Adam + Noam schedule, best val IoU →
     `--out`, `<out>.last.ckpt` / `--resume`, log `<out stem>_train_log.csv` (output explained in
     `DeepTechVec/TRAINING.md`). **`predict.py`**: as DeepVectoriser's, OCR never runs,
-    `--refine-iters`. Debug layers: `color_separation`, `ocr/*`, `text_removal`, `tiles/patch grid`,
+    `--refine-iters`. Debug layers: the RasterText prelude's, `tiles/patch grid`,
     `primitives/raw (network)` + `raw endpoints`, `refine/refined`, `merge/merged endpoints` +
     `merged vectors`, `vector_diff/total`.
   - **`ImplicitSketchVec/`** — learned raster→stroke vectorizer: a from-scratch PyTorch
     implementation of **Yan et al., "Deep Sketch Vectorization via Implicit Surface Extraction",
-    SIGGRAPH 2024** (`references/Deep Sketch Vectorization 3658197.pdf`). Front end copied from
-    DeepVectoriser (color separation → tiled OCR → text removal; `masks.py`, `diff.py`). Per ink
+    SIGGRAPH 2024** (`references/Deep Sketch Vectorization 3658197.pdf`). Front end: the
+    RasterText prelude (`masks.py`, `diff.py` copied from DeepVectoriser). Per colour
     layer (`inference.vectorize_layer`), 256 px tiles / 32 px overlap at 300 dpi through two
     networks (`model/network.py`): **Distance Field Prediction** (ResNeXt FCN after Puhachov et al.
     2021, cardinality 8, dilations 1→8, heavy blocks at ½ res, 2× head; Appendix B 2×2 pad-1
@@ -535,13 +564,12 @@ generic parallel-pool mechanics), never phase-specific business logic.
     **`predict.py`**: as DeepVectoriser's, OCR never runs. Debug layers: `dfp/udf centerline` +
     `keypoints end|sharp|junc` + `under-sampling map`, `ndc/raw edges`, `refine/refined edges`,
     `topology/refined regions`, `group/strokes`, `fit/stroke endpoints` + `fitted vectors`, plus
-    the copied ones.
+    the RasterText prelude's.
   - **`InvolutionStroke/`** — raster→stroke vectorization with the **authors' pretrained weights**
     (no training here): **Gerstner, Magne & Sorkine-Hornung, "Stroke Vectorization via Involution
     Prediction", VMV 2026**, reference code github.com/verven/InvolutionStrokeVectorization vendored
-    @ `178eede` (**upstream has no LICENSE** — internal research use; see its `README.md`). Front end
-    copied from ImplicitSketchVec (color separation → tiled OCR → text removal; `masks.py`,
-    `diff.py`). Per ink layer (`inference.vectorize_layer`), 300 dpi, **1024 px tiles / 96 px
+    @ `178eede` (**upstream has no LICENSE** — internal research use; see its `README.md`). Front end:
+    the RasterText prelude (`masks.py`, `diff.py` copied from ImplicitSketchVec). Per colour layer (`inference.vectorize_layer`), 300 dpi, **1024 px tiles / 96 px
     overlap, each running upstream's whole `main.process_image` chain**: invert to white-on-black →
     centerline UNet (`model/centerline.py`, `ResNextUNetLarge`, padded to a multiple of 16) →
     `_upstream/graph_extraction/build_linegraph.process` + `compute_polylines` (planar line graph,
@@ -569,7 +597,7 @@ generic parallel-pool mechanics), never phase-specific business logic.
     (`--centerline-weights`/`--intersection-weights`). Debug layers: `tiles/tile grid` + `failed
     tiles`, `centerline/predicted centerline`, `graph/polylines` + `junction nodes`,
     `pairing/matched strokes`, `merge/seam joins`, `fit/stroke endpoints` + `fitted vectors`, plus
-    the copied ones. Tests use a skeleton "centerline" + an angle-based "pairing" fake
+    the RasterText prelude's. Tests use a skeleton "centerline" + an angle-based "pairing" fake
     (`tests/.../InvolutionStroke/_fakes.py`); `RASTERVEC_RUN_INVOLUTION_TESTS=1` runs one
     real-weights test.
 
@@ -1345,8 +1373,10 @@ for unit tests since those are gitignored and give no exact expected values to a
    `parse(vectors_p1, page, **kwargs) -> (vectors, texts)`. **Fully self-contained**
    — duplicate whatever infra (FAST detector, PaddleOCR engine wrapper, layer/color separation,
    Radon deskew, ...) the backend needs internally rather than importing a sibling P2/P3 backend;
-   `commons/` is the only shared layer. Split real logic into small private functions per
-   sub-step, each independently testable.
+   `commons/` is the only shared layer — plus, for a P2 backend, `RasterText.raster_text.
+   prepare_images`, which it should call first (OCR + colour CLAHE + colour layers + text
+   removal) and then vectorize each prepared image's colour layers. Split real logic into small
+   private functions per sub-step, each independently testable.
 2. One more line in `core/registry.py`'s `P2_REGISTRY`/`P3_REGISTRY`.
 3. Optional: accept a `debug_out: dict | None = None` kwarg (mirrors the existing
    `radon.segment_clusters(debug_out=...)` convention) and, when given, stash your own

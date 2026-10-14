@@ -49,7 +49,7 @@ def test_run_writes_viewer_folder(tmp_path, synthetic_pdf_factory):
     on_disk = json.loads((out / "manifest.json").read_text())
     assert on_disk["pages"] == [0, 1] and on_disk["source_pdf"].endswith(path.name)
     stages = {e["stage"] for e in on_disk["layers"]}
-    assert {"original", "detected", "color_separation", "tiles", "merge"} <= stages
+    assert {"original", "detected", "color_layers", "tiles", "merge"} <= stages
     for entry in manifest["layers"]:
         with fitz.open(out / entry["file"]) as doc:
             assert doc.page_count == 2  # page-aligned with `pages`

@@ -1,4 +1,4 @@
-"""Step 9 of Junction's pre-tracing flow: split one color layer into
+"""Step 5 of Junction's flow (after the shared raster prelude): split one color layer into
 spatially separate components and hand them to the tracer one at a time.
 
 Junction runs at full native resolution (no downscale), and its skeleton

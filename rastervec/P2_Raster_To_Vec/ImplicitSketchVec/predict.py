@@ -7,7 +7,8 @@ the pipeline report viewer.
 Per page, the region `--clip` (PDF points, unrotated page space -- the
 coordinates the inspector and every extraction use; default: the whole page)
 is rendered at `--dpi`, handed to the real P2 backend (`adapter.extract`) as
-one embedded image, and every debug layer the backend draws is written, plus:
+one embedded image, and every debug layer the backend draws (the shared raster
+prelude's included) is written, plus:
 
   original / vectors       the page's own vector paths touching the clip, in
                            their real colors -- what the model should find
@@ -19,7 +20,9 @@ the shared training data (DeepVectoriser's `prep_dataset.py`) keeps text
 glyphs as strokes to vectorize, so the model sees the same kind of input.
 
 Output: `<out>/manifest.json` + one multi-page PDF per layer, the folder
-`scripts/pipeline_report_viewer.py` opens; the command is printed at the end.
+`scripts/pipeline_report_viewer.py` opens, plus one hue/lightness histogram
+PNG per page in `<out>/color_layer_histograms/`; the command is printed at
+the end.
 Default `<out>`: `outputs/implicitsketchvec_predict/<timestamp>__<pdf stem>/`.
 """
 from __future__ import annotations
@@ -44,7 +47,7 @@ from rastervec.P1_Reading_Native.reader import Reader
 from rastervec.P1_Reading_Native.vector_extract import extract_vectors
 from rastervec.P2_Raster_To_Vec.ImplicitSketchVec import adapter
 from rastervec.P2_Raster_To_Vec.ImplicitSketchVec.config import WEIGHTS_ENV_VAR
-from rastervec.P2_Raster_To_Vec.ImplicitSketchVec.paddle_engine import OcrBox
+from rastervec.P2_Raster_To_Vec.RasterText.paddle_engine import OcrBox
 
 _LOG = get_logger("P2.ImplicitSketchVec.predict")
 
@@ -55,6 +58,7 @@ NO_OCR = {
     "recognize_raw": lambda crops: [OcrBox("", 0.0) for _ in crops],
 }
 _CLIP_RGB = (1.0, 0.55, 0.0)
+HISTOGRAM_DIR = "color_layer_histograms"
 
 
 def _slug(text: str) -> str:
@@ -134,6 +138,19 @@ def render_region(pdf: Path, page_index: int, clip, dpi: float) -> Image:
                  transform=(w_pt, 0.0, 0.0, h_pt, x0, y0))
 
 
+def save_histograms(out: Path, debug_out: dict) -> list[str]:
+    """Write the raster prelude's hue/lightness histogram PNGs; returns their
+    file names."""
+    prelude = debug_out.get("raster_prelude")
+    if prelude is None or not prelude.debug.histograms:
+        return []
+    folder = out / HISTOGRAM_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    for name, png in prelude.debug.histograms:
+        (folder / name).write_bytes(png)
+    return [name for name, _png in prelude.debug.histograms]
+
+
 def _touches(a, b) -> bool:
     return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
 
@@ -163,16 +180,19 @@ def run(pdf: Path, pages: list[int], out: Path, *, clip=None, dpi: float = 300.0
                        render_vectors_pdf(meta, originals, color_of=_paint))
             layers.add("original", "clip region", "#ff8c00",
                        render_boxes_pdf(meta, [(image.bbox, _CLIP_RGB)]))
+            debug_out: dict = {}
             vectors, _texts = adapter.extract(
-                [image], page, on_debug_layer=layers.add, ocr_fns=NO_OCR, model_fn=model_fn,
+                [image], page, on_debug_layer=layers.add, debug_out=debug_out, keep_debug_arrays=False,
+                ocr_fns=NO_OCR, model_fn=model_fn,
             )
+            histograms = save_histograms(out, debug_out)
             layers.add("detected", "vectors", "#0050ff", render_vectors_pdf(meta, vectors, color_of=_paint))
             secs = time.perf_counter() - t0
             say(f"page {i}: region {tuple(round(v, 1) for v in image.bbox)} pt -> "
                 f"{image.array.shape[1]}x{image.array.shape[0]} px | original {len(originals)} vector(s) | "
                 f"detected {len(vectors)} vector(s) | {secs:.1f}s")
             summary.append({"page": i, "region": list(image.bbox), "original": len(originals),
-                            "detected": len(vectors), "seconds": round(secs, 2)})
+                            "detected": len(vectors), "histograms": histograms, "seconds": round(secs, 2)})
     manifest = {
         "source_pdf": str(Path(pdf).resolve()), "pages": pages, "variant": "implicitsketchvec-predict",
         "engine": "ImplicitSketchVec", "dpi": dpi, "clip": list(clip) if clip else None,

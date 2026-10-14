@@ -3,9 +3,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from rastervec.P2_Raster_To_Vec.Junction import text_ocr
-from rastervec.P2_Raster_To_Vec.Junction.paddle_engine import OcrBox
-from rastervec.P2_Raster_To_Vec.Junction.text_ocr import TileBox, merge_cross_tile_boxes, tile_grid
+from rastervec.P2_Raster_To_Vec.RasterText import text_ocr
+from rastervec.P2_Raster_To_Vec.RasterText.paddle_engine import OcrBox
+from rastervec.P2_Raster_To_Vec.RasterText.text_ocr import TileBox, merge_cross_tile_boxes, tile_grid
 
 
 @pytest.mark.parametrize("h,w", [(500, 700), (960, 960), (2000, 3000), (961, 2500)])
