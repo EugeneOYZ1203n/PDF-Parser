@@ -47,7 +47,7 @@ from tqdm import tqdm
 from rastervec.commons.logging_setup import get_logger
 from rastervec.commons.models import Image, Page, Text, Vector
 from rastervec.commons.renderer.draw import (
-    bbox_spec, dot_spec, draw_image, image_spec, new_page_doc, polyline_spec, render_specs_pdf,
+    bbox_spec, dot_batch_spec, draw_image, image_spec, new_page_doc, render_specs_pdf, stroke_batch_spec,
 )
 from rastervec.P2_Raster_To_Vec.Junction import diff as diff_mod
 from rastervec.P2_Raster_To_Vec.Junction.components import layer_components
@@ -82,9 +82,10 @@ def extract(
     work (recolor, image copies, per-component diff) is skipped entirely."""
     params = params or Params()
     state = _PageState()
-    sink = _RasterSink(
+    sink = _DebugSink(
         stream=on_debug_layer is not None,
         keep=debug_out is not None and keep_debug_arrays,
+        debug=on_debug_layer is not None or debug_out is not None,
     )
     t_start = time.perf_counter()
     _LOG.info("Junction: page %d, %d embedded image(s)", page.meta.index, len(images))
@@ -115,6 +116,7 @@ def extract(
         ]
         debug_out["state"] = state
         debug_out["vectors"] = state.vectors
+        debug_out["display_vectors"] = state.display_vectors
         debug_out["texts"] = state.texts
     _LOG.info("Junction done: %d vectors, %d texts (%.1fs)", len(state.vectors), len(state.texts),
               time.perf_counter() - t_start)
@@ -137,6 +139,8 @@ def render_debug(debug_out: "dict | None", page_meta) -> "list[DebugLayer]":
 @dataclass
 class _PageState:
     vectors: list[Vector] = field(default_factory=list)
+    # `vectors` RDP-thinned to `_CHAIN_DISPLAY_EPS_PX` -- debug drawing only
+    display_vectors: list[Vector] = field(default_factory=list)
     texts: list[Text] = field(default_factory=list)
     seqno: int = 0
     boxes: dict = field(default_factory=lambda: {"component": []})
@@ -171,25 +175,40 @@ class _RasterSink:
         self.keep = keep
         self.kept: list[_RasterItem] = []
         self._docs: dict[tuple[str, str], tuple[str, object]] = {}
+        self.seconds = 0.0  # time spent placing / finishing streamed rasters
 
     @property
     def active(self) -> bool:
         return self.stream or self.keep
 
+
+class _DebugSink(_RasterSink):
+    """`_RasterSink` plus `debug`: whether any debug consumer exists at all
+    (`debug_out` given, even without its raster arrays)."""
+
+    def __init__(self, *, stream: bool, keep: bool, debug: bool) -> None:
+        super().__init__(stream=stream, keep=keep)
+        self.debug = debug
+
     def add(self, stage: str, label: str, hexcolor: str, array: np.ndarray, image: Image, page_meta) -> None:
         if self.keep:
             self.kept.append(_RasterItem(stage, label, hexcolor, array, image, array.shape[:2]))
         if self.stream:
+            t0 = time.perf_counter()
             key = (stage, label)
             if key not in self._docs:
                 self._docs[key] = (hexcolor, new_page_doc(page_meta))
             _place_raster(self._docs[key][1][1], array, image)
+            self.seconds += time.perf_counter() - t0
 
     def finish_stream(self, page_meta) -> "list[DebugLayer]":
+        t0 = time.perf_counter()
         out: "list[DebugLayer]" = []
         for (stage, label), (hexcolor, doc) in self._docs.items():
             out.append((stage, label, hexcolor, _finish_doc(doc, page_meta)))
         self._docs.clear()
+        self.seconds += time.perf_counter() - t0
+        _LOG.info("Junction raster debug layers: %d (%.1fs encoding)", len(out), self.seconds)
         return out
 
 
@@ -209,7 +228,7 @@ def _compose_raster_layers(page_meta, items: list[_RasterItem]) -> "list[DebugLa
 # Per-image flow
 # ---------------------------------------------------------------------------
 def _process_image(prepared: PreparedImage, page: Page, params: Params, state: _PageState,
-                   sink: _RasterSink) -> None:
+                   sink: _DebugSink) -> None:
     image = prepared.image
     layers = prepared.layers
     h, w = layers.labels.shape[:2]
@@ -241,7 +260,9 @@ def _process_image(prepared: PreparedImage, page: Page, params: Params, state: _
 
             for pl in result.polylines:
                 state.vectors.append(_polyline_to_vector(pl, mapper, meta.index, state.next_seqno(), color))
-            _accumulate_trace_geometry(state, result, mapper, (comp.x0, comp.y0), comp.gray.shape, to_page)
+            if sink.debug:
+                _accumulate_trace_geometry(state, result, mapper, (comp.x0, comp.y0), comp.gray.shape,
+                                           to_page, meta.index, color, state.seqno - len(result.polylines))
 
             if sink.active:
                 codes, rendered = diff_mod.diff_codes(result.ink, result.polylines, DIFF_TOLERANCE_PX)
@@ -297,14 +318,19 @@ def _polyline_to_vector(pl: Polyline, to_page: Mapper, page_index: int, seqno: i
 
 # Skeleton chains are one vertex per pixel at native resolution; a sub-pixel
 # Douglas-Peucker pass keeps the debug polyline visually identical with far
-# fewer vertices (debug display only -- tracing itself is unaffected).
+# fewer vertices (debug display only -- tracing itself is unaffected). This
+# matters: PyMuPDF's `Shape` costs ~40-170 us per vertex, super-linearly, so
+# drawing the raw per-pixel geometry made the debug layers take minutes.
 _CHAIN_DISPLAY_EPS_PX = 0.5
 
 
-def _accumulate_trace_geometry(state: _PageState, result, mapper: Mapper, offset, crop_shape, to_page: Mapper) -> None:
-    """Only cheap page-space tuples -- never `result`'s mask arrays. A graph
-    node touched by exactly one chain end is an endpoint; anything else
-    (>= 3 ends, or a pruning leftover) is a junction."""
+def _accumulate_trace_geometry(state: _PageState, result, mapper: Mapper, offset, crop_shape, to_page: Mapper,
+                               page_index: int, color, first_seqno: int) -> None:
+    """Debug only. Only cheap page-space tuples -- never `result`'s mask
+    arrays. A graph node touched by exactly one chain end is an endpoint;
+    anything else (>= 3 ends, or a pruning leftover) is a junction. Each
+    output polyline is RDP-thinned once, feeding both the `vectorize`
+    layer and `state.display_vectors` (same seqnos as the real vectors)."""
     x0, y0 = offset
     ch, cw = crop_shape[:2]
     state.boxes["component"].append(_bbox_of([to_page((x0, y0)), to_page((x0 + cw, y0 + ch))]))
@@ -321,8 +347,11 @@ def _accumulate_trace_geometry(state: _PageState, result, mapper: Mapper, offset
     for node in result.graph.nodes:
         geom["endpoints" if ends.get(node, 0) == 1 else "junctions"].append(mapper(node))
     pl_ends: set = set()
-    for pl in result.polylines:
-        geom["polylines"].append([mapper(p) for p in pl.points])
+    for k, pl in enumerate(result.polylines):
+        thin = Polyline(points=approximate_rdp(pl.points, _CHAIN_DISPLAY_EPS_PX), width=pl.width)
+        vec = _polyline_to_vector(thin, mapper, page_index, first_seqno + k, color)
+        state.display_vectors.append(vec)
+        geom["polylines"].append([vec.items[0][1]] + [it[2] for it in vec.items] if vec.items else [])
         pl_ends.update((pl.points[0], pl.points[-1]))
     geom["polyline_ends"].extend(mapper(p) for p in pl_ends)
 
@@ -369,36 +398,53 @@ def _place_raster(page, array: np.ndarray, image: Image) -> None:
 
 def _boxes_layer(page_meta, stage: str, label: str, hexcolor: str, boxes) -> DebugLayer:
     rgb = _hex_rgb(hexcolor)
-    return (stage, label, hexcolor, render_specs_pdf(page_meta, [bbox_spec(b, rgb) for b in boxes]))
+    return (stage, label, hexcolor, render_specs_pdf(page_meta, [bbox_spec(b, rgb) for b in boxes], deflate=True))
 
 
 def _geometry_layer(
     page_meta, stage: str, label: str, hexcolor: str, *,
     polylines=(), points=(), width: float = 0.6, radius: float = 0.8,
 ) -> DebugLayer:
-    """Polylines (stroked) and points (small filled dots)."""
+    """Polylines (stroked) and points (small filled dots), as stroke
+    batches -- there are tens of thousands of them on a real page."""
     rgb = _hex_rgb(hexcolor)
-    specs = [polyline_spec(pl, rgb, width=width) for pl in polylines if len(pl) >= 2]
-    specs += [dot_spec(p, rgb, radius) for p in points]
-    return (stage, label, hexcolor, render_specs_pdf(page_meta, specs))
+    specs = [stroke_batch_spec([pl for pl in polylines if len(pl) >= 2], rgb, width=width),
+             dot_batch_spec(points, rgb, radius=radius)]
+    return (stage, label, hexcolor, render_specs_pdf(page_meta, specs, deflate=True))
+
+
+def vectors_layer_pdf(page_meta, vectors: "list[Vector]", *, width: float = 1.0) -> bytes:
+    """Junction's own (all-`"l"`) vectors stroked in their own colours, one
+    stroke batch per colour -- `render_vectors_pdf` replays them through a
+    PyMuPDF `Shape`, which takes minutes on a full page of traced chains."""
+    by_color: dict = {}
+    for v in vectors:
+        if v.items:
+            pts = [v.items[0][1]] + [it[-1] for it in v.items]
+            by_color.setdefault(tuple(v.color or (0.0, 0.0, 0.0)), []).append(pts)
+    return render_specs_pdf(page_meta, [
+        stroke_batch_spec(pls, color, width=width) for color, pls in by_color.items()
+    ], deflate=True)
 
 
 def _page_layers(page_meta, raster_layers: "list[DebugLayer]", state: _PageState) -> "list[DebugLayer]":
-    from rastervec.commons.renderer import render_vectors_pdf
-
     bx = state.boxes
     geom = state.geom
     out: "list[DebugLayer]" = [layer for layer in raster_layers if not layer[0].startswith("_")]
-    out += [
-        _boxes_layer(page_meta, "components", "component bbox", _C_COMPONENT, bx["component"]),
-        _geometry_layer(page_meta, "graph_build", "chains", _C_GRAPH_CHAIN, polylines=geom["chains"]),
-        _geometry_layer(page_meta, "graph_build", "junctions", _C_JUNCTION, points=geom["junctions"]),
-        _geometry_layer(page_meta, "graph_build", "endpoints", _C_ENDPOINT, points=geom["endpoints"]),
-        _geometry_layer(page_meta, "vectorize", "polylines", _C_SEGMENT, polylines=geom["polylines"]),
-        _geometry_layer(page_meta, "vectorize", "polyline endpoints", _C_SEGMENT_END,
-                        points=geom["polyline_ends"]),
-        ("final_vectors", "vectors", _C_SEGMENT, render_vectors_pdf(
-            page_meta, state.vectors, color_of=lambda v: tuple(v.color or (0, 0, 0)),
-        )),
+    builders = [
+        lambda: _boxes_layer(page_meta, "components", "component bbox", _C_COMPONENT, bx["component"]),
+        lambda: _geometry_layer(page_meta, "graph_build", "chains", _C_GRAPH_CHAIN, polylines=geom["chains"]),
+        lambda: _geometry_layer(page_meta, "graph_build", "junctions", _C_JUNCTION, points=geom["junctions"]),
+        lambda: _geometry_layer(page_meta, "graph_build", "endpoints", _C_ENDPOINT, points=geom["endpoints"]),
+        lambda: _geometry_layer(page_meta, "vectorize", "polylines", _C_SEGMENT, polylines=geom["polylines"]),
+        lambda: _geometry_layer(page_meta, "vectorize", "polyline endpoints", _C_SEGMENT_END,
+                                points=geom["polyline_ends"]),
+        lambda: ("final_vectors", "vectors", _C_SEGMENT,
+                 vectors_layer_pdf(page_meta, state.display_vectors or state.vectors)),
     ]
+    for build in builders:
+        t0 = time.perf_counter()
+        layer = build()
+        _LOG.info("  debug layer %s/%s: %.2fs", layer[0], layer[1], time.perf_counter() - t0)
+        out.append(layer)
     return out

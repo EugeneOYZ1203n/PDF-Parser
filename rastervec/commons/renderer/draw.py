@@ -3,11 +3,19 @@
 Two functions per primitive kind:
 
 - a **spec builder** (`text_spec`, `bbox_spec`, `quad_spec`,
-  `polyline_spec`, `arrow_spec`, `dot_spec`, `vector_spec`, `image_spec`)
+  `polyline_spec`, `arrow_spec`, `dot_spec`, `stroke_batch_spec`,
+  `vector_spec`, `image_spec`)
   turning a domain object into a frozen, fitz-free `*Spec` -- exactly the
   numbers PyMuPDF needs, inspectable in tests;
-- a **drawer** (`draw_text`, `draw_path`, `draw_dot`, `draw_vectors`,
-  `draw_image`) putting a spec onto a page.
+- a **drawer** (`draw_text`, `draw_path`, `draw_dot`, `draw_stroke_batch`,
+  `draw_vectors`, `draw_image`) putting a spec onto a page.
+
+`StrokeBatchSpec` is the bulk path for debug geometry with many thousands
+of polylines / points in one colour: PyMuPDF's `Shape` costs ~40-170 us per
+vertex and grows super-linearly (every `draw_*`/`finish` re-copies its
+content string), so a page of traced geometry took minutes through it. The
+batch drawer writes the content stream itself in one `join` (~1 us per
+vertex).
 
 `render_specs_pdf(page_meta, specs)` is the page-level entry point: a fresh
 page sized to `page_meta`, every spec drawn (images -> vectors -> paths/dots
@@ -115,7 +123,16 @@ class ImageSpec:
     alpha: bool
 
 
-Spec = Union[TextSpec, PathSpec, DotSpec, VectorSpec, ImageSpec]
+@dataclass(frozen=True, eq=False)
+class StrokeBatchSpec:
+    """Many open polylines in one colour/width, round caps + joins; a
+    one-point polyline draws as a round dot `width` across."""
+    polylines: tuple[tuple[Point, ...], ...]
+    color: Rgb
+    width: float = 1.0
+
+
+Spec = Union[TextSpec, PathSpec, DotSpec, StrokeBatchSpec, VectorSpec, ImageSpec]
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +321,39 @@ def draw_dot(shape: "fitz.Shape", spec: DotSpec) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Stroke batches
+# ---------------------------------------------------------------------------
+def stroke_batch_spec(polylines, color: Rgb, *, width: float = 1.0) -> StrokeBatchSpec:
+    """`polylines`: iterables of (x, y) page-space points; empty ones are
+    dropped, single points become dots."""
+    return StrokeBatchSpec(
+        polylines=tuple(tuple((float(x), float(y)) for x, y in pl) for pl in polylines if len(pl)),
+        color=tuple(float(c) for c in color), width=float(width),
+    )
+
+
+def dot_batch_spec(points, color: Rgb, *, radius: float = 0.8) -> StrokeBatchSpec:
+    """Many filled dots, as zero-length round-capped strokes."""
+    return stroke_batch_spec([(p,) for p in points], color, width=2.0 * radius)
+
+
+def draw_stroke_batch(page: "fitz.Page", spec: StrokeBatchSpec) -> None:
+    """One content stream for the whole batch, coordinates written in page
+    space under the page's own inverse transform (`cm`), one `S` per
+    polyline (MuPDF strokes one huge multi-subpath path far slower)."""
+    if not spec.polylines:
+        return
+    a, b, c, d, e, f = tuple(~page.transformation_matrix)
+    r, g, bl = spec.color
+    ops = [f"q {a:g} {b:g} {c:g} {d:g} {e:g} {f:g} cm {r:g} {g:g} {bl:g} RG {spec.width:g} w 1 J 1 j"]
+    for pl in spec.polylines:
+        (x0, y0), rest = pl[0], pl[1:] or pl[:1]
+        ops.append(f"{x0:.3f} {y0:.3f} m " + " ".join(f"{x:.3f} {y:.3f} l" for x, y in rest) + " S")
+    ops.append("Q")
+    fitz.TOOLS._insert_contents(page, "\n".join(ops).encode(), 1)
+
+
+# ---------------------------------------------------------------------------
 # Vectors
 # ---------------------------------------------------------------------------
 def vector_spec(vector: "Vector", *, recolor: Rgb | None = None, min_width: float = 1.0) -> VectorSpec:
@@ -388,15 +438,18 @@ def draw_image(page: "fitz.Page", spec: ImageSpec) -> None:
 # ---------------------------------------------------------------------------
 def draw_specs(page: "fitz.Page", specs: "list[Spec]") -> None:
     """Draw `specs` onto an existing (unrotated) page, in layer order:
-    images, vectors, paths + dots, text."""
+    images, vectors, stroke batches, paths + dots, text."""
     images = [s for s in specs if isinstance(s, ImageSpec)]
     vectors = [s for s in specs if isinstance(s, VectorSpec)]
+    batches = [s for s in specs if isinstance(s, StrokeBatchSpec)]
     marks = [s for s in specs if isinstance(s, (PathSpec, DotSpec))]
     texts = [s for s in specs if isinstance(s, TextSpec)]
 
     for spec in images:
         draw_image(page, spec)
     draw_vectors(page, vectors)
+    for spec in batches:
+        draw_stroke_batch(page, spec)
     if marks:
         shape = page.new_shape()
         for spec in marks:

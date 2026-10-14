@@ -416,9 +416,9 @@ def _place_raster(page, array: np.ndarray, image: Image) -> None:
 
 
 def _mask_rgba(mask: np.ndarray, rgb: tuple[int, int, int]) -> np.ndarray:
-    out = np.zeros(mask.shape + (4,), dtype=np.uint8)
+    out = np.empty(mask.shape + (4,), dtype=np.uint8)
     out[..., :3] = rgb
-    out[..., 3] = np.where(mask, 255, 0).astype(np.uint8)
+    np.multiply(mask, 255, out=out[..., 3], casting="unsafe")
     return out
 
 
@@ -463,10 +463,10 @@ def _histogram_png(lab: np.ndarray, layers: ColorLayers) -> bytes:
 
     fig = Figure(figsize=(10, 6.5), dpi=100)
     ax_l, ax_h = fig.subplots(2, 1)
-    L = lab[:, :, 0].ravel()
-    if L.size > 2_000_000:
-        L = L[:: L.size // 2_000_000 + 1]
-    ax_l.hist(L, bins=256, range=(0, 256), color="#64748b")
+    # binned with numpy, drawn as one step polygon -- `hist`/`bar` draw one
+    # artist per bin, seconds on a full page
+    counts = np.bincount(lab[:, :, 0].ravel(), minlength=256)[:256]
+    ax_l.stairs(counts, np.arange(257), color="#64748b", fill=True)
     ax_l.set_yscale("log")
     if layers.otsu_l is not None:
         ax_l.axvline(layers.otsu_l, color="#dc2626", label=f"Otsu L = {layers.otsu_l:.0f}")
@@ -477,7 +477,8 @@ def _histogram_png(lab: np.ndarray, layers: ColorLayers) -> bytes:
 
     deg = np.linspace(0, 360, len(layers.hist), endpoint=False) if layers.hist is not None else np.zeros(0)
     if layers.hist is not None and layers.hist.any():
-        ax_h.bar(deg, layers.hist, width=360 / len(layers.hist), color="#cbd5e1", label="chroma-weighted")
+        ax_h.stairs(layers.hist, np.linspace(0, 360, len(layers.hist) + 1), color="#cbd5e1", fill=True,
+                    label="chroma-weighted")
         ax_h.plot(deg, layers.hist_smooth, color="#0f172a", lw=1.2, label="smoothed")
         # log scale: one dominant colour would otherwise flatten every
         # smaller peak to the axis

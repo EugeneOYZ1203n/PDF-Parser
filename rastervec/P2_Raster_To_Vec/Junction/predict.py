@@ -183,7 +183,10 @@ def run(pdf: Path, pages: list[int], out: Path, *, clip=None, dpi: float = 300.0
                 [image], page, on_debug_layer=layers.add, debug_out=debug_out, keep_debug_arrays=False,
                 ocr_fns=None if ocr else NO_OCR,
             )
-            layers.add("detected", "vectors", "#0050ff", render_vectors_pdf(meta, vectors, color_of=_paint))
+            # the sub-pixel RDP-thinned copies, as stroke batches: one vertex per
+            # skeleton pixel through PyMuPDF's `Shape` takes minutes on a full page
+            shown = debug_out.get("display_vectors") or vectors
+            layers.add("detected", "vectors", "#0050ff", adapter.vectors_layer_pdf(meta, shown))
             histograms = save_histograms(out, debug_out)
             secs = time.perf_counter() - t0
             say(f"page {i}: region {tuple(round(v, 1) for v in image.bbox)} pt -> "

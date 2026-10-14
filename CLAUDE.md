@@ -1196,6 +1196,11 @@ generic parallel-pool mechanics), never phase-specific business logic.
   dots → text, one `Shape`+`commit` for all marks and one for all text (a commit per item is
   quadratic), `/Rotate` set **last** so nothing is placed in rotated space. Don't hand-roll
   `insert_text`/`draw_*`/`insert_image` anywhere else — add a spec kind here instead.
+  **Bulk geometry → `stroke_batch_spec`/`dot_batch_spec`** (`StrokeBatchSpec`, drawn by
+  `draw_stroke_batch` writing the content stream itself): PyMuPDF's `Shape` costs ~40-170 µs per
+  vertex and grows super-linearly (every `draw_*`/`finish` re-copies its content string), so tens
+  of thousands of polylines/dots through `PathSpec`/`DotSpec`/`render_vectors_pdf` take minutes —
+  Junction's debug layers + `predict.py`'s `detected/vectors` use batches (~70× faster).
 
   **Text rule (`text_spec`) — rotate, then scale to fit; never shear.** The text's *oriented* box
   comes from `oriented_box`: the detect quad (`Text.quad_points`) projected onto the text

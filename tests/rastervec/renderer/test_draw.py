@@ -21,12 +21,14 @@ from rastervec.commons.renderer.draw import (
     TextSpec,
     arrow_spec,
     bbox_spec,
+    dot_batch_spec,
     dot_spec,
     image_spec,
     oriented_box,
     polyline_spec,
     quad_spec,
     render_specs_pdf,
+    stroke_batch_spec,
     text_spec,
     vector_spec,
 )
@@ -221,6 +223,42 @@ def test_paths_land_at_their_unrotated_page_points(rotation):
     }
     line = ((5.0, 5.0), (25.0, 15.0), (45.0, 5.0))
     assert _drawing_points(render_specs_pdf(meta, [polyline_spec(line, (0, 0, 0))])) == set(line)
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_stroke_batch_lands_at_its_unrotated_page_points(rotation):
+    meta = _meta(300, 200, rotation)
+    lines = [((5.0, 5.0), (25.0, 15.0), (45.0, 5.0)), ((100.0, 150.0), (200.0, 150.0))]
+    pdf = render_specs_pdf(meta, [stroke_batch_spec(lines, (1, 0, 0), width=0.5)])
+    assert _drawing_points(pdf) == {p for pl in lines for p in pl}
+    doc = fitz.open("pdf", pdf)
+    try:
+        drawings = doc[0].get_drawings()
+        assert len(drawings) == 2  # one stroke per polyline
+        assert all(d["color"] == pytest.approx((1, 0, 0)) and d["width"] == pytest.approx(0.5)
+                   for d in drawings)
+    finally:
+        doc.close()
+
+
+def test_dot_batch_draws_round_dots_of_the_radius():
+    doc = fitz.open("pdf", render_specs_pdf(_meta(), [dot_batch_spec([(50, 60), (120, 30)], (0, 0, 1), radius=2)]))
+    try:
+        pix = doc[0].get_pixmap(matrix=fitz.Matrix(4, 4), alpha=False)
+        img = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, pix.n)
+        blue = (img[:, :, 2] > 200) & (img[:, :, 0] < 80)
+        ys, xs = np.nonzero(blue)
+        near = (abs(xs / 4 - 50) < 3) & (abs(ys / 4 - 60) < 3)
+        assert near.any() and (abs(xs[near] / 4 - 50) <= 2.3).all() and (abs(ys[near] / 4 - 60) <= 2.3).all()
+        assert ((abs(xs / 4 - 120) < 3) & (abs(ys / 4 - 30) < 3)).any()
+    finally:
+        doc.close()
+
+
+def test_empty_stroke_batch_draws_nothing():
+    pdf = render_specs_pdf(_meta(), [stroke_batch_spec([], (0, 0, 0)), dot_batch_spec([], (0, 0, 0))])
+    with fitz.open("pdf", pdf) as doc:
+        assert doc[0].get_drawings() == []
 
 
 @pytest.mark.parametrize("angle", [0, 37, 90, 200])
