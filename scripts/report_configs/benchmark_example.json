@@ -1,0 +1,8 @@
+{
+  "p2": "Stub",
+  "p3": "v1VectorClass",
+  "benchmark": true,
+  "input_files": ["outputs/labels/example_label"],
+  "pages": {"*": [0, 1]},
+  "debug_images": false
+}

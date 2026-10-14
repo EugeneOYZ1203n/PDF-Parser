@@ -1,0 +1,6 @@
+{
+  "p2": "v1RasterToVec",
+  "p3": "v1VectorClass",
+  "input_files": ["references/example.pdf"],
+  "pages": [0]
+}
