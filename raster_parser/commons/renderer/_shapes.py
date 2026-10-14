@@ -301,8 +301,8 @@ def replay_drawing_paths(
                 "width": width,
                 "closePath": True if v.closePath is None else bool(v.closePath),
                 "even_odd": bool(v.even_odd),
-                "lineJoin": v.lineJoin or 0,
-                "lineCap": v.lineCap or 0,
+                "lineJoin": int(v.lineJoin or 0),
+                "lineCap": v.line_cap,
             }
             if color is not None:
                 kwargs["color"] = color

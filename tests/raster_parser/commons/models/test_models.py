@@ -25,10 +25,10 @@ _NORMALIZED_FIELDS = {"lineCap", "lineJoin", "even_odd", "isolated", "knockout",
 def _expected_normalized(key: str, raw_value):
     if key == "lineCap":
         if isinstance(raw_value, (list, tuple)):
-            return int(raw_value[0]) if raw_value else 0
-        return int(raw_value or 0)
+            return tuple(int(c) for c in raw_value)
+        return (int(raw_value or 0),) * 3
     if key == "lineJoin":
-        return int(raw_value or 0)
+        return float(raw_value or 0)
     if key in ("even_odd", "isolated", "knockout"):
         return bool(raw_value)
     if key == "layer":
@@ -278,3 +278,42 @@ def test_quad_axis_aligned_matches_bbox_corners():
     assert ur == pytest.approx((10.0, 0.0))
     assert lr == pytest.approx((10.0, 4.0))
     assert ll == pytest.approx((0.0, 4.0))
+
+
+# --------------------------------------------------------------------------
+# Lossless stroke style + nesting level (superset of the old raster_parser
+# Vector: full lineCap tuple, raw lineJoin, `level`).
+# --------------------------------------------------------------------------
+def test_int_line_cap_widens_to_all_three_caps(vector):
+    v = vector(lineCap=1)
+    assert v.lineCap == (1, 1, 1)
+    assert v.line_cap == 1
+
+
+def test_line_cap_tuple_and_float_join_survive_extraction():
+    doc = fitz.open()
+    page = doc.new_page(width=50, height=50)
+    shape = page.new_shape()
+    shape.draw_line((5, 5), (40, 40))
+    shape.finish(width=2, lineCap=1, lineJoin=2)
+    shape.commit()
+    (drawing,) = page.get_drawings(extended=True)
+    v = Vector.from_pymupdf(drawing, page_index=0, seq=0)
+    assert v.lineCap == tuple(drawing["lineCap"]) == (1, 1, 1)
+    assert v.lineJoin == pytest.approx(2.0) and isinstance(v.lineJoin, float)
+    assert v.to_pymupdf()["lineCap"] == (1, 1, 1)
+
+
+def test_level_records_clip_nesting():
+    doc = fitz.open()
+    page = doc.new_page(width=200, height=200)
+    shape = page.new_shape()
+    shape.draw_line((0, 0), (1, 1))
+    shape.finish()
+    shape.commit()
+    doc.update_stream(page.get_contents()[0], b"q 10 10 100 100 re W n 0 0 1 rg 20 20 50 50 re f Q 0 0 1 RG 0 0 m 5 5 l S")
+    paths = [d for d in page.get_drawings(extended=True) if d["type"] in ("f", "s", "fs")]
+    by_type = {d["type"]: Vector.from_pymupdf(d, page_index=0, seq=0) for d in paths}
+    assert by_type["f"].level == next(d["level"] for d in paths if d["type"] == "f") > 0
+    assert by_type["s"].level == 0
+    assert by_type["f"].to_pymupdf()["level"] == by_type["f"].level

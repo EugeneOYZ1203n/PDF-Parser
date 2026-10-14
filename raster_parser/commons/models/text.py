@@ -35,10 +35,21 @@ cleanly without needing the enclosing line as a separate argument).
 """
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from math import atan2, degrees
 
 from raster_parser.commons.helpers.geometry import compute_origin, make_oriented_quad
+
+
+
+def _lists_to_tuples(obj):
+    """Lists (from JSON) back to tuples, recursively, inside dicts too."""
+    if isinstance(obj, list):
+        return tuple(_lists_to_tuples(x) for x in obj)
+    if isinstance(obj, dict):
+        return {k: _lists_to_tuples(v) for k, v in obj.items()}
+    return obj
 
 
 @dataclass
@@ -86,6 +97,24 @@ class Text:
 
     def quad(self) -> tuple[tuple[float, float], ...]:
         return make_oriented_quad(self.bbox, *self.direction)
+
+    def to_dict(self) -> dict:
+        """JSON-safe dict of every field (tuples become lists); `from_dict` restores it."""
+        return dataclasses.asdict(self)
+
+    @staticmethod
+    def from_dict(d: dict) -> "Text":
+        """Inverse of `to_dict`: tuples restored; unknown keys ignored."""
+        d = dict(d)
+        for key in ("bbox", "direction", "origin", "raw_word"):
+            if d.get(key) is not None:
+                d[key] = tuple(d[key])
+        if d.get("quad_points") is not None:
+            d["quad_points"] = tuple(tuple(pt) for pt in d["quad_points"])
+        if d.get("raw_span") is not None:
+            d["raw_span"] = _lists_to_tuples(d["raw_span"])
+        names = {f.name for f in dataclasses.fields(Text)}
+        return Text(**{k: v for k, v in d.items() if k in names})
 
     @staticmethod
     def from_pymupdf(

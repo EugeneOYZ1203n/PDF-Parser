@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from raster_parser.commons.models.image import Image
 from raster_parser.commons.models.page import Page, PageMeta
+from raster_parser.commons.models.result import ExtractResult
 from raster_parser.commons.models.segment import Segment, SegmentMeta
 from raster_parser.commons.models.text import Text
 from raster_parser.commons.models.vector import Vector
@@ -32,4 +33,5 @@ __all__ = [
     "Segment",
     "SegmentMeta",
     "Image",
+    "ExtractResult",
 ]
