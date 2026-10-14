@@ -149,7 +149,7 @@ def vector() -> Callable[..., Vector]:
         dashes: str | None = None,
         closePath: bool | None = None,
         lineCap: int = 0,
-        lineJoin: int = 0,
+        lineJoin: float = 0,
         even_odd: bool = False,
         stroke_opacity: float | None = None,
         fill_opacity: float | None = None,

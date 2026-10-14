@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 from pathlib import Path
-from pprint import pformat
 import random
 import pymupdf
 import pytest
 
 from raster_parser.extract_vectors_from_png import extract_vectors_from_png, get_image_polys
-from raster_parser.models import VectorDTO
-from extract_vectors_from_png_expected import expected1, expected2, expected3, expected4
+from raster_parser.commons.models import Vector
+
+EXPECTED_DIR = Path(__file__).resolve().parent / "expected"
+# REGENERATE_PNG_EXPECTED=1 rewrites expected/*.json from the current output instead of comparing.
+REGENERATE = os.environ.get("REGENERATE_PNG_EXPECTED") == "1"
+
+
+def expected(name: str):
+    """`expected/<name>.json`: a list of `Vector.to_dict()`s (or a list of such lists)."""
+    return json.loads((EXPECTED_DIR / f"{name}.json").read_text(encoding="utf-8"))
 
 def assert_approx(
     actual,
@@ -60,20 +69,20 @@ def assert_approx(
 
 
 def assert_vector_approx(
-    actual: VectorDTO,
-    expected: VectorDTO,
+    actual: Vector,
+    expected: dict,
     abs_tol: float = 0.1,
 ) -> None:
     assert_approx(
-        actual.model_dump(),
-        expected.model_dump(),
+        actual.to_dict(),
+        expected,
         abs_tol,
     )
 
 
 def assert_vectors_approx(
-    actual: list[VectorDTO],
-    expected: list[VectorDTO],
+    actual: list[Vector],
+    expected: list[dict],
     abs_tol: float = 0.1,
 ) -> None:
     assert len(actual) == len(expected)
@@ -86,35 +95,25 @@ def assert_vectors_approx(
         )
 
 
-def print_expected_vectors(
-    vectors: list[VectorDTO],
-    keep: int = 3,
-) -> None:
-    """Print a Python literal containing the first and last `keep` vectors."""
+def check_expected(actual, name: str) -> None:
+    """Compare `actual` (a list of Vectors, or a list of such lists) with `expected/<name>.json`,
+    or rewrite that file when REGENERATE_PNG_EXPECTED=1."""
 
-    if len(vectors) <= keep * 2:
-        selected = vectors
+    def to_json(value):
+        return [to_json(v) for v in value] if isinstance(value, list) else value.to_dict()
+
+    if REGENERATE:
+        EXPECTED_DIR.mkdir(exist_ok=True)
+        (EXPECTED_DIR / f"{name}.json").write_text(json.dumps(to_json(actual), indent=1), encoding="utf-8")
+        return
+
+    want = expected(name)
+    if actual and isinstance(actual[0], list):
+        assert len(actual) == len(want)
+        for got, exp in zip(actual, want):
+            assert_vectors_approx(got, exp)
     else:
-        selected = [
-            *vectors[:keep],
-            *vectors[-keep:],
-        ]
-
-    output = "[\n"
-
-    for vector in selected:
-        data = vector.model_dump()
-
-        output += "    VectorDTO(\n"
-
-        for field, value in data.items():
-            output += f"        {field}={pformat(value, width=100)},\n"
-
-        output += "    ),\n"
-
-    output += "]"
-
-    print(output)
+        assert_vectors_approx(actual, want)
 
 
 
@@ -128,7 +127,7 @@ def test_extract_vectors_from_png(tmp_path: Path) -> None:
         dpi=300,
     )
 
-    assert_vectors_approx(vectors, expected1)
+    check_expected(vectors, "expected1")
 
 
 def _insert_images(
@@ -267,7 +266,7 @@ def test_get_image_polys_scale_and_translation(
     rect_key = next(iter(vectors_by_rect))
     vectors = vectors_by_rect[rect_key]
 
-    assert_vectors_approx(vectors, expected2)
+    check_expected(vectors, "expected2")
 
     doc.close()
 
@@ -314,13 +313,13 @@ def test_get_image_polys_multiple_images(
 
     assert len(vectors_by_rect) == 3
 
-    ind = 0
+    per_rect = []
     for rect in actual_rects:
         rect_key = tuple(rect)
 
         assert rect_key in vectors_by_rect
-        assert_vectors_approx(vectors_by_rect[rect_key], expected3[ind])
-        ind += 1
+        per_rect.append(vectors_by_rect[rect_key])
+    check_expected(per_rect, "expected3")
 
     doc.close()
 
@@ -384,6 +383,6 @@ def test_get_image_polys_rotation(
 
     assert vectors
 
-    assert_vectors_approx(vectors, expected4)
+    check_expected(vectors, "expected4")
 
     doc.close()
