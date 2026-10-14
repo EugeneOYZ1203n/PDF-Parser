@@ -9,6 +9,9 @@
 It works on the whole page (from `page.doc_path`), so it ignores Phase 1's `images`. The steps
 return their own records (`s4_region_ocr.OcrWord`, `s5_colour_autotrace.TraceVector`); they are
 converted to the shared models here. Intermediates go under `settings.dump_dir`.
+
+With `settings.on_debug_layer` / `on_debug_image` set, the intermediate rasters, boxes and the
+output are also rendered as debug layers (`debug_layers.py`); that never changes the output.
 """
 from __future__ import annotations
 
@@ -17,6 +20,7 @@ from raster_parser.core.settings import RunSettings
 
 
 def extract(images: list[Image], page: Page, settings: RunSettings) -> tuple[list[Vector], list[Text]]:
+    from raster_parser.P2_Raster_To_Vec.v1RasterToVec.debug_layers import RasterDebug
     from raster_parser.P2_Raster_To_Vec.v1RasterToVec.raster_page import extract_raster_page
     from raster_parser.P2_Raster_To_Vec.v1RasterToVec.s1_clear_page import clear_page, page_is_nonempty
     from raster_parser.P2_Raster_To_Vec.v1RasterToVec.s5_colour_autotrace import trace_vector_to_vector
@@ -24,12 +28,16 @@ def extract(images: list[Image], page: Page, settings: RunSettings) -> tuple[lis
     work_dir, cleared = clear_page(page.doc_path, page.meta.index, dump_dir=settings.dump_dir)
     if not page_is_nonempty(cleared, 0):
         return [], []
+    debug = RasterDebug.for_settings(settings, page.meta)
     words, traced = extract_raster_page(
         cleared, 0, dpi=settings.ocr_dpi, workers=settings.workers, output_dump_dir=work_dir,
+        debug=debug,
     )
     index = page.meta.index
     vectors = [trace_vector_to_vector(v, page_index=index) for v in traced]
     texts = [_ocr_text(w, index) for w in words]
+    if debug is not None:
+        debug.output(texts, vectors)
     return vectors, texts
 
 

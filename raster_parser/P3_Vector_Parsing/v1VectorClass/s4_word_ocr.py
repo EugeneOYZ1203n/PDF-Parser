@@ -57,10 +57,13 @@ def ocr_word_groups(
     min_confidence: float = 0.0,
     lang: str = "en",
     use_angle_cls: bool,
+    on_crop=None,
 ) -> List[Tuple[OcrWord, List[int]]]:
     """OCR pre-grouped vector crops; one `(OcrWord, seqnos)` per group that read as a word.
 
-    Each word has the group's box and `block_no` = the group's index.
+    Each word has the group's box and `block_no` = the group's index. `on_crop(index, crop)`,
+    when given, is shown each group's normalised crop (what PaddleOCR reads first); it is a
+    debug hook and changes nothing.
     """
     if not vector_groups:
         return []
@@ -82,6 +85,8 @@ def ocr_word_groups(
         )
         if prepared is None:
             continue
+        if on_crop is not None:
+            on_crop(i, prepared.norm)
         text, vector_indices = _paddle_ocr_prepared(
             paddle_ocr,
             prepared,

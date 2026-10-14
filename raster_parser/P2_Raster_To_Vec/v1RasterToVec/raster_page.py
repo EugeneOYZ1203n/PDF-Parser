@@ -49,11 +49,14 @@ def extract_raster_page(
     hough_max_gap: int = 3,
     workers: int = 1,
     output_dump_dir: str | Path | None = None,
+    debug=None,
 ) -> tuple[list, list]:
     """Run Type-4 on one page; return ``(texts, drawing_vectors)``.
 
     Colour-fill autotraces the drawing layer. Writes intermediate files under
     ``output_dump_dir`` (default: ``./tmp``) and leaves them on disk.
+    ``debug`` (a ``debug_layers.RasterDebug``, or ``None``) is shown the intermediate rasters
+    and boxes; it changes nothing.
     """
     from raster_parser.P2_Raster_To_Vec.v1RasterToVec.s1_clear_page import DEFAULT_OUTPUT_DUMP_DIR
 
@@ -70,6 +73,8 @@ def extract_raster_page(
     )
 
     bgr, to_points = page_to_bgr(pdf_path, page_index, dpi)
+    if debug is not None:
+        debug.rendered(bgr, to_points)
     ocr = make_ocr(lang, min_conf)
     parser = OcrTextDrawingParser(
         min_conf=min_conf,
@@ -146,6 +151,9 @@ def extract_raster_page(
         erase = (recov.kept_mask == 255) & (result.lines != 255)
         drawing_final_bgr[erase] = (255, 255, 255)
         rec.texts.extend(recov.texts)
+
+    if debug is not None:
+        debug.split(text_final_gray, drawing_final_bgr, result.boxes, clean_boxes)
 
     drawing_final_path = dump / "drawing_final.png"
     text_final_path = dump / "text_final.png"

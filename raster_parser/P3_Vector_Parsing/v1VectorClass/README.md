@@ -48,5 +48,22 @@ this module's part of the output, all reviewed and approved during the migration
 | `s4_word_ocr.py` | crop prep + OCR per group | `parsing/parser.py` (`PdfRasterParser` methods, now functions) |
 | `s4_paddle_ocr.py` | PaddleOCR wrapper | `ocr/paddle_ocr.py` |
 | `s5_orientation.py` | each word's `rotate` | `rendering/pdf_render/reconstruct.py` |
+| `debug_layers.py` | debug layers / images for the pipeline report | new |
 
 Only code this module reaches was copied; the logic is unchanged.
+
+## Debug output
+
+When `RunSettings.on_debug_layer` / `on_debug_image` are set (the pipeline report does this;
+`extract()` never does), `parse` also renders each step's result. Nothing is rendered or kept
+otherwise, and the output is the same either way, so this is **not** a behaviour change.
+
+| Stage | Layer | What it shows |
+|---|---|---|
+| `fill_filter` | `glyph candidates`, `drawing` | step 1's split, as recoloured strokes |
+| `word_grouping` | `word groups` | one box per step-2 group, green horizontal / orange vertical / purple other |
+| `ocr` | `read`, `blank`, `text` | groups step 4 read a word from / got nothing from, and the words placed in their boxes |
+| `orientation` | `direction` | an arrow per word along its final direction (step 5) |
+
+Debug images: `v1_ocr_input/` holds each group's normalised crop, the array step 4 hands to
+PaddleOCR first (`s4_word_ocr.ocr_word_groups(on_crop=...)`).

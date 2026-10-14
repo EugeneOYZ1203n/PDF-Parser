@@ -9,6 +9,9 @@
 4. `s5_orientation`: each word's `rotate` from its group's orientation and the page rotation.
 5. Every vector that isn't a glyph candidate is returned as drawing, unchanged.
 
+With `settings.on_debug_layer` / `on_debug_image` set, each step's result is also rendered as a
+debug layer (`debug_layers.py`); that never changes the output.
+
 The steps run on the shared `Vector`; OCR words are `s4_word_ocr.OcrWord` records, converted to
 the shared `Text` here (`_ocr_text`).
 """
@@ -21,6 +24,7 @@ from raster_parser.core.settings import RunSettings
 def parse(vectors: list[Vector], page: Page, settings: RunSettings) -> tuple[list[Vector], list[Text]]:
     import pymupdf
 
+    from raster_parser.P3_Vector_Parsing.v1VectorClass.debug_layers import crop_sink, emit_layers
     from raster_parser.P3_Vector_Parsing.v1VectorClass.s1_fill_filter import filter_text_vectors
     from raster_parser.P3_Vector_Parsing.v1VectorClass.s2_word_grouping import (
         Orientation,
@@ -45,6 +49,7 @@ def parse(vectors: list[Vector], page: Page, settings: RunSettings) -> tuple[lis
             [(wg.bbox.x0, wg.bbox.y0, wg.bbox.x1, wg.bbox.y1) for wg in word_groups],
             dpi=settings.ocr_dpi,
             use_angle_cls=settings.use_angle_cls,
+            on_crop=crop_sink(settings),
         )
 
     texts: list[Text] = []
@@ -53,6 +58,11 @@ def parse(vectors: list[Vector], page: Page, settings: RunSettings) -> tuple[lis
         target = 90 if wg.orientation == Orientation.VERTICAL else 0
         texts.append(_ocr_text(word, ocr_rotate_for_target(target, page_rotation), page.meta.index))
     texts.sort(key=lambda t: t.block_no)
+    emit_layers(
+        settings, page.meta,
+        candidates=[v for v in vectors if v.seqno in fill_ids], drawings=drawings,
+        word_groups=word_groups, read_groups={word.block_no for word, _ in pairs}, texts=texts,
+    )
     return drawings, texts
 
 

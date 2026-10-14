@@ -52,9 +52,29 @@ All reviewed and approved during the migration.
 | `s3_text_drawing_split.py` | tiled OCR detection, text / drawing split | copied: `parsing/text_drawing_parser.py` |
 | `s4_region_ocr.py` | box refinement, recognition, missed-glyph recovery | copied: `ocr/region_ocr.py` (+ `normalise_crop_for_ocr` from `parsing/parser.py`) |
 | `s5_colour_autotrace.py` | colour-fill autotrace of the drawing layer | copied: `autotrace/`, `conversion/png_to_vectors/`, `transforms/`, `vectors/`, `helpers/geometry.py`, parts of `serialisation/` and `rendering/pdf_render/` |
+| `debug_layers.py` | debug layers / images for the pipeline report | new |
 
 Copied files hold only the code this module reaches; the logic is unchanged. In
 `s5_colour_autotrace.py`, `helpers/geometry.py`'s `_pt` / `_item_points` are renamed
 `_geom_pt` / `_geom_item_points` (another `_item_points` lives in the same file).
 `raster_parser.delete_drawings_from_pdf` (whole-document clear) now comes from
 `s1_clear_page.py`; the raster pass itself doesn't use it.
+
+## Debug output
+
+When `RunSettings.on_debug_layer` / `on_debug_image` are set (the pipeline report does this;
+`extract()` never does), the raster pass also renders its intermediate results as page-space
+layers (pixels mapped through the render's own `to_points`). Nothing is rendered otherwise, the
+files written under `dump_dir` are unchanged, and the output is the same either way, so this is
+**not** a behaviour change.
+
+| Stage | Layer | What it shows |
+|---|---|---|
+| `render` | `residual page` | the cleared page as rendered (step 2) |
+| `split` | `text layer`, `drawing layer` | the final text and drawing rasters (inputs to recognition and to autotrace) |
+| `detect` | `initial boxes`, `refined boxes` | step 3's detection on the whole page, and step 4's boxes on the text layer |
+| `ocr` | `text` | the recognised words in their boxes and directions |
+| `trace` | `vectors` | the autotraced vectors in their own colours |
+
+Debug images: `v1_raster_boxes/` holds each refined box cut from the text layer (5 px padding,
+before step 4 splits it into words).
