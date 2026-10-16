@@ -7,7 +7,11 @@ OCR text against ground truth without re-running the pipeline.
 
     {"schema": 1, "pdf_path": ..., "doc_durations": {...},
      "pages": [{"page": PageMeta, "texts": [...], "vectors": [...],
-                "p2": ..., "p3": ..., "step_durations": {...}, "debug_durations": {...}}, ...]}
+                "p2": ..., "p3": ..., "step_durations": {...}, "sub_durations": {...},
+                "debug_durations": {...}}, ...]}
+
+`sub_durations` (`{phase: {sub-step: seconds}}`) holds the sub-step times a backend reported
+through `RunSettings.on_step_time`; they are already inside their phase's `step_durations`.
 """
 from __future__ import annotations
 
@@ -33,6 +37,9 @@ class PageDump:
     # Report-generation seconds spent on this page outside the pipeline itself: input
     # conversion, the fixed layers, extra-prediction layers.
     debug_durations: dict = dataclasses.field(default_factory=dict)
+    # Backend sub-step seconds per phase (`RunSettings.on_step_time`), part of their phase's
+    # `step_durations` above. Last, so positional construction is unchanged.
+    sub_durations: dict = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass
@@ -49,6 +56,7 @@ def _page_to_json(pd: PageDump) -> dict:
         "p2": pd.p2,
         "p3": pd.p3,
         "step_durations": pd.step_durations,
+        "sub_durations": pd.sub_durations,
         "debug_durations": pd.debug_durations,
     }
 
@@ -59,6 +67,7 @@ def _page_from_json(d: dict) -> PageDump:
         page_meta=result.page, texts=result.texts, vectors=result.vectors,
         p2=d.get("p2", ""), p3=d.get("p3", ""),
         step_durations=d.get("step_durations", {}),
+        sub_durations=d.get("sub_durations", {}),
         debug_durations=d.get("debug_durations", {}),
     )
 

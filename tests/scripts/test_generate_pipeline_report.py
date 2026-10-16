@@ -258,3 +258,12 @@ def test_benchmark_without_layers_images_or_converted_pdfs_writes_no_pdfs(tmp_pa
     assert (run_dir / "A" / "dump.json").is_file()
     assert list(run_dir.rglob("*.pdf")) == []
     assert list(run_dir.rglob("*.png")) == []
+
+
+def test_step_time_sink_sums_per_phase_and_name():
+    sub: dict = {}
+    sink = gpr._step_time_sink(sub)
+    sink("phase3", "ocr_detect", 1.0)
+    sink("phase3", "ocr_detect", 0.5)
+    sink("phase3", "drawing", 0.25)
+    assert sub == {"phase3": {"ocr_detect": 1.5, "drawing": 0.25}}

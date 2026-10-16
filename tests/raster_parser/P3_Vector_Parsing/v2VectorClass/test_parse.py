@@ -1,0 +1,625 @@
+from __future__ import annotations
+
+import math
+
+import numpy as np
+import pytest
+
+from raster_parser.commons.models import Page
+from raster_parser.core.settings import RunSettings
+from raster_parser.P3_Vector_Parsing.v2VectorClass import ocr_pool
+from raster_parser.P3_Vector_Parsing.v2VectorClass import parse as lvc
+from raster_parser.P3_Vector_Parsing.v2VectorClass.paddle_engine import (
+    OcrBox, PaddleDetectBackend, PaddleRecBackend,
+)
+
+
+_FOLDER = lvc.DEBUG_IMAGE_FOLDERS
+
+
+def _image_sink(store: dict) -> RunSettings:
+    """Settings whose `on_debug_image` keeps every image, by folder kind."""
+    by_folder = {folder: kind for kind, folder in _FOLDER.items()}
+    return RunSettings(on_debug_image=lambda folder, _name, make: store.setdefault(
+        by_folder[folder], []).append(np.asarray(make())))
+
+
+def _page(page_meta) -> Page:
+    return Page(doc_path="synthetic.pdf", meta=page_meta(width=200.0, height=100.0), fitz_page=None)
+
+
+def _whole_image_quad(bgr):
+    h, w = bgr.shape[:2]
+    return [np.array([[0.0, 0.0], [w - 1.0, 0.0], [w - 1.0, h - 1.0], [0.0, h - 1.0]])]
+
+
+def _rotated_quad(angle_deg):
+    """A detect returning one quad rotated by `angle_deg` (y-down) about
+    the render's centre, half the render's width long."""
+    def _detect(self, bgr):
+        h, w = bgr.shape[:2]
+        cx, cy = w / 2.0, h / 2.0
+        hw, hh = w / 4.0, h / 8.0
+        c, s = math.cos(math.radians(angle_deg)), math.sin(math.radians(angle_deg))
+        pts = [(x * c - y * s + cx, x * s + y * c + cy) for x, y in ((-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh))]
+        return [np.array(pts)]
+    return _detect
+
+
+def _patch_rec(monkeypatch, text="X", conf=1.0, flip=0):
+    monkeypatch.setattr(
+        PaddleRecBackend, "recognize_crops",
+        lambda self, crops: [OcrBox(text=text, confidence=conf, flip_deg=flip) for _ in crops],
+    )
+    monkeypatch.setattr(
+        PaddleRecBackend, "recognize_crops_raw",
+        lambda self, crops: [OcrBox(text=text, confidence=conf) for _ in crops],
+    )
+
+
+def _strokes(vector):
+    """Three vertical strokes, 2 pt apart -- one cluster."""
+    return [
+        vector(bbox=(x, 10.0, x, 20.0), items=[("l", (x, 10.0), (x, 20.0))], width=0.5, seqno=i)
+        for i, x in enumerate((10.0, 12.0, 14.0))
+    ]
+
+
+def test_parse_empty_input_returns_empty_output(page_meta):
+    debug_out: dict = {}
+    drawing, texts = lvc.parse([], _page(page_meta), _trace=debug_out)
+    assert drawing == [] and texts == []
+    assert debug_out["rotation"] == []
+    assert debug_out["retry_stats"] == {"0": 0, "1": 0, "2": 0, "3": 0, "failed": 0}
+    assert debug_out["global_angles"] == []
+    for gone in ("cluster_rotation", "fast", "fast_images"):
+        assert gone not in debug_out
+
+
+def test_parse_detects_on_the_unrotated_render(page_meta, vector, monkeypatch):
+    seen_shapes: list = []
+
+    def _detect(self, bgr):
+        seen_shapes.append(bgr.shape)
+        return _whole_image_quad(bgr)
+
+    monkeypatch.setattr(PaddleDetectBackend, "detect", _detect)
+    _patch_rec(monkeypatch, "III")
+    strokes = _strokes(vector)
+    debug_out: dict = {}
+    drawing, texts = lvc.parse(strokes, _page(page_meta), _trace=debug_out)
+    # The render is taller than wide (4 pt x 10 pt + padding) -- not rotated.
+    h, w = seen_shapes[0][:2]
+    assert h > w
+    (entry,) = debug_out["rotation"]
+    # Whole-image quad: long edge vertical -> -90 (normalised), no flip.
+    assert entry["quad_angle_deg"] == -90.0
+    assert entry["final_angle_deg"] == pytest.approx(270.0)
+    x0, y0, x1, y1 = entry["bbox"]
+    pad = lvc._cluster_render_padding(strokes)
+    assert x0 == pytest.approx(10.0 - pad, abs=0.5) and x1 == pytest.approx(14.0 + pad, abs=0.5)
+    assert y0 == pytest.approx(10.0 - pad, abs=0.5) and y1 == pytest.approx(20.0 + pad, abs=0.5)
+    assert [t.text for t in texts] == ["III"]
+    assert drawing == []  # every stroke lies inside the quad
+
+
+def test_parse_quad_angle_drives_the_text_direction(page_meta, vector, monkeypatch):
+    monkeypatch.setattr(PaddleDetectBackend, "detect", _rotated_quad(30.0))
+    _patch_rec(monkeypatch, "AB")
+    debug_out: dict = {}
+    _drawing, texts = lvc.parse(
+        [vector(bbox=(10.0, 10.0, 60.0, 40.0), width=0.5, seqno=1)], _page(page_meta), _trace=debug_out,
+    )
+    (entry,) = debug_out["rotation"]
+    assert entry["quad_angle_deg"] == pytest.approx(30.0, abs=0.5)
+    (t,) = texts
+    assert t.angle() == pytest.approx(30.0, abs=0.5)
+    # Reading-ordered quad: p0 -> p1 runs along the text direction.
+    (x0, y0), (x1, y1) = t.quad_points[0], t.quad_points[1]
+    assert math.degrees(math.atan2(y1 - y0, x1 - x0)) == pytest.approx(30.0, abs=0.5)
+
+
+def _collinear_pair(vector, angle_deg, seq0=100):
+    """Two dashes on one infinite line at `angle_deg` (y-down), far from the
+    text strokes -- a 2-member collinear group, i.e. one global angle."""
+    c, s = math.cos(math.radians(angle_deg)), math.sin(math.radians(angle_deg))
+    out = []
+    for i, t in enumerate((0.0, 20.0)):
+        x0, y0 = 120.0 + t * c, 60.0 + t * s
+        x1, y1 = x0 + 10.0 * c, y0 + 10.0 * s
+        out.append(vector(bbox=(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)),
+                          items=[("l", (x0, y0), (x1, y1))], width=0.5, seqno=seq0 + i))
+    return out
+
+
+@pytest.mark.parametrize("quad_deg, expected_deg, snapped", [(28.0, 30.0, True), (40.0, 40.0, False)])
+def test_parse_quad_angle_snaps_to_global_angle_within_tolerance(
+    page_meta, vector, monkeypatch, quad_deg, expected_deg, snapped,
+):
+    monkeypatch.setattr(PaddleDetectBackend, "detect", _rotated_quad(quad_deg))
+    _patch_rec(monkeypatch, "AB")
+    debug_out: dict = {}
+    text_vec = vector(bbox=(10.0, 10.0, 60.0, 40.0), width=0.5, seqno=1)
+    lvc.parse([text_vec] + _collinear_pair(vector, 30.0), _page(page_meta), _trace=debug_out)
+    assert debug_out["global_angles"] == pytest.approx([30.0], abs=0.01)
+    entry = next(e for e in debug_out["rotation"] if e["quad_angle_raw_deg"] == pytest.approx(quad_deg, abs=0.5))
+    assert entry["snapped"] is snapped
+    assert entry["quad_angle_deg"] == pytest.approx(expected_deg, abs=0.5 if not snapped else 0.01)
+    assert entry["final_angle_deg"] == pytest.approx(expected_deg, abs=0.5 if not snapped else 0.01)
+
+
+def test_parse_classifier_flip_turns_the_text_180(page_meta, vector, monkeypatch):
+    monkeypatch.setattr(PaddleDetectBackend, "detect", _rotated_quad(30.0))
+    _patch_rec(monkeypatch, "AB", flip=180)
+    debug_out: dict = {}
+    _drawing, texts = lvc.parse(
+        [vector(bbox=(10.0, 10.0, 60.0, 40.0), width=0.5, seqno=1)], _page(page_meta), _trace=debug_out,
+    )
+    (entry,) = debug_out["rotation"]
+    assert entry["cls_flip_deg"] == 180
+    assert entry["final_angle_deg"] == pytest.approx(210.0, abs=0.5)
+    assert texts[0].angle() == pytest.approx(-150.0, abs=0.5)
+    layers = lvc._render_rotation_layers(page_meta(), debug_out["rotation"])
+    assert ("rotation", "cls flipped (1)") in [(s, l) for s, l, _h, _p in layers]
+
+
+@pytest.mark.parametrize("flip", [0, 180])
+def test_recog_0_debug_crop_is_what_the_recogniser_read(page_meta, vector, monkeypatch, flip):
+    """A pass-1 win's saved crop includes the classifier's 180 flip --
+    the classifier crop itself is the pre-flip one."""
+    monkeypatch.setattr(PaddleDetectBackend, "detect", _rotated_quad(30.0))
+    _patch_rec(monkeypatch, "AB", flip=flip)
+    vectors = [vector(bbox=(10.0, 10.0, 60.0, 40.0), width=0.5, seqno=1)]
+    streamed: dict = {}
+    lvc.parse(vectors, _page(page_meta), _image_sink(streamed))
+    (cls_img,) = streamed["rotation_classifier"]
+    (recog_img,) = streamed["recog_0"]
+    expected = np.rot90(cls_img, 2) if flip else cls_img
+    assert np.array_equal(recog_img, expected)
+
+
+def _scripted_rec(monkeypatch, by_pass):
+    """Pass 1 (`recognize_crops`, with the classifier) returns `by_pass[0]`;
+    the n-th retry (`recognize_crops_raw`) returns `by_pass[n]`. Records
+    each call's batch size."""
+    calls: list[int] = []
+
+    def _cls(self, crops):
+        text, conf = by_pass[0]
+        calls.append(len(crops))
+        return [OcrBox(text=text, confidence=conf) for _ in crops]
+
+    def _raw(self, crops):
+        text, conf = by_pass[len(calls)]
+        calls.append(len(crops))
+        return [OcrBox(text=text, confidence=conf) for _ in crops]
+
+    monkeypatch.setattr(PaddleRecBackend, "recognize_crops", _cls)
+    monkeypatch.setattr(PaddleRecBackend, "recognize_crops_raw", _raw)
+    return calls
+
+
+def _one_vector_run(page_meta, vector, monkeypatch):
+    v = vector(bbox=(10.0, 10.0, 30.0, 15.0), width=0.5, seqno=1)  # wider than tall -> quad angle 0
+    monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: _whole_image_quad(bgr))
+    debug_out: dict = {}
+    _drawing, texts = lvc.parse([v], _page(page_meta), _trace=debug_out)
+    return texts, debug_out
+
+
+def test_parse_low_confidence_retries_all_rotations_and_keeps_best(page_meta, vector, monkeypatch):
+    calls = _scripted_rec(monkeypatch, [("AB", 0.5), ("CD", 0.7), ("EF", 0.95), ("GH", 0.9)])
+    texts, debug_out = _one_vector_run(page_meta, vector, monkeypatch)
+    assert calls == [1, 1, 1, 1]  # pass 1 + all three retries, even after a good one
+    assert [t.text for t in texts] == ["EF"]
+    entry = debug_out["rotation"][0]
+    assert entry["retry_count"] == 2 and entry["retried"] and entry["score"] == 0.95
+    assert entry["final_angle_deg"] == 180.0  # quad 0 + 2 * 90
+    assert entry["cls_flip_deg"] is None  # a retry won -- the classifier flip does not apply
+    assert debug_out["retry_stats"] == {"0": 0, "1": 0, "2": 1, "3": 0, "failed": 0}
+
+
+def test_parse_single_character_is_penalised(page_meta, vector, monkeypatch):
+    _scripted_rec(monkeypatch, [("I", 0.95), ("AB", 0.6), ("", 0.0), ("", 0.0)])
+    texts, debug_out = _one_vector_run(page_meta, vector, monkeypatch)
+    assert [t.text for t in texts] == ["AB"]  # 0.6 beats 0.95 * 0.5
+    assert texts[0].confidence == 0.6  # raw confidence, not the score
+    assert debug_out["rotation"][0]["final_angle_deg"] == 90.0  # quad 0 + 90
+
+
+def test_parse_confident_pass_one_is_not_retried(page_meta, vector, monkeypatch):
+    calls = _scripted_rec(monkeypatch, [("AB", 0.8)])
+    texts, debug_out = _one_vector_run(page_meta, vector, monkeypatch)
+    assert calls == [1] and [t.text for t in texts] == ["AB"]
+    assert debug_out["rotation"][0]["retried"] is False
+
+
+def test_parse_retry_keeps_pass_one_when_nothing_beats_it(page_meta, vector, monkeypatch):
+    _scripted_rec(monkeypatch, [("AB", 0.5), ("", 0.0), ("X", 0.9), ("CD", 0.5)])
+    texts, debug_out = _one_vector_run(page_meta, vector, monkeypatch)
+    assert [t.text for t in texts] == ["AB"]  # X scores 0.45; CD ties and loses to pass 1
+    entry = debug_out["rotation"][0]
+    assert entry["retry_count"] == 0 and entry["retried"]
+
+
+def test_parse_english_words_boost_the_retry_winner(page_meta, vector, monkeypatch):
+    _scripted_rec(monkeypatch, [("XQZV", 0.7), ("DOOR FRAME", 0.6), ("", 0.0), ("", 0.0)])
+    texts, debug_out = _one_vector_run(page_meta, vector, monkeypatch)
+    assert [t.text for t in texts] == ["DOOR FRAME"]  # 0.6 * 1.2**2 = 0.864 beats 0.7
+    assert texts[0].confidence == 0.6
+    entry = debug_out["rotation"][0]
+    assert entry["retry_count"] == 1
+    assert entry["score"] == pytest.approx(0.864)
+    assert entry["raw_score"] == 0.6 and entry["english_words"] == 2
+
+
+def test_parse_english_words_do_not_skip_the_retry(page_meta, vector, monkeypatch):
+    # Boosted 0.75 * 1.2 = 0.9 would clear the threshold -- the trigger uses the raw score.
+    calls = _scripted_rec(monkeypatch, [("DOOR", 0.75), ("XQZV", 0.85), ("", 0.0), ("", 0.0)])
+    texts, debug_out = _one_vector_run(page_meta, vector, monkeypatch)
+    assert calls == [1, 1, 1, 1]
+    assert [t.text for t in texts] == ["DOOR"]  # 0.9 beats 0.85
+    assert debug_out["rotation"][0]["retry_count"] == 0
+
+
+def test_parse_all_blank_is_failed_and_its_vectors_are_drawing(page_meta, vector, monkeypatch):
+    _scripted_rec(monkeypatch, [("", 0.0)] * 4)
+    v = vector(bbox=(10.0, 10.0, 30.0, 15.0), width=0.5, seqno=1)
+    monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: _whole_image_quad(bgr))
+    debug_out: dict = {}
+    images: dict = {}
+    drawing, texts = lvc.parse([v], _page(page_meta), _image_sink(images), _trace=debug_out)
+    assert texts == [] and drawing == [v]  # a blank quad owns nothing
+    assert debug_out["rotation"][0]["retry_count"] is None
+    assert debug_out["retry_stats"]["failed"] == 1
+    assert len(debug_out["ocr_blank_quads"]) == 1 and len(debug_out["ocr_blank_quads"][0]) == 4
+    assert len(images["recog_failed"]) == 1
+
+
+class _InlineExecutor:
+    """Stands in for the spawn pool: runs each job in this process (so the test's patched
+    backends apply) and records which job function ran."""
+
+    def __init__(self):
+        self.calls: list = []
+
+    def map(self, fn, jobs):
+        self.calls.append((fn, len(jobs)))
+        return [fn(job) for job in jobs]
+
+    def shutdown(self, wait=True):
+        pass
+
+
+def _two_clusters(vector):
+    return [vector(bbox=(x, 10.0, x + 10.0, 20.0), width=0.5, seqno=i) for i, x in enumerate((10.0, 120.0))]
+
+
+def test_parse_with_workers_runs_ocr_jobs_on_the_pool(page_meta, vector, monkeypatch, tmp_path):
+    monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: _whole_image_quad(bgr))
+    _patch_rec(monkeypatch, "X")
+    executor = _InlineExecutor()
+    real_start = ocr_pool.OcrPool._start
+
+    def _start(self):
+        real_start(self)  # makes the spill folder and a real executor ...
+        self._executor.shutdown(wait=True)
+        self._executor = executor  # ... replaced by the in-process one
+
+    monkeypatch.setattr(ocr_pool.OcrPool, "_start", _start)
+    settings = RunSettings(workers=2, dump_dir=tmp_path)
+    _drawing, texts = lvc.parse(_two_clusters(vector), _page(page_meta), settings)
+    assert [t.text for t in texts] == ["X", "X"]
+    # Two cluster renders -> one detect job each; two crops form one recognition batch, which
+    # stays in this process.
+    assert executor.calls == [(ocr_pool._detect_path_job, 2)]
+    assert list((tmp_path / ocr_pool.SPILL_FOLDER).iterdir()) == []  # spill folder removed
+
+
+def test_parse_with_one_worker_never_starts_a_pool(page_meta, vector, monkeypatch, tmp_path):
+    monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: _whole_image_quad(bgr))
+    _patch_rec(monkeypatch, "X")
+
+    def _start(self):
+        raise AssertionError("no pool with workers=1")
+
+    monkeypatch.setattr(ocr_pool.OcrPool, "_start", _start)
+    _drawing, texts = lvc.parse(_two_clusters(vector), _page(page_meta), RunSettings(workers=1, dump_dir=tmp_path))
+    assert [t.text for t in texts] == ["X", "X"]
+
+
+def test_ocr_pool_recognize_batches_keep_their_order(monkeypatch, tmp_path):
+    monkeypatch.setattr(PaddleRecBackend, "recognize_crops",
+                        lambda self, crops: [OcrBox(text=str(int(c[0, 0, 0])), confidence=1.0) for c in crops])
+    batches = [[np.full((4, 8, 3), v, np.uint8) for v in (1, 2)], [np.full((4, 8, 3), 3, np.uint8)]]
+    with ocr_pool.OcrPool(2, tmp_path) as pool:
+        monkeypatch.setattr(ocr_pool.OcrPool, "_start", lambda self: (
+            setattr(self, "_spill", tmp_path), setattr(self, "_executor", _InlineExecutor())))
+        out = pool.recognize(batches, raw=False)
+    assert [[b.text for b in batch] for batch in out] == [["1", "2"], ["3"]]
+
+
+def test_parse_streams_debug_layers_without_changing_the_result(page_meta, vector, monkeypatch):
+    monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: _whole_image_quad(bgr))
+    _patch_rec(monkeypatch, "X")
+    page = _page(page_meta)
+    streamed: list[tuple] = []
+    images: dict = {}
+    settings = RunSettings(on_debug_layer=lambda *layer: streamed.append(layer),
+                           on_debug_image=_image_sink(images).on_debug_image)
+    drawing, texts = lvc.parse(_strokes(vector), page, settings)
+    plain_drawing, plain_texts = lvc.parse(_strokes(vector), page)
+    assert [(t.text, t.bbox) for t in texts] == [(t.text, t.bbox) for t in plain_texts]
+    assert [v.seqno for v in drawing] == [v.seqno for v in plain_drawing]
+    assert set(images) == {"detect", "rotation_quad", "rotation_classifier", "recog_0"}
+
+    names = {(s, l) for s, l, _h, _p in streamed}
+    for expected in [
+        ("geometry", "collinear groups"), ("geometry", "parallel singletons"),
+        ("rotation", "raw quad angle"), ("rotation", "snapped angle (0)"),
+        ("rotation", "final angle"),
+        ("ownership", "text vectors"), ("ownership", "drawing vectors"),
+        ("ocr", "detect bbox"), ("drawing", "drawing vectors"),
+    ]:
+        assert expected in names
+    stages = {s for s, *_ in streamed}
+    assert not stages & {"fast", "rotation_rule_cluster", "rotation_rule_quad"}
+    for _stage, _label, hexcolor, pdf_bytes in streamed:
+        assert pdf_bytes[:4] == b"%PDF" and hexcolor.startswith("#")
+
+
+def test_classification_layers_render_dropped_vectors(page_meta, vector):
+    from types import SimpleNamespace as NS
+
+    dropped = vector(bbox=(0.0, 0.0, 5.0, 0.0))
+    kept = vector(bbox=(10.0, 10.0, 20.0, 20.0))
+
+    def step(label, kept_groups, dropped_groups):
+        return NS(label=label, categories={
+            "kept": NS(role="kept", groups=kept_groups),
+            "drawing": NS(role="dropped", groups=dropped_groups),
+        })
+
+    cls = NS(clustering={"b": NS(steps=[
+        step("Collinear drawing", [[kept]], [[dropped]]),
+        step("Seq overlap merge", [[kept]], []),
+    ])})
+    layers = lvc._render_classification_layers(page_meta(), cls)
+    assert [(s, l) for s, l, _h, _p in layers] == [
+        ("classify_01_collinear_drawing", "dropped drawing"),
+        ("classify_02_seq_overlap_merge", "kept bbox"),
+    ]
+
+
+def test_classification_layers_intersection_stage(page_meta, vector):
+    from types import SimpleNamespace as NS
+
+    crossed = vector(bbox=(0.0, 0.0, 5.0, 0.0))
+    off_grid = vector(bbox=(30.0, 0.0, 35.0, 3.0))
+    kept = vector(bbox=(10.0, 10.0, 20.0, 20.0))
+    cls = NS(clustering={"b": NS(steps=[
+        NS(label="Collinear drawing", categories={"kept": NS(role="kept", groups=[[kept]])}),
+        NS(label="Crossings", categories={
+            "kept": NS(role="kept", groups=[[[kept, off_grid]]]),
+            "crossed": NS(role="dropped", groups=[[crossed]]),
+            "crossed_off_grid": NS(role="info", groups=[[off_grid]]),
+        }),
+    ])})
+    layers = lvc._render_classification_layers(page_meta(), cls)
+    labels = [(s, l) for s, l, _h, _p in layers]
+    assert ("intersection", "dropped to drawing (1)") in labels
+    assert ("intersection", "flagged, kept (off-grid) (1)") in labels
+    assert not any(l == "dropped crossed" for _s, l in labels)
+
+
+def test_remaining_layers_show_kept_vectors_in_real_paint(page_meta, vector):
+    from types import SimpleNamespace as NS
+
+    import pymupdf as fitz
+
+    red = vector(bbox=(10.0, 10.0, 30.0, 10.0), items=[("l", (10.0, 10.0), (30.0, 10.0))],
+                 color=(1.0, 0.0, 0.0), width=1.0, seqno=2)
+    blue = vector(bbox=(10.0, 20.0, 30.0, 20.0), items=[("l", (10.0, 20.0), (30.0, 20.0))],
+                  color=(0.0, 0.0, 1.0), width=1.0, seqno=1)
+    dash = vector(bbox=(0.0, 40.0, 5.0, 40.0), items=[("l", (0.0, 40.0), (5.0, 40.0))], seqno=3)
+
+    def step(label, kept_groups, dropped_groups=()):
+        return NS(label=label, categories={
+            "kept": NS(role="kept", groups=kept_groups),
+            "drawing": NS(role="dropped", groups=list(dropped_groups)),
+        })
+
+    cls = NS(clustering={"b": NS(steps=[
+        step("Oversize", [[red], [blue], [dash]]),  # dropped nothing -> skipped
+        step("Collinear drawing", [[red], [blue]], [[dash]]),
+        step("Seq overlap merge", [[red, blue]]),  # regrouped only -> skipped
+        step("Length outliers", [[[red]]], [[blue]]),
+    ])})
+    layers = lvc._render_remaining_layers(page_meta(), cls)
+    assert [(s, l) for s, l, _h, _p in layers] == [
+        ("remaining", "02 after collinear drawing (2)"),
+        ("remaining", "04 after length outliers (1)"),
+    ]
+    drawings = fitz.open("pdf", layers[0][3])[0].get_drawings()
+    assert [d["color"] for d in drawings] == [(0.0, 0.0, 1.0), (1.0, 0.0, 0.0)]  # real colour, seqno order
+
+
+def test_remaining_layers_split_the_pattern_step_per_category(page_meta, vector):
+    from types import SimpleNamespace as NS
+
+    glyph = vector(bbox=(10.0, 10.0, 12.0, 14.0), seqno=1)
+    group = [vector(bbox=(x, 50.0, x + 1.0, 51.0), seqno=10 + i) for i, x in enumerate((0.0, 4.0))]
+    bucket = [vector(bbox=(x, 70.0, x + 1.0, 71.0), seqno=20 + i) for i, x in enumerate((0.0, 4.0, 8.0))]
+    cls = NS(clustering={"b": NS(steps=[NS(label="Pattern lattice", categories={
+        "kept": NS(role="kept", groups=[[glyph]]),
+        "pattern": NS(role="dropped", groups=[group]),
+        "pattern_bucket": NS(role="dropped", groups=[bucket]),
+        "pattern_rejected": NS(role="info", groups=[]),
+    })])})
+    layers = lvc._render_remaining_layers(page_meta(), cls)
+    assert [(s, l) for s, l, _h, _p in layers] == [
+        ("remaining", "01a after pattern (4)"),  # glyph + the bucket-rule groups
+        ("remaining", "01b after pattern_bucket (1)"),
+    ]
+
+
+def test_remaining_layers_after_real_collinear_step_exclude_the_dashed_line(page_meta, vector):
+    import pymupdf as fitz
+
+    from raster_parser.P3_Vector_Parsing.v2VectorClass.classify_vectors import classify_vectors
+
+    dashes = [
+        vector(bbox=(x, 80.0, x + 2.0, 80.0), items=[("l", (x, 80.0), (x + 2.0, 80.0))],
+               width=0.5, seqno=i)
+        for i, x in enumerate(3.0 * k for k in range(60))
+    ]
+    glyphs = [
+        vector(bbox=(x, 10.0, x + 3.0, 16.0), items=[("l", (x, 16.0), (x + 3.0, 10.0))],
+               width=0.5, seqno=100 + i)
+        for i, x in enumerate((20.0, 26.0, 32.0))
+    ]
+    page = _page(page_meta)
+    cls = classify_vectors(dashes + glyphs, page, keep_steps=True)
+    layers = lvc._render_remaining_layers(page.meta, cls)
+    assert layers[0][1] == "02 after collinear drawing (3)"
+    drawn = fitz.open("pdf", layers[0][3])[0].get_drawings()
+    assert all(d["rect"].y1 < 50.0 for d in drawn)  # only the glyphs, no dash at y=80
+
+
+def test_geometry_layers_color_each_group(page_meta, vector):
+    import pymupdf as fitz
+
+    a = vector(kind="l", items=[("l", (0.0, 0.0), (10.0, 0.0))], bbox=(0.0, 0.0, 10.0, 0.0), seqno=1)
+    b = vector(kind="l", items=[("l", (20.0, 0.0), (30.0, 0.0))], bbox=(20.0, 0.0, 30.0, 0.0), seqno=2)
+    c = vector(kind="l", items=[("l", (0.0, 9.0), (0.0, 19.0))], bbox=(0.0, 9.0, 0.0, 19.0), seqno=3)
+    layers = {
+        (stage, label): pdf
+        for stage, label, _hex, pdf in lvc._render_geometry_layers(page_meta(), [[a, b, c]])
+    }
+    collinear = fitz.open("pdf", layers[("geometry", "collinear groups")])[0].get_drawings()
+    singles = fitz.open("pdf", layers[("geometry", "collinear singletons")])[0].get_drawings()
+    assert len(collinear) == 2  # a + b, one shared colour
+    assert len({d["color"] for d in collinear}) == 1
+    assert len(singles) == 1  # c
+
+
+def _line(vector, x0, y0, x1, y1):
+    return vector(bbox=(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)), items=[("l", (x0, y0), (x1, y1))])
+
+
+def test_text_vectors_by_quad_needs_most_of_the_ink_inside(vector):
+    quad = ((0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (0.0, 10.0))
+    glyph = _line(vector, 2, 2, 2, 8)  # fully inside
+    leader = _line(vector, 14, 5, 34, 5)  # 30% inside
+    text, drawing = lvc._text_vectors_by_quad([[glyph, leader]], {0: [quad]})
+    assert text == [glyph] and drawing == [leader]
+
+
+def test_text_vectors_by_quad_uses_the_rotated_quad(vector):
+    c, s = math.cos(math.radians(30)), math.sin(math.radians(30))
+    quad = tuple((x * c - y * s + 50, x * s + y * c + 50) for x, y in ((-20, -2), (20, -2), (20, 2), (-20, 2)))
+    line = _line(vector, 35, 50, 65, 50)  # inside the envelope, mostly outside the quad
+    text, drawing = lvc._text_vectors_by_quad([[line]], {0: [quad]})
+    assert text == [] and drawing == [line]
+
+
+def test_text_vectors_by_quad_only_uses_its_own_clusters_quads(vector):
+    quad = ((0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (0.0, 10.0))
+    in_a = _line(vector, 2, 2, 2, 8)
+    in_b = _line(vector, 4, 2, 4, 8)  # inside cluster 0's quad, but in cluster 1
+    text, drawing = lvc._text_vectors_by_quad([[in_a], [in_b]], {0: [quad]})
+    assert text == [in_a] and drawing == [in_b]
+
+
+def test_parse_text_carries_its_page_space_detect_quad(page_meta, vector, monkeypatch):
+    _scripted_rec(monkeypatch, [("AB", 0.95)])
+    texts, debug_out = _one_vector_run(page_meta, vector, monkeypatch)
+    [t] = texts
+    xs = [p[0] for p in t.quad_points]
+    ys = [p[1] for p in t.quad_points]
+    assert t.bbox == pytest.approx((min(xs), min(ys), max(xs), max(ys)))
+    assert set(debug_out["ocr_detect_quads"][0]) == set(t.quad_points)
+
+
+_SQUARE = ((0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (0.0, 10.0))
+
+
+def test_quad_owns_bbox_fully_inside(vector):
+    glyph = vector(bbox=(2, 2, 8, 8), items=[("re", (2, 2, 8, 8))])
+    assert lvc._quad_owns(glyph, _SQUARE, (0, 0, 20, 10), 200.0)
+
+
+def test_quad_owns_rejects_bbox_larger_than_the_quad(vector):
+    # Centred on the quad, but its bbox (30x30) is bigger than the quad (20x10).
+    frame = vector(bbox=(-5, -10, 25, 20), items=[("re", (-5, -10, 25, 20))])
+    assert not lvc._quad_owns(frame, _SQUARE, (0, 0, 20, 10), 200.0)
+
+
+def test_quad_owns_rejects_when_few_pieces_touch(vector):
+    # 1 of 3 pieces touches the quad (< 50%), small bbox.
+    v = vector(bbox=(15, 5, 26, 9), items=[
+        ("l", (15, 5), (19, 5)), ("l", (22, 5), (26, 5)), ("l", (22, 9), (26, 9)),
+    ])
+    assert not lvc._quad_owns(v, _SQUARE, (0, 0, 20, 10), 200.0)
+
+
+def test_quad_owns_falls_back_to_ink_fraction(vector):
+    # Both pieces touch (100%); ink 8 of 10 inside -> owned.
+    mostly = vector(bbox=(12, 2, 22, 8), items=[("l", (12, 2), (22, 2)), ("l", (12, 8), (22, 8))])
+    assert lvc._quad_owns(mostly, _SQUARE, (0, 0, 20, 10), 200.0)
+    # Both pieces touch; ink 3 of 10 inside -> not owned.
+    barely = vector(bbox=(17, 2, 27, 8), items=[("l", (17, 2), (27, 2)), ("l", (17, 8), (27, 8))])
+    assert not lvc._quad_owns(barely, _SQUARE, (0, 0, 20, 10), 200.0)
+
+
+_TIMED_STEPS = {
+    "classify_separate", "classify_oversize", "classify_collinear", "classify_pattern", "classify_seqno",
+    "classify_spatial",
+    "classify_outliers", "classify_crossings", "classify_collect",
+    "ocr_render", "ocr_detect", "ocr_crop", "ocr_recognize", "ocr_assemble",
+    "quad_ownership", "drawing",
+}
+
+
+def _step_times(**kwargs) -> "tuple[RunSettings, dict]":
+    """Settings recording `on_step_time`, plus the dict it fills (one call per name)."""
+    steps: dict = {}
+
+    def sink(phase, name, seconds):
+        assert phase == "phase3" and name not in steps
+        steps[name] = seconds
+
+    return RunSettings(on_step_time=sink, **kwargs), steps
+
+
+def test_parse_times_every_step_without_nesting(page_meta, vector, monkeypatch):
+    monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: _whole_image_quad(bgr))
+    _patch_rec(monkeypatch, "III")
+    page = _page(page_meta)
+
+    settings, steps = _step_times()
+    lvc.parse(_strokes(vector), page, settings)
+    assert set(steps) == _TIMED_STEPS  # no outer `classify`, no `debug_render`
+    assert all(secs >= 0.0 for secs in steps.values())
+
+    settings, steps = _step_times(on_debug_layer=lambda *layer: None)
+    lvc.parse(_strokes(vector), page, settings)
+    assert set(steps) == _TIMED_STEPS | {"debug_render"}
+
+
+def test_parse_returns_drawing_in_paint_order(page_meta, vector, monkeypatch):
+    """Classification drawing (a long dashed line) and OCR-cluster drawing (blank reads) come
+    back merged in `seqno` order, not grouped by where they were decided."""
+    monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: _whole_image_quad(bgr))
+    _scripted_rec(monkeypatch, [("", 0.0)] * 4)
+    dashes = [
+        vector(bbox=(x, 80.0, x + 2.0, 80.0), items=[("l", (x, 80.0), (x + 2.0, 80.0))], width=0.5, seqno=100 + i)
+        for i, x in enumerate(3.0 * k for k in range(60))
+    ]
+    glyphs = [
+        vector(bbox=(x, 10.0, x + 3.0, 16.0), items=[("l", (x, 16.0), (x + 3.0, 10.0))], width=0.5, seqno=i)
+        for i, x in enumerate((20.0, 26.0, 32.0))
+    ]
+    drawing, texts = lvc.parse(dashes + glyphs, _page(page_meta))
+    assert texts == []
+    assert [v.seqno for v in drawing] == sorted(v.seqno for v in dashes + glyphs)

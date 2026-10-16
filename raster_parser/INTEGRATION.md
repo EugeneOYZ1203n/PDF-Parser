@@ -39,11 +39,14 @@ again = ExtractResult.from_json(json_str)
 | `ocr_dpi` | `300` | Type-2 crop DPI and Type-4 render DPI |
 | `use_angle_cls` | `True` | PaddleOCR angle classification (Type-2) |
 | `enable_raster_pass` | `True` | After Type-2: LibreOffice clear → Type-4 if residual page |
-| `workers` | `1` | Process pool size for Type-4 tile det / recog / colour autotrace |
+| `workers` | `1` | Process pool size for Type-4 tile det / recog / colour autotrace, and for `p3="v2VectorClass"`'s OCR detect / recognise |
 | `dump_dir` | `./tmp` | LO + Type-4 dump root (passed to `clear_page`) |
 | `debug` | `False` | Keep dumps on disk; otherwise removed after `extract()` |
 | `p2` | `"v1RasterToVec"` | Phase 2 (raster pass) backend — `raster_parser.core.registry.P2_REGISTRY` |
 | `p3` | `"v1VectorClass"` | Phase 3 (vector parsing) backend — `raster_parser.core.registry.P3_REGISTRY` |
+
+With `workers > 1` the pools start their processes with `spawn`, which re-imports the calling
+script: call `extract()` from under `if __name__ == "__main__":`.
 
 An unknown `p2` / `p3` name raises `ValueError` listing the valid ones. `enable_raster_pass=False`
 skips Phase 2 whatever `p2` is (same as `p2="Stub"`).
@@ -114,6 +117,13 @@ pip install -e .
 
 Also needs LibreOffice on the host when `enable_raster_pass=True`.
 
+`p3="v2VectorClass"` scores OCR reads with pyenchant's `en_US` dictionary. The Windows and macOS
+wheels bundle Enchant; on Linux install it and the dictionary:
+
+```bash
+sudo apt install libenchant-2-2 hunspell-en-us
+```
+
 **Notebooks / stats / batch analysis** (not required for `extract()`):
 
 ```bash
@@ -139,6 +149,7 @@ uv run pytest tests/ -m "not slow"
 uv run pytest tests/raster_parser/ -m "not slow"  # library logic (mirrors raster_parser/)
 uv run pytest tests/scripts/                      # scripts/ helpers (mirrors scripts/)
 uv run pytest tests/raster_parser/test_main_pipeline_extract.py -m slow
+RASTER_PARSER_RUN_OCR_TESTS=1 uv run pytest tests/raster_parser/P3_Vector_Parsing/v2VectorClass  # + real PaddleOCR tests
 ```
 
 `tests/references/test_pdfs_*.pdf` are committed fixture PDFs.

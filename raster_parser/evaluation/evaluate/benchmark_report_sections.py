@@ -192,8 +192,10 @@ def add_text_sections(
 # Timing
 # ---------------------------------------------------------------------------
 def _timing_label(row: str) -> str:
-    if row.startswith(timing.DEBUG_PARENT + "."):
-        return f"{timing.DEBUG_PARENT} › {row.split('.', 1)[1]}"
+    """`debug.x` -> `debug › x`, a backend sub-step `phase3.x` -> `phase3 › x`."""
+    if "." in row:
+        parent, name = row.split(".", 1)
+        return f"{parent} › {name}"
     return row
 
 
@@ -208,8 +210,8 @@ def _timing_cell(st: "dict | None") -> str:
 def add_timing_sections(
     builder: ReportBuilder, timings_by_run: "dict[str, dict[str, dict]]", chart_path: "Path | None" = None,
 ) -> None:
-    """A table of per-page seconds (a row per phase, `total`, then the report-generation
-    `debug › *` rows; a column per run, plus a median delta vs the first run), and a table of
+    """A table of per-page seconds (a row per phase, each followed by its backend sub-steps
+    `phase › *`, then `total`, then the report-generation `debug › *` rows; a column per run, plus a median delta vs the first run), and a table of
     per-document report generation. `timings_by_run` = `{run: {kind: summarize_timings(...)}}`."""
     builder.add_group_header("Timing")
     runs = list(timings_by_run)
@@ -230,7 +232,8 @@ def add_timing_sections(
                     row.append(f"{delta:+.3f}s{pct}")
             rows.append(row)
         builder.add_subsection(
-            "Wall-clock per page (total = pipeline; debug › * = report generation)",
+            "Wall-clock per page (total = pipeline phases; phase › * = a backend's sub-steps, "
+            "inside their phase; debug › * = report generation)",
             headers, rows, [chart_path] if chart_path else [],
         )
     docs = {run: by_kind.get(timing.DOC_KIND, {}) for run, by_kind in timings_by_run.items()}

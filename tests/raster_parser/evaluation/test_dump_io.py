@@ -14,7 +14,8 @@ def test_write_load_dump(tmp_path, text, vector, page_meta):
         page_meta=page_meta(index=2, width=300, height=400),
         texts=[text(text="Hello", bbox=(1.0, 2.0, 3.0, 4.0), direction=(0.0, 1.0), source="ocr")],
         vectors=[v], p2="Stub", p3="v1VectorClass",
-        step_durations={"phase1": 0.5}, debug_durations={"conversion": 0.1},
+        step_durations={"phase1": 0.5, "phase3": 2.0}, sub_durations={"phase3": {"ocr_detect": 1.5}},
+        debug_durations={"conversion": 0.1},
     )
     path = tmp_path / "dump.json"
     dump_io.write_dump(path, "doc.pdf", [pd], {"layer_save": 0.2})
@@ -32,11 +33,12 @@ def test_missing_optional_fields_default(tmp_path, page_meta):
     path = tmp_path / "dump.json"
     dump_io.write_dump(path, "doc.pdf", [pd])
     payload = json.loads(path.read_text(encoding="utf-8"))
-    for key in ("p2", "p3", "step_durations", "debug_durations"):
+    for key in ("p2", "p3", "step_durations", "sub_durations", "debug_durations"):
         payload["pages"][0].pop(key)
     payload.pop("doc_durations")
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     dump = dump_io.load_dump(path)
     assert dump.pages[0].step_durations == {} and dump.pages[0].p2 == ""
+    assert dump.pages[0].sub_durations == {}
     assert dump.doc_durations == {}

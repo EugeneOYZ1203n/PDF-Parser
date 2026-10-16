@@ -12,6 +12,14 @@ from raster_parser.P2_Raster_To_Vec.v1RasterToVec.adapter import extract as _v1_
 from raster_parser.P3_Vector_Parsing.Stub.stub import parse as _p3_stub
 from raster_parser.P3_Vector_Parsing.v1VectorClass.parse import parse as _v1_vector_class
 
+
+def _v2_vector_class(vectors, page, settings):
+    """`v2VectorClass.parse`, imported on first use: its modules load OpenCV, SciPy and
+    pyenchant at import time, and `import raster_parser` must stay light."""
+    from raster_parser.P3_Vector_Parsing.v2VectorClass.parse import parse
+
+    return parse(vectors, page, settings)
+
 P2_REGISTRY: dict[str, Phase2Backend] = {
     "Stub": _p2_stub,
     "v1RasterToVec": _v1_raster_to_vec,
@@ -20,6 +28,7 @@ P2_REGISTRY: dict[str, Phase2Backend] = {
 P3_REGISTRY: dict[str, Phase3Backend] = {
     "Stub": _p3_stub,
     "v1VectorClass": _v1_vector_class,
+    "v2VectorClass": _v2_vector_class,
 }
 
 DEFAULT_P2 = "v1RasterToVec"

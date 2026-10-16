@@ -20,7 +20,7 @@ def _pdf(tmp_pdf_path) -> str:
 
 def test_registry_names_and_defaults():
     assert set(registry.P2_REGISTRY) == {"Stub", "v1RasterToVec"}
-    assert set(registry.P3_REGISTRY) == {"Stub", "v1VectorClass"}
+    assert set(registry.P3_REGISTRY) == {"Stub", "v1VectorClass", "v2VectorClass"}
     assert (registry.DEFAULT_P2, registry.DEFAULT_P3) == ("v1RasterToVec", "v1VectorClass")
 
 
@@ -108,3 +108,23 @@ def test_bad_stop_after_fails_before_reading():
 def test_debug_hooks_default_to_off():
     settings = RunSettings()
     assert settings.on_debug_layer is None and settings.on_debug_image is None
+    assert settings.on_step_time is None
+
+
+def test_import_stays_light():
+    """`import raster_parser` must not load OCR / image / dictionary libraries (v2VectorClass is
+    imported on first use)."""
+    import subprocess
+    import sys
+
+    code = ("import sys, raster_parser; "
+            "print(sorted(m for m in ('cv2', 'scipy', 'enchant', 'paddle', 'paddleocr') if m in sys.modules))")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
+    assert out.strip() == "[]"
+
+
+def test_v2_vector_class_runs_through_the_registry(tmp_pdf_path, synthetic_pdf_factory):
+    """No vectors -> nothing to OCR: the lazily imported v2 backend returns empty output."""
+    doc = synthetic_pdf_factory([{"texts": [{"point": (20, 40), "text": "hello"}]}])
+    result = run_pipeline(tmp_pdf_path(doc), 0, p2="Stub", p3="v2VectorClass")
+    assert [t.text for t in result.texts] == ["hello"] and result.vectors == []

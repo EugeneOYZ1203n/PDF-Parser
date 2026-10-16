@@ -13,7 +13,7 @@ and how to add a backend. For the public API (parameters, errors, wiring into a 
 | `core/` | The orchestrator and the backend contract: `interfaces.py` (the backend protocols), `registry.py` (backend names → functions), `settings.py` (`RunSettings`), `pipeline.py` (`run_pipeline`), `result.py` (`PipelineResult`). |
 | `P1_Reading_Native/` | Phase 1, always the same. |
 | `P2_Raster_To_Vec/<Name>/` | Phase 2 backends: `Stub`, `v1RasterToVec`. |
-| `P3_Vector_Parsing/<Name>/` | Phase 3 backends: `Stub`, `v1VectorClass`. |
+| `P3_Vector_Parsing/<Name>/` | Phase 3 backends: `Stub`, `v1VectorClass`, `v2VectorClass`. |
 | `P4_Output_Organization/` | Phase 4, always the same. |
 
 ## Flow
@@ -102,6 +102,9 @@ The rule is enforced by review. All current backends follow it.
 2. **Register it**: one line in `core/registry.py`'s `P2_REGISTRY` or `P3_REGISTRY`. It can then
    be selected with `extract(..., p2="<Name>")` / `p3="<Name>"`. Change `DEFAULT_P2` /
    `DEFAULT_P3` only if it should become the default, since that changes `extract()`'s output.
+   `import raster_parser` imports the registry, so a backend whose modules load heavy libraries
+   at import time (OpenCV, SciPy, PaddleOCR, ...) is registered through a small function that
+   imports it on first call, as `_v2_vector_class` is.
 3. **Write a `README.md`** in the folder, like the v1 ones: what it does step by step, its entry
    point, and what it needs installed. A backend that replaces or derives from an existing one
    lists every difference in output as a behaviour-change table.
@@ -116,13 +119,14 @@ The rule is enforced by review. All current backends follow it.
 
 ## Debug output
 
-`RunSettings` carries two optional callbacks for tools that want to see inside a run (the
+`RunSettings` carries three optional callbacks for tools that want to see inside a run (the
 pipeline report, `docs/SCRIPTS.md`). `extract()` never sets them.
 
 | Field | Called as | Meaning |
 |---|---|---|
 | `on_debug_layer` | `(stage, label, "#rrggbb", pdf_bytes)` | one rendered debug layer: a one-page PDF of the page, in unrotated page space |
-| `on_debug_image` | `(folder, name, make_image)` | one debug image; `make_image()` builds the PIL image and is only called if the tool keeps it |
+| `on_debug_image` | `(folder, name, make_image)` | one debug image; `make_image()` builds the PIL image and is only called if the tool keeps it; `folder` may contain `/` |
+| `on_step_time` | `(phase, name, seconds)` | one of the backend's own sub-steps, once per name when the page is done; the time is part of that phase's total (v2VectorClass uses `commons/step_timing.StepClock`) |
 
 Rules for a backend:
 

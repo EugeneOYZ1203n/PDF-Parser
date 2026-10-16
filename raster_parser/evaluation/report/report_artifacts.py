@@ -263,7 +263,7 @@ def debug_image_sink(reservoirs: ImageReservoirs, page_index: int):
 # ---------------------------------------------------------------------------
 def write_hyperparams(path: Path, config: "ReportConfig", settings: "RunSettings", config_path: Path) -> None:
     run_settings = {
-        k: str(v) for k, v in vars(settings).items() if not k.startswith("on_debug_")
+        k: str(v) for k, v in vars(settings).items() if not k.startswith("on_")
     }
     path.write_text(
         "# Source config\n" + str(config_path.resolve())
