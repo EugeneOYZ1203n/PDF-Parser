@@ -777,8 +777,11 @@ def _render_remaining_layers(page_meta, cls) -> "list[DebugLayer]":
     """Per classification step that removed anything: `remaining / NN after
     <step> (N)` -- every bucket's Vectors still kept after that step, in
     their real paint and `seqno` paint order, so stepping through the
-    layers shows the drawing falling away. A step whose kept set equals
-    the previous one (the first step: equals its input) is skipped."""
+    layers shows the drawing falling away. A step with several dropped
+    categories (the pattern step: `pattern`, then `pattern_bucket`) gets
+    one snapshot per category, in order: `NNa after <category> (N)`, ...
+    A snapshot equal to the previous one (the first: equal to the input)
+    is skipped."""
     from rastervec.commons.renderer.draw import render_specs_pdf, vector_spec
 
     out: "list[DebugLayer]" = []
@@ -793,20 +796,35 @@ def _render_remaining_layers(page_meta, cls) -> "list[DebugLayer]":
         for v in _flatten_entries(cat.groups)
     }
     for i in range(len(steps_per_bucket[0])):
-        vectors: list[Vector] = []
+        kept: list[Vector] = []
+        dropped: dict[str, list[Vector]] = {}
         for steps in steps_per_bucket:
-            if i < len(steps):
-                kept = steps[i].categories.get("kept")
-                if kept is not None:
-                    vectors.extend(_flatten_entries(kept.groups))
-        ids = {id(v) for v in vectors}
-        if ids == prev:
-            continue
-        prev = ids
-        vectors.sort(key=lambda v: v.seqno)
-        label = steps_per_bucket[0][i].label
-        out.append(("remaining", f"{i + 1:02d} after {label.lower()} ({len(vectors)})", _C_REMAINING,
-                    render_specs_pdf(page_meta, [vector_spec(v) for v in vectors], deflate=True)))
+            if i >= len(steps):
+                continue
+            for name, cat in steps[i].categories.items():
+                if cat.role == "kept":
+                    kept.extend(_flatten_entries(cat.groups))
+                elif cat.role == "dropped":
+                    dropped.setdefault(name, []).extend(_flatten_entries(cat.groups))
+        names = list(dropped)
+        label = steps_per_bucket[0][i].label.lower()
+        if len(names) > 1:
+            # After category k, the later categories' Vectors are still there.
+            snapshots = [
+                (f"{i + 1:02d}{chr(ord('a') + k)} after {name}",
+                 kept + [v for later in names[k + 1:] for v in dropped[later]])
+                for k, name in enumerate(names)
+            ]
+        else:
+            snapshots = [(f"{i + 1:02d} after {label}", kept)]
+        for title, vectors in snapshots:
+            ids = {id(v) for v in vectors}
+            if ids == prev:
+                continue
+            prev = ids
+            vectors = sorted(vectors, key=lambda v: v.seqno)
+            out.append(("remaining", f"{title} ({len(vectors)})", _C_REMAINING,
+                        render_specs_pdf(page_meta, [vector_spec(v) for v in vectors], deflate=True)))
     return out
 
 

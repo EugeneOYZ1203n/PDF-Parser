@@ -401,6 +401,48 @@ def test_remaining_layers_show_kept_vectors_in_real_paint(page_meta, vector):
     assert [d["color"] for d in drawings] == [(0.0, 0.0, 1.0), (1.0, 0.0, 0.0)]  # real colour, seqno order
 
 
+def test_remaining_layers_split_the_pattern_step_per_category(page_meta, vector):
+    from types import SimpleNamespace as NS
+
+    glyph = vector(bbox=(10.0, 10.0, 12.0, 14.0), seqno=1)
+    group = [vector(bbox=(x, 50.0, x + 1.0, 51.0), seqno=10 + i) for i, x in enumerate((0.0, 4.0))]
+    bucket = [vector(bbox=(x, 70.0, x + 1.0, 71.0), seqno=20 + i) for i, x in enumerate((0.0, 4.0, 8.0))]
+    cls = NS(clustering={"b": NS(steps=[NS(label="Pattern lattice", categories={
+        "kept": NS(role="kept", groups=[[glyph]]),
+        "pattern": NS(role="dropped", groups=[group]),
+        "pattern_bucket": NS(role="dropped", groups=[bucket]),
+        "pattern_rejected": NS(role="info", groups=[]),
+    })])})
+    layers = lvc._render_remaining_layers(page_meta(), cls)
+    assert [(s, l) for s, l, _h, _p in layers] == [
+        ("remaining", "01a after pattern (4)"),  # glyph + the bucket-rule groups
+        ("remaining", "01b after pattern_bucket (1)"),
+    ]
+
+
+def test_remaining_layers_after_real_collinear_step_exclude_the_dashed_line(page_meta, vector):
+    import pymupdf as fitz
+
+    from rastervec.P3_Vector_Parsing.LatestVectorClassification.classify_vectors import classify_vectors
+
+    dashes = [
+        vector(bbox=(x, 80.0, x + 2.0, 80.0), items=[("l", (x, 80.0), (x + 2.0, 80.0))],
+               width=0.5, seqno=i)
+        for i, x in enumerate(3.0 * k for k in range(60))
+    ]
+    glyphs = [
+        vector(bbox=(x, 10.0, x + 3.0, 16.0), items=[("l", (x, 16.0), (x + 3.0, 10.0))],
+               width=0.5, seqno=100 + i)
+        for i, x in enumerate((20.0, 26.0, 32.0))
+    ]
+    page = _page(page_meta)
+    cls = classify_vectors(dashes + glyphs, page, keep_steps=True)
+    layers = lvc._render_remaining_layers(page.meta, cls)
+    assert layers[0][1] == "02 after collinear drawing (3)"
+    drawn = fitz.open("pdf", layers[0][3])[0].get_drawings()
+    assert all(d["rect"].y1 < 50.0 for d in drawn)  # only the glyphs, no dash at y=80
+
+
 def test_geometry_layers_color_each_group(page_meta, vector):
     import pymupdf as fitz
 

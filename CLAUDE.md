@@ -697,7 +697,8 @@ generic parallel-pool mechanics), never phase-specific business logic.
     `ocr_assemble`, `quad_ownership`, `drawing`, plus `debug_render`. `render_debug` (`P3_RENDER_DEBUG["LatestVectorClassification"]`)
     and the streaming `on_debug_layer` render: per-step `kept bbox` / `dropped <category>`,
     `remaining / NN after <step> (N)` (the Vectors still kept after each step that removed
-    anything, in their real paint and seqno order -- unchanged steps skipped),
+    anything, in their real paint and seqno order -- unchanged steps skipped; the pattern step
+    splits into `03a after pattern` + `03b after pattern_bucket`),
     `intersection / dropped to drawing (N)` + `flagged, kept (off-grid) (N)`, `geometry`
     collinear/parallel groups (the same `line_geometry` grouping the steps use), `ocr` detect/
     passed/failed quads, `rotation / raw quad angle` + `snapped angle (N)` + `final angle` arrows + `cls flipped (N)` quads,
