@@ -1,6 +1,7 @@
 # v2VectorClass (Phase 3)
 
-Vector-text recognition for any vector text, stroked or filled (`p3="v2VectorClass"`). It
+Vector-text recognition for any vector text, stroked or filled (`p3="v2VectorClass"`, the
+default). It
 classifies Phase 1's vectors into text candidates and drawing, OCRs the candidate clusters with
 PaddleOCR, and decides which vectors each read owns:
 

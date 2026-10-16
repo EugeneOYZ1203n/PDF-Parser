@@ -3,7 +3,7 @@
     Phase 1  native text, vectors and embedded images                   (always)
     Phase 2  raster pass, `p2` (default v1RasterToVec)                  (skipped when
                                                                          enable_raster_pass=False)
-    Phase 3  vector parsing, `p3` (default v1VectorClass)               (always)
+    Phase 3  vector parsing, `p3` (default v2VectorClass)               (always)
     Phase 4  combine everything                                          (always)
 
 See `raster_parser.core` for the pipeline and the backend registry.

@@ -33,7 +33,7 @@ Phase 1 (read page) ─┤                                                ├─
    raw vector paths (clip and group info folded into each path) and embedded images.
 2. **Phase 2** (`p2`, default `v1RasterToVec`) gets **Phase 1's images only** and turns raster
    content into vectors and OCR text. `extract(enable_raster_pass=False)` runs `Stub` instead.
-3. **Phase 3** (`p3`, default `v1VectorClass`) gets **Phase 1's vectors only** and splits them
+3. **Phase 3** (`p3`, default `v2VectorClass`) gets **Phase 1's vectors only** and splits them
    into text (read with OCR) and drawing. Phase 2 and Phase 3 are independent branches: Phase 3
    never sees Phase 2's output, and Phase 2's vectors never go through Phase 3.
 4. **Phase 4** (`P4_Output_Organization/organize.py::organize_outputs`) combines everything into

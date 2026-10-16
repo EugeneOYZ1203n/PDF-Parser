@@ -21,7 +21,7 @@ def _pdf(tmp_pdf_path) -> str:
 def test_registry_names_and_defaults():
     assert set(registry.P2_REGISTRY) == {"Stub", "v1RasterToVec"}
     assert set(registry.P3_REGISTRY) == {"Stub", "v1VectorClass", "v2VectorClass"}
-    assert (registry.DEFAULT_P2, registry.DEFAULT_P3) == ("v1RasterToVec", "v1VectorClass")
+    assert (registry.DEFAULT_P2, registry.DEFAULT_P3) == ("v1RasterToVec", "v2VectorClass")
 
 
 @pytest.mark.parametrize("kwargs, message", [({"p2": "Nope"}, "unknown p2 backend 'Nope'"),

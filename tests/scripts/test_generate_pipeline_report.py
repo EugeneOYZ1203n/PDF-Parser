@@ -32,7 +32,7 @@ def _pm(rotation: int = 0) -> PageMeta:
 # ---------------------------------------------------------------------------
 def test_defaults_and_pages():
     cfg = ReportConfig(input_files=["a.pdf"])
-    assert (cfg.p2, cfg.p3) == ("v1RasterToVec", "v1VectorClass")
+    assert (cfg.p2, cfg.p3) == ("v1RasterToVec", "v2VectorClass")
     assert cfg.final_stage is None
     assert cfg.pages_for("a") == [0]
     assert ReportConfig(pages={"a": [1, 2], "*": [0]}).pages_for("b") == [0]

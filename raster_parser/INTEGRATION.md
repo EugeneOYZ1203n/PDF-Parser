@@ -36,14 +36,14 @@ again = ExtractResult.from_json(json_str)
 |-----------|---------|-------------|
 | `pdf_path` | (required) | PDF file path |
 | `page_index` | `0` | Page to process (0-based) |
-| `ocr_dpi` | `300` | Type-2 crop DPI and Type-4 render DPI |
-| `use_angle_cls` | `True` | PaddleOCR angle classification (Type-2) |
+| `ocr_dpi` | `300` | Type-4 render DPI, and the crop DPI of `p3="v1VectorClass"` (v2VectorClass picks a DPI per cluster) |
+| `use_angle_cls` | `True` | PaddleOCR angle classification for `p3="v1VectorClass"` (v2VectorClass always runs it) |
 | `enable_raster_pass` | `True` | After Type-2: LibreOffice clear → Type-4 if residual page |
 | `workers` | `1` | Process pool size for Type-4 tile det / recog / colour autotrace, and for `p3="v2VectorClass"`'s OCR detect / recognise |
 | `dump_dir` | `./tmp` | LO + Type-4 dump root (passed to `clear_page`) |
 | `debug` | `False` | Keep dumps on disk; otherwise removed after `extract()` |
 | `p2` | `"v1RasterToVec"` | Phase 2 (raster pass) backend — `raster_parser.core.registry.P2_REGISTRY` |
-| `p3` | `"v1VectorClass"` | Phase 3 (vector parsing) backend — `raster_parser.core.registry.P3_REGISTRY` |
+| `p3` | `"v2VectorClass"` | Phase 3 (vector parsing) backend — `raster_parser.core.registry.P3_REGISTRY` |
 
 With `workers > 1` the pools start their processes with `spawn`, which re-imports the calling
 script: call `extract()` from under `if __name__ == "__main__":`.
@@ -61,9 +61,14 @@ skips Phase 2 whatever `p2` is (same as `p2="Stub"`).
    via `clear_page(..., dump_dir=...)` on a one-page copy (native text / vector shapes removed,
    embedded images kept); if anything is left, `extract_raster_page` runs on it — text/drawing
    split, tiled OCR detection + recognition, then **colour-fill autotrace** of the drawing layer.
-3. **Phase 3** (`p3`, default `v1VectorClass`) — fill-glyph OCR on Phase 1's vectors: filled,
-   non-white, non-box paths are grouped into words by content-stream order and read with
-   PaddleOCR; every other vector is kept as drawing. Phase 3 never sees Phase 2's output.
+3. **Phase 3** (`p3`, default `v2VectorClass`) — vector-text OCR on Phase 1's vectors, stroked
+   or filled: drawing is removed by geometry per layer / colour / width bucket (oversize,
+   dashed lines, repeated patterns, length outliers, crossed grids), the remaining clusters are
+   rendered and read with PaddleOCR (detection, rotation from the detected quad, retries at
+   90 / 180 / 270), and each read takes the vectors its quad owns; every other vector is kept as
+   drawing (`docs/PIPELINE.md`). `p3="v1VectorClass"` is the original fill-glyph OCR: filled,
+   non-white, non-box paths grouped into words by content-stream order and read with
+   PaddleOCR. Phase 3 never sees Phase 2's output.
 4. **Phase 4** (`P4_Output_Organization`) — native words, then Phase 3 text, then Phase 2 text,
    with `block_no` renumbered per phase; Phase 3 vectors, then Phase 2 vectors with seqnos moved
    past Phase 3's (raster traces paint on top). Out-of-page items are logged.

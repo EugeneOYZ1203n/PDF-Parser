@@ -24,6 +24,7 @@ def test_extract_raises_when_pdf_missing(tmp_path: Path) -> None:
 def test_extract_stroke_pdf_returns_native_text(synthetic_pdf: Path) -> None:
     result = extract(
         synthetic_pdf,
+        p3="v1VectorClass",
         page_index=0,
         ocr_dpi=150,
         use_angle_cls=False,
@@ -42,7 +43,7 @@ def test_extract_merges_mock_ocr_with_strokes(
 ) -> None:
     mock_ocr.return_value = [(OcrWord(0, 0, 20, 20, "glyph", 0, 0, 0), [1])]
     result = extract(
-        synthetic_pdf_with_fills, use_angle_cls=False, enable_raster_pass=False
+        synthetic_pdf_with_fills, use_angle_cls=False, enable_raster_pass=False, p3="v1VectorClass"
     )
     assert len(result.vectors) == 1
     assert result.vectors[0].type == "s"
@@ -55,7 +56,7 @@ def test_extract_without_ocr_hits_returns_strokes_only(
     mock_ocr, synthetic_pdf_with_fills: Path
 ) -> None:
     result = extract(
-        synthetic_pdf_with_fills, use_angle_cls=False, enable_raster_pass=False
+        synthetic_pdf_with_fills, use_angle_cls=False, enable_raster_pass=False, p3="v1VectorClass"
     )
     assert len(result.vectors) == 1
     assert result.texts == []
@@ -66,6 +67,7 @@ def test_extract_without_ocr_hits_returns_strokes_only(
 def test_extract_runs_paddle_on_fill_groups(synthetic_pdf_with_fills: Path) -> None:
     result = extract(
         synthetic_pdf_with_fills,
+        p3="v1VectorClass",
         page_index=0,
         ocr_dpi=150,
         use_angle_cls=False,
@@ -119,6 +121,7 @@ def test_extract_merges_type4_when_raster_pass(
     ):
         result = extract(
             synthetic_pdf,
+            p3="v1VectorClass",
             page_index=0,
             ocr_dpi=150,
             use_angle_cls=False,
@@ -153,6 +156,7 @@ def test_extract_cleans_dump_dir_when_debug_false(
     ):
         extract(
             synthetic_pdf,
+            p3="v1VectorClass",
             page_index=0,
             enable_raster_pass=True,
             dump_dir=dump_dir,
@@ -185,6 +189,7 @@ def test_extract_keeps_dump_dir_when_debug_true(
     ):
         extract(
             synthetic_pdf,
+            p3="v1VectorClass",
             page_index=0,
             enable_raster_pass=True,
             dump_dir=dump_dir,
@@ -217,5 +222,5 @@ def test_extract_without_raster_pass_never_clears_the_page(
     mock_ocr, synthetic_pdf: Path
 ) -> None:
     with patch("raster_parser.P2_Raster_To_Vec.v1RasterToVec.s1_clear_page.clear_page") as clear_page:
-        extract(synthetic_pdf, enable_raster_pass=False)
+        extract(synthetic_pdf, enable_raster_pass=False, p3="v1VectorClass")
     clear_page.assert_not_called()

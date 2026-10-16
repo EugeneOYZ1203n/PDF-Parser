@@ -10,7 +10,7 @@ python scripts/generate_pipeline_report.py --config scripts/report_configs/examp
 
 | Field | Default | Meaning |
 |---|---|---|
-| `p2`, `p3` | `v1RasterToVec`, `v1VectorClass` | Backends by registry name (`core/registry.py`). An unknown name is rejected. |
+| `p2`, `p3` | `v1RasterToVec`, `v2VectorClass` | Backends by registry name (`core/registry.py`). An unknown name is rejected. |
 | `final_stage` | `null` | Stop after `phase1`, `phase2` or `phase3` (`run_pipeline(stop_after=...)`). Later backends don't run and emit no layers. Phase 4 still runs. |
 | `input_dir` | `null` | Every `*.pdf` in this folder. |
 | `input_files` | `[]` | PDFs. In benchmark mode also label JSON files and `scripts/label/master_label.py` folders. |
@@ -44,7 +44,7 @@ name>`, or `pdf:<stem>` for a bare PDF without `label_files`), so run both confi
 
 ## Worked examples
 
-**Look at one backend's steps.** `example.json` (default backends) and `example_v2.json`
+**Look at one backend's steps.** `example.json` (v1RasterToVec + v1VectorClass) and `example_v2.json`
 (`p3: "v2VectorClass"`, no raster pass) report one page each; open a result in the viewer:
 
 ```

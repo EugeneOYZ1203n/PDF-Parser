@@ -32,7 +32,7 @@ P3_REGISTRY: dict[str, Phase3Backend] = {
 }
 
 DEFAULT_P2 = "v1RasterToVec"
-DEFAULT_P3 = "v1VectorClass"
+DEFAULT_P3 = "v2VectorClass"
 
 
 def _resolve(registry: dict, name: str, phase: str):
