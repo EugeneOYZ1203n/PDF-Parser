@@ -71,6 +71,7 @@ skips Phase 2 whatever `p2` is (same as `p2="Stub"`).
 No native-vs-OCR comparison. The original native page is not rasterized for Phase 3.
 
 How the phases and backends fit together, and how to add a backend: `docs/ARCHITECTURE.md`.
+How `p3="v2VectorClass"` works step by step: `docs/PIPELINE.md` (terms: `docs/Glossary.md`).
 
 ### Guarantees
 

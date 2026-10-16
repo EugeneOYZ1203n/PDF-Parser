@@ -13,7 +13,7 @@ and how to add a backend. For the public API (parameters, errors, wiring into a 
 | `core/` | The orchestrator and the backend contract: `interfaces.py` (the backend protocols), `registry.py` (backend names → functions), `settings.py` (`RunSettings`), `pipeline.py` (`run_pipeline`), `result.py` (`PipelineResult`). |
 | `P1_Reading_Native/` | Phase 1, always the same. |
 | `P2_Raster_To_Vec/<Name>/` | Phase 2 backends: `Stub`, `v1RasterToVec`. |
-| `P3_Vector_Parsing/<Name>/` | Phase 3 backends: `Stub`, `v1VectorClass`, `v2VectorClass`. |
+| `P3_Vector_Parsing/<Name>/` | Phase 3 backends: `Stub`, `v1VectorClass`, `v2VectorClass` (walked through in `docs/PIPELINE.md`, terms in `docs/Glossary.md`). |
 | `P4_Output_Organization/` | Phase 4, always the same. |
 
 ## Flow
