@@ -10,14 +10,24 @@ Point = tuple[float, float]
 
 @dataclass
 class Polyline:
-    points: list[Point]                # ordered (x, y), one per skeleton pixel
+    points: list[Point]                # ordered (x, y), Douglas-Peucker fitted
     width: float = 1.0
 
 
 @dataclass
+class Outline:
+    """The boundary of one solid filled region: its outer ring plus one ring
+    per hole, each closed (first point repeated last)."""
+    rings: list[list[Point]]
+
+
+@dataclass
 class Graph:
-    nodes: list[Point]                 # (x, y)
-    chains: list[list[Point]]          # ordered (x, y) pixel chains between nodes
+    nodes: list[Point]                 # (x, y) junction nodes (degree >= 3)
+    chains: list[list[Point]]          # ordered (x, y) chains, ends on their nodes
+    # per chain: (start node index, end node index), -1 = free end
+    ends: list[tuple[int, int]] = field(default_factory=list)
+    node_widths: list[float] = field(default_factory=list)  # local stroke width per node
 
 
 @dataclass
@@ -28,3 +38,5 @@ class PipelineResult:
     graph: Graph
     polylines: list[Polyline]
     timings: dict[str, float] = field(default_factory=dict)
+    fill: "np.ndarray | None" = None   # solid-region mask (None: no fills)
+    outlines: list[Outline] = field(default_factory=list)

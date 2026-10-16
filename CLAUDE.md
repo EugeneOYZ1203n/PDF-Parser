@@ -432,12 +432,25 @@ generic parallel-pool mechanics), never phase-specific business logic.
     (a generator — one crop alive at a time) splits the layer into components at
     `COMPONENT_TOLERANCE_PT` (10 pt) and each is traced by `junction_test.pipeline.run`
     at **native resolution** (no downscale): `binarize` (Otsu | gray<245, specks removed by
-    connected-component area — *not* a 2×2 open, which erased 1-px lines) → `skeletonize` →
-    `skeleton_graph.build_graph` (chain walk + barb pruning) → `vectorize` — each chain becomes
-    **one raw polyline through every skeleton pixel** (`types_.Polyline`; no Douglas-Peucker fit, no
-    regularisation — snapping/collinear-merging 1 px steps would wreck them — and no stroke-width
-    estimate: width is always 1.0). One output `Vector` per chain, an `"l"` item per pixel step;
-    `simplify.approximate_rdp` survives only to thin the debug chain display. The vendored spike (branch `junction-classification`,
+    connected-component area — *not* a 2×2 open, which erased 1-px lines — and enclosed paper
+    holes ≤ `hole_max_area_px` filled, so they don't skeletonize into bubble loops) → **solid
+    fills** (`fills.py`: ink deeper than `fill_min_width_px / 2` by distance transform, core blobs
+    < half that dropped, regrown by ⌈r√2⌉+1 clipped to the ink; only their `cv2.findContours`
+    outline is kept, one stroked `Vector` per region with a closed ring per boundary/hole;
+    `FILL_MIN_WIDTH_PT` 3.5 pt, floor `FILL_MIN_WIDTH_FLOOR_PX` — keep it ≥ √2 × the widest real
+    line or thick-line crossings read as fills) → `skeletonize` the rest →
+    `skeleton_graph.build_graph` (sparse, linear in skeleton pixels: each 8-connected cluster of
+    degree ≥ 3 pixels is **one node** at its centroid — per-pixel nodes made ~80 % of the old output
+    1-3 px stubs; barb pruning, junction-zone collapse of nodes closer than the local stroke width
+    `2·DT`, degree-2 nodes dissolved — all on the in-memory graph) →
+    `continue_through_junctions` (incident chains within `continuation_deg` (20°) of straight,
+    tangents taken just outside the junction zone, joined greedily — a line crossing N others is
+    one stroke; `merge_through_junctions=False` turns it off) → free ends near a fill snapped onto
+    it → `vectorize`: `simplify.fit_polyline` per stroke (closed loops re-anchored at their extreme
+    point, then Douglas-Peucker `rdp_eps_px` 1.0, ends fixed; `0` = raw pixels). **No endpoint
+    snapping, short-segment drop or collinear segment merge** — that combination (removed in
+    `fcd677c`) damaged real geometry. No stroke-width estimate: width is always 1.0. One output
+    `Vector` per stroke. Tracer knobs on `junction_test.pipeline.Params`. The vendored spike (branch `junction-classification`,
     Dosch et al. 2000) originally also had F&K text/graphics separation, dashed reclaim,
     thick/thin, junction repair, LSD/Hough alternatives, Rosin-West + arc fitting, dashed-line /
     staircase / symbol recognition, remainder extraction and junction classification — all
@@ -450,8 +463,9 @@ generic parallel-pool mechanics), never phase-specific business logic.
     `vector_diff/total` + `vector_diff/layer #rrggbb` — `diff.py`: red = ink with no vector within
     `DIFF_TOLERANCE_PX` (missed), blue = vector with no ink (spurious), for future missed-line
     recovery) plus the `components/component bbox` layer and tracing point/line layers
-    (`graph_build/chains|junctions|endpoints`, `vectorize/polylines|polyline endpoints` -- real
-    geometry, not bboxes), `final_vectors/vectors` in their layer colours; each (stage, label)
+    (`graph_build/chains|junctions|endpoints`, `vectorize/polylines|polyline endpoints`,
+    `fills/outlines` -- real geometry, not bboxes; `fills/filled regions` is a raster mask, and the
+    diff counts everything a fill outline encloses as covered), `final_vectors/vectors` in their layer colours; each (stage, label)
     appears once per page. `debug_out["diff_codes"]` keeps the raw uint8 code canvases. Tunables
     in `Junction/config.py` (tracing/diff only). **`predict.py`** (`--pdf --pages --clip --dpi
     [--no-ocr]`): as DeepVectoriser's, but OCR + text erase **on** by default (Junction has no

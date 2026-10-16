@@ -1,6 +1,7 @@
 """junction_test: the classical raster->vector tracer Junction runs per
-component -- binarize -> skeleton -> chains (barb pruning) -> each chain
-as a raw polyline.
+component -- binarize -> solid fills outlined (`fills.py`) -> skeleton of
+the rest -> node/edge graph with clustered junctions (`skeleton_graph.py`)
+-> strokes joined through junctions -> Douglas-Peucker polylines.
 
 Originally a spike reproducing Dosch, Tombre, Ah-Soon, Masini, "A complete
 system for the analysis of architectural drawings", IJDAR 3(2):102-116, 2000

@@ -1,10 +1,9 @@
 """Step 5 of Junction's flow (after the shared raster prelude): split one color layer into
 spatially separate components and hand them to the tracer one at a time.
 
-Junction runs at full native resolution (no downscale), and its skeleton
-graph walk is pure Python, so tracing a whole multi-megapixel
-layer in one call is slow and holds every intermediate mask for the whole
-image at once. Instead each layer's ink is grouped into components -- ink
+Junction runs at full native resolution (no downscale), so tracing a whole
+multi-megapixel layer in one call holds every intermediate mask (ink,
+distance transform, fills, skeleton) for the whole image at once. Instead each layer's ink is grouped into components -- ink
 pixels closer than `COMPONENT_TOLERANCE_PT` (converted to px by the caller)
 join, via one rectangular dilation + connected-component labelling -- and
 `iter_layer_components` is a generator: it yields one tight crop at a time,

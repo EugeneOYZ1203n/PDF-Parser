@@ -10,6 +10,10 @@ side dilated by `tol_px` so a 1-2 px width/position slop isn't flagged:
     2  missed            (ink with no vector within tol -- a line the tracer lost)
     3  spurious          (vector with no ink within tol -- an invented line)
 
+Fill outlines (`junction_test.fills`) count as covering everything they
+enclose: they are drawn filled on the comparison canvas (stroked on the
+returned `rendered` canvas).
+
 Codes 2 are the raw material for a future missed-line recovery pass (e.g.
 re-running LSD/Hough on just that mask). `codes_to_rgba` colours them for
 the `vector_diff` debug layers; `rendered_to_rgba` does the plain
@@ -29,29 +33,41 @@ _PALETTE = np.array([
 ], dtype=np.uint8)
 
 
-def render_geometry(shape: tuple[int, int], polylines) -> np.ndarray:
-    """Polylines drawn at their own (rounded) width -- always 1.0 now -- onto a bool canvas."""
+def _int_pts(points) -> np.ndarray:
+    return np.round(np.asarray(points, float)).astype(np.int32).reshape(-1, 1, 2)
+
+
+def render_geometry(shape: tuple[int, int], polylines, outlines=()) -> np.ndarray:
+    """Polylines drawn at their own (rounded) width -- always 1.0 now -- plus
+    fill outline rings at 1 px, onto a bool canvas."""
     canvas = np.zeros(shape[:2], np.uint8)
     for pl in polylines:
-        pts = np.round(np.asarray(pl.points, float)).astype(np.int32).reshape(-1, 1, 2)
-        cv2.polylines(canvas, [pts], False, 255, max(1, int(round(pl.width))))
+        cv2.polylines(canvas, [_int_pts(pl.points)], False, 255, max(1, int(round(pl.width))))
+    for o in outlines:
+        cv2.polylines(canvas, [_int_pts(r) for r in o.rings], True, 255, 1)
     return canvas > 0
 
 
-def diff_codes(ink: np.ndarray, polylines, tol_px: int) -> "tuple[np.ndarray, np.ndarray]":
+def diff_codes(ink: np.ndarray, polylines, tol_px: int, outlines=()) -> "tuple[np.ndarray, np.ndarray]":
     """`(codes uint8, rendered bool)` in `ink`'s own pixel frame."""
     ink = np.asarray(ink, dtype=bool)
-    rendered = render_geometry(ink.shape, polylines)
+    rendered = render_geometry(ink.shape, polylines, outlines)
+    covered = rendered
+    if outlines:
+        solid = np.zeros(ink.shape, np.uint8)
+        for o in outlines:
+            cv2.fillPoly(solid, [_int_pts(r) for r in o.rings], 255)  # holes stay open
+        covered = rendered | (solid > 0)
     if tol_px > 0:
         k = np.ones((2 * tol_px + 1, 2 * tol_px + 1), np.uint8)
-        rendered_near = cv2.dilate(rendered.astype(np.uint8), k) > 0
+        rendered_near = cv2.dilate(covered.astype(np.uint8), k) > 0
         ink_near = cv2.dilate(ink.astype(np.uint8), k) > 0
     else:
-        rendered_near, ink_near = rendered, ink
+        rendered_near, ink_near = covered, ink
     codes = np.zeros(ink.shape, dtype=np.uint8)
     codes[ink & rendered_near] = MATCHED
     codes[ink & ~rendered_near] = MISSED
-    codes[rendered & ~ink_near] = SPURIOUS
+    codes[covered & ~ink_near] = SPURIOUS
     return codes, rendered
 
 

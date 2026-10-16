@@ -15,6 +15,18 @@ from __future__ import annotations
 COMPONENT_TOLERANCE_PT = 10.0
 
 # ======================================================================
+# Solid fills (junction_test/fills.py)
+# ======================================================================
+
+# Ink at least this wide (page points) is a solid fill: only its outline is
+# kept, it isn't skeletonized. Keep it >= sqrt(2) x the widest real line --
+# the centre of an X crossing is that much deeper inside the ink than either
+# line, so a smaller value turns thick-line crossings into "fills".
+FILL_MIN_WIDTH_PT = 3.5
+# Floor in px, for low-resolution images (at 72 dpi 3.5 pt is only 3.5 px).
+FILL_MIN_WIDTH_FLOOR_PX = 6.0
+
+# ======================================================================
 # Vector/ink diff debug (diff.py)
 # ======================================================================
 

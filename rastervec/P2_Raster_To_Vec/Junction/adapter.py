@@ -8,9 +8,12 @@ over goes through, in order,
   5. tracing               per ink color layer, per 10 pt-tolerance spatial
                            component, one at a time (`components.py`),
                            `junction_test.pipeline.run` at native resolution:
-                           binarize -> skeleton -> chains (barb pruning) ->
-                           each chain as a raw polyline (one vertex per
-                           skeleton pixel), width 1.0
+                           binarize -> solid fills (ink >= FILL_MIN_WIDTH_PT
+                           wide) split off and outlined -> skeleton of the
+                           rest -> node/edge graph (junction clusters, barb
+                           pruning, junction-zone collapse) -> strokes joined
+                           straight through junctions -> Douglas-Peucker,
+                           width 1.0
   6. diff (debug only)     traced vectors rasterized and compared back
                            against their own ink (`diff.py`)
 
@@ -29,7 +32,8 @@ then Junction's raster stages (rendered vectors, total + per-layer diff)
 become full-resolution PNGs embedded in page-sized PDFs -- each layer label
 appears once per page even with several images, the images composed onto
 it; OCR and component stages become box / text layers, and the tracing
-stages (skeleton chains, junction / end nodes, output polylines) become
+stages (skeleton chains, junction / end nodes, output polylines, fill
+outlines; the fill mask is a raster layer) become
 point / line layers drawn on the real geometry. On the streaming path
 each raster debug image is PNG-encoded into its layer's page right away and
 the array dropped, so no full-size debug array outlives its own step;
@@ -38,7 +42,7 @@ canvases, `diff.MATCHED/MISSED/SPURIOUS`) for later missed-line work."""
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
 import numpy as np
@@ -51,10 +55,12 @@ from rastervec.commons.renderer.draw import (
 )
 from rastervec.P2_Raster_To_Vec.Junction import diff as diff_mod
 from rastervec.P2_Raster_To_Vec.Junction.components import layer_components
-from rastervec.P2_Raster_To_Vec.Junction.config import COMPONENT_TOLERANCE_PT, DIFF_TOLERANCE_PX
+from rastervec.P2_Raster_To_Vec.Junction.config import (
+    COMPONENT_TOLERANCE_PT, DIFF_TOLERANCE_PX, FILL_MIN_WIDTH_FLOOR_PX, FILL_MIN_WIDTH_PT,
+)
 from rastervec.P2_Raster_To_Vec.Junction.junction_test.pipeline import Params, run
-from rastervec.P2_Raster_To_Vec.Junction.junction_test.simplify import approximate_rdp
-from rastervec.P2_Raster_To_Vec.Junction.junction_test.types_ import Polyline
+from rastervec.P2_Raster_To_Vec.Junction.junction_test.simplify import fit_polyline
+from rastervec.P2_Raster_To_Vec.Junction.junction_test.types_ import Outline, Polyline
 from rastervec.P2_Raster_To_Vec.RasterText.enhance import to_gray
 from rastervec.P2_Raster_To_Vec.RasterText.raster_text import (
     PreparedImage, prelude_debug_layers, prepare_images,
@@ -139,7 +145,7 @@ def render_debug(debug_out: "dict | None", page_meta) -> "list[DebugLayer]":
 @dataclass
 class _PageState:
     vectors: list[Vector] = field(default_factory=list)
-    # `vectors` RDP-thinned to `_CHAIN_DISPLAY_EPS_PX` -- debug drawing only
+    # `vectors` again, for debug drawing only (same seqnos)
     display_vectors: list[Vector] = field(default_factory=list)
     texts: list[Text] = field(default_factory=list)
     seqno: int = 0
@@ -147,6 +153,7 @@ class _PageState:
     # page-space tracing geometry for the point / line debug layers
     geom: dict = field(default_factory=lambda: {
         "chains": [], "junctions": [], "endpoints": [], "polylines": [], "polyline_ends": [],
+        "outlines": [],
     })
 
     def next_seqno(self) -> int:
@@ -237,11 +244,14 @@ def _process_image(prepared: PreparedImage, page: Page, params: Params, state: _
     px_per_pt = prepared.px_per_pt
     _LOG.info("  %dx%d px, %.2f px/pt, %d colour layer(s)", w, h, px_per_pt, layers.n_layers)
     enhanced = to_gray(prepared.enhanced_rgb)
+    if params.fill_min_width_px is None:
+        params = replace(params, fill_min_width_px=max(FILL_MIN_WIDTH_PT * px_per_pt, FILL_MIN_WIDTH_FLOOR_PX))
 
     # 5. per-layer, per-component tracing (+ 6. diff when debugging)
     tol_px = COMPONENT_TOLERANCE_PT * px_per_pt
     rendered_canvas = np.zeros((h, w), dtype=bool) if sink.active else None
     total_codes = np.zeros((h, w), dtype=np.uint8) if sink.active else None
+    fill_canvas = np.zeros((h, w), dtype=bool) if sink.active else None
     for layer in layers.ink_layers():
         color_rgb = layers.colors_rgb[layer]
         color = tuple(float(c) / 255.0 for c in color_rgb)
@@ -258,14 +268,21 @@ def _process_image(prepared: PreparedImage, page: Page, params: Params, state: _
             def mapper(pt, _x0=comp.x0, _y0=comp.y0):
                 return to_page((pt[0] + _x0, pt[1] + _y0))
 
+            first_seqno = state.seqno
             for pl in result.polylines:
                 state.vectors.append(_polyline_to_vector(pl, mapper, meta.index, state.next_seqno(), color))
+            for outline in result.outlines:
+                state.vectors.append(_outline_to_vector(outline, mapper, meta.index, state.next_seqno(), color))
             if sink.debug:
                 _accumulate_trace_geometry(state, result, mapper, (comp.x0, comp.y0), comp.gray.shape,
-                                           to_page, meta.index, color, state.seqno - len(result.polylines))
+                                           to_page, meta.index, color, first_seqno)
 
             if sink.active:
-                codes, rendered = diff_mod.diff_codes(result.ink, result.polylines, DIFF_TOLERANCE_PX)
+                if result.fill is not None:
+                    fr = fill_canvas[comp.y0:comp.y0 + result.fill.shape[0], comp.x0:comp.x0 + result.fill.shape[1]]
+                    fr |= result.fill[:fr.shape[0], :fr.shape[1]]
+                codes, rendered = diff_mod.diff_codes(result.ink, result.polylines, DIFF_TOLERANCE_PX,
+                                                      result.outlines)
                 diff_mod.paste_codes(layer_codes, codes, comp.x0, comp.y0)
                 diff_mod.paste_codes(total_codes, codes, comp.x0, comp.y0)
                 region = rendered_canvas[comp.y0:comp.y0 + rendered.shape[0], comp.x0:comp.x0 + rendered.shape[1]]
@@ -284,6 +301,8 @@ def _process_image(prepared: PreparedImage, page: Page, params: Params, state: _
         sink.add("vector_render", "rendered vectors", _C_SEGMENT,
                  diff_mod.rendered_to_rgba(rendered_canvas), image, meta)
         sink.add("vector_diff", "total", _C_DIFF, diff_mod.codes_to_rgba(total_codes), image, meta)
+        if fill_canvas.any():
+            sink.add("fills", "filled regions", _C_FILL, _mask_to_rgba(fill_canvas, _C_FILL), image, meta)
         if sink.keep:
             sink.kept.append(_RasterItem("_codes", "total", _C_DIFF, total_codes, image, (h, w)))
 
@@ -316,21 +335,46 @@ def _polyline_to_vector(pl: Polyline, to_page: Mapper, page_index: int, seqno: i
     )
 
 
-# Skeleton chains are one vertex per pixel at native resolution; a sub-pixel
-# Douglas-Peucker pass keeps the debug polyline visually identical with far
-# fewer vertices (debug display only -- tracing itself is unaffected). This
-# matters: PyMuPDF's `Shape` costs ~40-170 us per vertex, super-linearly, so
-# drawing the raw per-pixel geometry made the debug layers take minutes.
+def _outline_to_vector(outline: Outline, to_page: Mapper, page_index: int, seqno: int, color) -> Vector:
+    """One stroked (unfilled) `Vector` per fill region: every ring as its own
+    closed run of `"l"` items (each ring repeats its first point, so no
+    `closePath` is needed -- which would join the last ring to the first)."""
+    items, allpts = [], []
+    for ring in outline.rings:
+        pts = [to_page(p) for p in ring]
+        items.extend(("l", a, b) for a, b in zip(pts, pts[1:]))
+        allpts.extend(pts)
+    return Vector(
+        type="s", items=items, width=1.0, rect=_bbox_of(allpts),
+        **_base_vector_kwargs(page_index, seqno, color),
+    )
+
+
+def _item_runs(v: Vector) -> list[list[tuple[float, float]]]:
+    """A `Vector`'s `"l"` items as polylines, split wherever one item does not
+    start where the previous one ended (a fill outline's separate rings)."""
+    runs: list[list[tuple[float, float]]] = []
+    for it in v.items:
+        a, b = it[1], it[-1]
+        if runs and runs[-1][-1] == a:
+            runs[-1].append(b)
+        else:
+            runs.append([a, b])
+    return runs
+
+
 _CHAIN_DISPLAY_EPS_PX = 0.5
 
 
 def _accumulate_trace_geometry(state: _PageState, result, mapper: Mapper, offset, crop_shape, to_page: Mapper,
                                page_index: int, color, first_seqno: int) -> None:
     """Debug only. Only cheap page-space tuples -- never `result`'s mask
-    arrays. A graph node touched by exactly one chain end is an endpoint;
-    anything else (>= 3 ends, or a pruning leftover) is a junction. Each
-    output polyline is RDP-thinned once, feeding both the `vectorize`
-    layer and `state.display_vectors` (same seqnos as the real vectors)."""
+    arrays. Graph nodes are the junctions; a chain end on no node is an
+    endpoint. Raw chains are thinned with a sub-pixel Douglas-Peucker for
+    display (PyMuPDF's `Shape` costs ~40-170 us per vertex). Output
+    polylines are already fitted; they feed both the `vectorize` layer and
+    `state.display_vectors` (same seqnos as the real vectors), followed by
+    the fill outlines."""
     x0, y0 = offset
     ch, cw = crop_shape[:2]
     state.boxes["component"].append(_bbox_of([to_page((x0, y0)), to_page((x0 + cw, y0 + ch))]))
@@ -338,22 +382,26 @@ def _accumulate_trace_geometry(state: _PageState, result, mapper: Mapper, offset
     chains = result.graph.chains
     for chain in chains:
         if len(chain) >= 2:
-            geom["chains"].append([mapper(p) for p in approximate_rdp(chain, _CHAIN_DISPLAY_EPS_PX)])
-    ends: dict = {}
-    for chain in chains:
-        if chain:
-            for p in (chain[0], chain[-1]):
-                ends[p] = ends.get(p, 0) + 1
-    for node in result.graph.nodes:
-        geom["endpoints" if ends.get(node, 0) == 1 else "junctions"].append(mapper(node))
+            geom["chains"].append([mapper(p) for p in fit_polyline(chain, _CHAIN_DISPLAY_EPS_PX)])
+    geom["junctions"].extend(mapper(node) for node in result.graph.nodes)
+    for chain, (a, b) in zip(chains, result.graph.ends):
+        if len(chain) < 2 or chain[0] == chain[-1]:
+            continue
+        if a < 0:
+            geom["endpoints"].append(mapper(chain[0]))
+        if b < 0:
+            geom["endpoints"].append(mapper(chain[-1]))
     pl_ends: set = set()
     for k, pl in enumerate(result.polylines):
-        thin = Polyline(points=approximate_rdp(pl.points, _CHAIN_DISPLAY_EPS_PX), width=pl.width)
-        vec = _polyline_to_vector(thin, mapper, page_index, first_seqno + k, color)
+        vec = _polyline_to_vector(pl, mapper, page_index, first_seqno + k, color)
         state.display_vectors.append(vec)
         geom["polylines"].append([vec.items[0][1]] + [it[2] for it in vec.items] if vec.items else [])
         pl_ends.update((pl.points[0], pl.points[-1]))
     geom["polyline_ends"].extend(mapper(p) for p in pl_ends)
+    for k, outline in enumerate(result.outlines):
+        state.display_vectors.append(
+            _outline_to_vector(outline, mapper, page_index, first_seqno + len(result.polylines) + k, color))
+        geom["outlines"].extend([mapper(p) for p in ring] for ring in outline.rings)
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +416,14 @@ _C_SEGMENT = "#059669"
 _C_JUNCTION = "#e11d48"
 _C_ENDPOINT = "#ca8a04"
 _C_SEGMENT_END = "#1d4ed8"
+_C_FILL = "#7c3aed"
+
+
+def _mask_to_rgba(mask: np.ndarray, hexcolor: str) -> np.ndarray:
+    out = np.zeros((*mask.shape, 4), dtype=np.uint8)
+    out[mask, :3] = [int(c * 255) for c in _hex_rgb(hexcolor)]
+    out[mask, 3] = 140
+    return out
 
 
 def _hex_rgb(h: str) -> tuple[float, float, float]:
@@ -420,8 +476,7 @@ def vectors_layer_pdf(page_meta, vectors: "list[Vector]", *, width: float = 1.0)
     by_color: dict = {}
     for v in vectors:
         if v.items:
-            pts = [v.items[0][1]] + [it[-1] for it in v.items]
-            by_color.setdefault(tuple(v.color or (0.0, 0.0, 0.0)), []).append(pts)
+            by_color.setdefault(tuple(v.color or (0.0, 0.0, 0.0)), []).extend(_item_runs(v))
     return render_specs_pdf(page_meta, [
         stroke_batch_spec(pls, color, width=width) for color, pls in by_color.items()
     ], deflate=True)
@@ -439,6 +494,7 @@ def _page_layers(page_meta, raster_layers: "list[DebugLayer]", state: _PageState
         lambda: _geometry_layer(page_meta, "vectorize", "polylines", _C_SEGMENT, polylines=geom["polylines"]),
         lambda: _geometry_layer(page_meta, "vectorize", "polyline endpoints", _C_SEGMENT_END,
                                 points=geom["polyline_ends"]),
+        lambda: _geometry_layer(page_meta, "fills", "outlines", _C_FILL, polylines=geom["outlines"]),
         lambda: ("final_vectors", "vectors", _C_SEGMENT,
                  vectors_layer_pdf(page_meta, state.display_vectors or state.vectors)),
     ]
