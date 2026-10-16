@@ -87,6 +87,10 @@ class PageDump:
     # never be scored from `texts` (the vectorised-PDF run's own output).
     # Empty when no rasterised run was made (older dumps default to []).
     raster_texts: list[Text] = dataclasses.field(default_factory=list)
+    # Every output Vector of that same rasterised-PDF run (P2's vectors --
+    # the rasterised page has no native vectors) -- the predictions the
+    # vector metrics score. Empty when no rasterised run was made.
+    raster_vectors: list[Vector] = dataclasses.field(default_factory=list)
     # The P3 backend's sub-step seconds (`PipelineResult.substep_durations`)
     # for the vectorised run, and the rasterised run's phase / sub-step
     # seconds. All `{}` when absent (older dumps, legacy engine, no
@@ -120,6 +124,7 @@ def _page_dump_to_json(pd: PageDump) -> dict:
         "engine": pd.engine,
         "step_durations": pd.step_durations,
         "raster_texts": [text_to_json(t) for t in pd.raster_texts],
+        "raster_vectors": [vector_to_json(v) for v in pd.raster_vectors],
         "substep_durations": pd.substep_durations,
         "raster_step_durations": pd.raster_step_durations,
         "raster_substep_durations": pd.raster_substep_durations,
@@ -143,6 +148,7 @@ def _page_dump_from_json(d: dict) -> PageDump:
         engine=d.get("engine", "current"),
         step_durations=d.get("step_durations", {}),
         raster_texts=[text_from_json(t) for t in d.get("raster_texts", [])],
+        raster_vectors=[vector_from_json(v) for v in d.get("raster_vectors", [])],
         substep_durations=d.get("substep_durations", {}),
         raster_step_durations=d.get("raster_step_durations", {}),
         raster_substep_durations=d.get("raster_substep_durations", {}),

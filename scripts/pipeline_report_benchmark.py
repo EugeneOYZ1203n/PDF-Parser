@@ -11,13 +11,14 @@ This script matches the folders on the inputs they **share** (by input
 identity: `pdf:<stem>` = native_to_vector-only, `labels:<stem>` = whatever
 label sources the run had), scores each shared input's text metrics
 (`metrics.evaluate_text_metrics`) and vector metrics
-(`vector_metrics.evaluate_vector_metrics`, GT-only for both
-`vector_to_raster`/`original_raster` -- no raster-tracing pipeline stage
-exists; `original_vector` is scored as a text-provenance type only, not
-at the vector-geometry level), and writes one
+(`vector_metrics.evaluate_vector_metrics`: the rasterised-PDF run's
+vectors -- P2's output -- against the union of the
+`vector_to_raster`/`original_raster` geometry labels; `original_vector` is
+scored as a text-provenance type only, not at the vector-geometry level),
+and writes one
 self-contained `report.html` -- one section per shared key, broken into
 Text (Char/Word/Font size/Rotation/Bbox/Vector classification/Reading
-order/Confusion), Vector (Count/Endpoint/Property) and Timing (per-page
+order/Confusion), Vector (Count/Image similarity/Length/Direction) and Timing (per-page
 wall-clock per phase + P3 sub-step and report-generation cost, vectorised
 and rasterised runs, with a stacked-bar chart) subsections, each with
 linked chart PNGs, a per-character OCR accuracy table per text type
@@ -87,7 +88,6 @@ from rastervec.Evaluation.Evaluate.benchmark_report_sections import (  # noqa: F
     _add_text_sections,
     _add_timing_sections,
     _add_vector_sections,
-    _fmt_property_rows,
 )
 from rastervec.Evaluation.Evaluate.benchmark_run_loading import (  # noqa: F401 -- re-exported for callers/tests
     RunEntry,
@@ -306,13 +306,17 @@ def main(argv: list[str] | None = None) -> int:
             charts.vector_count_chart(
                 vector_by_run, title=f"{key} aggregate vector count",
                 path=charts_dir / f"{kslug}__aggregate__vector_count.png")
-            charts.endpoint_accuracy_chart(
-                vector_by_run, title=f"{key} aggregate endpoint accuracy",
-                path=charts_dir / f"{kslug}__aggregate__vector_endpoint.png")
+            charts.vector_quality_chart(
+                vector_by_run, title=f"{key} aggregate vector quality",
+                path=charts_dir / f"{kslug}__aggregate__vector_quality.png")
+            charts.direction_histogram_chart(
+                vector_by_run, title=f"{key} aggregate direction histogram",
+                path=charts_dir / f"{kslug}__aggregate__vector_direction.png")
             builder.add_raw_html(
-                '<div class="charts">'
-                f'<img src="{(charts_dir / f"{kslug}__aggregate__vector_count.png").relative_to(out_dir).as_posix()}">'
-                f'<img src="{(charts_dir / f"{kslug}__aggregate__vector_endpoint.png").relative_to(out_dir).as_posix()}">'
+                '<div class="charts">' + "".join(
+                    f'<img src="{(charts_dir / f"{kslug}__aggregate__vector_{name}.png").relative_to(out_dir).as_posix()}">'
+                    for name in ("count", "quality", "direction")
+                ) +
                 '</div>'
             )
 

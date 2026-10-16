@@ -54,7 +54,8 @@ def _grouped_bar(
     if ylim is not None:
         ax.set_ylim(*ylim)
     ax.set_title(title, fontsize=9)
-    ax.legend(fontsize=7)
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(fontsize=7)
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=120, bbox_inches="tight")
@@ -213,39 +214,65 @@ def timing_chart(summaries_by_run: "dict[str, dict]", *, title: str, path: Path)
 def vector_count_chart(
     results_by_run: "dict[str, VectorMetricSuiteResult | None]", *, title: str, path: Path,
 ) -> None:
+    """Stroke precision, union recall and recall per GT type."""
+    categories = ["precision", "recall (union)", *(f"recall {t}" for t in VECTOR_TYPES)]
     series = {}
     for run, result in results_by_run.items():
         if result is None:
-            series[run] = [float("nan")] * len(VECTOR_TYPES)
+            series[run] = [float("nan")] * len(categories)
             continue
-        series[run] = [result.by_type[t].count_stats.recall.value for t in VECTOR_TYPES]
-    _grouped_bar(list(VECTOR_TYPES), series, title=title, ylabel="recall", path=path, ylim=(0, 1))
+        c = result.count
+        series[run] = [
+            c.precision.value, c.recall.value, *(c.recall_by_type[t].value for t in VECTOR_TYPES),
+        ]
+    _grouped_bar(categories, series, title=title, ylabel="stroke ratio", path=path, ylim=(0, 1))
 
 
-def endpoint_accuracy_chart(
+def vector_quality_chart(
     results_by_run: "dict[str, VectorMetricSuiteResult | None]", *, title: str, path: Path,
 ) -> None:
+    """SSIM, length ratio (pred / GT) and direction-histogram intersection
+    -- each 1.0 when the prediction matches GT."""
+    categories = ["SSIM", "length ratio", "direction intersection"]
     series = {}
     for run, result in results_by_run.items():
         if result is None:
-            series[run] = [float("nan")] * len(VECTOR_TYPES)
+            series[run] = [float("nan")] * len(categories)
             continue
-        series[run] = [result.by_type[t].endpoint_stats.rmse for t in VECTOR_TYPES]
-    _grouped_bar(list(VECTOR_TYPES), series, title=title, ylabel="endpoint RMSE (pt)", path=path)
+        series[run] = [result.image.ssim, result.length.ratio.value, result.direction.intersection]
+    _grouped_bar(categories, series, title=title, ylabel="score (1 = match)", path=path)
 
 
-def property_accuracy_chart(
-    results_by_run: "dict[str, VectorMetricSuiteResult | None]", *, property_name: str,
-    title: str, path: Path,
+def direction_histogram_chart(
+    results_by_run: "dict[str, VectorMetricSuiteResult | None]", *, title: str, path: Path,
 ) -> None:
-    series = {}
-    for run, result in results_by_run.items():
+    """Length-weighted direction histograms (each normalised to 1): GT once,
+    then one line per run."""
+    fig, ax = plt.subplots(figsize=(7, 3.5))
+    gt_drawn = False
+    for ri, (run, result) in enumerate(results_by_run.items()):
         if result is None:
-            series[run] = [float("nan")] * len(VECTOR_TYPES)
             continue
-        rows = []
-        for t in VECTOR_TYPES:
-            row = next((r for r in result.by_type[t].property_rows if r.property_name == property_name), None)
-            rows.append(row.metric_value if row and row.applicable else float("nan"))
-        series[run] = rows
-    _grouped_bar(list(VECTOR_TYPES), series, title=title, ylabel=property_name, path=path)
+        bins = len(result.direction.gt_hist)
+        centers = [(i + 0.5) * 180.0 / bins for i in range(bins)]
+        if not gt_drawn:
+            gt = list(result.direction.gt_hist)
+            total = sum(gt)
+            if total > 0:
+                ax.bar(centers, [v / total for v in gt], width=180.0 / bins, color="#9ca3af", label="GT")
+            gt_drawn = True
+        pred = list(result.direction.pred_hist)
+        total = sum(pred)
+        if total > 0:
+            ax.step(centers, [v / total for v in pred], where="mid", label=run,
+                    color=_BAR_COLORS[ri % len(_BAR_COLORS)])
+    ax.set_xlim(0, 180)
+    ax.set_xlabel("direction (deg, mod 180)", fontsize=8)
+    ax.set_ylabel("length share", fontsize=8)
+    ax.set_title(title, fontsize=9)
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(fontsize=7)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=120, bbox_inches="tight")
+    plt.close(fig)

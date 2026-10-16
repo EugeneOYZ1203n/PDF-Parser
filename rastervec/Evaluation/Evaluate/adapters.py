@@ -26,7 +26,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from rastervec.Evaluation.Evaluate.metrics import TEXT_TYPES, Bbox, GtRegion, Prediction
-from rastervec.Evaluation.Evaluate.vector_metrics import GeometryEntry, geometry_entries_from_annotations
+from rastervec.Evaluation.Evaluate.vector_metrics import (
+    GeometryEntry,
+    geometry_entries_from_annotations,
+    geometry_entries_from_vectors,
+)
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet, path_signature
 from rastervec.commons.models import Text
 
@@ -189,30 +193,24 @@ def build_text_eval_inputs(labels: LabelSet, res: "PipelineResult") -> TextEvalI
 @dataclass
 class VectorEvalInputs:
     gt_by_type: "dict[str, list[GeometryEntry]]"
-    preds_by_type: "dict[str, list[GeometryEntry]]"
+    preds: "list[GeometryEntry]"
     label_counts: "dict[str, int]"
 
 
-def build_vector_eval_inputs(labels: LabelSet) -> VectorEvalInputs:
-    """`original_vector` (real `Vector`-level GT vs. pipeline `Vector`
-    predictions) is not scored here -- dropped from vector-geometry
-    calculations; it stays a `metrics.TEXT_TYPES` text-provenance type,
-    scored by the text metrics suite instead. `vector_to_raster`/
-    `original_raster` have no prediction population either (no
-    raster-tracing pipeline stage exists) -- label stats/GT counts still
-    populate."""
+def build_vector_eval_inputs(labels: LabelSet, raster_vectors: "list | None" = None) -> VectorEvalInputs:
+    """GT = `vector_to_raster`/`original_raster` geometry annotations (each
+    entry tagged with its type); predictions = every `Vector` of the
+    rasterised-PDF run (`PageDump.raster_vectors` -- P2's output), or none
+    when there was no such run. `original_vector` is never scored here --
+    it stays a `metrics.TEXT_TYPES` text-provenance type."""
     gt_geometry = gt_geometry_by_vector_type(labels)
-
     gt_by_type: "dict[str, list[GeometryEntry]]" = {
-        "vector_to_raster": geometry_entries_from_annotations(gt_geometry["vector_to_raster"]),
-        "original_raster": geometry_entries_from_annotations(gt_geometry["original_raster"]),
+        t: geometry_entries_from_annotations(gt_geometry[t], vector_type=t)
+        for t in ("vector_to_raster", "original_raster")
     }
-    preds_by_type: "dict[str, list[GeometryEntry]]" = {
-        "vector_to_raster": [],
-        "original_raster": [],
-    }
-    label_counts = {
-        "vector_to_raster": len(gt_geometry["vector_to_raster"]),
-        "original_raster": len(gt_geometry["original_raster"]),
-    }
-    return VectorEvalInputs(gt_by_type=gt_by_type, preds_by_type=preds_by_type, label_counts=label_counts)
+    label_counts = {t: len(gt_geometry[t]) for t in ("vector_to_raster", "original_raster")}
+    return VectorEvalInputs(
+        gt_by_type=gt_by_type,
+        preds=geometry_entries_from_vectors(raster_vectors or []),
+        label_counts=label_counts,
+    )

@@ -136,3 +136,20 @@ def test_dump_retry_stats_roundtrip_and_default(tmp_path, page_meta):
     path.write_text(json.dumps(raw), encoding="utf-8")
     old = dump_io.load_dump(path).pages[0]
     assert old.retry_stats is None
+
+
+def test_dump_raster_vectors_roundtrip_and_default(tmp_path, vector, page_meta):
+    vs = [vector(seqno=1), vector(kind="c", seqno=2)]
+    pd = dump_io.PageDump(
+        page_meta=page_meta(), texts=[], vectors=[], engine="current",
+        step_durations={}, raster_vectors=vs,
+    )
+    path = tmp_path / "dump.json"
+    dump_io.write_dump(path, "x.pdf", [pd])
+    assert dump_io.load_dump(path).pages[0].raster_vectors == vs
+
+    import json
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["pages"][0].pop("raster_vectors")
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert dump_io.load_dump(path).pages[0].raster_vectors == []

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from rastervec.Evaluation import dump_io
-from rastervec.Evaluation.Evaluate import adapters, timing, vector_metrics
+from rastervec.Evaluation.Evaluate import adapters, timing, vector_metrics, vector_render
 from rastervec.Evaluation.Evaluate.metrics import (
     TEXT_TYPES,
     MetricConfig,
@@ -130,12 +130,12 @@ def _score_text(
 def _score_vectors(
     entry: RunEntry, cfg: VectorMetricConfig,
 ) -> "tuple[list[tuple[int, VectorMetricSuiteResult]], VectorMetricSuiteResult | None]":
-    """Vector metrics from the run's own ground-truth labels alone --
-    `vector_to_raster`/`original_raster` only (`original_vector` is a
-    text-provenance type, not scored at the vector-geometry level; see
-    `adapters.build_vector_eval_inputs`). Neither has a prediction
-    population (no raster-tracing pipeline stage exists), so this reports
-    GT-only stats."""
+    """Vector metrics for the run's rasterised-PDF pass: each page's
+    `raster_vectors` (P2's output) against the union of its
+    `vector_to_raster`/`original_raster` geometry labels, incl. grayscale
+    renders of both for SSIM/PSNR (`vector_render.render_pair`). A page
+    without a rasterised run has no predictions -- GT-only stats plus a
+    blank-vs-GT image comparison."""
     dump = dump_io.load_dump(entry.dump_path)
     per_page: "list[tuple[int, VectorMetricSuiteResult]]" = []
 
@@ -146,9 +146,10 @@ def _score_vectors(
             entries=[e for e in entry.gt.entries if e.page_index == pi],
             geometry_entries=[g for g in entry.gt.geometry_entries if g.page_index == pi],
         )
-        inputs = adapters.build_vector_eval_inputs(page_gt)
+        inputs = adapters.build_vector_eval_inputs(page_gt, page.raster_vectors)
+        images = vector_render.render_pair(inputs.gt_by_type, inputs.preds, page.page_meta, cfg)
         res = vector_metrics.evaluate_vector_metrics(
-            inputs.gt_by_type, inputs.preds_by_type, inputs.label_counts, cfg=cfg,
+            inputs.gt_by_type, inputs.preds, inputs.label_counts, images=images, cfg=cfg,
         )
         per_page.append((pi, res))
     return per_page, aggregate_vector_metrics([r for _pi, r in per_page])

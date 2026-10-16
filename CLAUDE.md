@@ -935,14 +935,17 @@ generic parallel-pool mechanics), never phase-specific business logic.
   rotation accuracy), and `metrics_suite.py` (category 6 funnel stats, the box-overlay data, and the
   top-level `evaluate_text_metrics`/`aggregate_text_metrics` orchestration) — `metrics.py` itself is
   now a re-export surface, since many callers import specific names straight from its path.
-- **`Evaluation/Evaluate/vector_metrics.py`** *(implemented)*: the vector-provenance counterpart to
-  `metrics.py`'s text metrics — vector pairing, vector count accuracy, endpoint accuracy, and
-  per-property accuracy, scored over `GeometryEntry` (a `dataclass` unifying GT
-  `GeometryAnnotation`s and pipeline `Vector` predictions into one comparable shape, with
-  `VECTOR_TYPES = ("vector_to_raster", "original_raster")`). Pure — no pipeline/`label_schema`
-  import; `adapters.py` builds `GeometryEntry` lists from real `Vector`/`GeometryAnnotation`
-  objects via `geometry_entries_from_vector`/`geometry_entries_from_annotations` (duck-typed, not
-  imported here).
+- **`Evaluation/Evaluate/vector_metrics.py`** *(implemented)*: raster (P2) vector scoring --
+  the benchmark's rasterised-PDF run vectors (`PageDump.raster_vectors`) against the union of the
+  `vector_to_raster`/`original_raster` geometry labels (`VECTOR_TYPES`, recall also per type).
+  **Count accuracy** on strokes (RDP 0.5 pt → split at > 15° turns → chain pieces end to end
+  across Vectors when ends are within 2 pt and continue straight → greedy pairing on both ends +
+  end-tangent agreement, identical for GT and preds, so fragmented P2 output isn't punished as
+  spurious), **SSIM/PSNR** of grayscale real-width renders (`vector_render.py`, 150 dpi, via
+  `draw.stroke_batch_spec`), **length ratio** and a length-weighted **direction-histogram
+  intersection** (raw flattened geometry, curves → 10 pieces). Formulas: `docs/EVAL_METRICS.md`
+  §7. Pure except `vector_render.py`; `adapters.build_vector_eval_inputs(labels, raster_vectors)`
+  builds the `GeometryEntry` inputs.
 - **`Evaluation/Evaluate/adapters.py`** *(implemented)*: the only `Evaluation/Evaluate/` module that
   imports `rastervec.pipeline`. `gt_regions_from_labelset` / `predictions_from_cluster_ocr` /
   `text_candidate_boxes` (union bbox per `ctx.regrouped_clusters` cluster, blank OCR included; falls

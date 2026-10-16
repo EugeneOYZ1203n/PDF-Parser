@@ -149,26 +149,20 @@ def format_confusion_table(result: TextMetricSuiteResult, *, top_n: int = 5) -> 
 
 
 def format_vector_report(pdf_path: str, page_index: int, result: VectorMetricSuiteResult) -> str:
+    c = result.count
     lines = [f"{pdf_path} page {page_index} [vectors]:"]
-    for vector_type in VECTOR_TYPES:
-        r = result.by_type[vector_type]
-        lines.append(f"  [{vector_type}]")
-        lines.append(f"    labels: {r.label_stats.count}")
-        cs = r.count_stats
-        lines.append(
-            f"    count: paired={cs.n_paired} missed={cs.n_missed} spurious={cs.n_spurious} | "
-            f"precision {_fmt_ratio(cs.precision)} | recall {_fmt_ratio(cs.recall)}"
-        )
-        es = r.endpoint_stats
-        lines.append(f"    endpoint RMSE: {es.rmse} (n_paired={es.n_paired})")
-        for row in r.property_rows:
-            if not row.applicable:
-                lines.append(f"    property {row.property_name}: n/a")
-                continue
-            lines.append(
-                f"    property {row.property_name} ({row.kind}): {row.metric_value} "
-                f"(n={row.n_applicable}, none_vs_none={row.none_vs_none_count})"
-            )
+    lines.append("  labels: " + ", ".join(f"{t}={result.label_counts.get(t, 0)}" for t in VECTOR_TYPES))
+    lines.append(
+        f"  count: strokes gt={c.n_gt_strokes} pred={c.n_pred_strokes} | paired={c.n_paired} "
+        f"missed={c.n_missed} spurious={c.n_spurious} | precision {_fmt_ratio(c.precision)} | "
+        f"recall {_fmt_ratio(c.recall)}"
+    )
+    for t in VECTOR_TYPES:
+        lines.append(f"    recall {t}: {_fmt_ratio(c.recall_by_type[t])}")
+    lines.append(f"  image: SSIM {result.image.ssim:.4f} | PSNR {result.image.psnr:.2f} dB")
+    ln = result.length
+    lines.append(f"  length: gt={ln.gt_length:.1f} pred={ln.pred_length:.1f} | ratio {_fmt_ratio(ln.ratio)}")
+    lines.append(f"  direction: histogram intersection {result.direction.intersection:.4f}")
     return "\n".join(lines)
 
 

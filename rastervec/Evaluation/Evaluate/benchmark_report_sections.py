@@ -13,30 +13,6 @@ from rastervec.Evaluation.Evaluate.metrics import TEXT_TYPES, TextMetricSuiteRes
 from rastervec.Evaluation.Evaluate.vector_metrics import VECTOR_TYPES, VectorMetricSuiteResult
 
 
-def _fmt_property_rows(agg_by_run: "dict[str, VectorMetricSuiteResult | None]") -> "tuple[list[str], list[list[str]]]":
-    headers = ["vector_type", "property"] + list(agg_by_run)
-    rows: "list[list[str]]" = []
-    for t in VECTOR_TYPES:
-        names: "list[str]" = []
-        for res in agg_by_run.values():
-            if res is not None:
-                names = [r.property_name for r in res.by_type[t].property_rows]
-                break
-        for name in names:
-            row = [t, name]
-            for res in agg_by_run.values():
-                if res is None:
-                    row.append("n/a")
-                    continue
-                r = next((rr for rr in res.by_type[t].property_rows if rr.property_name == name), None)
-                if r is None or not r.applicable:
-                    row.append("n/a")
-                else:
-                    row.append(f"{r.kind}={r.metric_value:.3f} (n={r.n_applicable})")
-            rows.append(row)
-    return headers, rows
-
-
 def _pct(n: int, total: int) -> str:
     return f"{100 * n / total:.1f}%" if total else "n/a"
 
@@ -260,45 +236,43 @@ def _add_vector_sections(builder: ReportBuilder, agg_by_run: "dict[str, VectorMe
     if not any(v is not None for v in agg_by_run.values()):
         return
     builder.add_group_header("Vector")
+    headers = ["metric"] + list(agg_by_run)
 
-    headers = ["vector_type"] + list(agg_by_run)
-    rows = []
-    for t in VECTOR_TYPES:
-        row = [t]
-        for res in agg_by_run.values():
-            row.append(str(res.by_type[t].label_stats.count) if res else "n/a")
-        rows.append(row)
-    builder.add_vector_subsection("Label description", headers, rows)
+    def _rows(cells: "list[tuple[str, object]]") -> "list[list[str]]":
+        rows = []
+        for label, fn in cells:
+            rows.append([label] + [fn(res) if res is not None else "n/a" for res in agg_by_run.values()])
+        return rows
 
-    rows = []
-    for t in VECTOR_TYPES:
-        row = [t]
-        for res in agg_by_run.values():
-            if res is None:
-                row.append("n/a")
-                continue
-            cs = res.by_type[t].count_stats
-            row.append(
-                f"paired={cs.n_paired} missed={cs.n_missed} spurious={cs.n_spurious} | "
-                f"P {_fmt_ratio(cs.precision)} | R {_fmt_ratio(cs.recall)}"
-            )
-        rows.append(row)
-    builder.add_vector_subsection("Count accuracy", headers, rows)
+    builder.add_vector_subsection("Label description", headers, _rows([
+        (f"{t} primitives", lambda r, t=t: str(r.label_counts.get(t, 0))) for t in VECTOR_TYPES
+    ]))
+    builder.add_vector_subsection("Count accuracy", headers, _rows([
+        ("strokes GT / pred", lambda r: f"{r.count.n_gt_strokes} / {r.count.n_pred_strokes}"),
+        ("primitives GT / pred", lambda r: f"{r.count.n_gt_primitives} / {r.count.n_pred_primitives}"),
+        ("paired / missed / spurious",
+         lambda r: f"{r.count.n_paired} / {r.count.n_missed} / {r.count.n_spurious}"),
+        ("precision", lambda r: _fmt_ratio(r.count.precision)),
+        ("recall (union)", lambda r: _fmt_ratio(r.count.recall)),
+        *((f"recall {t}", lambda r, t=t: _fmt_ratio(r.count.recall_by_type[t])) for t in VECTOR_TYPES),
+    ]))
+    builder.add_vector_subsection("Image similarity", headers, _rows([
+        ("SSIM", lambda r: _fmt_float(r.image.ssim)),
+        ("PSNR (dB)", lambda r: _fmt_float(r.image.psnr, 2)),
+        ("pixels", lambda r: str(r.image.n_pixels)),
+    ]))
+    builder.add_vector_subsection("Length", headers, _rows([
+        ("GT length (pt)", lambda r: f"{r.length.gt_length:.1f}"),
+        ("pred length (pt)", lambda r: f"{r.length.pred_length:.1f}"),
+        ("ratio pred / GT", lambda r: _fmt_float(r.length.ratio.value)),
+    ]))
+    builder.add_vector_subsection("Direction", headers, _rows([
+        ("histogram intersection", lambda r: _fmt_float(r.direction.intersection)),
+    ]))
 
-    rows = []
-    for t in VECTOR_TYPES:
-        row = [t]
-        for res in agg_by_run.values():
-            if res is None:
-                row.append("n/a")
-                continue
-            es = res.by_type[t].endpoint_stats
-            row.append(f"RMSE {es.rmse} (n_paired={es.n_paired})")
-        rows.append(row)
-    builder.add_vector_subsection("Endpoint accuracy", headers, rows)
 
-    p_headers, p_rows = _fmt_property_rows(agg_by_run)
-    builder.add_vector_subsection("Property accuracy", p_headers, p_rows)
+def _fmt_float(v: float, digits: int = 3) -> str:
+    return "n/a" if math.isnan(v) else f"{v:.{digits}f}"
 
 
 def _timing_label(row: str) -> str:

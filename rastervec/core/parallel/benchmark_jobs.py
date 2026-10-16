@@ -303,7 +303,7 @@ def _run_current(
     try:
         vector_inputs = build_vector_eval_inputs(gt)
         result.vector_metrics = vm.evaluate_vector_metrics(
-            vector_inputs.gt_by_type, vector_inputs.preds_by_type, vector_inputs.label_counts,
+            vector_inputs.gt_by_type, vector_inputs.preds, vector_inputs.label_counts,
         )
     except Exception as exc:  # noqa: BLE001
         result.report_blocks.append(
@@ -449,7 +449,7 @@ def _run_legacy(task: PageTask, gt: LabelSet, cfg: MetricConfig) -> PageResult:
     try:
         vector_inputs = build_vector_eval_inputs(gt)
         result.vector_metrics = vm.evaluate_vector_metrics(
-            vector_inputs.gt_by_type, vector_inputs.preds_by_type, vector_inputs.label_counts,
+            vector_inputs.gt_by_type, vector_inputs.preds, vector_inputs.label_counts,
         )
     except Exception as exc:  # noqa: BLE001
         result.report_blocks.append(

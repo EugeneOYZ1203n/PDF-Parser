@@ -471,10 +471,9 @@ def _process_pdf_benchmark(
     `native_to_vector`/`original_vector`), plus -- when `bench.rasterised_
     pdf_path` is set -- a SEPARATE pipeline run directly on that rasterised
     PDF's own page (predictions for `vector_to_raster`/`original_raster`/
-    `native_to_raster`; that page has no vector paths at all, so this run
-    currently always yields empty predictions -- see `PageDump.raster_
-    texts`'s docstring). Writes `ground_truth_<type>.json` (only the
-    non-empty types) and `<type>_{bbox,text}.pdf` overlays for whichever
+    `native_to_raster`, and its vectors -- P2's output, that page has no
+    vector paths of its own -- for the vector metrics). Writes
+    `ground_truth_<type>.json` (only the non-empty types) and `<type>_{bbox,text}.pdf` overlays for whichever
     types have labels. Returns the `benchmark.json` entry."""
     from rastervec.core.pipeline import run_pipeline as run_current
     from rastervec.pipelines.legacy import run_pipeline as run_legacy
@@ -539,6 +538,7 @@ def _process_pdf_benchmark(
                 )
 
         raster_texts = []
+        raster_vectors = []
         raster_steps: dict = {}
         raster_substeps: dict = {}
         if bench.rasterised_pdf_path is not None:
@@ -549,8 +549,8 @@ def _process_pdf_benchmark(
                 if is_legacy:
                     res_raster = run_legacy(str(raster_page_path), 0, verbose=True)
                 else:
-                    # Only texts + timings are read back from this run, and
-                    # run_pipeline fills step/substep durations without
+                    # Only texts, vectors + timings are read back from this
+                    # run, and run_pipeline fills step/substep durations without
                     # verbose -- so no debug data is kept at all.
                     res_raster = run_current(
                         str(raster_page_path), 0, p2=variant.p2, p3=variant.p3,
@@ -560,6 +560,7 @@ def _process_pdf_benchmark(
                     )
                 _restamp_page(res_raster, p)
                 raster_texts = list(res_raster.texts or [])
+                raster_vectors = list(res_raster.vectors or [])
                 raster_steps = dict(res_raster.step_durations or {})
                 raster_substeps = _substeps(res_raster)
                 del res_raster
@@ -576,6 +577,7 @@ def _process_pdf_benchmark(
             vectors=list(res.vectors or []), engine=variant.engine,
             step_durations=dict(res.step_durations or {}),
             raster_texts=raster_texts,
+            raster_vectors=raster_vectors,
             substep_durations=_substeps(res),
             raster_step_durations=raster_steps,
             raster_substep_durations=raster_substeps,

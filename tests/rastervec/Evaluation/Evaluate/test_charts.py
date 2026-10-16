@@ -23,8 +23,7 @@ def _text_result():
 def _vector_result():
     line = GeometryEntry(kind="l", points=((0, 0), (10, 0)))
     gt_by_type = {"vector_to_raster": [line], "original_raster": []}
-    preds_by_type = {"vector_to_raster": [line], "original_raster": []}
-    return evaluate_vector_metrics(gt_by_type, preds_by_type, {"vector_to_raster": 1, "original_raster": 0})
+    return evaluate_vector_metrics(gt_by_type, [line], {"vector_to_raster": 1, "original_raster": 0})
 
 
 def _assert_png(path):
@@ -71,11 +70,11 @@ def test_vector_count_chart(tmp_path):
     _assert_png(tmp_path / "h.png")
 
 
-def test_endpoint_accuracy_chart(tmp_path):
-    charts.endpoint_accuracy_chart({"current": _vector_result()}, title="t", path=tmp_path / "i.png")
+def test_vector_quality_chart(tmp_path):
+    charts.vector_quality_chart({"current": _vector_result()}, title="t", path=tmp_path / "i.png")
     _assert_png(tmp_path / "i.png")
 
 
-def test_property_accuracy_chart(tmp_path):
-    charts.property_accuracy_chart({"current": _vector_result()}, property_name="width", title="t", path=tmp_path / "j.png")
+def test_direction_histogram_chart(tmp_path):
+    charts.direction_histogram_chart({"current": _vector_result()}, title="t", path=tmp_path / "j.png")
     _assert_png(tmp_path / "j.png")
