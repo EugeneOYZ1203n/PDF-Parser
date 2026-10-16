@@ -364,6 +364,7 @@ def parse(
         ]
     ocr_clusters = [g for g in flat_clusters if g]
     _emit(lambda: _render_classification_layers(page_meta, cls))
+    _emit(lambda: _render_remaining_layers(page_meta, cls))
     _emit(lambda: _render_geometry_layers(page_meta, ocr_clusters))
 
     rec_backend = PaddleRecBackend()
@@ -655,6 +656,7 @@ _C_OWN_DRAWING = "#dc2626"
 _C_GEOM_COLLINEAR = "#0ea5e9"
 _C_GEOM_PARALLEL = "#f97316"
 _C_GEOM_SINGLETON = "#9ca3af"
+_C_REMAINING = "#0f766e"
 
 
 def _hex_rgb(h: str) -> tuple[float, float, float]:
@@ -768,6 +770,43 @@ def _render_classification_layers(page_meta, cls) -> "list[DebugLayer]":
         out.append((stage, "kept bbox", _C_KEPT, render_boxes_pdf(
             page_meta, [(b, _hex_rgb(_C_KEPT)) for b in kept_boxes],
         )))
+    return out
+
+
+def _render_remaining_layers(page_meta, cls) -> "list[DebugLayer]":
+    """Per classification step that removed anything: `remaining / NN after
+    <step> (N)` -- every bucket's Vectors still kept after that step, in
+    their real paint and `seqno` paint order, so stepping through the
+    layers shows the drawing falling away. A step whose kept set equals
+    the previous one (the first step: equals its input) is skipped."""
+    from rastervec.commons.renderer.draw import render_specs_pdf, vector_spec
+
+    out: "list[DebugLayer]" = []
+    if cls is None or not cls.clustering:
+        return out
+    steps_per_bucket = [stage.steps for stage in cls.clustering.values() if stage.steps]
+    if not steps_per_bucket:
+        return out
+    prev = {
+        id(v) for steps in steps_per_bucket
+        for cat in steps[0].categories.values() if cat.role in ("kept", "dropped")
+        for v in _flatten_entries(cat.groups)
+    }
+    for i in range(len(steps_per_bucket[0])):
+        vectors: list[Vector] = []
+        for steps in steps_per_bucket:
+            if i < len(steps):
+                kept = steps[i].categories.get("kept")
+                if kept is not None:
+                    vectors.extend(_flatten_entries(kept.groups))
+        ids = {id(v) for v in vectors}
+        if ids == prev:
+            continue
+        prev = ids
+        vectors.sort(key=lambda v: v.seqno)
+        label = steps_per_bucket[0][i].label
+        out.append(("remaining", f"{i + 1:02d} after {label.lower()} ({len(vectors)})", _C_REMAINING,
+                    render_specs_pdf(page_meta, [vector_spec(v) for v in vectors], deflate=True)))
     return out
 
 
@@ -956,6 +995,7 @@ def render_debug(debug_out: "dict | None", page_meta) -> "list[DebugLayer]":
     ownership = debug_out.get("ownership") or {}
     out: "list[DebugLayer]" = []
     out += _render_classification_layers(page_meta, debug_out.get("classification"))
+    out += _render_remaining_layers(page_meta, debug_out.get("classification"))
     out += _render_geometry_layers(page_meta, debug_out.get("ocr_clusters"))
     out += _render_ocr_layers(
         page_meta, debug_out.get("texts"), debug_out.get("ocr_blank_quads"),

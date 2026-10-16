@@ -369,6 +369,38 @@ def test_classification_layers_intersection_stage(page_meta, vector):
     assert not any(l == "dropped crossed" for _s, l in labels)
 
 
+def test_remaining_layers_show_kept_vectors_in_real_paint(page_meta, vector):
+    from types import SimpleNamespace as NS
+
+    import pymupdf as fitz
+
+    red = vector(bbox=(10.0, 10.0, 30.0, 10.0), items=[("l", (10.0, 10.0), (30.0, 10.0))],
+                 color=(1.0, 0.0, 0.0), width=1.0, seqno=2)
+    blue = vector(bbox=(10.0, 20.0, 30.0, 20.0), items=[("l", (10.0, 20.0), (30.0, 20.0))],
+                  color=(0.0, 0.0, 1.0), width=1.0, seqno=1)
+    dash = vector(bbox=(0.0, 40.0, 5.0, 40.0), items=[("l", (0.0, 40.0), (5.0, 40.0))], seqno=3)
+
+    def step(label, kept_groups, dropped_groups=()):
+        return NS(label=label, categories={
+            "kept": NS(role="kept", groups=kept_groups),
+            "drawing": NS(role="dropped", groups=list(dropped_groups)),
+        })
+
+    cls = NS(clustering={"b": NS(steps=[
+        step("Oversize", [[red], [blue], [dash]]),  # dropped nothing -> skipped
+        step("Collinear drawing", [[red], [blue]], [[dash]]),
+        step("Seq overlap merge", [[red, blue]]),  # regrouped only -> skipped
+        step("Length outliers", [[[red]]], [[blue]]),
+    ])})
+    layers = lvc._render_remaining_layers(page_meta(), cls)
+    assert [(s, l) for s, l, _h, _p in layers] == [
+        ("remaining", "02 after collinear drawing (2)"),
+        ("remaining", "04 after length outliers (1)"),
+    ]
+    drawings = fitz.open("pdf", layers[0][3])[0].get_drawings()
+    assert [d["color"] for d in drawings] == [(0.0, 0.0, 1.0), (1.0, 0.0, 0.0)]  # real colour, seqno order
+
+
 def test_geometry_layers_color_each_group(page_meta, vector):
     import pymupdf as fitz
 
