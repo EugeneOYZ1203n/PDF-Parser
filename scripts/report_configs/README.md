@@ -25,7 +25,53 @@ python scripts/generate_pipeline_report.py --config scripts/report_configs/examp
 | `debug_image_cap` | `100` | At most this many images per folder per document (uniform random across pages, same picks on a rerun). `null` = all. |
 | `debug_layers` | `true` | Write the layer PDFs. Off: `dump.json`, ground truth and debug images are still written, which is all the benchmark needs. |
 | `keep_converted_pdfs` | `true` | Keep each page's converted input (`converted_p<N>.pdf`). |
-| `ocr_dpi`, `use_angle_cls`, `workers` | `300`, `true`, `1` | Passed to the backends in `RunSettings`. |
+| `ocr_dpi`, `use_angle_cls`, `workers` | `300`, `true`, `1` | Passed to the backends in `RunSettings`. `workers > 1` runs v1RasterToVec's and v2VectorClass's OCR on a process pool (same output, faster). v2VectorClass doesn't use `ocr_dpi` / `use_angle_cls`. |
 
-`example.json` reports one page with the default backends. `benchmark_example.json` scores
-`v1VectorClass` (no raster pass) on two pages of a labelled folder.
+## Inputs
+
+Keep inputs under `outputs/labels/` (git-ignored; `scripts/label/master_label.py` already
+writes there). Three kinds can go in `input_files`:
+
+| Input | Example | Scored against (benchmark mode) |
+|---|---|---|
+| a `master_label.py` folder | `outputs/labels/example_label` | its `native_labels.json` and hand-made `vector_labels.json` |
+| a label JSON | `outputs/labels/example.json` | its labels; the PDF is the JSON's `pdf_path` |
+| a bare PDF | `outputs/labels/plain.pdf` | labels derived from its own native text; with a `label_files` entry, that JSON's labels too |
+
+The benchmark matches two runs on the inputs they share, by key (`labels:<folder or JSON
+name>`, or `pdf:<stem>` for a bare PDF without `label_files`), so run both configs on the same
+`input_files`.
+
+## Worked examples
+
+**Look at one backend's steps.** `example.json` (default backends) and `example_v2.json`
+(`p3: "v2VectorClass"`, no raster pass) report one page each; open a result in the viewer:
+
+```
+python scripts/generate_pipeline_report.py --config scripts/report_configs/example_v2.json
+python scripts/pipeline_report_viewer.py outputs/pipeline_report/<ts>__example_v2/example
+```
+
+**Compare two backends: v1VectorClass vs v2VectorClass.** `bench_v1.json` and `bench_v2.json`
+differ only in `p3` (and `workers: 2` for v2). Both use `p2: "Stub"` so only Phase 3 is
+measured, skip debug images (the benchmark doesn't need them), and score pages 0 and 1 of the
+same three inputs:
+
+```
+python scripts/generate_pipeline_report.py --config scripts/report_configs/bench_v1.json
+python scripts/generate_pipeline_report.py --config scripts/report_configs/bench_v2.json
+python scripts/pipeline_report_benchmark.py \
+    --run outputs/pipeline_report/<ts>__bench_v1 --run outputs/pipeline_report/<ts>__bench_v2
+python scripts/pipeline_report_viewer.py \
+    outputs/pipeline_report/<ts>__bench_v1/example_label outputs/pipeline_report/<ts>__bench_v2/example_label
+```
+
+`outputs/pipeline_report_benchmark/<ts>/report.html` then has one column per run: char / word
+F1, bbox IoU and rotation per ground-truth type, candidate precision, and seconds per page.
+v2VectorClass also reports its own sub-steps (`classify_*`, `ocr_detect`, `ocr_recognize`, ...)
+as `phase3 › <name>` rows under `phase3` in the timing table; they are part of `phase3`, not
+added to `total`.
+
+**Benchmark a backend pair faster.** Set `"debug_layers": false` as well: only `dump.json` and
+the ground truth are written. Leave it on when you want to inspect errors in the viewer
+(including the `benchmark__extra_*` layers).

@@ -27,7 +27,8 @@ Ubuntu).
 
    For scoring, set `"benchmark": true` and list PDFs, label JSON files or `master_label`
    folders in `input_files`. Run it once per backend combination you want to compare, e.g.
-   `p3: "v1VectorClass"` and `p3: "Stub"`.
+   `p3: "v1VectorClass"` and `p3: "v2VectorClass"` (`bench_v1.json` / `bench_v2.json`, worked
+   through in the configs' `README.md`).
 3. **Look.** Open any input folder of a run (two runs side by side for a comparison):
 
    ```
@@ -52,7 +53,7 @@ Ubuntu).
 | `p2_work/` | Phase 2 backends' own intermediate files (`RunSettings.dump_dir`) |
 | `benchmark.json` | benchmark mode: the backends, the threshold and one entry per input (key, source PDF, labels, pages, ground-truth types) |
 | `<doc>/manifest.json` | source PDF, pages, backends and the layer list; the viewer reads it |
-| `<doc>/dump.json` | every page's final texts and vectors (the `ExtractResult` layout) plus timings; the benchmark reads it |
+| `<doc>/dump.json` | every page's final texts and vectors (the `ExtractResult` layout) plus timings: phase seconds, a backend's own sub-step seconds (`sub_durations`, from `RunSettings.on_step_time`) and report-generation seconds; the benchmark reads it |
 | `<doc>/<stage>__<layer>.pdf` | one multi-page PDF per debug layer a backend emitted, page-aligned with `manifest.json`'s `pages` (blank where the layer had nothing); `reconstructed__page.pdf` is the final output as a page |
 | `<doc>/<folder>/` | debug images a backend offered, at most `debug_image_cap` per folder, sampled uniformly across pages |
 | `<doc>/converted_p<N>.pdf` | the converted input page (vectorise / benchmark modes) |
@@ -90,7 +91,8 @@ the numerators and denominators, then divide).
 3. Then the full tables for all inputs and for each input: labels, char and word overlap, bbox
    accuracy (plus spurious readings with no label), rotation, per-character accuracy (each
    label character detected / dropped / unreached / misclassified, with the top misreadings),
-   extra predicted characters, and per-page timing with a median delta between runs. Each
+   extra predicted characters, and per-page timing with a median delta between runs (a
+   backend's sub-steps as `phase3 › <name>` rows under their phase, not added to `total`). Each
    input ends with the viewer command for it.
 
 `benchmark.txt` has the same numbers as plain text, `viewer_commands.txt` one viewer command per
