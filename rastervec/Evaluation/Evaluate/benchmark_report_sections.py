@@ -10,6 +10,7 @@ from rastervec.Evaluation.Evaluate import timing
 from rastervec.Evaluation.Evaluate.benchmark import _fmt_ratio
 from rastervec.Evaluation.Evaluate.html_report import ReportBuilder
 from rastervec.Evaluation.Evaluate.metrics import TEXT_TYPES, TextMetricSuiteResult
+from rastervec.Evaluation.Evaluate.liu_dori import FRAG_BUCKETS
 from rastervec.Evaluation.Evaluate.vector_metrics import VECTOR_TYPES, VectorMetricSuiteResult
 
 
@@ -247,19 +248,61 @@ def _add_vector_sections(builder: ReportBuilder, agg_by_run: "dict[str, VectorMe
     builder.add_vector_subsection("Label description", headers, _rows([
         (f"{t} primitives", lambda r, t=t: str(r.label_counts.get(t, 0))) for t in VECTOR_TYPES
     ]))
-    builder.add_vector_subsection("Count accuracy", headers, _rows([
-        ("strokes GT / pred", lambda r: f"{r.count.n_gt_strokes} / {r.count.n_pred_strokes}"),
-        ("primitives GT / pred", lambda r: f"{r.count.n_gt_primitives} / {r.count.n_pred_primitives}"),
-        ("paired / missed / spurious",
-         lambda r: f"{r.count.n_paired} / {r.count.n_missed} / {r.count.n_spurious}"),
-        ("precision", lambda r: _fmt_ratio(r.count.precision)),
-        ("recall (union)", lambda r: _fmt_ratio(r.count.recall)),
-        *((f"recall {t}", lambda r, t=t: _fmt_ratio(r.count.recall_by_type[t])) for t in VECTOR_TYPES),
-    ]))
-    builder.add_vector_subsection("Image similarity", headers, _rows([
+    builder.add_vector_subsection("Headline (Liu & Dori 1997)", headers, _rows([
+        ("D_v -- vector detection rate", lambda r: _fmt_ratio(r.liu_dori.overall.d_v)),
+        ("F_v -- vector false alarm rate", lambda r: _fmt_ratio(r.liu_dori.overall.f_v)),
+        ("VRI", lambda r: _fmt_float(r.liu_dori.vri)),
+        ("PRI", lambda r: _fmt_float(r.pixel.pri)),
         ("SSIM", lambda r: _fmt_float(r.image.ssim)),
         ("PSNR (dB)", lambda r: _fmt_float(r.image.psnr, 2)),
-        ("pixels", lambda r: str(r.image.n_pixels)),
+    ]))
+    builder.add_vector_subsection("Q_v components", headers, _rows([
+        ("Q_pt (endpoints) -- per overlap", lambda r: _fmt_float(r.liu_dori.q_pt.value)),
+        ("Q_od (overlap distance) -- per overlap", lambda r: _fmt_float(r.liu_dori.q_od.value)),
+        ("Q_w (width) -- per overlap", lambda r: _fmt_float(r.liu_dori.q_w.value)),
+        ("Q_v(c) -- per overlap", lambda r: _fmt_float(r.liu_dori.q_v_overlap.value)),
+        ("Q_b(g) -- GT basic quality", lambda r: _fmt_float(r.liu_dori.gt.q_b.value)),
+        ("Q_fr(g) -- GT fragmentation (matched)", lambda r: _fmt_float(r.liu_dori.gt.q_fr.value)),
+        ("Q_v(g) -- GT total (= D_v)", lambda r: _fmt_float(r.liu_dori.gt.q_v.value)),
+        ("Q_b(k) -- pred basic quality", lambda r: _fmt_float(r.liu_dori.pred.q_b.value)),
+        ("Q_fr(k) -- pred consolidation (matched)", lambda r: _fmt_float(r.liu_dori.pred.q_fr.value)),
+        ("Q_v(k) -- pred total (= 1 - F_v)", lambda r: _fmt_float(r.liu_dori.pred.q_v.value)),
+    ]))
+
+    def _split_rows(attr: str, keys) -> "list[tuple[str, object]]":
+        cells = []
+        for k in keys:
+            cells.append((f"{k}: D_v", lambda r, k=k: _fmt_ratio(getattr(r.liu_dori, attr)[k].d_v)))
+            cells.append((f"{k}: F_v", lambda r, k=k: _fmt_ratio(getattr(r.liu_dori, attr)[k].f_v)))
+            cells.append((f"{k}: VRI", lambda r, k=k: _fmt_float(getattr(r.liu_dori, attr)[k].vri)))
+        return cells
+
+    builder.add_vector_subsection("Splits -- text / non-text (both sides)", headers,
+                                  _rows(_split_rows("by_text", ("text", "non-text"))))
+    builder.add_vector_subsection("Splits -- GT solid / dashed (D_v only)", headers, _rows([
+        (f"{k}: D_v", lambda r, k=k: _fmt_ratio(r.liu_dori.by_style[k].d_v)) for k in ("solid", "dashed")
+    ]))
+    builder.add_vector_subsection("Splits -- GT type (D_v only)", headers, _rows([
+        (f"{t}: D_v", lambda r, t=t: _fmt_ratio(r.liu_dori.by_type[t].d_v)) for t in VECTOR_TYPES
+    ]))
+    builder.add_vector_subsection("Fragmentation -- predicted lines per GT line |D(g)|", headers, _rows([
+        *((f"{b}", lambda r, b=b: _fmt_hist(r.liu_dori.gt.histogram, b)) for b in FRAG_BUCKETS),
+        ("mean (matched GT)", lambda r: _fmt_float(r.liu_dori.gt.matched_count.value, 2)),
+    ]))
+    builder.add_vector_subsection("Consolidation -- GT lines per predicted line |G(k)|", headers, _rows([
+        *((f"{b}", lambda r, b=b: _fmt_hist(r.liu_dori.pred.histogram, b)) for b in FRAG_BUCKETS),
+        ("mean (matched preds)", lambda r: _fmt_float(r.liu_dori.pred.matched_count.value, 2)),
+    ]))
+    builder.add_vector_subsection("Counts", headers, _rows([
+        ("GT lines / pred lines", lambda r: f"{r.liu_dori.gt.n_lines} / {r.liu_dori.pred.n_lines}"),
+        ("GT length / pred length (pt)",
+         lambda r: f"{r.liu_dori.gt_length:.1f} / {r.liu_dori.pred_length:.1f}"),
+        ("overlaps", lambda r: str(r.liu_dori.n_overlaps)),
+    ]))
+    builder.add_vector_subsection("Pixel level", headers, _rows([
+        ("D_p -- pixel detection rate", lambda r: _fmt_ratio(r.pixel.d_p)),
+        ("F_p -- pixel false alarm rate", lambda r: _fmt_ratio(r.pixel.f_p)),
+        ("SSIM pixels", lambda r: str(r.image.n_pixels)),
     ]))
     builder.add_vector_subsection("Length", headers, _rows([
         ("GT length (pt)", lambda r: f"{r.length.gt_length:.1f}"),
@@ -269,6 +312,12 @@ def _add_vector_sections(builder: ReportBuilder, agg_by_run: "dict[str, VectorMe
     builder.add_vector_subsection("Direction", headers, _rows([
         ("histogram intersection", lambda r: _fmt_float(r.direction.intersection)),
     ]))
+
+
+def _fmt_hist(hist: "dict[str, int]", bucket: str) -> str:
+    total = sum(hist.values())
+    n = hist.get(bucket, 0)
+    return f"{n} ({_pct(n, total)})"
 
 
 def _fmt_float(v: float, digits: int = 3) -> str:

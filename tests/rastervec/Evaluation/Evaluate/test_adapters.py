@@ -3,7 +3,9 @@ mixed LabelSet into native_to_vector/original_vector/vector_to_raster/
 original_raster/native_to_raster."""
 from __future__ import annotations
 
-from rastervec.Evaluation.Evaluate.adapters import entries_by_text_type
+import pytest
+
+from rastervec.Evaluation.Evaluate.adapters import build_vector_eval_inputs, entries_by_text_type
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet
 
 
@@ -36,3 +38,30 @@ def test_natsync_prefix_takes_precedence_over_source():
     labels = LabelSet(pdf_path="x.pdf", entries=[_entry("natsync:x", "t", "raster")])
     buckets = entries_by_text_type(labels)
     assert buckets["native_to_raster"] and not buckets["original_raster"]
+
+
+def test_raster_dpi_for_page(tmp_path):
+    import pymupdf as fitz
+
+    from rastervec.Evaluation.Evaluate.adapters import raster_dpi_for_page
+
+    doc = fitz.open()
+    page = doc.new_page(width=144, height=72)  # 2 x 1 inch
+    pix = fitz.Pixmap(fitz.csGRAY, fitz.IRect(0, 0, 600, 300), False)
+    pix.set_rect(pix.irect, (255,))
+    page.insert_image(page.rect, pixmap=pix)
+    path = tmp_path / "r.pdf"
+    doc.save(str(path))
+    doc.close()
+    assert raster_dpi_for_page(str(path), 0) == pytest.approx(300.0)
+    assert raster_dpi_for_page(str(path), 5) is None
+    assert raster_dpi_for_page(str(tmp_path / "missing.pdf"), 0) is None
+
+
+def test_build_vector_eval_inputs_collects_text_boxes():
+    labels = LabelSet(pdf_path="x.pdf", entries=[
+        LabelEntry(page_index=0, cluster_bbox=(1, 2, 3, 4), cluster_signature="s", label_id="a",
+                   text="A", source="native"),
+    ])
+    inputs = build_vector_eval_inputs(labels, [])
+    assert inputs.text_boxes == [(1, 2, 3, 4)]

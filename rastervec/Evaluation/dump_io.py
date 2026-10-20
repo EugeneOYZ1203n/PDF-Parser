@@ -114,6 +114,10 @@ class PageDump:
     # read off `res.extra["p3_debug"]["retry_stats"]` at report-generation
     # time. `None` for any other P3 backend or an older dump.
     retry_stats: "dict | None" = None
+    # Resolution (dpi) of the rasterised PDF page the raster run read
+    # (`adapters.raster_dpi_for_page`) -- sets the Liu-Dori width floor.
+    # `None` when unknown (no rasterised run, older dumps).
+    raster_dpi: "float | None" = None
 
 
 def _page_dump_to_json(pd: PageDump) -> dict:
@@ -131,6 +135,7 @@ def _page_dump_to_json(pd: PageDump) -> dict:
         "debug_durations": pd.debug_durations,
         "fast_cluster_stats": pd.fast_cluster_stats,
         "retry_stats": pd.retry_stats,
+        "raster_dpi": pd.raster_dpi,
     }
 
 
@@ -155,6 +160,7 @@ def _page_dump_from_json(d: dict) -> PageDump:
         debug_durations=d.get("debug_durations", {}),
         fast_cluster_stats=d.get("fast_cluster_stats"),
         retry_stats=d.get("retry_stats"),
+        raster_dpi=d.get("raster_dpi"),
     )
 
 

@@ -148,17 +148,38 @@ def format_confusion_table(result: TextMetricSuiteResult, *, top_n: int = 5) -> 
     return "\n".join(lines)
 
 
+def _fmt_num(v: float, digits: int = 3) -> str:
+    return "n/a" if math.isnan(v) else f"{v:.{digits}f}"
+
+
 def format_vector_report(pdf_path: str, page_index: int, result: VectorMetricSuiteResult) -> str:
-    c = result.count
+    ld = result.liu_dori
     lines = [f"{pdf_path} page {page_index} [vectors]:"]
     lines.append("  labels: " + ", ".join(f"{t}={result.label_counts.get(t, 0)}" for t in VECTOR_TYPES))
     lines.append(
-        f"  count: strokes gt={c.n_gt_strokes} pred={c.n_pred_strokes} | paired={c.n_paired} "
-        f"missed={c.n_missed} spurious={c.n_spurious} | precision {_fmt_ratio(c.precision)} | "
-        f"recall {_fmt_ratio(c.recall)}"
+        f"  Liu-Dori: D_v {_fmt_ratio(ld.overall.d_v)} | F_v {_fmt_ratio(ld.overall.f_v)} | "
+        f"VRI {_fmt_num(ld.vri)}"
     )
-    for t in VECTOR_TYPES:
-        lines.append(f"    recall {t}: {_fmt_ratio(c.recall_by_type[t])}")
+    lines.append(
+        f"    overlap factors: Q_pt {_fmt_num(ld.q_pt.value)} | Q_od {_fmt_num(ld.q_od.value)} | "
+        f"Q_w {_fmt_num(ld.q_w.value)} | Q_v(c) {_fmt_num(ld.q_v_overlap.value)} (n={ld.n_overlaps})"
+    )
+    for side, st in (("GT", ld.gt), ("pred", ld.pred)):
+        hist = " ".join(f"{k}:{v}" for k, v in st.histogram.items())
+        lines.append(
+            f"    {side}: Q_b {_fmt_num(st.q_b.value)} | Q_fr {_fmt_num(st.q_fr.value)} | "
+            f"Q_v {_fmt_num(st.q_v.value)} | matched-by histogram {hist} | "
+            f"mean matched-by {_fmt_num(st.matched_count.value, 2)}"
+        )
+    for name, split in (("text", ld.by_text), ("style", ld.by_style), ("type", ld.by_type)):
+        cells = " | ".join(
+            f"{k} D_v {_fmt_num(d.d_v.value)} F_v {_fmt_num(d.f_v.value)}" for k, d in split.items()
+        )
+        lines.append(f"    by {name}: {cells}")
+    px = result.pixel
+    lines.append(
+        f"  pixel: D_p {_fmt_ratio(px.d_p)} | F_p {_fmt_ratio(px.f_p)} | PRI {_fmt_num(px.pri)}"
+    )
     lines.append(f"  image: SSIM {result.image.ssim:.4f} | PSNR {result.image.psnr:.2f} dB")
     ln = result.length
     lines.append(f"  length: gt={ln.gt_length:.1f} pred={ln.pred_length:.1f} | ratio {_fmt_ratio(ln.ratio)}")

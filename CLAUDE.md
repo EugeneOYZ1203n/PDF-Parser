@@ -951,15 +951,20 @@ generic parallel-pool mechanics), never phase-specific business logic.
   now a re-export surface, since many callers import specific names straight from its path.
 - **`Evaluation/Evaluate/vector_metrics.py`** *(implemented)*: raster (P2) vector scoring --
   the benchmark's rasterised-PDF run vectors (`PageDump.raster_vectors`) against the union of the
-  `vector_to_raster`/`original_raster` geometry labels (`VECTOR_TYPES`, recall also per type).
-  **Count accuracy** on strokes (RDP 0.5 pt → split at > 15° turns → chain pieces end to end
-  across Vectors when ends are within 2 pt and continue straight → greedy pairing on both ends +
-  end-tangent agreement, identical for GT and preds, so fragmented P2 output isn't punished as
-  spurious), **SSIM/PSNR** of grayscale real-width renders (`vector_render.py`, 150 dpi, via
-  `draw.stroke_batch_spec`), **length ratio** and a length-weighted **direction-histogram
-  intersection** (raw flattened geometry, curves → 10 pieces). Formulas: `docs/EVAL_METRICS.md`
-  §7. Pure except `vector_render.py`; `adapters.build_vector_eval_inputs(labels, raster_vectors)`
-  builds the `GeometryEntry` inputs.
+  `vector_to_raster`/`original_raster` geometry labels (`VECTOR_TYPES`). Headline: the
+  **Liu & Dori (1997) line-detection protocol** (`liu_dori.py`, pure) — every raw `"l"` item a
+  straight bar on both sides (`"c"` → arc-length samples → RDP at W_eff/4, each piece its own
+  bar; nothing chained or de-duplicated), widths floored at 2 raster px of the rasterised page's
+  dpi (`PageDump.raster_dpi`, `adapters.raster_dpi_for_page`), a 15° angle gate then the paper's
+  2-of-4-endpoints overlap rule, Q_v(c) = (Q_pt·Q_od·Q_w)^(1/3) (style/shape factors dropped),
+  per-line Q_b/Q_fr/Q_v, D_v / F_v / VRI, |D(g)|/|G(k)| fragmentation histograms, text/solid/type
+  splits; `paper_mode` reproduces the paper's Table 2 in tests. Plus the paper's pixel-level
+  D_p/F_p/PRI (ink masks at W_eff, 300 dpi), **SSIM/PSNR** of grayscale real-width renders
+  (`vector_render.py`, 150 dpi, via `draw.stroke_batch_spec`), **length ratio** and a
+  length-weighted **direction-histogram intersection** as sanity checks. Viewer overlays: stage
+  `vector_eval` (`report_artifacts._add_vector_eval_layers`). Everything — formulas, deviations,
+  accepted biases — is in `docs/RasterToVectorEvaluation.md`. Pure except `vector_render.py`;
+  `adapters.build_vector_eval_inputs(labels, raster_vectors)` builds the `GeometryEntry` inputs.
 - **`Evaluation/Evaluate/adapters.py`** *(implemented)*: the only `Evaluation/Evaluate/` module that
   imports `rastervec.pipeline`. `gt_regions_from_labelset` / `predictions_from_cluster_ocr` /
   `text_candidate_boxes` (union bbox per `ctx.regrouped_clusters` cluster, blank OCR included; falls

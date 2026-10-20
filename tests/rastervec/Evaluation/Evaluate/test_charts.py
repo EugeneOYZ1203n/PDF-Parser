@@ -65,9 +65,20 @@ def test_font_size_histogram_chart(tmp_path):
     _assert_png(tmp_path / "fs.png")
 
 
-def test_vector_count_chart(tmp_path):
-    charts.vector_count_chart({"current": _vector_result()}, title="t", path=tmp_path / "h.png")
+def test_vector_headline_chart(tmp_path):
+    charts.vector_headline_chart({"current": _vector_result(), "none": None}, title="t", path=tmp_path / "h.png")
     _assert_png(tmp_path / "h.png")
+
+
+def test_vector_components_chart(tmp_path):
+    charts.vector_components_chart({"current": _vector_result()}, title="t", path=tmp_path / "c.png")
+    _assert_png(tmp_path / "c.png")
+
+
+def test_fragmentation_chart(tmp_path):
+    for side in ("gt", "pred"):
+        charts.fragmentation_chart({"current": _vector_result()}, side=side, title="t", path=tmp_path / f"{side}.png")
+        _assert_png(tmp_path / f"{side}.png")
 
 
 def test_vector_quality_chart(tmp_path):

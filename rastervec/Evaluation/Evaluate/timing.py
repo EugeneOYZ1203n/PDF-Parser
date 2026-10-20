@@ -40,7 +40,7 @@ OTHER_SUFFIX = "other"
 TOTAL = "total"
 DEBUG_PARENT = "debug"
 DEBUG_RENDER_SUBSTEP = "debug_render"
-DEBUG_ORDER = ("backend_layers", "stage_layers", "debug_images", "extra_predictions", "conversion")
+DEBUG_ORDER = ("backend_layers", "stage_layers", "debug_images", "extra_predictions", "vector_eval", "conversion")
 DEBUG_TOTAL = "debug.total"
 TOTAL_INCL_DEBUG = "total_incl_debug"
 # Document-level report-generation rows (one per document, not per page).

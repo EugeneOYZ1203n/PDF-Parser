@@ -132,12 +132,16 @@ def _score_vectors(
 ) -> "tuple[list[tuple[int, VectorMetricSuiteResult]], VectorMetricSuiteResult | None]":
     """Vector metrics for the run's rasterised-PDF pass: each page's
     `raster_vectors` (P2's output) against the union of its
-    `vector_to_raster`/`original_raster` geometry labels, incl. grayscale
-    renders of both for SSIM/PSNR (`vector_render.render_pair`). A page
-    without a rasterised run has no predictions -- GT-only stats plus a
-    blank-vs-GT image comparison."""
+    `vector_to_raster`/`original_raster` geometry labels -- Liu-Dori line
+    detection, ink masks for D_p/F_p/PRI (`vector_render.render_ink_pair`)
+    and grayscale renders for SSIM/PSNR (`vector_render.render_pair`). A
+    page without a rasterised run has no predictions -- GT-only stats plus
+    a blank-vs-GT image comparison. The rasterised dpi comes from the dump
+    (`PageDump.raster_dpi`), else the label folder's own `rasterised.pdf`,
+    else `cfg.default_dpi`."""
     dump = dump_io.load_dump(entry.dump_path)
     per_page: "list[tuple[int, VectorMetricSuiteResult]]" = []
+    rasterised = Path(entry.gt.pdf_path).parent / "rasterised.pdf" if entry.gt.pdf_path else None
 
     for page in dump.pages:
         pi = page.page_meta.index
@@ -147,10 +151,17 @@ def _score_vectors(
             geometry_entries=[g for g in entry.gt.geometry_entries if g.page_index == pi],
         )
         inputs = adapters.build_vector_eval_inputs(page_gt, page.raster_vectors)
+        dpi = page.raster_dpi
+        if dpi is None and rasterised is not None and rasterised.is_file():
+            dpi = adapters.raster_dpi_for_page(str(rasterised), pi)
+        dpi = dpi or cfg.default_dpi
         images = vector_render.render_pair(inputs.gt_by_type, inputs.preds, page.page_meta, cfg)
+        ink = vector_render.render_ink_pair(inputs.gt_by_type, inputs.preds, page.page_meta, dpi, cfg)
         res = vector_metrics.evaluate_vector_metrics(
-            inputs.gt_by_type, inputs.preds, inputs.label_counts, images=images, cfg=cfg,
+            inputs.gt_by_type, inputs.preds, inputs.label_counts, images=images, ink=ink,
+            dpi=dpi, text_boxes=inputs.text_boxes, cfg=cfg,
         )
+        del images, ink
         per_page.append((pi, res))
     return per_page, aggregate_vector_metrics([r for _pi, r in per_page])
 

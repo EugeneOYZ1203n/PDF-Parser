@@ -18,7 +18,7 @@ import pymupdf as fitz
 
 import rastervec.config as rvconfig
 from rastervec.Evaluation import dump_io
-from rastervec.Evaluation.Evaluate import adapters, label_overlays, metrics
+from rastervec.Evaluation.Evaluate import adapters, label_overlays, liu_dori, metrics, vector_metrics
 from rastervec.Evaluation.Labelling.label_schema import LabelSet
 from rastervec.Evaluation.Report import stage_stats
 from rastervec.commons.logging_setup import get_logger
@@ -549,3 +549,99 @@ def _add_extra_prediction_layers(
     for (label, hexc), pdf_bytes in zip(_EXTRA_LAYERS, rendered):
         fname = f"benchmark__{_layer_slug(label)}.pdf"
         writer.add(fname, {"stage": "benchmark", "layer": label, "file": fname, "color": hexc}, pdf_bytes)
+
+
+# Liu-Dori raster-vector evaluation overlays (stage `vector_eval`): label,
+# legend colour. The two "by Q_v" layers are a red (0) -> green (1) ramp.
+_VECTOR_EVAL_LAYERS = (
+    ("gt by Q_v", "#16a34a"),
+    ("pred by Q_v", "#2563eb"),
+    ("missed gt", "#dc2626"),
+    ("false alarms", "#f97316"),
+    ("gt endpoints", "#7c3aed"),
+    ("pred endpoints", "#0891b2"),
+)
+_Q_BINS = 10
+_MIN_DRAW_WIDTH = 0.5
+_ENDPOINT_RADIUS = 0.6
+
+
+def _q_color(q: float) -> tuple[float, float, float]:
+    """Red (0) -> yellow (0.5) -> green (1)."""
+    q = min(1.0, max(0.0, q))
+    return (min(1.0, 2.0 * (1.0 - q)), min(1.0, 2.0 * q), 0.0)
+
+
+def _bars_by_quality(bars, scores) -> list:
+    """`stroke_batch_spec`s of `bars` coloured by their line's Q_v, one
+    batch per (Q_v bin, width)."""
+    from collections import defaultdict
+
+    from rastervec.commons.renderer.draw import stroke_batch_spec
+
+    batches: dict = defaultdict(list)
+    for b, s in zip(bars, scores):
+        qbin = min(_Q_BINS - 1, int(s.q_v * _Q_BINS))
+        batches[(qbin, round(max(b.w_eff, _MIN_DRAW_WIDTH), 3))].append([b.p0, b.p1])
+    return [
+        stroke_batch_spec(lines, _q_color((qbin + 0.5) / _Q_BINS), width=w)
+        for (qbin, w), lines in sorted(batches.items())
+    ]
+
+
+def _bars_plain(bars, hexc: str) -> list:
+    from collections import defaultdict
+
+    from rastervec.commons.renderer.draw import stroke_batch_spec
+
+    batches: dict = defaultdict(list)
+    for b in bars:
+        batches[round(max(b.w_eff, _MIN_DRAW_WIDTH), 3)].append([b.p0, b.p1])
+    return [stroke_batch_spec(lines, _rgb01(hexc), width=w) for w, lines in batches.items()]
+
+
+def _endpoints(bars, hexc: str) -> list:
+    from rastervec.commons.renderer.draw import dot_batch_spec
+
+    pts = [p for b in bars for p in (b.p0, b.p1)]
+    return [dot_batch_spec(pts, _rgb01(hexc), radius=_ENDPOINT_RADIUS)] if pts else []
+
+
+def _add_vector_eval_layers(
+    writer: _LayerWriter, page_meta, page_gt: LabelSet, raster_vectors: list, dpi: float,
+    cfg: "vector_metrics.VectorMetricConfig | None" = None,
+) -> None:
+    """Adds this page's `vector_eval__*.pdf` layers: the Liu-Dori
+    evaluation (`liu_dori.evaluate`, the same pure scorer the benchmark
+    uses) of `raster_vectors` (the rasterised-PDF run's P2 output) against
+    `page_gt`'s `vector_to_raster`/`original_raster` geometry -- every GT
+    bar and every predicted bar coloured by its line's Q_v, missed GT
+    (|D(g)| = 0), pure false alarms (|G(k)| = 0) and both sides' bar
+    endpoints. One page per layer (an all-blank layer is dropped by
+    `_LayerWriter`)."""
+    from rastervec.commons.renderer.draw import render_specs_pdf
+
+    cfg = cfg or vector_metrics.VectorMetricConfig()
+    inputs = adapters.build_vector_eval_inputs(page_gt, raster_vectors)
+    gt_bars, pred_bars, _overlaps, res = liu_dori.evaluate(
+        vector_metrics.gt_entries_union(inputs.gt_by_type), inputs.preds, dpi, cfg.liu_dori,
+        text_boxes=inputs.text_boxes,
+    )
+    missed = [b for b, s in zip(gt_bars, res.gt_scores) if s.n_matched == 0]
+    false_alarms = [b for b, s in zip(pred_bars, res.pred_scores) if s.n_matched == 0]
+    specs_by_layer = (
+        _bars_by_quality(gt_bars, res.gt_scores),
+        _bars_by_quality(pred_bars, res.pred_scores),
+        _bars_plain(missed, _VECTOR_EVAL_LAYERS[2][1]),
+        _bars_plain(false_alarms, _VECTOR_EVAL_LAYERS[3][1]),
+        _endpoints(gt_bars, _VECTOR_EVAL_LAYERS[4][1]),
+        _endpoints(pred_bars, _VECTOR_EVAL_LAYERS[5][1]),
+    )
+    for (label, hexc), specs in zip(_VECTOR_EVAL_LAYERS, specs_by_layer):
+        if not specs:
+            continue
+        fname = f"vector_eval__{_layer_slug(label)}.pdf"
+        writer.add(
+            fname, {"stage": "vector_eval", "layer": label, "file": fname, "color": hexc},
+            render_specs_pdf(page_meta, specs),
+        )

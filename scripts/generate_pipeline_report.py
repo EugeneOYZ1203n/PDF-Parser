@@ -118,7 +118,7 @@ import pymupdf as fitz
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from rastervec.Evaluation import conversion, dump_io
-from rastervec.Evaluation.Evaluate import adapters, metrics
+from rastervec.Evaluation.Evaluate import adapters, metrics, vector_metrics
 from rastervec.Evaluation.Evaluate.variants import PipelineVariant, resolve_variant
 from rastervec.Evaluation.Labelling import native_label
 from rastervec.Evaluation.Evaluate.metrics import TEXT_TYPES
@@ -155,6 +155,7 @@ from rastervec.Evaluation.Report.report_artifacts import (  # noqa: F401 -- re-e
     _accumulate_page,
     _active_artifacts,
     _add_extra_prediction_layers,
+    _add_vector_eval_layers,
     _debug_image_sink,
     _debug_layer_sink,
     _finalize_doc_dir,
@@ -541,8 +542,10 @@ def _process_pdf_benchmark(
         raster_vectors = []
         raster_steps: dict = {}
         raster_substeps: dict = {}
+        raster_dpi = None
         if bench.rasterised_pdf_path is not None:
             raster_page_path = doc_dir / f"rasterised_p{p}.pdf"
+            raster_dpi = adapters.raster_dpi_for_page(str(bench.rasterised_pdf_path), p)
             try:
                 with clock("conversion"):
                     _extract_single_page(bench.rasterised_pdf_path, p, raster_page_path)
@@ -572,6 +575,24 @@ def _process_pdf_benchmark(
                 if not config.keep_converted_pdfs:
                     raster_page_path.unlink(missing_ok=True)
 
+            page_gt = LabelSet(
+                pdf_path=str(bench.pdf_path),
+                entries=[e for t in TEXT_TYPES for e in gt_by_type[t].entries if e.page_index == p],
+                geometry_entries=[
+                    g for t in ("vector_to_raster", "original_raster")
+                    for g in gt_by_type[t].geometry_entries if g.page_index == p
+                ],
+            )
+            if config.debug_layers and page_gt.geometry_entries:
+                try:
+                    with clock("vector_eval"):
+                        _add_vector_eval_layers(
+                            writer, res.page.meta, page_gt, raster_vectors,
+                            raster_dpi or vector_metrics.VectorMetricConfig().default_dpi,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    _LOG.warning("%s: vector_eval layers failed for page %d: %s", bench.key, p, exc)
+
         dumps.append(dump_io.PageDump(
             page_meta=res.page.meta, texts=list(res.texts or []),
             vectors=list(res.vectors or []), engine=variant.engine,
@@ -584,6 +605,7 @@ def _process_pdf_benchmark(
             debug_durations=debug_durations,
             fast_cluster_stats=_fast_cluster_stats(res, variant.p3),
             retry_stats=_retry_stats(res, variant.p3),
+            raster_dpi=raster_dpi,
         ))
         if not config.keep_converted_pdfs:
             conv_path.unlink(missing_ok=True)

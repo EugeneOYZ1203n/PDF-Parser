@@ -1,41 +1,35 @@
-"""Vector-geometry metrics for a raster (P2) run: count accuracy, image
-similarity (SSIM/PSNR), total length and direction distribution.
+"""Vector-geometry metrics for a raster (P2) run.
 
 2 GT vector types (`VECTOR_TYPES`): `vector_to_raster` (`GeometryAnnotation`
 entries with `source=="auto"`), `original_raster` (`source=="manual"`).
 Predictions are the vectors of a pipeline run on the page's rasterised PDF
 (P2's output -- that page has no native vectors). The page is scored against
-the **union** of both GT types (that is what P2 sees); recall is also
-reported per type. `original_vector` is a `metrics.TEXT_TYPES` text type
-only, never scored here.
+the **union** of both GT types (that is what P2 sees); D_v is also reported
+per type. `original_vector` is a `metrics.TEXT_TYPES` text type only, never
+scored here. Full description: `docs/RasterToVectorEvaluation.md`.
 
-Every metric works off one shared prep step, `flatten_entries`: each
-`GeometryEntry` becomes points (`"l"` 2, `"c"` `curve_segments + 1`
-equal-t samples; `re`/`qu` were already split into 4 lines upstream), and
-consecutive touching entries of one group (one source `Vector`) are joined
-into one polyline.
-
-- **Count** (`build_strokes` + `pair_strokes`): each polyline is
-  RDP-simplified (removes 1 px staircases), split at turns sharper than
-  `turn_tol_deg`, then pieces are chained end to end across groups when the
-  ends are within `endpoint_tolerance_pt` and continue straight (within
-  `turn_tol_deg`) -- at a junction of 3+ ends the straightest pairs are
-  joined, so a line split at a crossing is one stroke again. GT and
-  predictions go through the identical chain, then strokes pair greedily
-  nearest-first when both ends are within tolerance and both end tangents
-  agree. Several predicted pieces drawn along one GT line are therefore one
-  paired stroke, not one hit + spurious extras.
+- **Line detection** (`liu_dori.py`): the Liu & Dori (1997) vector-level
+  protocol -- D_v / F_v / VRI, every per-overlap quality factor, per-line
+  basic / fragmentation quality, fragmentation histograms, text/solid/type
+  splits.
+- **Pixel level** (`liu_dori.pixel_stats`): the same paper's D_p / F_p /
+  PRI on ink masks of GT and predictions rendered at their floored widths
+  (`vector_render.render_ink_pair`).
 - **Image** (`image_similarity`): SSIM + PSNR between grayscale renders of GT
   and predictions at their real widths (`vector_render.py` renders; this
   module only compares arrays).
 - **Length** (`length_stats`): sum of raw flattened segment lengths, GT vs
-  predicted; ratio pred / GT.
+  predicted; ratio pred / GT -- a global sanity check.
 - **Direction** (`direction_stats`): length-weighted histogram of raw
   flattened segment angles mod 180 deg (`direction_bins` bins); score =
-  intersection of the two normalised histograms (1 = identical).
+  intersection of the two normalised histograms (1 = identical) -- a global
+  sanity check.
 
-Length and direction deliberately use the raw (un-simplified) geometry, so
-staircase output is penalised there.
+Length/direction/image work off `flatten_entries`: each `GeometryEntry`
+becomes points (`"l"` 2, `"c"` `curve_segments + 1` equal-t samples;
+`re`/`qu` were already split into 4 lines upstream), and consecutive
+touching entries of one group (one source `Vector`) are joined into one
+polyline.
 
 Pure -- no pipeline/label_schema/fitz import; callers (`adapters.py`) build
 `GeometryEntry` lists via `geometry_entries_from_vector`/
@@ -44,10 +38,12 @@ Pure -- no pipeline/label_schema/fitz import; callers (`adapters.py`) build
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
+from rastervec.Evaluation.Evaluate import liu_dori
+from rastervec.Evaluation.Evaluate.liu_dori import LiuDoriConfig, LiuDoriResult, PixelStats
 from rastervec.Evaluation.Evaluate.metrics import Ratio
 
 VECTOR_TYPES: tuple[str, ...] = ("vector_to_raster", "original_raster")
@@ -59,15 +55,15 @@ _TOUCH_EPS = 1e-6
 
 @dataclass(frozen=True)
 class VectorMetricConfig:
-    endpoint_tolerance_pt: float = 2.0
-    rdp_eps_pt: float = 0.5
-    turn_tol_deg: float = 15.0
     curve_segments: int = 10
     direction_bins: int = 36
     render_dpi: float = 150.0
     psnr_cap_db: float = 100.0
     # Width (pt) a fill-only entry (no stroke width) is rendered with.
     default_width_pt: float = 0.5
+    liu_dori: LiuDoriConfig = LiuDoriConfig()
+    # Used when a page's rasterised-PDF dpi is unknown.
+    default_dpi: float = 300.0
 
 
 # --------------------------------------------------------------------------
@@ -80,6 +76,7 @@ class GeometryEntry:
     color: "tuple[float, ...] | None" = None
     fill: "tuple[float, ...] | None" = None
     width: "float | None" = None
+    dashes: "str | None" = None
     # Entries of one group (one source Vector / annotation) may be joined
     # into one polyline when consecutive ones touch.
     group: int = -1
@@ -96,7 +93,7 @@ def geometry_entries_from_annotations(anns: list, *, vector_type: str = "") -> l
     return [
         GeometryEntry(
             kind=a.kind, points=tuple(tuple(p) for p in a.points), color=a.color, fill=a.fill,
-            width=a.width, group=i, vector_type=vector_type,
+            width=a.width, dashes=getattr(a, "dashes", None), group=i, vector_type=vector_type,
         )
         for i, a in enumerate(anns)
     ]
@@ -108,7 +105,7 @@ def geometry_entries_from_vector(v, *, group: int = -1) -> list[GeometryEntry]:
     `label_schema.geometry_annotations_for_vector`'s decomposition."""
     from rastervec.commons.helpers.geometry import item_points
 
-    common = dict(color=v.color, fill=v.fill, width=v.width, group=group)
+    common = dict(color=v.color, fill=v.fill, width=v.width, dashes=getattr(v, "dashes", None), group=group)
     out: list[GeometryEntry] = []
     for item in v.items:
         kind = item[0]
@@ -199,260 +196,6 @@ def _segments(polys: list[FlatPolyline]) -> np.ndarray:
     if not polys:
         return np.zeros((0, 2))
     return np.concatenate([np.diff(p.points, axis=0) for p in polys])
-
-
-# --------------------------------------------------------------------------
-# Strokes (count accuracy)
-# --------------------------------------------------------------------------
-@dataclass(frozen=True)
-class Stroke:
-    p0: Point
-    p1: Point
-    # Outward unit tangents at p0 / p1 ((0, 0) for a degenerate stroke).
-    t0: Point
-    t1: Point
-    vector_type: str = ""
-
-
-def _rdp(pts: np.ndarray, eps: float) -> np.ndarray:
-    """Iterative Ramer-Douglas-Peucker."""
-    n = len(pts)
-    if n <= 2:
-        return pts
-    keep = np.zeros(n, dtype=bool)
-    keep[0] = keep[-1] = True
-    stack = [(0, n - 1)]
-    while stack:
-        i, j = stack.pop()
-        if j - i < 2:
-            continue
-        a, b = pts[i], pts[j]
-        seg = pts[i + 1:j]
-        d = b - a
-        norm = math.hypot(d[0], d[1])
-        if norm == 0.0:
-            dist = np.hypot(seg[:, 0] - a[0], seg[:, 1] - a[1])
-        else:
-            dist = np.abs(d[0] * (seg[:, 1] - a[1]) - d[1] * (seg[:, 0] - a[0])) / norm
-        k = int(np.argmax(dist))
-        if dist[k] > eps:
-            m = i + 1 + k
-            keep[m] = True
-            stack.append((i, m))
-            stack.append((m, j))
-    return pts[keep]
-
-
-def _unit(v: np.ndarray) -> np.ndarray:
-    n = math.hypot(v[0], v[1])
-    return v / n if n > 0 else np.zeros(2)
-
-
-def _split_at_turns(pts: np.ndarray, cos_tol: float) -> list[np.ndarray]:
-    """Split a polyline at every interior vertex where the direction turns
-    by more than the tolerance."""
-    if len(pts) <= 2:
-        return [pts]
-    d = np.diff(pts, axis=0)
-    n = np.hypot(d[:, 0], d[:, 1])
-    ok = n > 0
-    pts, d, n = np.concatenate([pts[:1], pts[1:][ok]]), d[ok], n[ok]
-    if len(d) <= 1:
-        return [pts]
-    u = d / n[:, None]
-    cos = (u[:-1] * u[1:]).sum(axis=1)
-    cuts = np.nonzero(cos < cos_tol)[0] + 1  # vertex indices to split at
-    pieces, start = [], 0
-    for c in cuts:
-        pieces.append(pts[start:c + 1])
-        start = c
-    pieces.append(pts[start:])
-    return pieces
-
-
-def _piece_ends(piece: np.ndarray):
-    """(p0, outward t0, p1, outward t1)."""
-    p0, p1 = piece[0], piece[-1]
-    if len(piece) < 2:
-        z = np.zeros(2)
-        return p0, z, p1, z
-    return p0, _unit(piece[0] - piece[1]), p1, _unit(piece[-1] - piece[-2])
-
-
-def build_strokes(polys: list[FlatPolyline], cfg: "VectorMetricConfig | None" = None) -> list[Stroke]:
-    """Polylines -> strokes: RDP, split at sharp turns, then chain pieces end
-    to end across polylines (ends within tolerance, straight continuation;
-    at a junction the straightest pairs join, each end at most once). Every
-    polyline should share one `vector_type` -- callers chain per type."""
-    from scipy.spatial import cKDTree
-
-    cfg = cfg or VectorMetricConfig()
-    cos_tol = math.cos(math.radians(cfg.turn_tol_deg))
-    pieces: list[np.ndarray] = []
-    vtype = polys[0].vector_type if polys else ""
-    for poly in polys:
-        pieces.extend(_split_at_turns(_rdp(poly.points, cfg.rdp_eps_pt), cos_tol))
-    if not pieces:
-        return []
-
-    n = len(pieces)
-    ends = np.zeros((2 * n, 2))
-    tans = np.zeros((2 * n, 2))
-    for i, pc in enumerate(pieces):
-        p0, t0, p1, t1 = _piece_ends(pc)
-        ends[2 * i], tans[2 * i] = p0, t0
-        ends[2 * i + 1], tans[2 * i + 1] = p1, t1
-
-    # Candidate joins: ends of different pieces within tolerance whose
-    # outward tangents point at each other (straight continuation).
-    cands = []
-    for a, b in cKDTree(ends).query_pairs(cfg.endpoint_tolerance_pt):
-        if a // 2 == b // 2:
-            continue
-        if not (tans[a].any() and tans[b].any()):  # a degenerate piece never chains
-            continue
-        cos = -float(tans[a] @ tans[b])
-        if cos >= cos_tol:
-            dist = float(np.hypot(*(ends[a] - ends[b])))
-            cands.append((-cos, dist, a, b))
-    cands.sort()
-
-    parent = list(range(n))
-
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    link = [-1] * (2 * n)
-    for _c, _d, a, b in cands:
-        if link[a] >= 0 or link[b] >= 0:
-            continue
-        ra, rb = find(a // 2), find(b // 2)
-        if ra == rb:  # would close a loop
-            continue
-        parent[ra] = rb
-        link[a], link[b] = b, a
-
-    strokes: list[Stroke] = []
-    seen = [False] * n
-    for start_end in range(2 * n):
-        piece = start_end // 2
-        if seen[piece] or link[start_end] >= 0:
-            continue
-        # Walk from a free end through the chain.
-        e = start_end
-        first = e
-        while True:
-            seen[e // 2] = True
-            other = e ^ 1
-            nxt = link[other]
-            if nxt < 0:
-                last = other
-                break
-            e = nxt
-        strokes.append(Stroke(
-            p0=tuple(ends[first]), p1=tuple(ends[last]),
-            t0=tuple(tans[first]), t1=tuple(tans[last]), vector_type=vtype,
-        ))
-    return strokes
-
-
-@dataclass(frozen=True)
-class StrokePairing:
-    paired: "list[tuple[int, int]]"  # (gt_idx, pred_idx)
-    unpaired_gt: "list[int]"
-    unpaired_pred: "list[int]"
-
-
-def _tangents_agree(a, b, cos_tol: float) -> bool:
-    """Undirected agreement; a degenerate tangent always agrees."""
-    if not (any(a) and any(b)):
-        return True
-    return abs(a[0] * b[0] + a[1] * b[1]) >= cos_tol
-
-
-def pair_strokes(gt: list[Stroke], pred: list[Stroke], cfg: "VectorMetricConfig | None" = None) -> StrokePairing:
-    """Greedy nearest-first: a pair needs both ends within tolerance (in the
-    better orientation) and both end tangents agreeing."""
-    from scipy.spatial import cKDTree
-
-    cfg = cfg or VectorMetricConfig()
-    tol = cfg.endpoint_tolerance_pt
-    cos_tol = math.cos(math.radians(cfg.turn_tol_deg))
-    cands: list[tuple[float, int, int]] = []
-    if gt and pred:
-        pred_ends = np.array([s.p0 for s in pred] + [s.p1 for s in pred])
-        tree = cKDTree(pred_ends)
-        m = len(pred)
-        for gi, g in enumerate(gt):
-            near = {j % m for j in tree.query_ball_point(g.p0, tol)}
-            for pj in near:
-                p = pred[pj]
-                best = None
-                for q0, q1, u0, u1 in ((p.p0, p.p1, p.t0, p.t1), (p.p1, p.p0, p.t1, p.t0)):
-                    d0, d1 = math.dist(g.p0, q0), math.dist(g.p1, q1)
-                    if d0 > tol or d1 > tol:
-                        continue
-                    if not (_tangents_agree(g.t0, u0, cos_tol) and _tangents_agree(g.t1, u1, cos_tol)):
-                        continue
-                    if best is None or d0 + d1 < best:
-                        best = d0 + d1
-                if best is not None:
-                    cands.append((best, gi, pj))
-    cands.sort()
-    used_g: set[int] = set()
-    used_p: set[int] = set()
-    paired: list[tuple[int, int]] = []
-    for _d, gi, pj in cands:
-        if gi in used_g or pj in used_p:
-            continue
-        used_g.add(gi)
-        used_p.add(pj)
-        paired.append((gi, pj))
-    return StrokePairing(
-        paired=paired,
-        unpaired_gt=[i for i in range(len(gt)) if i not in used_g],
-        unpaired_pred=[j for j in range(len(pred)) if j not in used_p],
-    )
-
-
-@dataclass(frozen=True)
-class VectorCountStats:
-    n_gt_strokes: int
-    n_pred_strokes: int
-    n_paired: int
-    n_missed: int
-    n_spurious: int
-    precision: Ratio
-    recall: Ratio
-    # Per GT type: Ratio(paired GT strokes of that type, GT strokes of that type).
-    recall_by_type: "dict[str, Ratio]"
-    n_gt_primitives: int = 0
-    n_pred_primitives: int = 0
-
-
-def vector_count_stats(
-    gt_strokes: list[Stroke], pred_strokes: list[Stroke], pairing: StrokePairing,
-    *, n_gt_primitives: int = 0, n_pred_primitives: int = 0,
-) -> VectorCountStats:
-    n_paired = len(pairing.paired)
-    n_missed = len(pairing.unpaired_gt)
-    n_spurious = len(pairing.unpaired_pred)
-    paired_gt = {gi for gi, _pj in pairing.paired}
-    recall_by_type = {}
-    for t in VECTOR_TYPES:
-        idx = [i for i, s in enumerate(gt_strokes) if s.vector_type == t]
-        recall_by_type[t] = Ratio(float(sum(1 for i in idx if i in paired_gt)), float(len(idx)))
-    return VectorCountStats(
-        n_gt_strokes=len(gt_strokes), n_pred_strokes=len(pred_strokes),
-        n_paired=n_paired, n_missed=n_missed, n_spurious=n_spurious,
-        precision=Ratio(float(n_paired), float(n_paired + n_spurious)),
-        recall=Ratio(float(n_paired), float(n_paired + n_missed)),
-        recall_by_type=recall_by_type,
-        n_gt_primitives=n_gt_primitives, n_pred_primitives=n_pred_primitives,
-    )
 
 
 # --------------------------------------------------------------------------
@@ -562,11 +305,11 @@ def image_similarity(
 @dataclass
 class VectorMetricSuiteResult:
     label_counts: dict[str, int]
-    count: VectorCountStats
+    liu_dori: LiuDoriResult
+    pixel: PixelStats
     image: ImageSimilarityStats
     length: LengthStats
     direction: DirectionStats
-    pairing: "StrokePairing | None" = field(default=None, repr=False)  # per page only
 
 
 def evaluate_vector_metrics(
@@ -575,34 +318,38 @@ def evaluate_vector_metrics(
     label_counts: "dict[str, int]",
     *,
     images: "tuple[np.ndarray, np.ndarray] | None" = None,
+    ink: "tuple[np.ndarray, np.ndarray] | None" = None,
+    dpi: "float | None" = None,
+    text_boxes: "list | None" = None,
     cfg: VectorMetricConfig = VectorMetricConfig(),
 ) -> VectorMetricSuiteResult:
-    """`images`: `(gt_render, pred_render)` from `vector_render.render_pair`;
-    `None` leaves the image stats not-applicable (nan)."""
-    gt_polys_by_type = {
-        t: flatten_entries([e if e.vector_type == t else _with_type(e, t) for e in gt_by_type.get(t, [])], cfg)
-        for t in VECTOR_TYPES
-    }
-    gt_polys = [p for t in VECTOR_TYPES for p in gt_polys_by_type[t]]
+    """`images`: `(gt_render, pred_render)` from `vector_render.render_pair`
+    (SSIM/PSNR); `ink`: `(gt_mask, pred_mask)` from
+    `vector_render.render_ink_pair` (D_p/F_p/PRI). Either `None` leaves its
+    stats not-applicable. `dpi`: the rasterised PDF's resolution (width
+    floor + curve sampling); `None` -> `cfg.default_dpi`. `text_boxes`:
+    page-space text-label bboxes for the text / non-text split."""
+    gt_entries = gt_entries_union(gt_by_type)
+    gt_polys = flatten_entries(gt_entries, cfg)
     pred_polys = flatten_entries(preds, cfg)
-
-    gt_strokes = [s for t in VECTOR_TYPES for s in build_strokes(gt_polys_by_type[t], cfg)]
-    pred_strokes = build_strokes(pred_polys, cfg)
-    pairing = pair_strokes(gt_strokes, pred_strokes, cfg)
-    count = vector_count_stats(
-        gt_strokes, pred_strokes, pairing,
-        n_gt_primitives=sum(len(gt_by_type.get(t, [])) for t in VECTOR_TYPES),
-        n_pred_primitives=len(preds),
+    _gt_bars, _pred_bars, _overlaps, ld = liu_dori.evaluate(
+        gt_entries, preds, dpi or cfg.default_dpi, cfg.liu_dori, text_boxes=text_boxes,
     )
     image = image_similarity(images[0], images[1], cfg) if images is not None else _IMAGE_NA
+    pixel = liu_dori.pixel_stats(ink[0], ink[1], cfg.liu_dori) if ink is not None else liu_dori.PIXEL_NA
     return VectorMetricSuiteResult(
         label_counts={t: int(label_counts.get(t, 0)) for t in VECTOR_TYPES},
-        count=count,
+        liu_dori=ld,
+        pixel=pixel,
         image=image,
         length=length_stats(gt_polys, pred_polys),
         direction=direction_stats(gt_polys, pred_polys, cfg.direction_bins),
-        pairing=pairing,
     )
+
+
+def gt_entries_union(gt_by_type: "dict[str, list[GeometryEntry]]") -> "list[GeometryEntry]":
+    """Every `VECTOR_TYPES` type's entries, each tagged with its type."""
+    return [e if e.vector_type == t else _with_type(e, t) for t in VECTOR_TYPES for e in gt_by_type.get(t, [])]
 
 
 def _with_type(e: GeometryEntry, t: str) -> GeometryEntry:
@@ -611,31 +358,11 @@ def _with_type(e: GeometryEntry, t: str) -> GeometryEntry:
 
 
 def aggregate_vector_metrics(results: "list[VectorMetricSuiteResult]") -> "VectorMetricSuiteResult | None":
-    """Counts and lengths summed, SSIM pixel-weighted, PSNR from pooled MSE,
-    direction histograms summed (intersection recomputed)."""
+    """Liu-Dori ratios micro-averaged, pixel counts summed, SSIM
+    pixel-weighted, PSNR from pooled MSE, lengths and direction histograms
+    summed (intersection recomputed)."""
     if not results:
         return None
-    cs = [r.count for r in results]
-    n_paired = sum(c.n_paired for c in cs)
-    n_missed = sum(c.n_missed for c in cs)
-    n_spurious = sum(c.n_spurious for c in cs)
-    count = VectorCountStats(
-        n_gt_strokes=sum(c.n_gt_strokes for c in cs),
-        n_pred_strokes=sum(c.n_pred_strokes for c in cs),
-        n_paired=n_paired, n_missed=n_missed, n_spurious=n_spurious,
-        precision=Ratio(float(n_paired), float(n_paired + n_spurious)),
-        recall=Ratio(float(n_paired), float(n_paired + n_missed)),
-        recall_by_type={
-            t: Ratio(
-                sum(c.recall_by_type[t].numerator for c in cs),
-                sum(c.recall_by_type[t].denominator for c in cs),
-            )
-            for t in VECTOR_TYPES
-        },
-        n_gt_primitives=sum(c.n_gt_primitives for c in cs),
-        n_pred_primitives=sum(c.n_pred_primitives for c in cs),
-    )
-
     imgs = [r.image for r in results if r.image.n_pixels and not math.isnan(r.image.mse)]
     n_px = sum(i.n_pixels for i in imgs)
     image = ImageSimilarityStats(
@@ -653,7 +380,8 @@ def aggregate_vector_metrics(results: "list[VectorMetricSuiteResult]") -> "Vecto
 
     return VectorMetricSuiteResult(
         label_counts={t: sum(r.label_counts.get(t, 0) for r in results) for t in VECTOR_TYPES},
-        count=count,
+        liu_dori=liu_dori.aggregate_liu_dori([r.liu_dori for r in results]),
+        pixel=liu_dori.aggregate_pixel([r.pixel for r in results if r.pixel.gt_ink or r.pixel.pred_ink]),
         image=image,
         length=LengthStats(
             gt_length=sum(r.length.gt_length for r in results),

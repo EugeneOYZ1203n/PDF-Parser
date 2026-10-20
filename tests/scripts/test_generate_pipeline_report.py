@@ -320,8 +320,6 @@ def test_final_stage_trims_new_engine_artifacts():
 def test_debug_images_flag_default_and_off(tmp_path):
     from types import SimpleNamespace
 
-    import numpy as np
-
     assert gpr.ReportConfig().debug_images is True
     crop = np.zeros((4, 4, 3), dtype=np.uint8)
     res = SimpleNamespace(extra={"p3_debug": {"ocr_crops": [(crop, "A")]}})
@@ -583,3 +581,27 @@ def test_benchmark_without_converted_pdfs_writes_no_pdfs(tmp_path, synthetic_pdf
     assert (run_dir / "A" / "ground_truth_native_to_vector.json").is_file()
     assert list(run_dir.rglob("*.pdf")) == []
     assert list(run_dir.rglob("*.png")) == []
+
+
+def test_vector_eval_layers(tmp_path, vector):
+    from rastervec.Evaluation.Labelling.label_schema import GeometryAnnotation, LabelSet
+    from rastervec.commons.models import PageMeta
+
+    pm = PageMeta(index=0, number=1, mediabox=(0, 0, 100, 100), rotation=0, width=100, height=100)
+    gt = LabelSet(pdf_path="x.pdf", entries=[], geometry_entries=[
+        GeometryAnnotation(page_index=0, kind="l", points=[(10, 10), (90, 10)], width=1.0, source="auto"),
+        GeometryAnnotation(page_index=0, kind="l", points=[(10, 50), (90, 50)], width=1.0, source="manual"),
+    ])
+    pred = vector(items=[("l", (10, 10), (90, 10)), ("l", (10, 80), (90, 80))], width=1.0)
+    writer = gpr._LayerWriter()
+    writer.begin_page(0, 100, 100)
+    gpr._add_vector_eval_layers(writer, pm, gt, [pred], 300.0)
+    assert set(writer.filenames()) == {
+        "vector_eval__gt_by_q_v.pdf", "vector_eval__pred_by_q_v.pdf", "vector_eval__missed_gt.pdf",
+        "vector_eval__false_alarms.pdf", "vector_eval__gt_endpoints.pdf", "vector_eval__pred_endpoints.pdf",
+    }
+    assert all(m["stage"] == "vector_eval" for m in writer.meta.values())
+    writer.finalize(tmp_path)
+    with fitz.open(str(tmp_path / "vector_eval__missed_gt.pdf")) as doc:
+        assert doc.page_count == 1
+

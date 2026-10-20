@@ -499,36 +499,11 @@ demand.
 | `text_candidate_area_recall_of_gt` | vector-classification | GT area covered by the candidate layer ÷ total GT area |
 | `ocr_blank_rate_over_reached_gt` | vector-classification | of GT that reached OCR, fraction whose covering cluster came back blank |
 
-## 7. Raster vector metrics (`vector_metrics.py`)
+## 7. Raster vector metrics (`vector_metrics.py`, `liu_dori.py`)
 
-Scores the vectors of the benchmark's **rasterised-PDF run** (`PageDump.raster_vectors` -- P2's
-output; that page has no native vectors) against the **union** of the `vector_to_raster`
-(`GeometryAnnotation.source == "auto"`) and `original_raster` (`"manual"`) geometry labels. Text
-glyph strokes are not masked: they count as GT. Tunables: `VectorMetricConfig`.
-
-Shared prep, `flatten_entries`: `"l"` → 2 points, `"c"` → `curve_segments + 1` (10 pieces)
-equal-t samples, `re`/`qu` → 4 lines (done upstream); consecutive touching entries of one group
-(one source `Vector`) join into one polyline.
-
-- **Count accuracy** (`build_strokes` → `pair_strokes` → `VectorCountStats`). GT (chained per
-  type) and predictions go through the identical chain: RDP-simplify each polyline at
-  `rdp_eps_pt` (0.5 — removes 1 px staircases), split at turns > `turn_tol_deg` (15°), then
-  join pieces across polylines whose ends are within `endpoint_tolerance_pt` (2 pt) and continue
-  straight (within 15°) — greedy straightest-first, each end joined once, no loops, so a line
-  split at a crossing is one stroke again. Strokes pair greedily nearest-first when both ends are
-  within tolerance (better orientation) **and** both end tangents agree (undirected, 15°).
-  Precision = paired / pred strokes, recall = paired / GT strokes, plus recall per GT type.
-- **Image similarity** (`vector_render.render_pair` → `image_similarity`): GT and predictions
-  rendered grayscale (luminance of stroke colour, else fill) at their real widths
-  (`default_width_pt` when none) at `render_dpi` (150), whole page, through
-  `draw.stroke_batch_spec`. SSIM (`skimage`, Gaussian σ 1.5, data range 255) and PSNR (capped at
-  `psnr_cap_db`, 100 dB).
-- **Length** (`length_stats`): Σ raw flattened segment length, GT vs pred; ratio pred / GT
-  (1 = match, > 1 over-tracing/duplicates, < 1 misses).
-- **Direction** (`direction_stats`): length-weighted histogram of raw segment angle mod 180°
-  (`direction_bins`, 36 × 5°); score = Σ min of the two normalised histograms (1 = identical,
-  nan when either side is empty).
-
-Length and direction use the **raw** geometry (no RDP), so staircase output is penalised there
-by design. Aggregation (`aggregate_vector_metrics`): counts and lengths summed, histograms summed
-before the intersection, SSIM pixel-weighted, PSNR from pooled MSE.
+Phase 2 (raster → vector) output is scored with the Liu & Dori (1997) vector-level line-detection
+protocol (D_v / F_v / VRI, per-overlap quality factors, fragmentation counts), its pixel-level
+companion (D_p / F_p / PRI), SSIM/PSNR, and length / direction sanity checks. The full
+description — inputs, units and width floor, every formula, every deviation from the paper, the
+report and viewer outputs, and the known biases — is in
+[`RasterToVectorEvaluation.md`](RasterToVectorEvaluation.md).

@@ -13,12 +13,14 @@ label sources the run had), scores each shared input's text metrics
 (`metrics.evaluate_text_metrics`) and vector metrics
 (`vector_metrics.evaluate_vector_metrics`: the rasterised-PDF run's
 vectors -- P2's output -- against the union of the
-`vector_to_raster`/`original_raster` geometry labels; `original_vector` is
-scored as a text-provenance type only, not at the vector-geometry level),
+`vector_to_raster`/`original_raster` geometry labels, by the Liu & Dori
+(1997) protocol, see `docs/RasterToVectorEvaluation.md`; `original_vector`
+is scored as a text-provenance type only, not at the vector-geometry level),
 and writes one
 self-contained `report.html` -- one section per shared key, broken into
 Text (Char/Word/Font size/Rotation/Bbox/Vector classification/Reading
-order/Confusion), Vector (Count/Image similarity/Length/Direction) and Timing (per-page
+order/Confusion), Vector (Liu-Dori headline/Q_v components/splits/
+fragmentation/pixel level/Length/Direction) and Timing (per-page
 wall-clock per phase + P3 sub-step and report-generation cost, vectorised
 and rasterised runs, with a stacked-bar chart) subsections, each with
 linked chart PNGs, a per-character OCR accuracy table per text type
@@ -303,9 +305,18 @@ def main(argv: list[str] | None = None) -> int:
         builder.add_raw_html("".join(font_size_html))
 
         if any(v is not None for v in vector_by_run.values()):
-            charts.vector_count_chart(
-                vector_by_run, title=f"{key} aggregate vector count",
-                path=charts_dir / f"{kslug}__aggregate__vector_count.png")
+            charts.vector_headline_chart(
+                vector_by_run, title=f"{key} aggregate vector detection (Liu-Dori + pixel)",
+                path=charts_dir / f"{kslug}__aggregate__vector_headline.png")
+            charts.vector_components_chart(
+                vector_by_run, title=f"{key} aggregate Q_v components",
+                path=charts_dir / f"{kslug}__aggregate__vector_components.png")
+            charts.fragmentation_chart(
+                vector_by_run, side="gt", title=f"{key} predicted lines per GT line |D(g)|",
+                path=charts_dir / f"{kslug}__aggregate__vector_fragmentation.png")
+            charts.fragmentation_chart(
+                vector_by_run, side="pred", title=f"{key} GT lines per predicted line |G(k)|",
+                path=charts_dir / f"{kslug}__aggregate__vector_consolidation.png")
             charts.vector_quality_chart(
                 vector_by_run, title=f"{key} aggregate vector quality",
                 path=charts_dir / f"{kslug}__aggregate__vector_quality.png")
@@ -315,7 +326,8 @@ def main(argv: list[str] | None = None) -> int:
             builder.add_raw_html(
                 '<div class="charts">' + "".join(
                     f'<img src="{(charts_dir / f"{kslug}__aggregate__vector_{name}.png").relative_to(out_dir).as_posix()}">'
-                    for name in ("count", "quality", "direction")
+                    for name in ("headline", "components", "fragmentation", "consolidation",
+                                 "quality", "direction")
                 ) +
                 '</div>'
             )

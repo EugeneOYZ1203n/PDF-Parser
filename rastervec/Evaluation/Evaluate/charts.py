@@ -20,10 +20,8 @@ from rastervec.Evaluation.Evaluate.metrics import (  # noqa: E402
     TEXT_TYPES,
     TextMetricSuiteResult,
 )
-from rastervec.Evaluation.Evaluate.vector_metrics import (  # noqa: E402
-    VECTOR_TYPES,
-    VectorMetricSuiteResult,
-)
+from rastervec.Evaluation.Evaluate.liu_dori import FRAG_BUCKETS  # noqa: E402
+from rastervec.Evaluation.Evaluate.vector_metrics import VectorMetricSuiteResult  # noqa: E402
 
 _BAR_COLORS = ("#2563eb", "#dc2626", "#16a34a", "#d97706")
 
@@ -211,21 +209,60 @@ def timing_chart(summaries_by_run: "dict[str, dict]", *, title: str, path: Path)
     plt.close(fig)
 
 
-def vector_count_chart(
+def vector_headline_chart(
     results_by_run: "dict[str, VectorMetricSuiteResult | None]", *, title: str, path: Path,
 ) -> None:
-    """Stroke precision, union recall and recall per GT type."""
-    categories = ["precision", "recall (union)", *(f"recall {t}" for t in VECTOR_TYPES)]
+    """Liu-Dori D_v, 1 - F_v, VRI, pixel D_p, 1 - F_p, PRI and SSIM -- each
+    1.0 for a perfect detection."""
+    categories = ["D_v", "1 - F_v", "VRI", "D_p", "1 - F_p", "PRI", "SSIM"]
     series = {}
     for run, result in results_by_run.items():
         if result is None:
             series[run] = [float("nan")] * len(categories)
             continue
-        c = result.count
+        ld, px = result.liu_dori, result.pixel
         series[run] = [
-            c.precision.value, c.recall.value, *(c.recall_by_type[t].value for t in VECTOR_TYPES),
+            ld.d_v, 1.0 - ld.f_v, ld.vri, px.d_p.value, 1.0 - px.f_p.value, px.pri, result.image.ssim,
         ]
-    _grouped_bar(categories, series, title=title, ylabel="stroke ratio", path=path, ylim=(0, 1))
+    _grouped_bar(categories, series, title=title, ylabel="score (1 = match)", path=path, ylim=(0, 1))
+
+
+def vector_components_chart(
+    results_by_run: "dict[str, VectorMetricSuiteResult | None]", *, title: str, path: Path,
+) -> None:
+    """Every component of Q_v: the per-overlap factors, then GT-side and
+    pred-side basic / fragmentation / total quality."""
+    categories = ["Q_pt", "Q_od", "Q_w", "Q_v(c)", "Q_b(g)", "Q_fr(g)", "Q_v(g)", "Q_b(k)", "Q_fr(k)", "Q_v(k)"]
+    series = {}
+    for run, result in results_by_run.items():
+        if result is None:
+            series[run] = [float("nan")] * len(categories)
+            continue
+        ld = result.liu_dori
+        series[run] = [
+            ld.q_pt.value, ld.q_od.value, ld.q_w.value, ld.q_v_overlap.value,
+            ld.gt.q_b.value, ld.gt.q_fr.value, ld.gt.q_v.value,
+            ld.pred.q_b.value, ld.pred.q_fr.value, ld.pred.q_v.value,
+        ]
+    _grouped_bar(categories, series, title=title, ylabel="quality (1 = perfect)", path=path, ylim=(0, 1))
+
+
+def fragmentation_chart(
+    results_by_run: "dict[str, VectorMetricSuiteResult | None]", *, side: str, title: str, path: Path,
+) -> None:
+    """Share of GT lines by |D(g)| (`side="gt"`) or of predicted lines by
+    |G(k)| (`side="pred"`), bucketed `liu_dori.FRAG_BUCKETS`."""
+    categories = list(FRAG_BUCKETS)
+    series = {}
+    for run, result in results_by_run.items():
+        if result is None:
+            series[run] = [float("nan")] * len(categories)
+            continue
+        hist = getattr(result.liu_dori, side).histogram
+        total = sum(hist.values())
+        series[run] = [hist.get(b, 0) / total if total else float("nan") for b in categories]
+    label = "predicted lines per GT line" if side == "gt" else "GT lines per predicted line"
+    _grouped_bar(categories, series, title=title, ylabel=f"share of lines ({label})", path=path, ylim=(0, 1))
 
 
 def vector_quality_chart(

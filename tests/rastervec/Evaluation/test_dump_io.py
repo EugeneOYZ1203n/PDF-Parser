@@ -153,3 +153,19 @@ def test_dump_raster_vectors_roundtrip_and_default(tmp_path, vector, page_meta):
     raw["pages"][0].pop("raster_vectors")
     path.write_text(json.dumps(raw), encoding="utf-8")
     assert dump_io.load_dump(path).pages[0].raster_vectors == []
+
+
+def test_dump_raster_dpi_roundtrip_and_default(tmp_path, page_meta):
+    pd = dump_io.PageDump(
+        page_meta=page_meta(), texts=[], vectors=[], engine="current",
+        step_durations={}, raster_dpi=300.0,
+    )
+    path = tmp_path / "dump.json"
+    dump_io.write_dump(path, "x.pdf", [pd])
+    assert dump_io.load_dump(path).pages[0].raster_dpi == 300.0
+
+    import json
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["pages"][0].pop("raster_dpi")
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert dump_io.load_dump(path).pages[0].raster_dpi is None

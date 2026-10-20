@@ -1,5 +1,6 @@
-"""Tests for vector_metrics.py (count / length / direction / image) and
-vector_render.py."""
+"""Tests for vector_metrics.py (Liu-Dori wiring / pixel / length /
+direction / image) and vector_render.py. The Liu-Dori protocol itself is
+tested in test_liu_dori.py."""
 from __future__ import annotations
 
 import math
@@ -11,14 +12,12 @@ from rastervec.Evaluation.Evaluate.vector_metrics import (
     GeometryEntry,
     VectorMetricConfig,
     aggregate_vector_metrics,
-    build_strokes,
     direction_histogram,
     evaluate_vector_metrics,
     flatten_entries,
     geometry_entries_from_vector,
     image_similarity,
     length_stats,
-    pair_strokes,
 )
 
 CFG = VectorMetricConfig()
@@ -26,10 +25,6 @@ CFG = VectorMetricConfig()
 
 def _line(p0, p1, *, group=-1, vector_type="", width=None):
     return GeometryEntry(kind="l", points=(p0, p1), group=group, vector_type=vector_type, width=width)
-
-
-def _strokes(entries):
-    return build_strokes(flatten_entries(entries, CFG), CFG)
 
 
 def _staircase(x_end: float, slope: float, group: int = 0):
@@ -70,73 +65,37 @@ def test_geometry_entries_from_vector_rect_gives_four_lines(vector):
     assert all(e.group == 3 for e in entries)
 
 
-# ---------------------------------------------------------------- strokes / count
-def test_staircase_chains_into_one_stroke_and_pairs():
-    gt = [_line((0, 0), (40, 7))]
+# ---------------------------------------------------------------- Liu-Dori wiring
+def test_staircase_pred_items_match_a_diagonal_gt_line():
+    # Raw items, no RDP: each 1-px step is its own predicted bar.
+    gt = [_line((0, 0), (40, 7), width=1.0)]
     pred = _staircase(40, 7 / 40)
     res = _eval(gt, pred)
-    assert res.count.n_pred_strokes == 1
-    assert res.count.n_paired == 1
-    assert res.count.precision.value == 1.0 and res.count.recall.value == 1.0
+    ld = res.liu_dori
+    assert ld.pred.n_lines == len(pred)
+    assert ld.gt.histogram["6+"] == 1
+    assert 0.0 < ld.d_v < 1.0
 
 
-def test_collinear_pieces_from_separate_vectors_merge():
-    gt = [_line((0, 0), (30, 0))]
-    pred = [_line((0, 0), (10, 0), group=0), _line((11, 0), (20, 0), group=1), _line((20.5, 0), (30, 0), group=2)]
-    res = _eval(gt, pred)
-    assert res.count.n_pred_strokes == 1
-    assert res.count.precision.value == 1.0 and res.count.recall.value == 1.0
-
-
-def test_perpendicular_pieces_sharing_an_end_do_not_merge():
-    strokes = _strokes([_line((0, 0), (10, 0), group=0), _line((10, 0), (10, 10), group=1)])
-    assert len(strokes) == 2
-
-
-def test_polyline_corner_splits_into_two_strokes():
-    strokes = _strokes([_line((0, 0), (10, 0), group=0), _line((10, 0), (10, 10), group=0)])
-    assert len(strokes) == 2
-
-
-def test_crossing_rejoins_straight_through():
-    # A "+" traced as 4 arms ending at the centre -> 2 straight strokes.
-    arms = [
-        _line((0, 0), (10, 0), group=0), _line((10, 0), (20, 0), group=1),
-        _line((10, -10), (10, 0), group=2), _line((10, 0), (10, 10), group=3),
-    ]
-    strokes = _strokes(arms)
-    assert len(strokes) == 2
-
-
-def test_reversed_orientation_still_pairs():
-    gt = _strokes([_line((0, 0), (10, 0))])
-    pred = _strokes([_line((10, 0), (0, 0))])
-    assert len(pair_strokes(gt, pred, CFG).paired) == 1
-
-
-def test_endpoints_close_but_direction_off_does_not_pair():
-    # Both ends within tolerance, but the pred is a short diagonal hop.
-    gt = _strokes([_line((0, 0), (3, 0))])
-    pred = _strokes([_line((0, 1.5), (3, -1.5))])
-    assert pair_strokes(gt, pred, CFG).paired == []
-
-
-def test_outside_tolerance_unpaired():
-    gt = _strokes([_line((0, 0), (10, 0))])
-    pred = _strokes([_line((0, 5), (10, 5))])
-    p = pair_strokes(gt, pred, CFG)
-    assert p.paired == [] and p.unpaired_gt == [0] and p.unpaired_pred == [0]
-
-
-def test_recall_by_type():
+def test_union_of_gt_types_and_split_by_type():
     gt_by_type = {
-        "vector_to_raster": [_line((0, 0), (10, 0), vector_type="vector_to_raster")],
-        "original_raster": [_line((0, 50), (10, 50), vector_type="original_raster")],
+        "vector_to_raster": [_line((0, 0), (10, 0), vector_type="vector_to_raster", width=1.0)],
+        "original_raster": [_line((0, 50), (10, 50), vector_type="original_raster", width=1.0)],
     }
-    res = evaluate_vector_metrics(gt_by_type, [_line((0, 0), (10, 0))], {}, cfg=CFG)
-    assert res.count.recall_by_type["vector_to_raster"].value == 1.0
-    assert res.count.recall_by_type["original_raster"].value == 0.0
-    assert res.count.recall.value == 0.5
+    res = evaluate_vector_metrics(gt_by_type, [_line((0, 0), (10, 0), width=1.0)], {}, cfg=CFG)
+    ld = res.liu_dori
+    assert ld.by_type["vector_to_raster"].d_v.value == pytest.approx(1.0)
+    assert ld.by_type["original_raster"].d_v.value == 0.0
+    assert ld.d_v == pytest.approx(0.5)
+    assert ld.f_v == pytest.approx(0.0)
+
+
+def test_dpi_sets_the_width_floor():
+    # A 0.3 pt offset matches at 72 dpi (floor 2 pt) but not at 600 dpi
+    # (floor 0.24 pt).
+    gt, pred = [_line((0, 0), (50, 0), width=0.0)], [_line((0, 0.3), (50, 0.3), width=0.0)]
+    assert _eval(gt, pred, dpi=72.0).liu_dori.n_overlaps == 1
+    assert _eval(gt, pred, dpi=600.0).liu_dori.n_overlaps == 0
 
 
 # ---------------------------------------------------------------- length / direction
@@ -199,9 +158,23 @@ def test_render_pair_and_evaluate(page_meta):
     assert gt_img.min() < 128  # ink was drawn
     res = evaluate_vector_metrics(gt, [_line((10, 10), (190, 10), width=1.0)], {}, images=(gt_img, pred_img), cfg=CFG)
     assert res.image.ssim == pytest.approx(1.0)
+    assert math.isnan(res.pixel.pri)  # no ink masks given
 
     _gi, blank = render_pair(gt, [], pm, CFG)
     assert blank.min() == 255
+
+
+def test_render_ink_pair_and_pixel_stats(page_meta):
+    from rastervec.Evaluation.Evaluate.vector_render import render_ink_pair
+
+    gt = {"vector_to_raster": [_line((10, 10), (190, 10), width=0.0)], "original_raster": []}
+    pm = page_meta(width=200, height=100)
+    gt_ink, pred_ink = render_ink_pair(gt, [_line((10, 10), (100, 10), width=0.0)], pm, 300.0, CFG)
+    assert gt_ink.shape == pred_ink.shape
+    assert gt_ink.dtype == bool and gt_ink.any()  # a hairline still renders at the floor width
+    res = evaluate_vector_metrics(gt, [_line((10, 10), (100, 10), width=0.0)], {}, ink=(gt_ink, pred_ink), cfg=CFG)
+    assert res.pixel.d_p.value == pytest.approx(0.5, abs=0.05)
+    assert res.pixel.f_p.value == pytest.approx(0.0, abs=0.01)
 
 
 def test_no_images_gives_nan():
@@ -217,8 +190,8 @@ def test_aggregate_sums_and_pools():
     r1 = _eval([_line((0, 0), (10, 0))], [_line((0, 0), (10, 0))], images=(a, a.copy()))
     r2 = _eval([_line((0, 0), (0, 10))], [], images=(a, b))
     agg = aggregate_vector_metrics([r1, r2])
-    assert agg.count.n_paired == 1 and agg.count.n_missed == 1
-    assert agg.count.recall.value == 0.5
+    assert agg.liu_dori.d_v == pytest.approx(0.5)
+    assert agg.liu_dori.gt.histogram["1"] == 1 and agg.liu_dori.gt.histogram["0"] == 1
     assert agg.length.gt_length == 20 and agg.length.pred_length == 10
     assert agg.image.n_pixels == 2 * 32 * 32
     assert agg.image.mse == pytest.approx((r1.image.mse + r2.image.mse) / 2)

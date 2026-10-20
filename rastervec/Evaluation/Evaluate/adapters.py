@@ -195,6 +195,9 @@ class VectorEvalInputs:
     gt_by_type: "dict[str, list[GeometryEntry]]"
     preds: "list[GeometryEntry]"
     label_counts: "dict[str, int]"
+    # Every text label's page-space bbox (all text types) -- the Liu-Dori
+    # text / non-text split.
+    text_boxes: "list[Bbox]"
 
 
 def build_vector_eval_inputs(labels: LabelSet, raster_vectors: "list | None" = None) -> VectorEvalInputs:
@@ -213,4 +216,33 @@ def build_vector_eval_inputs(labels: LabelSet, raster_vectors: "list | None" = N
         gt_by_type=gt_by_type,
         preds=geometry_entries_from_vectors(raster_vectors or []),
         label_counts=label_counts,
+        text_boxes=[tuple(e.cluster_bbox) for e in labels.entries],  # type: ignore[misc]
     )
+
+
+def raster_dpi_for_page(pdf_path: str, page_index: int) -> "float | None":
+    """Resolution of a rasterised PDF page (`master_label.py`'s
+    `rasterised.pdf`, one full-page embedded image): the largest embedded
+    image's pixels per inch, area-based so a 90-degree placement reads the
+    same. `None` when the file/page has no image or can't be opened."""
+    import fitz
+
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        if not 0 <= page_index < doc.page_count:
+            return None
+        best = None
+        for info in doc[page_index].get_image_info():
+            x0, y0, x1, y1 = info["bbox"]
+            area_pt = abs(x1 - x0) * abs(y1 - y0)
+            area_px = float(info.get("width", 0)) * float(info.get("height", 0))
+            if area_pt <= 0 or area_px <= 0:
+                continue
+            if best is None or area_pt > best[0]:
+                best = (area_pt, 72.0 * (area_px / area_pt) ** 0.5)
+        return best[1] if best else None
+    finally:
+        doc.close()
