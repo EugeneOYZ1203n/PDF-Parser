@@ -16,6 +16,7 @@ output are also rendered as debug layers (`debug_layers.py`); that never changes
 from __future__ import annotations
 
 from raster_parser.commons.models import Image, Page, Text, Vector
+from raster_parser.commons.progress import note, stage
 from raster_parser.core.settings import RunSettings
 
 
@@ -25,8 +26,10 @@ def extract(images: list[Image], page: Page, settings: RunSettings) -> tuple[lis
     from raster_parser.P2_Raster_To_Vec.v1RasterToVec.s1_clear_page import clear_page, page_is_nonempty
     from raster_parser.P2_Raster_To_Vec.v1RasterToVec.s5_colour_autotrace import trace_vector_to_vector
 
-    work_dir, cleared = clear_page(page.doc_path, page.meta.index, dump_dir=settings.dump_dir)
+    with stage("p2 v1RasterToVec › s1 clear page (LibreOffice)"):
+        work_dir, cleared = clear_page(page.doc_path, page.meta.index, dump_dir=settings.dump_dir)
     if not page_is_nonempty(cleared, 0):
+        note("- p2 v1RasterToVec › cleared page is empty, nothing to trace")
         return [], []
     debug = RasterDebug.for_settings(settings, page.meta)
     words, traced = extract_raster_page(

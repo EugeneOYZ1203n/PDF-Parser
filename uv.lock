@@ -857,6 +857,7 @@ dependencies = [
     { name = "pymupdf" },
     { name = "scipy" },
     { name = "setuptools" },
+    { name = "tqdm" },
 ]
 
 [package.dev-dependencies]
@@ -884,6 +885,7 @@ requires-dist = [
     { name = "pymupdf" },
     { name = "scipy" },
     { name = "setuptools" },
+    { name = "tqdm" },
 ]
 
 [package.metadata.requires-dev]

@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from raster_parser.commons.models import Image, Page, Text, Vector
+from raster_parser.commons.progress import stage
 from raster_parser.P1_Reading_Native.image_extract import extract_images
 from raster_parser.P1_Reading_Native.native_text import extract_native_text
 from raster_parser.P1_Reading_Native.reader import Reader
@@ -37,7 +38,10 @@ def read_and_extract(pdf_path: str, page_index: int) -> Phase1Result:
 
 
 def _extract(page: Page) -> Phase1Result:
-    texts = extract_native_text(page)
-    vectors = extract_vectors(page)
-    images = extract_images(page)
+    with stage("phase1 › native text"):
+        texts = extract_native_text(page)
+    with stage("phase1 › vectors"):
+        vectors = extract_vectors(page)
+    with stage("phase1 › images"):
+        images = extract_images(page)
     return Phase1Result(page=page, texts=texts, images=images, vectors=vectors)

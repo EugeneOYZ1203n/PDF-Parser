@@ -43,6 +43,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from raster_parser.commons.logging_setup import configure_logging, get_logger  # noqa: E402
+from raster_parser.commons.progress import bar, stage  # noqa: E402
 from raster_parser.commons.paths import output_dir  # noqa: E402
 from raster_parser.evaluation.evaluate import charts, timing  # noqa: E402
 from raster_parser.evaluation.evaluate.benchmark_format import (  # noqa: E402
@@ -118,7 +119,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("at most 2 --run folders")
     cfg = MetricConfig(iou_edge_min=args.iou_threshold)
 
-    loaded = [load_run(Path(d), parser) for d in args.run]
+    with stage(f"benchmark › load {len(args.run)} run(s)"):
+        loaded = [load_run(Path(d), parser) for d in args.run]
     metas = [m for m, _e in loaded]
     runs = [e for _m, e in loaded]
     if len({m.name for m in metas}) != len(metas):
@@ -134,58 +136,61 @@ def main(argv: list[str] | None = None) -> int:
     charts_dir.mkdir(parents=True, exist_ok=True)
 
     # Score everything first: the summary goes at the top of the report.
-    scored = {key: {r[key].run_name: score_text(r[key], cfg) for r in runs} for key in shared_keys}
-    timings = {key: {r[key].run_name: load_timings(r[key]) for r in runs} for key in shared_keys}
+    with stage(f"benchmark › score {len(shared_keys)} input(s)"):
+        scored = {key: {r[key].run_name: score_text(r[key], cfg) for r in runs}
+                  for key in bar(shared_keys, desc="score inputs", unit="input")}
+        timings = {key: {r[key].run_name: load_timings(r[key]) for r in runs} for key in shared_keys}
     run_names = [m.name for m in metas]
-    grand_agg = {
-        name: aggregate_text_metrics([res for key in shared_keys for _pi, res in scored[key][name].per_page])
-        for name in run_names
-    }
-    grand_candidates = {
-        name: (sum(scored[k][name].n_ocr for k in shared_keys), sum(scored[k][name].n_ocr_touching_gt for k in shared_keys))
-        for name in run_names
-    }
-    grand_rows = {name: {kind: [row for key in shared_keys for row in timings[key][name][kind]]
-                         for kind in (timing.RUN_KIND, timing.DOC_KIND)} for name in run_names}
+    with stage("benchmark › aggregate, charts + report.html"):
+        grand_agg = {
+            name: aggregate_text_metrics([res for key in shared_keys for _pi, res in scored[key][name].per_page])
+            for name in run_names
+        }
+        grand_candidates = {
+            name: (sum(scored[k][name].n_ocr for k in shared_keys), sum(scored[k][name].n_ocr_touching_gt for k in shared_keys))
+            for name in run_names
+        }
+        grand_rows = {name: {kind: [row for key in shared_keys for row in timings[key][name][kind]]
+                             for kind in (timing.RUN_KIND, timing.DOC_KIND)} for name in run_names}
 
-    builder = ReportBuilder(f"Pipeline benchmark ({ts})")
-    blocks: list[str] = ["compared runs:\n" + "\n".join(
-        f"  {m.name}  (p2={m.p2}, p3={m.p3})  {m.path}" for m in metas)]
+        builder = ReportBuilder(f"Pipeline benchmark ({ts})")
+        blocks: list[str] = ["compared runs:\n" + "\n".join(
+            f"  {m.name}  (p2={m.p2}, p3={m.p3})  {m.path}" for m in metas)]
 
-    add_inputs_header(builder, metas, {key: [r[key] for r in runs] for key in shared_keys})
-    grand_timing, grand_chart = _timing(grand_rows, "all inputs", "aggregate", charts_dir, out_dir, blocks)
-    add_summary(builder, grand_agg, grand_candidates,
-                {run: s.get(timing.RUN_KIND, {}) for run, s in grand_timing.items()})
-    add_text_sections(builder, grand_agg, _text_charts(grand_agg, "all inputs", "aggregate", charts_dir, out_dir))
-    add_timing_sections(builder, grand_timing, grand_chart)
-    blocks.append(format_aggregate_comparison(grand_agg, title="all inputs -- text"))
+        add_inputs_header(builder, metas, {key: [r[key] for r in runs] for key in shared_keys})
+        grand_timing, grand_chart = _timing(grand_rows, "all inputs", "aggregate", charts_dir, out_dir, blocks)
+        add_summary(builder, grand_agg, grand_candidates,
+                    {run: s.get(timing.RUN_KIND, {}) for run, s in grand_timing.items()})
+        add_text_sections(builder, grand_agg, _text_charts(grand_agg, "all inputs", "aggregate", charts_dir, out_dir))
+        add_timing_sections(builder, grand_timing, grand_chart)
+        blocks.append(format_aggregate_comparison(grand_agg, title="all inputs -- text"))
 
-    viewer_lines = ["# Open each benchmarked input in the viewer (runs side by side):"]
-    for key in shared_keys:
-        kslug = short_slug(key)
-        agg_by_run = {name: score.aggregate for name, score in scored[key].items()}
-        blocks.append(format_aggregate_comparison(agg_by_run, title=f"{key} -- text"))
-        for name, agg in agg_by_run.items():
-            if agg is not None:
-                blocks.append(f"[{key} / {name}] " + format_confusion_table(agg))
+        viewer_lines = ["# Open each benchmarked input in the viewer (runs side by side):"]
+        for key in shared_keys:
+            kslug = short_slug(key)
+            agg_by_run = {name: score.aggregate for name, score in scored[key].items()}
+            blocks.append(format_aggregate_comparison(agg_by_run, title=f"{key} -- text"))
+            for name, agg in agg_by_run.items():
+                if agg is not None:
+                    blocks.append(f"[{key} / {name}] " + format_confusion_table(agg))
 
-        builder.add_key_section(key)
-        add_text_sections(builder, agg_by_run, _text_charts(agg_by_run, key, kslug, charts_dir, out_dir))
-        key_timing, key_chart = _timing(timings[key], key, kslug, charts_dir, out_dir, blocks)
-        add_timing_sections(builder, key_timing, key_chart)
-        dirs = " ".join(f'"{r[key].doc_dir.resolve()}"' for r in runs)
-        command = f"python scripts/pipeline_report_viewer.py {dirs}"
-        builder.add_viewer_command(key, command)
-        viewer_lines.append(command)
+            builder.add_key_section(key)
+            add_text_sections(builder, agg_by_run, _text_charts(agg_by_run, key, kslug, charts_dir, out_dir))
+            key_timing, key_chart = _timing(timings[key], key, kslug, charts_dir, out_dir, blocks)
+            add_timing_sections(builder, key_timing, key_chart)
+            dirs = " ".join(f'"{r[key].doc_dir.resolve()}"' for r in runs)
+            command = f"python scripts/pipeline_report_viewer.py {dirs}"
+            builder.add_viewer_command(key, command)
+            viewer_lines.append(command)
 
-    (out_dir / "report.html").write_text(builder.render(), encoding="utf-8")
-    (out_dir / "benchmark.txt").write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
-    (out_dir / "runs.json").write_text(json.dumps({
-        "runs": [str(m.path) for m in metas],
-        "iou_edge_min": args.iou_threshold,
-        "shared_keys": shared_keys,
-    }, indent=2), encoding="utf-8")
-    (out_dir / "viewer_commands.txt").write_text("\n".join(viewer_lines) + "\n", encoding="utf-8")
+        (out_dir / "report.html").write_text(builder.render(), encoding="utf-8")
+        (out_dir / "benchmark.txt").write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
+        (out_dir / "runs.json").write_text(json.dumps({
+            "runs": [str(m.path) for m in metas],
+            "iou_edge_min": args.iou_threshold,
+            "shared_keys": shared_keys,
+        }, indent=2), encoding="utf-8")
+        (out_dir / "viewer_commands.txt").write_text("\n".join(viewer_lines) + "\n", encoding="utf-8")
     print(f"wrote {out_dir}")
     return 0
 

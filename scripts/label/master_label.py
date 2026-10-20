@@ -75,6 +75,7 @@ from raster_parser.evaluation.labelling.raster_label import (
     sync_text_from_vector_labels,
 )
 from raster_parser.commons.logging_setup import configure_logging, get_logger
+from raster_parser.commons.progress import bar, stage
 from raster_parser.commons.paths import output_dir
 
 from raster_label import RasterLabelApp  # noqa: E402 -- sibling import, see module docstring
@@ -107,7 +108,7 @@ def _run_native_step(folder: Path, original_path: Path, page_count: int, manifes
     out_doc = fitz.open()
     new_pages = 0
     try:
-        for p in range(page_count):
+        for p in bar(range(page_count), desc="native pages", unit="page"):
             state = manifest["pages"].setdefault(str(p), {})
             if state.get("native_done") and existing_doc is not None and p < existing_doc.page_count:
                 out_doc.insert_pdf(existing_doc, from_page=p, to_page=p)
@@ -157,7 +158,7 @@ def _run_raster_step(
     rasterised_pages = 0
     geometry_pages = 0
     try:
-        for p in range(page_count):
+        for p in bar(range(page_count), desc="raster pages", unit="page"):
             state = manifest["pages"].setdefault(str(p), {})
             if state.get("rasterise_done") and existing_doc is not None and p < existing_doc.page_count:
                 out_doc.insert_pdf(existing_doc, from_page=p, to_page=p)
@@ -256,18 +257,22 @@ def main(argv: list[str] | None = None) -> int:
     page_count = doc.page_count
     doc.close()
 
-    _run_native_step(folder, original_path, page_count, manifest)
+    with stage(f"master_label › native step ({page_count} pages)"):
+        _run_native_step(folder, original_path, page_count, manifest)
     _save_manifest(manifest_path, manifest)
 
-    _run_raster_step(folder, original_path, page_count, manifest, args.dpi)
+    with stage(f"master_label › rasterise + geometry step ({page_count} pages)"):
+        _run_raster_step(folder, original_path, page_count, manifest, args.dpi)
     _save_manifest(manifest_path, manifest)
 
-    _resync_raster_text(folder, original_path, page_count)
+    with stage("master_label › raster text re-sync"):
+        _resync_raster_text(folder, original_path, page_count)
 
     _LOG.info("opening vector_label -- close its window to continue")
     VectorLabelApp(str(original_path), 0, str(folder / "vector_labels.json")).run()
 
-    _resync_raster_text(folder, original_path, page_count)
+    with stage("master_label › raster text re-sync"):
+        _resync_raster_text(folder, original_path, page_count)
 
     _LOG.info("opening raster_label -- close its window to finish")
     RasterLabelApp(str(original_path), str(folder / "raster_labels.json")).run()

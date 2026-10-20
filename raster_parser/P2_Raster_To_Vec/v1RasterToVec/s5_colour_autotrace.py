@@ -38,6 +38,7 @@ from autotrace import Bitmap, VectorFormat
 from raster_parser.commons.helpers.fitz_geometry import plain_item
 from raster_parser.commons.helpers.geometry import round_color
 from raster_parser.commons.models import Vector
+from raster_parser.commons.progress import bar
 from pydantic import BaseModel, Field
 
 
@@ -1574,7 +1575,7 @@ def colour_fill_autotrace(
     trace_by_label: dict[int, dict] = {}
     t_trace_all = time.perf_counter()
     if jobs and (n_workers == 1 or len(jobs) == 1):
-        for job in jobs:
+        for job in bar(jobs, desc="autotrace colours", unit="colour"):
             trace_by_label[int(job["label"])] = _colour_trace_job(job)
     elif jobs:
         ctx = mp.get_context("spawn")
@@ -1584,7 +1585,7 @@ def colour_fill_autotrace(
             initializer=_colour_trace_worker_init,
         ) as pool:
             futs = {pool.submit(_colour_trace_job, j): int(j["label"]) for j in jobs}
-            for fut in as_completed(futs):
+            for fut in bar(as_completed(futs), desc="autotrace colours", total=len(futs), unit="colour"):
                 label = futs[fut]
                 trace_by_label[label] = fut.result()
                 print(

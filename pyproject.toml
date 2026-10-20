@@ -15,6 +15,7 @@ dependencies = [
     "pyautotrace",
     "scipy",  # v2VectorClass: cKDTree in the pattern-lattice step
     "pyenchant",  # v2VectorClass: English-word scoring; Linux also needs libenchant-2-2 + hunspell-en-us
+    "tqdm",  # stage progress bars (commons/progress.py)
 ]
 
 [dependency-groups]

@@ -145,6 +145,27 @@ Rules for a backend:
 - Document the layers in the backend's `README.md` ("Debug output"). The v1 backends keep theirs
   in `debug_layers.py`.
 
+## Progress output
+
+`commons/progress.py` shows which stage is running, and when, on stderr:
+
+- `stage(name)` -- a context manager writing `HH:MM:SS  ▶ name` before the block and
+  `HH:MM:SS  ✔ name  1.23s` after it (`✖` when it raises);
+- `bar(iterable, desc=..., total=...)` -- a tqdm bar over a long loop (tiles, batches, buckets,
+  pages), including `as_completed` over a process pool;
+- `note(line)` -- one timestamped line, e.g. a skipped stage.
+
+All three are active while the `raster_parser.progress` logger is enabled for DEBUG. The
+`raster_parser` logger starts at DEBUG (`commons/logging_setup.py`, unless a level was already
+set), so progress shows by default; `setLevel(logging.INFO)` on it turns progress off.
+`configure_logging()` defaults to DEBUG and writes log records through `tqdm.write`, so they
+don't break an open bar. Only the calling process shows progress: spawn workers configure no
+logging.
+
+`run_pipeline` writes a stage per phase. A backend wraps each of its steps in `stage(...)`, named
+`"p2 <Name> › <step>"` / `"p3 <Name> › <step>"`, and its long loops in `bar(...)`. Progress is
+like the debug callbacks: it must never change the output.
+
 `run_pipeline(..., stop_after="phase1" | "phase2" | "phase3")` stops after that phase: later
 backends are not called. Phase 4 still runs on what ran (with Phase 3 skipped, Phase 1's raw
 vectors are the output). `extract()` always runs every phase.

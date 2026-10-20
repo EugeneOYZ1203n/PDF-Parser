@@ -39,6 +39,7 @@ import pymupdf as fitz
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from raster_parser.commons.logging_setup import configure_logging, get_logger  # noqa: E402
+from raster_parser.commons.progress import bar, stage  # noqa: E402
 from raster_parser.commons.paths import output_dir  # noqa: E402
 from raster_parser.core.pipeline import run_pipeline  # noqa: E402
 from raster_parser.core.settings import RunSettings  # noqa: E402
@@ -147,13 +148,14 @@ def process_pdf(pdf_path: Path, config: ReportConfig, run_dir: Path) -> None:
     writer = LayerWriter(doc_dir / ".layer_parts")
     dumps: list[dump_io.PageDump] = []
 
-    for pos, page_index in enumerate(pages):
+    for pos, page_index in enumerate(bar(pages, desc=pdf_path.stem, unit="page")):
         debug_durations: dict = {}
         run_input, run_page = str(pdf_path), page_index
         if config.vectorise:
             conv_path = doc_dir / f"converted_p{page_index}.pdf"
             start = time.perf_counter()
-            CONVERT[config.vectorise_mode](str(pdf_path), page_index, str(conv_path))
+            with stage(f"report › convert {pdf_path.stem} p{page_index} ({config.vectorise_mode})"):
+                CONVERT[config.vectorise_mode](str(pdf_path), page_index, str(conv_path))
             debug_durations["conversion"] = time.perf_counter() - start
             run_input, run_page = str(conv_path), 0
         writer.begin_page(pos, *page_geometry(run_input, run_page))
@@ -168,7 +170,8 @@ def process_pdf(pdf_path: Path, config: ReportConfig, run_dir: Path) -> None:
         del res
         gc.collect()
 
-    finalize_doc_dir(doc_dir, pdf_path, pages, config, writer, dumps)
+    with stage(f"report › write {pdf_path.stem} layers + dump.json"):
+        finalize_doc_dir(doc_dir, pdf_path, pages, config, writer, dumps)
 
 
 def bench_ground_truth_by_type(bench: BenchInput, pages: list[int]) -> "dict[str, LabelSet]":
@@ -205,16 +208,18 @@ def process_pdf_benchmark(bench: BenchInput, config: ReportConfig, run_dir: Path
     reservoirs = ImageReservoirs(doc_dir, config.debug_image_cap) if config.debug_images else None
     pages = filter_valid_pages(bench.pdf_path, config.pages_for(doc_name), bench.key)
     cfg = metrics.MetricConfig(iou_edge_min=config.iou_edge_min)
-    gt_by_type = bench_ground_truth_by_type(bench, pages)
+    with stage(f"report › ground truth {bench.key}"):
+        gt_by_type = bench_ground_truth_by_type(bench, pages)
     has_manual = bool(gt_by_type["original_vector"].entries)
 
     writer = LayerWriter(doc_dir / ".layer_parts")
     dumps: list[dump_io.PageDump] = []
-    for pos, p in enumerate(pages):
+    for pos, p in enumerate(bar(pages, desc=doc_name, unit="page")):
         debug_durations: dict = {}
         conv_path = doc_dir / f"converted_p{p}.pdf"
         start = time.perf_counter()
-        conversion.convert_page_to_vector_text(str(bench.pdf_path), p, str(conv_path))
+        with stage(f"report › convert {doc_name} p{p} (to_vector_text)"):
+            conversion.convert_page_to_vector_text(str(bench.pdf_path), p, str(conv_path))
         debug_durations["conversion"] = time.perf_counter() - start
         writer.begin_page(pos, *page_geometry(conv_path, 0))
 
@@ -223,15 +228,16 @@ def process_pdf_benchmark(bench: BenchInput, config: ReportConfig, run_dir: Path
                                        debug_durations)
         if has_manual and config.debug_layers:
             start = time.perf_counter()
-            add_extra_prediction_layers(
-                writer, res.page.meta, list(res.texts),
-                text_routed_vectors(read_and_extract(str(conv_path), 0).vectors, list(res.vectors)),
-                list(res.vectors),
-                gt_boxes=[tuple(e.cluster_bbox) for t in TEXT_TYPES
-                          for e in gt_by_type[t].entries if e.page_index == p],
-                manual_boxes=[tuple(e.cluster_bbox) for e in gt_by_type["original_vector"].entries
-                              if e.page_index == p],
-            )
+            with stage(f"report › extra-prediction layers {doc_name} p{p}"):
+                add_extra_prediction_layers(
+                    writer, res.page.meta, list(res.texts),
+                    text_routed_vectors(read_and_extract(str(conv_path), 0).vectors, list(res.vectors)),
+                    list(res.vectors),
+                    gt_boxes=[tuple(e.cluster_bbox) for t in TEXT_TYPES
+                              for e in gt_by_type[t].entries if e.page_index == p],
+                    manual_boxes=[tuple(e.cluster_bbox) for e in gt_by_type["original_vector"].entries
+                                  if e.page_index == p],
+                )
             debug_durations["extra_predictions"] = time.perf_counter() - start
         restamp_page(res, p)
         dumps.append(_new_page_dump(res, config, debug_durations, sub_durations))
@@ -251,7 +257,8 @@ def process_pdf_benchmark(bench: BenchInput, config: ReportConfig, run_dir: Path
         sources.append(text_type)
         if config.debug_layers:
             start = time.perf_counter()
-            write_label_overlays(doc_dir, text_type, gt, dumps, cfg)
+            with stage(f"report › {text_type} label overlays {doc_name}"):
+                write_label_overlays(doc_dir, text_type, gt, dumps, cfg)
             doc_durations["label_overlays"] = doc_durations.get("label_overlays", 0.0) + time.perf_counter() - start
             for kind in ("bbox", "text"):
                 extra_layers.append({
@@ -259,8 +266,9 @@ def process_pdf_benchmark(bench: BenchInput, config: ReportConfig, run_dir: Path
                     "file": f"{text_type}_{kind}.pdf", "color": OVERLAY_COLORS[text_type],
                 })
 
-    finalize_doc_dir(doc_dir, bench.pdf_path, pages, config, writer, dumps,
-                     extra_layers=tuple(extra_layers), doc_durations=doc_durations)
+    with stage(f"report › write {doc_name} layers + dump.json"):
+        finalize_doc_dir(doc_dir, bench.pdf_path, pages, config, writer, dumps,
+                         extra_layers=tuple(extra_layers), doc_durations=doc_durations)
     return {
         "key": bench.key,
         "pdf_stem": bench.pdf_path.stem,
@@ -295,7 +303,8 @@ def main(argv: list[str] | None = None) -> int:
         if not inputs:
             _LOG.error("no benchmark inputs (set input_dir and/or input_files)")
             return 1
-        entries = [process_pdf_benchmark(bench, config, run_dir) for bench in inputs]
+        entries = [process_pdf_benchmark(bench, config, run_dir)
+                   for bench in bar(inputs, desc="inputs", unit="input")]
         (run_dir / "benchmark.json").write_text(json.dumps({
             "benchmark": True,
             "config_stem": Path(args.config).stem,
@@ -313,7 +322,7 @@ def main(argv: list[str] | None = None) -> int:
     if not pdfs:
         _LOG.error("no input PDFs (set input_dir and/or input_files)")
         return 1
-    for pdf_path in pdfs:
+    for pdf_path in bar(pdfs, desc="inputs", unit="pdf"):
         process_pdf(pdf_path, config, run_dir)
     print(f"wrote {run_dir}")
     return 0

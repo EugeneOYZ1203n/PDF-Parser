@@ -32,6 +32,7 @@ from raster_parser.evaluation.labelling.native_label import (
 )
 from raster_parser.commons.logging_setup import configure_logging, get_logger
 from raster_parser.commons.paths import output_dir
+from raster_parser.commons.progress import stage
 
 _LOG = get_logger("native_label_cli")
 
@@ -55,9 +56,12 @@ def main(argv: list[str] | None = None) -> int:
     stem = Path(args.pdf).stem
     vectors_pdf_path = str(output_dir("labels") / f"{stem}_p{args.page}_native_vectors.pdf")
 
-    labels = native_label_pdf(args.pdf, args.page)
-    convert_page_text_only(args.pdf, args.page, vectors_pdf_path)
-    attach_vector_signatures(labels, args.page, vectors_pdf_path)
+    with stage(f"native_label › labels p{args.page}"):
+        labels = native_label_pdf(args.pdf, args.page)
+    with stage(f"native_label › text-only conversion p{args.page}"):
+        convert_page_text_only(args.pdf, args.page, vectors_pdf_path)
+    with stage(f"native_label › vector signatures p{args.page}"):
+        attach_vector_signatures(labels, args.page, vectors_pdf_path)
 
     existing = load_labels(out_path) if Path(out_path).exists() else LabelSet(pdf_path=args.pdf)
     known = {e.label_id for e in existing.entries}

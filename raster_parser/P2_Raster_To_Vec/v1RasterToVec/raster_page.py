@@ -13,6 +13,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from raster_parser.commons.progress import stage
 from raster_parser.P2_Raster_To_Vec.v1RasterToVec.s2_render_page import page_to_bgr
 from raster_parser.P2_Raster_To_Vec.v1RasterToVec.s3_text_drawing_split import (
     OcrTextDrawingParser,
@@ -72,7 +73,8 @@ def extract_raster_page(
         )
     )
 
-    bgr, to_points = page_to_bgr(pdf_path, page_index, dpi)
+    with stage(f"p2 v1RasterToVec › s2 render @ {dpi} dpi"):
+        bgr, to_points = page_to_bgr(pdf_path, page_index, dpi)
     if debug is not None:
         debug.rendered(bgr, to_points)
     ocr = make_ocr(lang, min_conf)
@@ -92,7 +94,8 @@ def extract_raster_page(
         workers=workers,
         ocr=ocr,
     )
-    result = parser.parse(bgr, scratch_dir=dump)
+    with stage("p2 v1RasterToVec › s3 text/drawing split"):
+        result = parser.parse(bgr, scratch_dir=dump)
 
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     text_final_gray = np.full_like(gray, 255)
@@ -104,48 +107,52 @@ def extract_raster_page(
     clean_rgb = cv2.cvtColor(text_final_gray, cv2.COLOR_GRAY2RGB)
     clean_scratch = dump / "clean_det"
     clean_scratch.mkdir(parents=True, exist_ok=True)
-    clean_boxes = ocr_boxes_rotated(
-        clean_rgb,
-        parser.min_conf,
-        parser.lang,
-        parser.tile,
-        parser.tile_overlap,
-        ocr=parser.ocr,
-        workers=workers,
-        scratch_dir=clean_scratch,
-    )
+    with stage("p2 v1RasterToVec › s3 clean-text detection"):
+        clean_boxes = ocr_boxes_rotated(
+            clean_rgb,
+            parser.min_conf,
+            parser.lang,
+            parser.tile,
+            parser.tile_overlap,
+            ocr=parser.ocr,
+            workers=workers,
+            scratch_dir=clean_scratch,
+        )
     clean_boxes = filter_boxes_by_min_area(clean_boxes, parser.min_box_area)
-    clean_boxes = refine_boxes(
-        text_final_gray,
-        clean_boxes,
-        ocr=parser.ocr,
-        lang=parser.lang,
-        min_conf=parser.min_conf,
-    )
+    with stage(f"p2 v1RasterToVec › s4 refine {len(clean_boxes)} boxes"):
+        clean_boxes = refine_boxes(
+            text_final_gray,
+            clean_boxes,
+            ocr=parser.ocr,
+            lang=parser.lang,
+            min_conf=parser.min_conf,
+        )
     clean_boxes = nms_boxes(clean_boxes, iou_thresh=0.6)
     clean_boxes = filter_boxes_by_min_area(clean_boxes, parser.min_box_area)
 
     rec_scratch = dump / "rec_boxes"
     rec_scratch.mkdir(parents=True, exist_ok=True)
-    rec = recognize_boxes(
-        text_final_gray,
-        clean_boxes,
-        ocr=parser.ocr,
-        to_points=to_points,
-        dpi=dpi,
-        min_conf=rec_min_conf,
-        workers=workers,
-        lang=parser.lang,
-        scratch_dir=rec_scratch,
-    )
-    recov = recover_missed_glyphs(
-        gray,
-        clean_boxes,
-        ocr=parser.ocr,
-        to_points=to_points,
-        dpi=dpi,
-        min_conf=0.9,
-    )
+    with stage(f"p2 v1RasterToVec › s4 recognise {len(clean_boxes)} boxes"):
+        rec = recognize_boxes(
+            text_final_gray,
+            clean_boxes,
+            ocr=parser.ocr,
+            to_points=to_points,
+            dpi=dpi,
+            min_conf=rec_min_conf,
+            workers=workers,
+            lang=parser.lang,
+            scratch_dir=rec_scratch,
+        )
+    with stage("p2 v1RasterToVec › s4 recover missed glyphs"):
+        recov = recover_missed_glyphs(
+            gray,
+            clean_boxes,
+            ocr=parser.ocr,
+            to_points=to_points,
+            dpi=dpi,
+            min_conf=0.9,
+        )
     if recov.n_text:
         text_final_gray[recov.kept_mask == 255] = gray[recov.kept_mask == 255]
         erase = (recov.kept_mask == 255) & (result.lines != 255)
@@ -175,14 +182,15 @@ def extract_raster_page(
             cv2.rectangle(det_vis, (x - 3, y - 3), (x + w + 3, y + h + 3), (0, 170, 0), 2)
     cv2.imwrite(str(dump / "det_boxes.png"), det_vis)
 
-    colour = colour_fill_autotrace(
-        drawing_final_path,
-        out_dir=dump,
-        stem="drawing",
-        dpi=dpi,
-        keep_intermediates=True,
-        workers=workers,
-    )
+    with stage("p2 v1RasterToVec › s5 colour autotrace"):
+        colour = colour_fill_autotrace(
+            drawing_final_path,
+            out_dir=dump,
+            stem="drawing",
+            dpi=dpi,
+            keep_intermediates=True,
+            workers=workers,
+        )
     drawing_vectors = list(colour.combined_vectors)
 
     (dump / "ocr.txt").write_text(

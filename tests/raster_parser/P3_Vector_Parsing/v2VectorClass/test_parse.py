@@ -623,3 +623,24 @@ def test_parse_returns_drawing_in_paint_order(page_meta, vector, monkeypatch):
     drawing, texts = lvc.parse(dashes + glyphs, _page(page_meta))
     assert texts == []
     assert [v.seqno for v in drawing] == sorted(v.seqno for v in dashes + glyphs)
+
+
+def test_progress_output_does_not_change_the_result(page_meta, vector, monkeypatch, capsys):
+    import logging
+
+    monkeypatch.setattr(PaddleDetectBackend, "detect", lambda self, bgr: _whole_image_quad(bgr))
+    _patch_rec(monkeypatch, "III")
+    root = logging.getLogger("raster_parser")
+    before = root.level
+    try:
+        root.setLevel(logging.INFO)
+        quiet = lvc.parse(_strokes(vector), _page(page_meta))
+        assert capsys.readouterr().err == ""
+        root.setLevel(logging.DEBUG)
+        loud = lvc.parse(_strokes(vector), _page(page_meta))
+    finally:
+        root.setLevel(before)
+    err = capsys.readouterr().err
+    for step in ("classify", "OCR render + detect", "recognise", "assemble", "quad ownership"):
+        assert f"✔ p3 v2VectorClass › {step}" in err
+    assert loud == quiet

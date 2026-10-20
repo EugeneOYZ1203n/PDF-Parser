@@ -65,6 +65,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from raster_parser.commons.models import Page, Vector
+from raster_parser.commons.progress import bar
 from raster_parser.commons.step_timing import StepClock
 from raster_parser.P3_Vector_Parsing.v2VectorClass import cluster_filters as clf
 from raster_parser.P3_Vector_Parsing.v2VectorClass import group_filters as grf
@@ -360,7 +361,8 @@ def classify_vectors(
 
     clustering: dict = {}
     all_angles: list[float] = []
-    for key, bucket in _iter_buckets(vectors_by_layer_color_width):
+    for key, bucket in bar(_iter_buckets(vectors_by_layer_color_width), desc="classify buckets",
+                           unit="bucket"):
         steps, angles = _classify_bucket(bucket, clock, page_area=page_area, keep_steps=keep_steps)
         clustering[key] = ClusteringStageResult(steps=steps)
         all_angles.extend(angles)

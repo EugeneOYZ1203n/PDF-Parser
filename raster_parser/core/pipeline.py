@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 from raster_parser.commons.logging_setup import get_logger
+from raster_parser.commons.progress import note, stage
 from raster_parser.core.registry import DEFAULT_P2, DEFAULT_P3, resolve_p2, resolve_p3
 from raster_parser.core.result import PipelineResult
 from raster_parser.core.settings import RunSettings
@@ -46,26 +47,35 @@ def run_pipeline(
     last = STEP_NAMES.index(stop_after) if stop_after else len(STEP_NAMES) - 1
     durations: dict[str, float] = {}
 
+    tag = f"{Path(pdf_path).name} p{page_index}"
     start = time.perf_counter()
-    phase1 = read_and_extract(str(pdf_path), page_index)
+    with stage(f"{tag} › phase1 read"):
+        phase1 = read_and_extract(str(pdf_path), page_index)
     durations["phase1"] = time.perf_counter() - start
 
     vectors_p2, texts_p2 = [], []
     if last >= 1:
         start = time.perf_counter()
-        vectors_p2, texts_p2 = phase2(phase1.images, phase1.page, settings)
+        with stage(f"{tag} › phase2 {p2} ({len(phase1.images)} images)"):
+            vectors_p2, texts_p2 = phase2(phase1.images, phase1.page, settings)
         durations["phase2"] = time.perf_counter() - start
+    else:
+        note(f"- {tag} › phase2 {p2} skipped (stop_after={stop_after})")
 
     vectors_p3, texts_p3 = phase1.vectors, []
     if last >= 2:
         start = time.perf_counter()
-        vectors_p3, texts_p3 = phase3(phase1.vectors, phase1.page, settings)
+        with stage(f"{tag} › phase3 {p3} ({len(phase1.vectors)} vectors)"):
+            vectors_p3, texts_p3 = phase3(phase1.vectors, phase1.page, settings)
         durations["phase3"] = time.perf_counter() - start
+    else:
+        note(f"- {tag} › phase3 {p3} skipped (stop_after={stop_after})")
 
     start = time.perf_counter()
-    texts, vectors = organize_outputs(
-        phase1.texts, texts_p2, texts_p3, vectors_p2, vectors_p3, phase1.page,
-    )
+    with stage(f"{tag} › phase4 organize"):
+        texts, vectors = organize_outputs(
+            phase1.texts, texts_p2, texts_p3, vectors_p2, vectors_p3, phase1.page,
+        )
     durations["phase4"] = time.perf_counter() - start
 
     _LOG.info(

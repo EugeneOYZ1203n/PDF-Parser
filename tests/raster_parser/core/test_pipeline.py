@@ -1,6 +1,8 @@
 """`core.pipeline.run_pipeline` and the registry, with the no-OCR stub backends."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pymupdf as fitz
 import pytest
 
@@ -128,3 +130,27 @@ def test_v2_vector_class_runs_through_the_registry(tmp_pdf_path, synthetic_pdf_f
     doc = synthetic_pdf_factory([{"texts": [{"point": (20, 40), "text": "hello"}]}])
     result = run_pipeline(tmp_pdf_path(doc), 0, p2="Stub", p3="v2VectorClass")
     assert [t.text for t in result.texts] == ["hello"] and result.vectors == []
+
+
+@pytest.mark.parametrize("stop_after, skipped", [(None, []), ("phase1", ["phase2", "phase3"])])
+def test_progress_lines_per_phase_and_same_result(tmp_pdf_path, capsys, stop_after, skipped):
+    import logging
+
+    root = logging.getLogger("raster_parser")
+    before = root.level
+    pdf = _pdf(tmp_pdf_path)
+    try:
+        root.setLevel(logging.INFO)
+        quiet = run_pipeline(pdf, 0, p2="Stub", p3="Stub", stop_after=stop_after)
+        assert capsys.readouterr().err == ""
+        root.setLevel(logging.DEBUG)
+        loud = run_pipeline(pdf, 0, p2="Stub", p3="Stub", stop_after=stop_after)
+    finally:
+        root.setLevel(before)
+    err = capsys.readouterr().err
+    for phase in ("phase1 read", "phase4 organize"):
+        assert f"▶ {Path(pdf).name} p0 › {phase}" in err
+        assert f"✔ {Path(pdf).name} p0 › {phase}" in err
+    for phase in skipped:
+        assert f"› {phase} Stub skipped" in err
+    assert (loud.texts, loud.vectors) == (quiet.texts, quiet.vectors)

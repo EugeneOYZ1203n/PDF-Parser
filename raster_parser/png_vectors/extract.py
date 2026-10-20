@@ -12,6 +12,7 @@ import tempfile
 from contextlib import nullcontext
 
 from raster_parser.commons.models import Vector
+from raster_parser.commons.progress import bar, stage
 from raster_parser.png_vectors.trace import (
     TraceVector,
     draw_vectors,
@@ -166,7 +167,8 @@ def extract_vectors_from_png(
     The returned vectors are in the coordinate system of the generated
     vector PDF and are not transformed to any external bounding box.
     """
-    return [trace_vector_to_vector(v) for v in _trace_png(png_path, tmp_dir, dpi)]
+    with stage(f"png_vectors › autotrace {Path(png_path).name}"):
+        return [trace_vector_to_vector(v) for v in _trace_png(png_path, tmp_dir, dpi)]
 
 
 def _trace_png(png_path: Path, tmp_dir: Path | None, dpi: int) -> list[TraceVector]:
@@ -325,7 +327,7 @@ def get_image_polys(
             for job in jobs
         )
 
-        for imgxref, vectors, image_size in results:
+        for imgxref, vectors, image_size in bar(results, desc="autotrace images", total=len(jobs), unit="image"):
             extracted[imgxref] = (
                 vectors,
                 image_size,
@@ -340,7 +342,7 @@ def get_image_polys(
                 jobs,
             )
 
-            for imgxref, vectors, image_size in results:
+            for imgxref, vectors, image_size in bar(results, desc="autotrace images", total=len(jobs), unit="image"):
                 extracted[imgxref] = (
                     vectors,
                     image_size,

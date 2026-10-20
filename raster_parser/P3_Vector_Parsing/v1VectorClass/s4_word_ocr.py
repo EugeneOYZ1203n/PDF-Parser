@@ -17,6 +17,7 @@ import numpy as np
 import pymupdf as pymupdf
 
 from raster_parser.commons.models import Vector
+from raster_parser.commons.progress import bar
 from raster_parser.P3_Vector_Parsing.v1VectorClass.s3_glyph_render import PngRenderer
 from raster_parser.P3_Vector_Parsing.v1VectorClass.s2_word_grouping import Orientation
 from raster_parser.P3_Vector_Parsing.v1VectorClass.s4_paddle_ocr import PaddleOcr
@@ -79,7 +80,8 @@ def ocr_word_groups(
     renderer = PngRenderer(dpi=dpi, page=page)
     out: List[Tuple[OcrWord, List[int]]] = []
 
-    for i, (vectors, box) in enumerate(zip(vector_groups, group_boxes)):
+    for i, (vectors, box) in enumerate(bar(zip(vector_groups, group_boxes), desc="word groups",
+                                           total=len(group_boxes), unit="group")):
         prepared, vector_indices = _prepare_paddle_word_group(
             i, vectors, box, renderer
         )

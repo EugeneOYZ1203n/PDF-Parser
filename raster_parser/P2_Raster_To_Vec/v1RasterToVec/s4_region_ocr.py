@@ -34,6 +34,7 @@ import cv2
 import numpy as np
 import pymupdf as pymupdf
 
+from raster_parser.commons.progress import bar
 from raster_parser.P2_Raster_To_Vec.v1RasterToVec.s3_text_drawing_split import ocr_boxes, paddle_ocr_call
 
 # Per-process OCR for ProcessPoolExecutor box-recog workers (spawn).
@@ -571,7 +572,7 @@ def recognize_boxes(
 
     raw_hits: list[dict] = []
     if n_workers == 1 or len(prepared) <= 1:
-        for p in prepared:
+        for p in bar(prepared, desc="recognise boxes", unit="box"):
             if p["vertical"]:
                 w_cw, c_cw = _recognize(ocr, p["cw"])
                 w_ccw, c_ccw = _recognize(ocr, p["ccw"])
@@ -619,7 +620,7 @@ def recognize_boxes(
                 initargs=(lang, float(min_conf)),
             ) as pool:
                 futures = [pool.submit(_box_rec_job, job) for job in jobs]
-                for fut in as_completed(futures):
+                for fut in bar(as_completed(futures), desc="recognise boxes", total=len(futures), unit="box"):
                     raw_hits.append(fut.result())
             raw_hits.sort(key=lambda h: h["job_id"])
         finally:

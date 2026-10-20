@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
+from raster_parser.commons.progress import bar
 from raster_parser.P3_Vector_Parsing.v2VectorClass.config import OCR_LANG, OCR_VERSION
 from raster_parser.P3_Vector_Parsing.v2VectorClass.paddle_engine import (
     OcrBox,
@@ -109,9 +110,9 @@ class OcrPool:
         np.savez(path, *arrays)
         return str(path)
 
-    def _run(self, fn, jobs: list[dict]) -> list:
+    def _run(self, fn, jobs: list[dict], desc: str) -> list:
         try:
-            return list(self._executor.map(fn, jobs))
+            return list(bar(self._executor.map(fn, jobs), desc=desc, total=len(jobs)))
         finally:
             for job in jobs:
                 Path(job["path"]).unlink(missing_ok=True)
@@ -120,11 +121,11 @@ class OcrPool:
         """One quad list per cluster render, in input order."""
         if not self._parallel(len(bgrs)):
             backend = PaddleDetectBackend(self.ocr_version, self.lang)
-            return [backend.detect(bgr) for bgr in bgrs]
+            return [backend.detect(bgr) for bgr in bar(bgrs, desc="detect clusters")]
         self._start()
         jobs = [{"path": self._spill_arrays([bgr]), "ocr_version": self.ocr_version, "lang": self.lang}
                 for bgr in bgrs]
-        return self._run(_detect_path_job, jobs)
+        return self._run(_detect_path_job, jobs, "detect clusters")
 
     def recognize(self, batches: list[list[np.ndarray]], *, raw: bool) -> list[list[OcrBox]]:
         """One `OcrBox` list per batch, in input order: `recognize_crops` (angle classifier,
@@ -132,8 +133,8 @@ class OcrPool:
         if not self._parallel(len(batches)):
             backend = PaddleRecBackend(self.ocr_version, self.lang)
             fn = backend.recognize_crops_raw if raw else backend.recognize_crops
-            return [fn(batch) for batch in batches]
+            return [fn(batch) for batch in bar(batches, desc="recognise batches")]
         self._start()
         jobs = [{"path": self._spill_arrays(batch), "raw": raw,
                  "ocr_version": self.ocr_version, "lang": self.lang} for batch in batches]
-        return self._run(_recognize_path_job, jobs)
+        return self._run(_recognize_path_job, jobs, "recognise batches")

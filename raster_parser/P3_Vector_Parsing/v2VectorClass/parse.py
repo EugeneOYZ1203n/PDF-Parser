@@ -108,6 +108,7 @@ from raster_parser.P3_Vector_Parsing.v2VectorClass.line_geometry import (
     snap_angle,
     split_straight,
 )
+from raster_parser.commons.progress import bar, stage
 from raster_parser.P3_Vector_Parsing.v2VectorClass.ocr_pool import OcrPool
 from raster_parser.P3_Vector_Parsing.v2VectorClass.paddle_engine import (
     _normalize_bgr,
@@ -374,7 +375,8 @@ def _parse(all_vectors, page, page_meta, pool: OcrPool, clock: StepClock, debugg
     """`parse`'s stages, with the pool open."""
     # `classify_vectors` times its own steps (`classify_*`) on this clock;
     # no outer `classify` block.
-    cls = classify_vectors(all_vectors, page, clock=clock, keep_steps=debugging)
+    with stage(f"p3 v2VectorClass › classify {len(all_vectors)} vectors"):
+        cls = classify_vectors(all_vectors, page, clock=clock, keep_steps=debugging)
     with clock("classify_collect"):
         flat_clusters = [
             [v for group in cluster for v in group] for cluster in cls.text_clusters
@@ -389,91 +391,93 @@ def _parse(all_vectors, page, page_meta, pool: OcrPool, clock: StepClock, debugg
     # The whole detected quads (in page space), one per detection; a split
     # quad's pieces point back at theirs via `parent` (ownership uses it).
     parent_quads: list[tuple] = []
-    for chunk_start in range(0, len(ocr_clusters), DETECT_RENDER_CHUNK_SIZE):
-        chunk = ocr_clusters[chunk_start:chunk_start + DETECT_RENDER_CHUNK_SIZE]
+    with stage(f"p3 v2VectorClass › OCR render + detect {len(ocr_clusters)} clusters"):
+        for chunk_start in bar(range(0, len(ocr_clusters), DETECT_RENDER_CHUNK_SIZE),
+                               desc="render+detect chunks", unit="chunk"):
+            chunk = ocr_clusters[chunk_start:chunk_start + DETECT_RENDER_CHUNK_SIZE]
 
-        # Stage 1: render each cluster (in-process -- needs fitz). The
-        # page-space origin of the render, its zoom and the cluster's min
-        # seqno are computed once here, not per quad.
-        clusters_render: list[dict] = []
-        with clock("ocr_render"):
-            for offset, group_vectors in enumerate(chunk):
-                padding = _cluster_render_padding(group_vectors)
-                try:
-                    image, dpi_used = ocr_prep.render_cluster_with_dynamic_dpi(
-                        group_vectors, OCR_DPI, MIN_RENDER_SIDE_PX, MAX_RENDER_DPI, padding,
-                    )
-                except ValueError:
-                    continue
-                x0, y0, _x1, _y1 = union_bbox([v.bbox for v in group_vectors])
-                clusters_render.append({
-                    "cluster_idx": chunk_start + offset, "group_vectors": group_vectors,
-                    "origin": (x0 - padding, y0 - padding),
-                    "zoom": dpi_used / _PDF_POINTS_PER_INCH,
-                    "min_seqno": min(v.seqno for v in group_vectors),
-                    "bgr": _normalize_bgr(np.asarray(image)),
-                })
-                del image
-        for c in clusters_render:
-            _image("detect", f"cluster_{c['cluster_idx']:03d}.png", lambda b=c["bgr"]: _rgb_image(b))
-        _flush_images()
-
-        # Stage 2: PaddleOCR detect on the unrotated renders.
-        with clock("ocr_detect"):
-            quads_per_cluster = pool.detect([c["bgr"] for c in clusters_render])
-
-        # Stage 3: per quad -- page-space bbox + quad, long-edge angle
-        # (snapped to the nearest global potential angle within
-        # QUAD_ANGLE_SNAP_TOL_DEG -- render pixel space is page space scaled,
-        # unrotated, so the angles compare directly), the long-quad split,
-        # and each piece's upright crop (image rotated by that angle about
-        # the piece, piece cut out). Crops stay BGR, as the recognisers take.
-        with clock("ocr_crop"):
-            for c, quads in zip(clusters_render, quads_per_cluster):
-                ox, oy = c["origin"]
-                zoom = c["zoom"]
-                for quad in quads:
-                    pts = np.asarray(quad, dtype=np.float64).reshape(4, 2).tolist()
-                    qpts = tuple((px / zoom + ox, py / zoom + oy) for px, py in pts)
-                    detect_quads.append(qpts)
-                    raw_angle = quad_long_edge_angle(quad)
-                    snapped = snap_angle(raw_angle, cls.global_angles, QUAD_ANGLE_SNAP_TOL_DEG)
-                    # Not re-wrapped to [-90, 90): a raw 89.9 snapping to 90
-                    # must stay 90, not become -90 (a 180-degree crop flip).
-                    angle = raw_angle if snapped is None else snapped
-                    parent = len(parent_quads)
-                    parent_quads.append(qpts)
-                    pieces = _split_quad(qpts, angle, c["group_vectors"])
-                    for piece in pieces:
-                        if len(pieces) == 1:
-                            pix_quad, size = quad, None
-                        else:
-                            pix_quad = np.asarray(
-                                [((x - ox) * zoom, (y - oy) * zoom) for x, y in piece], dtype=np.float64,
-                            )
-                            # A piece can be shorter than it is tall: crop
-                            # it along the parent's reading axis explicitly.
-                            size = (
-                                float(np.hypot(*(pix_quad[1] - pix_quad[0]))),
-                                float(np.hypot(*(pix_quad[3] - pix_quad[0]))),
-                            )
-                        crop = upright_crop(c["bgr"], pix_quad, angle, size=size)
-                        qi = len(page_quads)
-                        _image(
-                            "rotation_quad", f"det_{qi:03d}.png",
-                            lambda b=c["bgr"], q=pix_quad: _rgb_image(quad_region(b, q)[0]),
+            # Stage 1: render each cluster (in-process -- needs fitz). The
+            # page-space origin of the render, its zoom and the cluster's min
+            # seqno are computed once here, not per quad.
+            clusters_render: list[dict] = []
+            with clock("ocr_render"):
+                for offset, group_vectors in enumerate(chunk):
+                    padding = _cluster_render_padding(group_vectors)
+                    try:
+                        image, dpi_used = ocr_prep.render_cluster_with_dynamic_dpi(
+                            group_vectors, OCR_DPI, MIN_RENDER_SIDE_PX, MAX_RENDER_DPI, padding,
                         )
-                        _image("rotation_classifier", f"det_{qi:03d}.png", lambda cr=crop: _rgb_image(cr))
-                        page_quads.append({
-                            "cluster_idx": c["cluster_idx"], "min_seqno": c["min_seqno"],
-                            "crop": crop, "bbox": _quad_envelope(piece), "quad_pts": tuple(piece),
-                            "parent": parent,
-                            "quad_angle": angle,
-                            "quad_angle_raw": raw_angle,
-                            "snapped": snapped is not None,
-                        })
-        _flush_images()
-        del clusters_render, quads_per_cluster
+                    except ValueError:
+                        continue
+                    x0, y0, _x1, _y1 = union_bbox([v.bbox for v in group_vectors])
+                    clusters_render.append({
+                        "cluster_idx": chunk_start + offset, "group_vectors": group_vectors,
+                        "origin": (x0 - padding, y0 - padding),
+                        "zoom": dpi_used / _PDF_POINTS_PER_INCH,
+                        "min_seqno": min(v.seqno for v in group_vectors),
+                        "bgr": _normalize_bgr(np.asarray(image)),
+                    })
+                    del image
+            for c in clusters_render:
+                _image("detect", f"cluster_{c['cluster_idx']:03d}.png", lambda b=c["bgr"]: _rgb_image(b))
+            _flush_images()
+
+            # Stage 2: PaddleOCR detect on the unrotated renders.
+            with clock("ocr_detect"):
+                quads_per_cluster = pool.detect([c["bgr"] for c in clusters_render])
+
+            # Stage 3: per quad -- page-space bbox + quad, long-edge angle
+            # (snapped to the nearest global potential angle within
+            # QUAD_ANGLE_SNAP_TOL_DEG -- render pixel space is page space scaled,
+            # unrotated, so the angles compare directly), the long-quad split,
+            # and each piece's upright crop (image rotated by that angle about
+            # the piece, piece cut out). Crops stay BGR, as the recognisers take.
+            with clock("ocr_crop"):
+                for c, quads in zip(clusters_render, quads_per_cluster):
+                    ox, oy = c["origin"]
+                    zoom = c["zoom"]
+                    for quad in quads:
+                        pts = np.asarray(quad, dtype=np.float64).reshape(4, 2).tolist()
+                        qpts = tuple((px / zoom + ox, py / zoom + oy) for px, py in pts)
+                        detect_quads.append(qpts)
+                        raw_angle = quad_long_edge_angle(quad)
+                        snapped = snap_angle(raw_angle, cls.global_angles, QUAD_ANGLE_SNAP_TOL_DEG)
+                        # Not re-wrapped to [-90, 90): a raw 89.9 snapping to 90
+                        # must stay 90, not become -90 (a 180-degree crop flip).
+                        angle = raw_angle if snapped is None else snapped
+                        parent = len(parent_quads)
+                        parent_quads.append(qpts)
+                        pieces = _split_quad(qpts, angle, c["group_vectors"])
+                        for piece in pieces:
+                            if len(pieces) == 1:
+                                pix_quad, size = quad, None
+                            else:
+                                pix_quad = np.asarray(
+                                    [((x - ox) * zoom, (y - oy) * zoom) for x, y in piece], dtype=np.float64,
+                                )
+                                # A piece can be shorter than it is tall: crop
+                                # it along the parent's reading axis explicitly.
+                                size = (
+                                    float(np.hypot(*(pix_quad[1] - pix_quad[0]))),
+                                    float(np.hypot(*(pix_quad[3] - pix_quad[0]))),
+                                )
+                            crop = upright_crop(c["bgr"], pix_quad, angle, size=size)
+                            qi = len(page_quads)
+                            _image(
+                                "rotation_quad", f"det_{qi:03d}.png",
+                                lambda b=c["bgr"], q=pix_quad: _rgb_image(quad_region(b, q)[0]),
+                            )
+                            _image("rotation_classifier", f"det_{qi:03d}.png", lambda cr=crop: _rgb_image(cr))
+                            page_quads.append({
+                                "cluster_idx": c["cluster_idx"], "min_seqno": c["min_seqno"],
+                                "crop": crop, "bbox": _quad_envelope(piece), "quad_pts": tuple(piece),
+                                "parent": parent,
+                                "quad_angle": angle,
+                                "quad_angle_raw": raw_angle,
+                                "snapped": snapped is not None,
+                            })
+            _flush_images()
+            del clusters_render, quads_per_cluster
 
     with clock("ocr_recognize"):
         def _recognize_batches(crops: list[np.ndarray], *, raw: bool) -> list:
@@ -482,7 +486,8 @@ def _parse(all_vectors, page, page_meta, pool: OcrPool, clock: StepClock, debugg
 
         # Stage 4: pass 1 -- angle classifier (0/180) + recognise.
         crops = [pq["crop"] for pq in page_quads]
-        boxes = _recognize_batches(crops, raw=False)
+        with stage(f"p3 v2VectorClass › recognise {len(crops)} crops"):
+            boxes = _recognize_batches(crops, raw=False)
         scores = [score(box) for box in boxes]
         winning_k: list[int] = [0] * len(boxes)
 
@@ -499,7 +504,8 @@ def _parse(all_vectors, page, page_meta, pool: OcrPool, clock: StepClock, debugg
             if not retry_idx:
                 break
             retry_crops = [np.ascontiguousarray(np.rot90(crops[i], k)) for i in retry_idx]
-            retry_boxes = _recognize_batches(retry_crops, raw=True)
+            with stage(f"p3 v2VectorClass › retry +{90 * k}° {len(retry_crops)} crops"):
+                retry_boxes = _recognize_batches(retry_crops, raw=True)
             del retry_crops
             for i, rbox in zip(retry_idx, retry_boxes):
                 rsel = selection_score(rbox)
@@ -509,7 +515,7 @@ def _parse(all_vectors, page, page_meta, pool: OcrPool, clock: StepClock, debugg
         retried = set(retry_idx)
 
     # Stage 6: assemble output, page-wide, in original cluster/quad order.
-    with clock("ocr_assemble"):
+    with stage(f"p3 v2VectorClass › assemble {len(page_quads)} reads"), clock("ocr_assemble"):
         texts: list[Text] = []
         blank_quads: list[tuple] = []
         rotation_entries: list[dict] = []
@@ -576,7 +582,7 @@ def _parse(all_vectors, page, page_meta, pool: OcrPool, clock: StepClock, debugg
     _emit(lambda: _render_rotation_layers(page_meta, rotation_entries))
     _emit(lambda: _render_retry_layers(page_meta, rotation_entries))
 
-    with clock("quad_ownership"):
+    with stage("p3 v2VectorClass › quad ownership"), clock("quad_ownership"):
         text_vectors, ocr_drawing = _text_vectors_by_quad(ocr_clusters, owner_quads)
     _emit(lambda: _render_ownership_layers(page_meta, text_vectors, ocr_drawing))
 
