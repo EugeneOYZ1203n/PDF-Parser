@@ -129,6 +129,7 @@ from rastervec.Evaluation import conversion, dump_io
 from rastervec.Evaluation.Evaluate import adapters, metrics, vector_metrics
 from rastervec.Evaluation.Evaluate.variants import PipelineVariant, resolve_variant
 from rastervec.Evaluation.Labelling import native_label
+from rastervec.Evaluation.Labelling.raster_label import raster_geometry_for_page
 from rastervec.Evaluation.Evaluate.metrics import TEXT_TYPES
 from rastervec.Evaluation.forms import (
     FORM_TEXT_TYPES,
@@ -475,6 +476,12 @@ def _bench_ground_truth_by_type(bench: BenchInput, pages: list[int]) -> "dict[st
     (`raster_label.sync_native_text_from_native_labels`) when present, else
     synthesized on the fly from `native_entries` (a label folder predating
     that sync step).
+
+    `vector_to_raster` geometry (the Phase 2 line GT) is the label source's
+    saved `source="auto"` geometry where a page has any, else derived live
+    with `raster_label.raster_geometry_for_page` on the original page -- the
+    same step `master_label.py` runs -- so a bare PDF, or a label folder whose
+    geometry step never ran for a page, is still vector-scored.
     """
     pdf_str = str(bench.pdf_path)
     by_type: "dict[str, LabelSet]" = {t: LabelSet(pdf_path=pdf_str, entries=[]) for t in TEXT_TYPES}
@@ -520,6 +527,18 @@ def _bench_ground_truth_by_type(bench: BenchInput, pages: list[int]) -> "dict[st
                     if geom_source else []
                 ),
             )
+
+    vt = by_type["vector_to_raster"]
+    have_geometry = {g.page_index for g in vt.geometry_entries}
+    live = [
+        g for p in pages if p not in have_geometry
+        for g in raster_geometry_for_page(pdf_str, p)
+    ]
+    if live:
+        by_type["vector_to_raster"] = LabelSet(
+            pdf_path=pdf_str, entries=vt.entries,
+            geometry_entries=[*vt.geometry_entries, *live],
+        )
 
     if not by_type["native_to_raster"].entries:
         by_type["native_to_raster"] = LabelSet(

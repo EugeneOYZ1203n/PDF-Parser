@@ -36,7 +36,7 @@ Every field is optional except that you need at least one of `input_dir` /
 |---|---|---|---|
 | `original` | the source page | `<stem>/` alone, `<stem>__original/` with other forms | native text (read by P1, reported as "native text"), `original_vector`, `original_raster` text — every output text is a prediction; `original_raster` geometry vs Phase 2's vectors |
 | `vectorised` | `convert_page_to_vector_text` | `<stem>__vectorised/` | `native_to_vector`, `original_vector` (OCR output) |
-| `rasterised` | `rasterised.pdf` page, else `rasterise_page` at `dpi` | `<stem>__rasterised/` | `vector_to_raster`, `original_raster`, `native_to_raster` text (OCR output); `vector_to_raster` + `original_raster` geometry vs Phase 2's vectors |
+| `rasterised` | `rasterised.pdf` page, else `rasterise_page` at `dpi` | `<stem>__rasterised/` | `vector_to_raster`, `original_raster`, `native_to_raster` text (OCR output); `vector_to_raster` + `original_raster` geometry vs Phase 2's vectors (`vector_to_raster` geometry is derived live from the original page when the input has none saved, so bare PDFs are scored too) |
 
 In benchmark mode each input folder holds the ground truth plus one
 sub-folder per form (`<input>/original/`, `<input>/vectorised/`,

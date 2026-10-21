@@ -165,7 +165,10 @@ def test_bench_ground_truth_by_type_synthesizes_native_to_raster(tmp_path):
 
     folder = tmp_path / "F_label"
     folder.mkdir()
-    (folder / "original.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    blank = fitz.open()
+    blank.new_page()
+    blank.save(str(folder / "original.pdf"))
+    blank.close()
     native_entry = LabelEntry(
         page_index=0, cluster_bbox=(0, 0, 10, 10), cluster_signature="s",
         label_id="line:0:0:0", text="HELLO", source="native",
@@ -182,6 +185,56 @@ def test_bench_ground_truth_by_type_synthesizes_native_to_raster(tmp_path):
     assert [e.text for e in by_type["native_to_vector"].entries] == ["HELLO"]
     assert [e.text for e in by_type["native_to_raster"].entries] == ["HELLO"]
     assert by_type["native_to_raster"].entries[0].label_id.startswith("natsync:")
+    assert by_type["vector_to_raster"].geometry_entries == []  # blank page: nothing to derive
+
+
+def test_bench_ground_truth_derives_vector_to_raster_geometry_for_bare_pdf(tmp_path, synthetic_pdf_factory):
+    pdf = _one_page_pdf(tmp_path, synthetic_pdf_factory)
+    bench = gpr.BenchInput(key="pdf:A", pdf_path=pdf.resolve(), labels_path=None)
+    by_type = gpr._bench_ground_truth_by_type(bench, [0])
+    geom = by_type["vector_to_raster"].geometry_entries
+    assert geom and all(g.source == "auto" and g.page_index == 0 for g in geom)
+    assert any(g.kind == "l" and [tuple(p) for p in g.points] == [(10, 80), (150, 80)] for g in geom)
+    assert by_type["original_raster"].geometry_entries == []
+    assert [e.text for e in by_type["native_to_raster"].entries] == ["HELLO"]
+
+
+def raster_geometry_points(pdf, page_index):
+    from rastervec.Evaluation.Labelling.raster_label import raster_geometry_for_page
+
+    return [[tuple(p) for p in g.points] for g in raster_geometry_for_page(str(pdf), page_index)]
+
+
+def test_bench_ground_truth_fills_only_pages_without_saved_geometry(tmp_path, synthetic_pdf_factory):
+    from rastervec.Evaluation.Labelling.label_schema import GeometryAnnotation, save_labels
+
+    page = {"drawings": [{"lines": [((10, 80), (150, 80))]}]}
+    doc = synthetic_pdf_factory([page, page])
+    pdf = tmp_path / "B.pdf"
+    doc.save(str(pdf))
+    doc.close()
+    saved = GeometryAnnotation(page_index=0, kind="l", points=[(1, 1), (2, 2)], width=1.0, source="auto")
+    sidecar = tmp_path / "B.json"
+    save_labels(gpr.LabelSet(pdf_path=str(pdf), entries=[], geometry_entries=[saved]), str(sidecar))
+    bench = gpr.BenchInput(key="labels:B", pdf_path=pdf.resolve(), labels_path=sidecar)
+    geom = gpr._bench_ground_truth_by_type(bench, [0, 1])["vector_to_raster"].geometry_entries
+    assert [[tuple(p) for p in g.points] for g in geom if g.page_index == 0] == [[(1, 1), (2, 2)]]
+    page1 = [[tuple(p) for p in g.points] for g in geom if g.page_index == 1]
+    assert page1 == raster_geometry_points(pdf, 1) and [(10, 80), (150, 80)] in page1
+
+
+def test_benchmark_bare_pdf_rasterised_form_gets_geometry_gt_and_vector_eval(tmp_path, synthetic_pdf_factory):
+    pdf = _one_page_pdf(tmp_path, synthetic_pdf_factory)
+    config_path = tmp_path / "cfg.json"
+    config_path.write_text(gpr.ReportConfig(
+        benchmark=True, inputs=["rasterised"], input_files=[pdf], pages=[0], final_stage="phase1",
+        debug_images=False, output_root=tmp_path / "out",
+    ).model_dump_json(), encoding="utf-8")
+    assert gpr.main(["--config", str(config_path)]) == 0
+    (run_dir,) = (tmp_path / "out").iterdir()
+    assert (run_dir / "A" / "ground_truth_vector_to_raster.json").is_file()
+    manifest = json.loads((run_dir / "A" / "rasterised" / "manifest.json").read_text(encoding="utf-8"))
+    assert any(layer["stage"] == "vector_eval" for layer in manifest["layers"])
 
 
 # ---------------------------------------------------------------------------

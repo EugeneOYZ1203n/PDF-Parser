@@ -1305,7 +1305,8 @@ generic parallel-pool mechanics), never phase-specific business logic.
   `rastervec/Evaluation/forms.py` is the single source of which types each form is scored on
   (original: "native text" [P1's own words, every output text a prediction], `original_vector`,
   `original_raster` + its geometry vs P2's own vectors; vectorised: `native_to_vector`,
-  `original_vector`; rasterised: the three raster text types + both geometry types). A form run
+  `original_vector`; rasterised: the three raster text types + both geometry types; a page with no
+  saved `vector_to_raster` geometry gets it live via `raster_geometry_for_page`). A form run
   that raises is logged and recorded as a failed page, not fatal. The per-input folder is named
   from `BenchInput.key` with its `pdf:`/`labels:` prefix stripped
   (`generate_pipeline_report.py::_bench_doc_name`), not the literal `<pdf-stem>` — a

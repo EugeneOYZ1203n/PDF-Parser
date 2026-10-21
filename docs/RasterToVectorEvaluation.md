@@ -46,7 +46,7 @@ image, which transposes every coordinate on a 90°/270° page — regenerate tho
 
 | type | source | what |
 |---|---|---|
-| `vector_to_raster` | `source="auto"` | every drawing item of the original page (`raster_label.raster_geometry_for_page`) — incl. CAD vector-text glyph strokes, not native font text |
+| `vector_to_raster` | `source="auto"` | every drawing item of the original page (`raster_label.raster_geometry_for_page`) — incl. CAD vector-text glyph strokes, not native font text. Taken from the label folder / sidecar where that page has any saved; otherwise derived live from the original page at benchmark time (`_bench_ground_truth_by_type`), so a bare PDF, or a label folder whose geometry step never ran, is still scored |
 | `original_raster` | `source="manual"` | lines/curves hand-traced in `raster_label.py` on embedded images with no vector backing |
 
 A rasterised page is scored against the **union** of both types (that is what P2 sees), an
