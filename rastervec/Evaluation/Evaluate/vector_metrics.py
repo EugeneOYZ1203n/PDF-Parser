@@ -290,9 +290,11 @@ def image_similarity(
     cfg = cfg or VectorMetricConfig()
     if gt_img.shape != pred_img.shape:
         raise ValueError(f"render shapes differ: {gt_img.shape} vs {pred_img.shape}")
-    a = gt_img.astype(np.float64)
-    b = pred_img.astype(np.float64)
-    mse = float(np.mean((a - b) ** 2))
+    # float32: a full-page render is ~17M px at 150 dpi, and SSIM keeps
+    # several same-size filtered copies -- float64 doubled a >1 GB peak.
+    a = gt_img.astype(np.float32)
+    b = pred_img.astype(np.float32)
+    mse = float(np.mean((a - b) ** 2, dtype=np.float64))
     ssim = float(structural_similarity(
         a, b, data_range=255.0, gaussian_weights=True, sigma=1.5, use_sample_covariance=False,
     ))
@@ -333,8 +335,9 @@ def evaluate_vector_metrics(
     gt_polys = flatten_entries(gt_entries, cfg)
     pred_polys = flatten_entries(preds, cfg)
     _gt_bars, _pred_bars, _overlaps, ld = liu_dori.evaluate(
-        gt_entries, preds, dpi or cfg.default_dpi, cfg.liu_dori, text_boxes=text_boxes,
+        gt_entries, preds, dpi or cfg.default_dpi, cfg.liu_dori, text_boxes=text_boxes, keep_lines=False,
     )
+    del _gt_bars, _pred_bars, _overlaps
     image = image_similarity(images[0], images[1], cfg) if images is not None else _IMAGE_NA
     pixel = liu_dori.pixel_stats(ink[0], ink[1], cfg.liu_dori) if ink is not None else liu_dori.PIXEL_NA
     return VectorMetricSuiteResult(

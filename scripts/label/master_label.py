@@ -66,7 +66,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pymupdf as fitz
 
-from rastervec.Evaluation.conversion import convert_page_text_only
+from rastervec.Evaluation.conversion import convert_page_text_only, rasterise_page
 from rastervec.Evaluation.Labelling.label_schema import LabelSet, load_labels, save_labels
 from rastervec.Evaluation.Labelling.native_label import attach_vector_signatures, native_label_pdf
 from rastervec.Evaluation.Labelling.raster_label import (
@@ -152,8 +152,6 @@ def _run_raster_step(
     )
     existing_doc = fitz.open(str(rasterised_path)) if rasterised_path.exists() else None
     out_doc = fitz.open()
-    src_doc = fitz.open(str(original_path))
-    matrix = fitz.Matrix(dpi / 72.0, dpi / 72.0)
     rasterised_pages = 0
     geometry_pages = 0
     try:
@@ -162,10 +160,11 @@ def _run_raster_step(
             if state.get("rasterise_done") and existing_doc is not None and p < existing_doc.page_count:
                 out_doc.insert_pdf(existing_doc, from_page=p, to_page=p)
             else:
-                src_page = src_doc[p]
-                pix = src_page.get_pixmap(matrix=matrix)
-                new_page = out_doc.new_page(width=src_page.rect.width, height=src_page.rect.height)
-                new_page.insert_image(new_page.rect, stream=pix.tobytes("png"))
+                # Rendered unrotated with /Rotate re-applied, so the raster
+                # run's coordinates match the labels' unrotated page space
+                # (a plain `get_pixmap()` transposed 90/270-degree pages).
+                with fitz.open("pdf", rasterise_page(str(original_path), p, dpi=dpi)) as page_doc:
+                    out_doc.insert_pdf(page_doc)
                 state["rasterise_done"] = True
                 rasterised_pages += 1
 
@@ -179,7 +178,6 @@ def _run_raster_step(
                 state["geometry_done"] = True
                 geometry_pages += 1
     finally:
-        src_doc.close()
         if existing_doc is not None:
             existing_doc.close()
     out_doc.save(str(rasterised_path))

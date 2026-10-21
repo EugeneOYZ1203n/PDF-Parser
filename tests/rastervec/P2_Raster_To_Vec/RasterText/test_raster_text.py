@@ -108,3 +108,14 @@ def test_no_debug_builds_no_rasters(page_meta):
     image = Image(array=_scene(), bbox=(0.0, 0.0, 200.0, 150.0), dpi=72.0, source="embedded")
     prelude = prepare_images([image], _page(page_meta), ocr_fns=_fns())
     assert prelude.debug.rasters == [] and prelude.debug.histograms == []
+
+
+def test_consume_images_releases_each_prepared_image():
+    from rastervec.P2_Raster_To_Vec.RasterText.raster_text import RasterPrelude
+
+    prelude = RasterPrelude(images=["a", "b"])
+    seen = []
+    for item in prelude.consume_images():
+        seen.append((item, len(prelude.images)))
+    assert seen == [("a", 1), ("b", 0)]
+    assert prelude.images == []

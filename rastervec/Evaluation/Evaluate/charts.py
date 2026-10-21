@@ -60,67 +60,78 @@ def _grouped_bar(
     plt.close(fig)
 
 
+def _type_axis(types, labels) -> "list[str]":
+    """Category labels for `types` (display names from `labels`)."""
+    return [(labels or {}).get(t, t) for t in types]
+
+
 def label_description_chart(
     results_by_run: "dict[str, TextMetricSuiteResult | None]", *, title: str, path: Path,
+    types: "tuple[str, ...]" = TEXT_TYPES, labels: "dict[str, str] | None" = None,
 ) -> None:
     series = {}
     for run, result in results_by_run.items():
         if result is None:
-            series[run] = [float("nan")] * len(TEXT_TYPES)
+            series[run] = [float("nan")] * len(types)
             continue
-        series[run] = [float(result.by_type[t].label_stats.label_count) for t in TEXT_TYPES]
-    _grouped_bar(list(TEXT_TYPES), series, title=title, ylabel="label count", path=path)
+        series[run] = [float(result.by_type[t].label_stats.label_count) for t in types]
+    _grouped_bar(_type_axis(types, labels), series, title=title, ylabel="label count", path=path)
 
 
 def char_word_overlap_chart(
     results_by_run: "dict[str, TextMetricSuiteResult | None]", *, field: str,
     title: str, path: Path,
+    types: "tuple[str, ...]" = TEXT_TYPES, labels: "dict[str, str] | None" = None,
 ) -> None:
     """`field`: `"char_overlap"` or `"word_overlap"`; plots recall per text type."""
     series = {}
     for run, result in results_by_run.items():
         if result is None:
-            series[run] = [float("nan")] * len(TEXT_TYPES)
+            series[run] = [float("nan")] * len(types)
             continue
         series[run] = [
-            getattr(result.by_type[t], field).recall.value for t in TEXT_TYPES
+            getattr(result.by_type[t], field).recall.value for t in types
         ]
-    _grouped_bar(list(TEXT_TYPES), series, title=title, ylabel="recall", path=path, ylim=(0, 1))
+    _grouped_bar(_type_axis(types, labels), series, title=title, ylabel="recall", path=path, ylim=(0, 1))
 
 
 def bbox_accuracy_chart(
     results_by_run: "dict[str, TextMetricSuiteResult | None]", *, title: str, path: Path,
+    types: "tuple[str, ...]" = TEXT_TYPES, labels: "dict[str, str] | None" = None,
 ) -> None:
     series = {}
     for run, result in results_by_run.items():
         if result is None:
-            series[run] = [float("nan")] * len(TEXT_TYPES)
+            series[run] = [float("nan")] * len(types)
             continue
-        series[run] = [result.by_type[t].bbox_accuracy.mean_iou.value for t in TEXT_TYPES]
-    _grouped_bar(list(TEXT_TYPES), series, title=title, ylabel="mean IoU", path=path, ylim=(0, 1))
+        series[run] = [result.by_type[t].bbox_accuracy.mean_iou.value for t in types]
+    _grouped_bar(_type_axis(types, labels), series, title=title, ylabel="mean IoU", path=path, ylim=(0, 1))
 
 
 def rotation_chart(
     results_by_run: "dict[str, TextMetricSuiteResult | None]", *, title: str, path: Path,
+    types: "tuple[str, ...]" = TEXT_TYPES, labels: "dict[str, str] | None" = None,
 ) -> None:
     series = {}
     for run, result in results_by_run.items():
         if result is None:
-            series[run] = [float("nan")] * len(TEXT_TYPES)
+            series[run] = [float("nan")] * len(types)
             continue
         rows = []
-        for t in TEXT_TYPES:
+        for t in types:
             rot = result.by_type[t].rotation
             n = rot.n_localized
             rows.append((rot.buckets.correct / n) if n else float("nan"))
         series[run] = rows
-    _grouped_bar(list(TEXT_TYPES), series, title=title, ylabel="rotation-correct rate", path=path, ylim=(0, 1))
+    _grouped_bar(_type_axis(types, labels), series, title=title, ylabel="rotation-correct rate", path=path,
+                 ylim=(0, 1))
 
 
 def funnel_chart(
     results_by_run: "dict[str, TextMetricSuiteResult | None]", *, title: str, path: Path,
+    types: "tuple[str, ...]" = TEXT_TYPES, labels: "dict[str, str] | None" = None,
 ) -> None:
-    funnel_types = ("native_to_vector", "original_vector")
+    funnel_types = tuple(t for t in ("native_to_vector", "original_vector") if t in types)
     series = {}
     for run, result in results_by_run.items():
         if result is None:
@@ -131,19 +142,21 @@ def funnel_chart(
             f_ = result.by_type[t].funnel
             rows.append(f_.survival_rate.value if f_ is not None else float("nan"))
         series[run] = rows
-    _grouped_bar(list(funnel_types), series, title=title, ylabel="survival rate", path=path, ylim=(0, 1))
+    _grouped_bar(_type_axis(funnel_types, labels), series, title=title, ylabel="survival rate", path=path,
+                 ylim=(0, 1))
 
 
 def reading_order_chart(
     results_by_run: "dict[str, TextMetricSuiteResult | None]", *, title: str, path: Path,
+    types: "tuple[str, ...]" = TEXT_TYPES, labels: "dict[str, str] | None" = None,
 ) -> None:
     series = {}
     for run, result in results_by_run.items():
         if result is None:
-            series[run] = [float("nan")] * len(TEXT_TYPES)
+            series[run] = [float("nan")] * len(types)
             continue
-        series[run] = [result.by_type[t].reading_order.in_order_rate.value for t in TEXT_TYPES]
-    _grouped_bar(list(TEXT_TYPES), series, title=title, ylabel="in-order rate", path=path, ylim=(0, 1))
+        series[run] = [result.by_type[t].reading_order.in_order_rate.value for t in types]
+    _grouped_bar(_type_axis(types, labels), series, title=title, ylabel="in-order rate", path=path, ylim=(0, 1))
 
 
 def font_size_histogram_chart(

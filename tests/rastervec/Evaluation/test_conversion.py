@@ -174,3 +174,44 @@ def test_convert_page_to_vector_text_writes_output_path(
     converted = fitz.open(out_path)
     assert converted[0].get_text().strip() == ""
     assert len(converted[0].get_drawings()) > 0
+
+
+import pytest
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_rasterise_page_keeps_unrotated_coordinates(tmp_path, rotation):
+    """A thick line at known unrotated coordinates must map back to the same
+    coordinates through the rasterised page's embedded image (P1 image
+    extraction + the P2 prelude's pixel -> page mapping), at every /Rotate."""
+    import numpy as np
+
+    from rastervec.Evaluation.conversion import rasterise_page
+    from rastervec.P1_Reading_Native.image_extract import extract_images
+    from rastervec.P1_Reading_Native.reader import Reader
+    from rastervec.P2_Raster_To_Vec.RasterText.raster_text import make_to_page
+
+    src = fitz.open()
+    page = src.new_page(width=300, height=200)
+    page.draw_line((40, 50), (260, 50), color=(0, 0, 0), width=4)
+    page.set_rotation(rotation)
+    src_path = tmp_path / "src.pdf"
+    src.save(str(src_path))
+    src.close()
+
+    out = tmp_path / "r.pdf"
+    rasterise_page(str(src_path), 0, str(out), dpi=72)
+    with fitz.open(str(out)) as doc:
+        assert doc[0].rotation == rotation
+        assert not doc[0].get_drawings() and not doc[0].get_text().strip()
+
+    rpage = Reader(str(out)).get_page(0)
+    (img,) = extract_images(rpage)
+    arr = np.asarray(img.array)
+    gray = arr if arr.ndim == 2 else arr[..., :3].mean(axis=2)
+    ys, xs = np.nonzero(gray < 128)
+    h, w = gray.shape
+    to_page = make_to_page(img, w, h)
+    pts = np.array([to_page((x + 0.5, y + 0.5)) for x, y in zip(xs, ys)])
+    assert pts[:, 1].min() >= 46 and pts[:, 1].max() <= 54
+    assert pts[:, 0].min() == pytest.approx(40, abs=4) and pts[:, 0].max() == pytest.approx(260, abs=4)

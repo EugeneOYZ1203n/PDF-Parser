@@ -85,10 +85,12 @@ def extract(
                              on_debug_image=on_debug_image)
     state.texts = prelude.texts
     state.seqno = len(prelude.texts)
-    for i, prepared in enumerate(tqdm(prelude.images, desc="InvolutionStroke images", unit="img",
-                                      leave=False, disable=len(prelude.images) <= 1)):
-        _LOG.info("InvolutionStroke image %d/%d", i + 1, len(prelude.images))
+    n_images = len(prelude.images)
+    for i, prepared in enumerate(tqdm(prelude.consume_images(), total=n_images, desc="InvolutionStroke images",
+                                      unit="img", leave=False, disable=n_images <= 1)):
+        _LOG.info("InvolutionStroke image %d/%d", i + 1, n_images)
         _process_image(prepared, page, compute, state, sink, model_fns)
+        del prepared  # free this image's arrays before the next one
 
     if on_debug_layer is not None:
         t0 = time.perf_counter()

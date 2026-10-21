@@ -169,3 +169,26 @@ def test_dump_raster_dpi_roundtrip_and_default(tmp_path, page_meta):
     raw["pages"][0].pop("raster_dpi")
     path.write_text(json.dumps(raw), encoding="utf-8")
     assert dump_io.load_dump(path).pages[0].raster_dpi is None
+
+
+def test_dump_writer_streams_pages_to_the_same_format(tmp_path, text, vector, page_meta):
+    pages = [
+        dump_io.PageDump(page_meta=page_meta(index=i), texts=[text()], vectors=[vector(seqno=i)],
+                         engine="current", step_durations={"phase1": float(i)})
+        for i in range(3)
+    ]
+    path = tmp_path / "dump.json"
+    w = dump_io.DumpWriter(path, "x.pdf")
+    for pd in pages:
+        w.add(pd)
+    w.finish({"layer_save": 0.5})
+    assert not (tmp_path / "dump.json.pages.part").exists()
+    got = dump_io.load_dump(path)
+    assert got.pdf_path == "x.pdf" and got.doc_durations == {"layer_save": 0.5}
+    assert [p.page_meta.index for p in got.pages] == [0, 1, 2]
+    assert [p.vectors for p in got.pages] == [pd.vectors for pd in pages]
+
+    empty = tmp_path / "empty.json"
+    w = dump_io.DumpWriter(empty, "y.pdf")
+    w.finish()
+    assert dump_io.load_dump(empty).pages == []

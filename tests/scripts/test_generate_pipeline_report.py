@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pymupdf as fitz
@@ -577,10 +578,16 @@ def test_benchmark_without_converted_pdfs_writes_no_pdfs(tmp_path, synthetic_pdf
     assert gpr.ReportConfig().keep_converted_pdfs is True
     assert gpr.main(["--config", str(config_path)]) == 0
     (run_dir,) = (tmp_path / "out").iterdir()
-    assert (run_dir / "A" / "dump.json").is_file()
+    # default benchmark forms: vectorised + rasterised (a bare PDF is
+    # rasterised on the fly), one sub-folder each; GT at the input level
+    assert (run_dir / "A" / "vectorised" / "dump.json").is_file()
+    assert (run_dir / "A" / "rasterised" / "dump.json").is_file()
+    assert not (run_dir / "A" / "original").exists()
     assert (run_dir / "A" / "ground_truth_native_to_vector.json").is_file()
     assert list(run_dir.rglob("*.pdf")) == []
     assert list(run_dir.rglob("*.png")) == []
+    entry = json.loads((run_dir / "benchmark.json").read_text(encoding="utf-8"))["entries"][0]
+    assert entry["forms"] == {"vectorised": "A/vectorised", "rasterised": "A/rasterised"}
 
 
 def test_vector_eval_layers(tmp_path, vector):
@@ -605,3 +612,128 @@ def test_vector_eval_layers(tmp_path, vector):
     with fitz.open(str(tmp_path / "vector_eval__missed_gt.pdf")) as doc:
         assert doc.page_count == 1
 
+
+
+# ---- input forms (`ReportConfig.inputs`) ----------------------------------
+def test_report_config_forms_defaults_and_alias():
+    assert gpr.ReportConfig().forms() == ["original"]
+    assert gpr.ReportConfig(benchmark=True).forms() == ["vectorised", "rasterised"]
+    assert gpr.ReportConfig(vectorise=True).forms() == ["vectorised"]
+    # canonical order whatever order the config lists
+    assert gpr.ReportConfig(inputs=["rasterised", "original"]).forms() == ["original", "rasterised"]
+    assert gpr.ReportConfig(vectorise=True, vectorise_mode="text_only").vectorise_fn().__name__ == \
+        "convert_page_text_only"
+    assert gpr.ReportConfig(inputs=["vectorised"]).vectorise_fn().__name__ == "convert_page_to_vector_text"
+
+
+@pytest.mark.parametrize("kwargs, message", [
+    (dict(inputs=[]), "at least one"),
+    (dict(inputs=["original", "original"]), "repeat"),
+    (dict(inputs=["scanned"]), "inputs"),
+    (dict(inputs=["original"], vectorise=True), "deprecated alias"),
+    (dict(vectorise_mode="text_only"), "vectorise_mode only applies"),
+    (dict(benchmark=True, vectorise=True), "not used in benchmark mode"),
+])
+def test_report_config_rejects_bad_inputs(kwargs, message):
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError, match=message):
+        gpr.ReportConfig(**kwargs)
+
+
+def _one_page_pdf(tmp_path, synthetic_pdf_factory, name="A"):
+    doc = synthetic_pdf_factory([{"texts": [{"point": (20, 50), "text": "HELLO"}],
+                                  "drawings": [{"lines": [((10, 80), (150, 80))]}]}])
+    pdf = tmp_path / "in" / f"{name}.pdf"
+    pdf.parent.mkdir(exist_ok=True)
+    doc.save(str(pdf))
+    doc.close()
+    return pdf
+
+
+def test_normal_mode_one_folder_per_form(tmp_path, synthetic_pdf_factory):
+    pdf = _one_page_pdf(tmp_path, synthetic_pdf_factory)
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(gpr.ReportConfig(
+        input_files=[pdf], pages=[0], final_stage="phase1", inputs=["rasterised", "original"],
+        debug_layers=False, debug_images=False, output_root=tmp_path / "out",
+    ).model_dump_json(), encoding="utf-8")
+    assert gpr.main(["--config", str(cfg)]) == 0
+    (run_dir,) = (tmp_path / "out").iterdir()
+    assert sorted(p.name for p in run_dir.iterdir() if p.is_dir()) == ["A__original", "A__rasterised"]
+    from rastervec.Evaluation import dump_io
+
+    for form in ("original", "rasterised"):
+        dump = dump_io.load_dump(run_dir / f"A__{form}" / "dump.json")
+        assert dump.form == form
+        assert json.loads((run_dir / f"A__{form}" / "manifest.json").read_text())["form"] == form
+    original = dump_io.load_dump(run_dir / "A__original" / "dump.json").pages[0]
+    rasterised = dump_io.load_dump(run_dir / "A__rasterised" / "dump.json").pages[0]
+    assert original.counts["native_texts"] == 1 and original.counts["images"] == 0
+    assert rasterised.counts["native_texts"] == 0 and rasterised.counts["images"] == 1
+    assert rasterised.raster_dpi == pytest.approx(300.0, rel=0.01)
+    assert (run_dir / "A__rasterised" / "rasterised_p0.pdf").is_file()  # keep_converted_pdfs default
+
+
+def test_normal_mode_single_form_keeps_plain_folder_name(tmp_path, synthetic_pdf_factory):
+    pdf = _one_page_pdf(tmp_path, synthetic_pdf_factory)
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(gpr.ReportConfig(
+        input_files=[pdf], pages=[0], final_stage="phase1", inputs=["vectorised"],
+        debug_layers=False, debug_images=False, output_root=tmp_path / "out",
+    ).model_dump_json(), encoding="utf-8")
+    assert gpr.main(["--config", str(cfg)]) == 0
+    (run_dir,) = (tmp_path / "out").iterdir()
+    assert (run_dir / "A" / "dump.json").is_file()
+
+
+def test_failed_form_run_is_recorded_not_fatal(tmp_path, synthetic_pdf_factory, monkeypatch):
+    pdf = _one_page_pdf(tmp_path, synthetic_pdf_factory)
+    real = gpr._run_form_page
+
+    def flaky(run_input, run_page, page_index, config, variant, writer, reservoirs):
+        if "rasterised_p" in run_input:
+            raise RuntimeError("boom")
+        return real(run_input, run_page, page_index, config, variant, writer, reservoirs)
+
+    monkeypatch.setattr(gpr, "_run_form_page", flaky)
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(gpr.ReportConfig(
+        benchmark=True, input_files=[pdf], pages=[0], final_stage="phase1",
+        debug_layers=False, debug_images=False, output_root=tmp_path / "out",
+    ).model_dump_json(), encoding="utf-8")
+    assert gpr.main(["--config", str(cfg)]) == 0
+    (run_dir,) = (tmp_path / "out").iterdir()
+    from rastervec.Evaluation import dump_io
+
+    page = dump_io.load_dump(run_dir / "A" / "rasterised" / "dump.json").pages[0]
+    assert page.counts["run_failed"] == 1 and "boom" in page.counts["error"]
+    assert page.page_meta.index == 0
+    assert dump_io.load_dump(run_dir / "A" / "vectorised" / "dump.json").pages[0].counts["run_failed"] == 0
+
+
+def test_run_counts_from_verbose_result(text, vector):
+    from types import SimpleNamespace
+
+    p2_vec = vector(items=[("l", (0, 0), (1, 0)), ("l", (1, 0), (2, 0))], color=(1.0, 0.0, 0.0))
+    p3_vec = vector(seqno=5)
+    prelude = SimpleNamespace(debug=SimpleNamespace(boxes={"refined_failed": [1, 2]}))
+    res = SimpleNamespace(
+        texts=[text(source="native"), text(source="ocr"), text(source="ocr")],
+        vectors=[p2_vec, p3_vec],
+        step_durations={"phase1": 0.1, "phase2": 0.1, "phase3": 0.1},
+        extra={
+            "phase1": SimpleNamespace(images=[object()], texts=[text()], vectors=[vector(), vector(), vector()]),
+            "phase2_texts": [text(source="ocr")],
+            "phase2_vectors": [p2_vec],
+            "p2_debug": {"raster_prelude": prelude},
+            "p3_debug": {"retry_stats": {"0": 1, "failed": 3}},
+        },
+    )
+    c = gpr._run_counts(res, "LatestVectorClassification")
+    assert c["images"] == 1 and c["native_texts"] == 1 and c["p1_vectors"] == 3
+    assert c["p2_ocr_texts"] == 1 and c["p3_ocr_texts"] == 1
+    assert c["p2_vectors"] == 1 and c["p2_items"] == 2
+    assert c["p2_layers"] == {"#ff0000": {"vectors": 1, "items": 2}}
+    assert c["p3_drawing_vectors"] == 1 and c["p3_consumed_as_text"] == 2
+    assert c["p2_ocr_blank"] == 2 and c["p3_ocr_blank"] == 3

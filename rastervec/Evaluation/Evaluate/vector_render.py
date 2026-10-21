@@ -29,7 +29,7 @@ from rastervec.Evaluation.Evaluate.vector_metrics import (
 from rastervec.commons.renderer.draw import draw_specs, new_page_doc, stroke_batch_spec
 
 if TYPE_CHECKING:
-    from rastervec.Evaluation.Evaluate.liu_dori import Bar
+    from rastervec.Evaluation.Evaluate.liu_dori import Bars
     from rastervec.commons.models import PageMeta
 
 
@@ -68,13 +68,15 @@ def render_pair(
     )
 
 
-def render_bars_ink(bars: "list[Bar]", page_meta: "PageMeta", dpi: float, threshold: int) -> np.ndarray:
-    """(H, W) bool ink mask of `liu_dori.Bar`s drawn black at their floored
+def render_bars_ink(bars: "Bars", page_meta: "PageMeta", dpi: float, threshold: int) -> np.ndarray:
+    """(H, W) bool ink mask of `liu_dori.Bars` drawn black at their floored
     width (`w_eff`) on white, unrotated page space."""
-    batches: "dict[float, list]" = defaultdict(list)
-    for b in bars:
-        batches[round(b.w_eff, 4)].append([b.p0, b.p1])
-    specs = [stroke_batch_spec(lines, (0.0, 0.0, 0.0), width=w) for w, lines in batches.items()]
+    widths = np.round(bars.w_eff, 4)
+    segs = np.stack([bars.p0, bars.p1], axis=1) if len(bars) else np.zeros((0, 2, 2))
+    specs = [
+        stroke_batch_spec(segs[widths == w].tolist(), (0.0, 0.0, 0.0), width=float(w))
+        for w in np.unique(widths)
+    ]
     doc, page = new_page_doc(page_meta)
     try:
         draw_specs(page, specs)

@@ -74,7 +74,7 @@ def test_paper_table_2(name, preds, gt, expected, tol):
 
 def test_no_overlap_is_a_miss_and_false_alarm():
     _g, _p, overlaps, res = _run(GT, [_line((10, 60), (90, 60))])
-    assert overlaps == []
+    assert len(overlaps) == 0
     assert res.d_v == 0.0 and res.f_v == 1.0 and res.vri == 0.0
     assert res.gt.histogram["0"] == 1 and res.pred.histogram["0"] == 1
 
@@ -94,7 +94,7 @@ def test_hairline_without_floor_never_matches():
     pred = [_line((0, 0.1), (100, 0.1), width=0.0)]
     cfg = LiuDoriConfig(floor_px=0.0)
     _g, _p, overlaps, _res = _run(gt, pred, cfg, dpi=300.0)
-    assert overlaps == []
+    assert len(overlaps) == 0
 
 
 def test_angle_gate_rejects_perpendicular_short_bar():
@@ -103,7 +103,7 @@ def test_angle_gate_rejects_perpendicular_short_bar():
     gt = [_line((0, 0), (50, 0), width=1.0)]
     pred = [_line((25, -0.15), (25, 0.15), width=1.0)]
     assert len(_run(gt, pred, PAPER)[2]) == 1
-    assert _run(gt, pred, PROD, dpi=300.0)[2] == []
+    assert len(_run(gt, pred, PROD, dpi=300.0)[2]) == 0
 
 
 def test_production_qv_is_cube_root_of_three_factors():

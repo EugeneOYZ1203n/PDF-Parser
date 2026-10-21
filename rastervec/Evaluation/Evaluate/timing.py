@@ -46,9 +46,8 @@ TOTAL_INCL_DEBUG = "total_incl_debug"
 # Document-level report-generation rows (one per document, not per page).
 DOC_KIND = "document"
 
-# Timing blocks a dump can carry: the vectorised-PDF run and (benchmark mode
-# with a rasterised input) the separate rasterised-PDF run.
-RUN_KINDS = ("vectorised", "rasterised")
+# Timing blocks: one per input form a run covered (`Evaluation/forms.py`).
+RUN_KINDS = ("original", "vectorised", "rasterised")
 
 _STAT_COLUMNS = ("n", "min", "median", "mean", "max", "sum")
 

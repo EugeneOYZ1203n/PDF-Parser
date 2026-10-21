@@ -14,6 +14,7 @@ import zlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pymupdf as fitz
 
 import rastervec.config as rvconfig
@@ -87,7 +88,6 @@ _NEW_ARTIFACTS: list[tuple[str, str, str | None, str]] = [
     ("reconstructed", "reconstructed", None, "phase3"),
 ]
 
-RASTER_TEXT_TYPES = ("vector_to_raster", "original_raster", "native_to_raster")
 
 
 def _reached(step: str, final_stage: str | None) -> bool:
@@ -433,12 +433,13 @@ def _debug_image_sink(reservoirs: "dict[str, _ImageReservoir]", page_index: int)
 def _finalize_doc_dir(
     doc_dir: Path, source_pdf: Path, pages: list[int], config: "ReportConfig", variant,
     active: list[tuple], writer: _LayerWriter,
-    stats_pages: dict[str, list[tuple[int, dict]]], dumps: list[dump_io.PageDump],
+    stats_pages: dict[str, list[tuple[int, dict]]], dump: "dump_io.DumpWriter",
     *, extra_layers: tuple[dict, ...] = (), doc_durations: "dict | None" = None,
 ) -> None:
-    """`doc_durations` (document-level report-generation seconds, e.g.
-    `label_overlays`) gains `layer_save` here and is written into
-    `dump.json`; the dump/manifest writes themselves are not timed."""
+    """`dump`: the document's incremental `dump.json` writer (every page
+    already added). `doc_durations` (document-level report-generation
+    seconds, e.g. `label_overlays`) gains `layer_save` here and is written
+    into `dump.json`; the dump/manifest writes themselves are not timed."""
     doc_durations = dict(doc_durations or {})
     layer_filenames = writer.filenames()
     with StepClock(doc_durations)("layer_save"):
@@ -455,40 +456,38 @@ def _finalize_doc_dir(
             f"# {stats_key} stats for {Path(source_pdf).name}\n{body}", encoding="utf-8"
         )
 
-    dump_io.write_dump(doc_dir / "dump.json", str(source_pdf), dumps, doc_durations)
+    dump.finish(doc_durations)
     (doc_dir / "manifest.json").write_text(json.dumps({
         "source_pdf": str(source_pdf),
         "pages": pages,
         "engine": variant.engine,
         "variant": variant.name,
         "final_stage": config.final_stage,
-        "vectorised": config.vectorise or config.benchmark,
+        "form": dump.form,
+        "vectorised": dump.form == "vectorised",
         "layers": [writer.meta[f] for f in layer_filenames] + list(extra_layers),
     }, indent=2), encoding="utf-8")
     _LOG.info("wrote %s", doc_dir)
 
 
 def _write_label_overlays(
-    doc_dir: Path, source: str, gt: LabelSet, dumps: list[dump_io.PageDump],
-    cfg: metrics.MetricConfig,
+    doc_dir: Path, source: str, gt: LabelSet, pages: list[dump_io.PageDump],
+    cfg: metrics.MetricConfig, *, all_texts: bool = False,
 ) -> None:
     """`<source>_bbox.pdf` (GT boxes green=covered by a prediction / red=missed)
     and `<source>_text.pdf` (GT text, per word green/yellow/red by read
-    accuracy) -- one page per report page. `source` is a text-type name;
-    `vector_to_raster`/`original_raster`/`native_to_raster` are scored
-    against that page's `raster_texts` (the SEPARATE rasterised-PDF run),
-    every other type against `texts` (the vectorised-PDF run) -- never the
-    other's predictions."""
+    accuracy) -- one page per report page, against `pages`' own `texts`
+    (one input form's run). `source` is a text-type name; predictions are
+    the run's OCR texts, or every text (native + OCR) with `all_texts` (the
+    original form, `forms.all_texts_are_predictions`)."""
     gt_regions = adapters.gt_regions_from_labelset(gt)
     bbox_pages: list[bytes] = []
     text_pages: list[bytes] = []
-    use_raster = source in RASTER_TEXT_TYPES
-    for pd in dumps:
+    for pd in pages:
         pi = pd.page_meta.index
         regions = [g for g in gt_regions if g.page_index == pi]
-        run_texts = pd.raster_texts if use_raster else pd.texts
         preds = adapters.predictions_from_texts(
-            [t for t in run_texts if t.source == "ocr"]
+            [t for t in pd.texts if all_texts or t.source == "ocr"]
         )
         graph = metrics.build_overlap_graph(regions, preds, cfg)
         bbox_pages.append(
@@ -572,49 +571,52 @@ def _q_color(q: float) -> tuple[float, float, float]:
     return (min(1.0, 2.0 * (1.0 - q)), min(1.0, 2.0 * q), 0.0)
 
 
+def _batched(bars, mask, keys, color_of) -> list:
+    """`stroke_batch_spec`s of the masked `liu_dori.Bars`, one batch per
+    distinct (colour key, draw width)."""
+    from rastervec.commons.renderer.draw import stroke_batch_spec
+
+    if not mask.any():
+        return []
+    segs = np.stack([bars.p0[mask], bars.p1[mask]], axis=1)
+    widths = np.round(np.maximum(bars.w_eff[mask], _MIN_DRAW_WIDTH), 3)
+    keys = keys[mask]
+    specs = []
+    for key in np.unique(keys):
+        for w in np.unique(widths[keys == key]):
+            sel = (keys == key) & (widths == w)
+            specs.append(stroke_batch_spec(segs[sel].tolist(), color_of(key), width=float(w)))
+    return specs
+
+
 def _bars_by_quality(bars, scores) -> list:
-    """`stroke_batch_spec`s of `bars` coloured by their line's Q_v, one
-    batch per (Q_v bin, width)."""
-    from collections import defaultdict
-
-    from rastervec.commons.renderer.draw import stroke_batch_spec
-
-    batches: dict = defaultdict(list)
-    for b, s in zip(bars, scores):
-        qbin = min(_Q_BINS - 1, int(s.q_v * _Q_BINS))
-        batches[(qbin, round(max(b.w_eff, _MIN_DRAW_WIDTH), 3))].append([b.p0, b.p1])
-    return [
-        stroke_batch_spec(lines, _q_color((qbin + 0.5) / _Q_BINS), width=w)
-        for (qbin, w), lines in sorted(batches.items())
-    ]
+    """Every bar coloured by its line's Q_v, one batch per (Q_v bin, width)."""
+    qbin = np.minimum(_Q_BINS - 1, (scores.q_v * _Q_BINS).astype(int))
+    return _batched(bars, np.ones(len(bars), bool), qbin, lambda b: _q_color((b + 0.5) / _Q_BINS))
 
 
-def _bars_plain(bars, hexc: str) -> list:
-    from collections import defaultdict
-
-    from rastervec.commons.renderer.draw import stroke_batch_spec
-
-    batches: dict = defaultdict(list)
-    for b in bars:
-        batches[round(max(b.w_eff, _MIN_DRAW_WIDTH), 3)].append([b.p0, b.p1])
-    return [stroke_batch_spec(lines, _rgb01(hexc), width=w) for w, lines in batches.items()]
+def _bars_plain(bars, mask, hexc: str) -> list:
+    return _batched(bars, mask, np.zeros(len(bars), int), lambda _k: _rgb01(hexc))
 
 
 def _endpoints(bars, hexc: str) -> list:
     from rastervec.commons.renderer.draw import dot_batch_spec
 
-    pts = [p for b in bars for p in (b.p0, b.p1)]
-    return [dot_batch_spec(pts, _rgb01(hexc), radius=_ENDPOINT_RADIUS)] if pts else []
+    if not len(bars):
+        return []
+    pts = np.concatenate([bars.p0, bars.p1]).tolist()
+    return [dot_batch_spec(pts, _rgb01(hexc), radius=_ENDPOINT_RADIUS)]
 
 
 def _add_vector_eval_layers(
     writer: _LayerWriter, page_meta, page_gt: LabelSet, raster_vectors: list, dpi: float,
-    cfg: "vector_metrics.VectorMetricConfig | None" = None,
+    cfg: "vector_metrics.VectorMetricConfig | None" = None, *,
+    gt_types: "tuple[str, ...]" = vector_metrics.VECTOR_TYPES,
 ) -> None:
     """Adds this page's `vector_eval__*.pdf` layers: the Liu-Dori
     evaluation (`liu_dori.evaluate`, the same pure scorer the benchmark
-    uses) of `raster_vectors` (the rasterised-PDF run's P2 output) against
-    `page_gt`'s `vector_to_raster`/`original_raster` geometry -- every GT
+    uses) of `raster_vectors` (one form's Phase 2 output) against
+    `page_gt`'s geometry of `gt_types` (`forms.FORM_VECTOR_GT`) -- every GT
     bar and every predicted bar coloured by its line's Q_v, missed GT
     (|D(g)| = 0), pure false alarms (|G(k)| = 0) and both sides' bar
     endpoints. One page per layer (an all-blank layer is dropped by
@@ -623,17 +625,16 @@ def _add_vector_eval_layers(
 
     cfg = cfg or vector_metrics.VectorMetricConfig()
     inputs = adapters.build_vector_eval_inputs(page_gt, raster_vectors)
+    gt_by_type = {t: (v if t in gt_types else []) for t, v in inputs.gt_by_type.items()}
     gt_bars, pred_bars, _overlaps, res = liu_dori.evaluate(
-        vector_metrics.gt_entries_union(inputs.gt_by_type), inputs.preds, dpi, cfg.liu_dori,
+        vector_metrics.gt_entries_union(gt_by_type), inputs.preds, dpi, cfg.liu_dori,
         text_boxes=inputs.text_boxes,
     )
-    missed = [b for b, s in zip(gt_bars, res.gt_scores) if s.n_matched == 0]
-    false_alarms = [b for b, s in zip(pred_bars, res.pred_scores) if s.n_matched == 0]
     specs_by_layer = (
         _bars_by_quality(gt_bars, res.gt_scores),
         _bars_by_quality(pred_bars, res.pred_scores),
-        _bars_plain(missed, _VECTOR_EVAL_LAYERS[2][1]),
-        _bars_plain(false_alarms, _VECTOR_EVAL_LAYERS[3][1]),
+        _bars_plain(gt_bars, res.gt_scores.n_matched == 0, _VECTOR_EVAL_LAYERS[2][1]),
+        _bars_plain(pred_bars, res.pred_scores.n_matched == 0, _VECTOR_EVAL_LAYERS[3][1]),
         _endpoints(gt_bars, _VECTOR_EVAL_LAYERS[4][1]),
         _endpoints(pred_bars, _VECTOR_EVAL_LAYERS[5][1]),
     )

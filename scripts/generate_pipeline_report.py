@@ -1,11 +1,16 @@
 """Config-driven pipeline stage report generator.
 
-Reads a JSON config, runs the pipeline once per (pdf, page), and writes a
-timestamped run folder:
+Reads a JSON config, runs the pipeline once per (pdf, page, input form), and
+writes a timestamped run folder. Input forms (`inputs`, any of
+"original" / "vectorised" / "rasterised", see `rastervec/Evaluation/
+forms.py`): the page as-is, its `convert_page_to_vector_text` conversion,
+or its `conversion.rasterise_page` flattening at `dpi`. One report folder
+per form -- `<pdf-stem>/` when a single form runs, else
+`<pdf-stem>__<form>/` each:
 
     outputs/pipeline_report/<ts>__<config-stem>/
         config_and_hyperparameters.txt        (also records the source config path)
-        <pdf-stem>/
+        <pdf-stem>[__<form>]/
             manifest.json
             <stage>__<layer>.pdf                       (one multi-page PDF per
                                                        visual layer, e.g.
@@ -20,9 +25,9 @@ timestamped run folder:
             and debug images are still written, so the benchmark still
             scores the run.
 
-            `converted_p<N>.pdf` / `rasterised_p<N>.pdf` (vectorise/benchmark
-            pipeline inputs) are deleted after each page's run with
-            `keep_converted_pdfs: false`.
+            `converted_p<N>.pdf` / `rasterised_p<N>.pdf` (the vectorised /
+            rasterised forms' per-page pipeline inputs) are deleted after
+            each page's run with `keep_converted_pdfs: false`.
 
             Pre-OCR debug image folders (skipped with `debug_images: false`,
             each leaf folder capped at `debug_image_cap` images -- default
@@ -74,20 +79,22 @@ timestamped run folder:
 
 Replaces `rastervec/notebooks/pipeline_stage_visualization.ipynb`.
 
-With `benchmark: true`, each input gets its own report folder (named from
+With `benchmark: true`, each input gets its own folder (named from
 `BenchInput.key`, not the literal `<pdf-stem>` -- see `_bench_doc_name`; a
 `scripts/label/master_label.py` folder's `pdf_path` is always that folder's
 own `original.pdf`, so naming by PDF filename would collide across inputs)
-that is also a scoring artifact for `pipeline_report_benchmark.py`: one
-`convert_page_to_vector_text`
-run per page (predictions for `native_to_vector`/`original_vector`) plus,
-when the input is a master_label.py folder with its own `rasterised.pdf`, a
-SEPARATE pipeline run directly on that rasterised page (predictions for
-`vector_to_raster`/`original_raster`/`native_to_raster` -- these 3 types are
-never scored from the vectorised run). Writes `ground_truth_<text_type>.json`
-(only the non-empty of the 5 text types) and the matching
-`<text_type>_{bbox,text}.pdf` overlays (registered in the manifest under
-stage `benchmark`), and a run-root `benchmark.json` marker.
+that is also a scoring artifact for `pipeline_report_benchmark.py`:
+`ground_truth_<text_type>.json` (only the non-empty of the 5 text types) +
+`benchmark_meta.json`, and one sub-folder per input form (default
+`["vectorised", "rasterised"]`), each a complete viewer folder of that
+form's run with its own `dump.json`, the `<text_type>_{bbox,text}.pdf`
+overlays of the types scored on that form (stage `benchmark`) and the
+`vector_eval` layers of its Phase 2 vectors (`rastervec/Evaluation/
+forms.py` says what each form is scored on). The rasterised form uses a
+master_label.py folder's own `rasterised.pdf` (the file the raster labels
+were drawn on), else flattens each page on the fly. A form run that raises
+is logged and recorded as a failed page (`counts["run_failed"]`), not
+fatal. Plus a run-root `benchmark.json` marker (`entries[].forms`).
 `input_files`/`input_dir` entries may be a `.pdf`
 (auto-only), a `.json` label sidecar, or a directory (a
 `scripts/label/master_label.py` output folder, merging its
@@ -107,6 +114,7 @@ several names are imported directly from this module's own path.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime as _dt
 import gc
 import json
@@ -122,6 +130,12 @@ from rastervec.Evaluation.Evaluate import adapters, metrics, vector_metrics
 from rastervec.Evaluation.Evaluate.variants import PipelineVariant, resolve_variant
 from rastervec.Evaluation.Labelling import native_label
 from rastervec.Evaluation.Evaluate.metrics import TEXT_TYPES
+from rastervec.Evaluation.forms import (
+    FORM_TEXT_TYPES,
+    FORM_VECTOR_GT,
+    all_texts_are_predictions,
+    type_label,
+)
 from rastervec.Evaluation.Labelling.label_schema import (
     LabelEntry,
     LabelSet,
@@ -151,7 +165,6 @@ from rastervec.Evaluation.Report.debug_image_savers import (  # noqa: F401 -- re
 from rastervec.Evaluation.Report.report_artifacts import (  # noqa: F401 -- re-exported for callers/tests
     _ARTIFACTS,
     _NEW_ARTIFACTS,
-    RASTER_TEXT_TYPES,
     _accumulate_page,
     _active_artifacts,
     _add_extra_prediction_layers,
@@ -249,12 +262,131 @@ def _image_dirs(doc_dir: Path) -> "dict[str, Path]":
     }
 
 
-def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -> None:
+def _form_input(
+    form: str, pdf_path: Path, page_index: int, out_dir: Path, config: ReportConfig,
+    rasterised_pdf: "Path | None" = None,
+) -> "tuple[str, int, Path | None]":
+    """`(pipeline input path, page index in it, per-page file written)` of one
+    input form (`Evaluation/forms.py`). "vectorised" converts the page
+    (`ReportConfig.vectorise_fn`); "rasterised" takes the page from a label
+    folder's own `rasterised.pdf` when given (the file the raster labels
+    were drawn on), else flattens it at `config.dpi`."""
+    if form == "original":
+        return str(pdf_path), page_index, None
+    if form == "vectorised":
+        path = out_dir / f"converted_p{page_index}.pdf"
+        config.vectorise_fn()(str(pdf_path), page_index, str(path))
+    else:
+        path = out_dir / f"rasterised_p{page_index}.pdf"
+        if rasterised_pdf is not None:
+            _extract_single_page(rasterised_pdf, page_index, path)
+        else:
+            conversion.rasterise_page(str(pdf_path), page_index, str(path), dpi=config.dpi)
+    return str(path), 0, path
+
+
+def _run_form_page(
+    run_input: str, run_page: int, page_index: int, config: ReportConfig, variant,
+    writer: "_LayerWriter", reservoirs,
+):
+    """One verbose pipeline run (debug layers / images streamed into this
+    form's writer / reservoirs), restamped to the source page index."""
     from rastervec.core.pipeline import run_pipeline as run_current
     from rastervec.pipelines.legacy import run_pipeline as run_legacy
 
+    if variant.engine == "legacy":
+        res = run_legacy(run_input, run_page, verbose=True)
+    else:
+        res = run_current(
+            run_input, run_page, p2=variant.p2, p3=variant.p3,
+            enable_fast=variant.enable_fast, verbose=True,
+            on_debug_layer=_debug_layer_sink(writer) if config.debug_layers else None,
+            on_debug_image=(
+                _debug_image_sink(reservoirs, page_index) if reservoirs is not None else None
+            ),
+            keep_debug_arrays=config.debug_images,
+            stop_after=config.final_stage,
+        )
+    if run_page != page_index:
+        _restamp_page(res, page_index)
+    return res
+
+
+def _hex(color) -> str:
+    return "#" + "".join(f"{int(round(float(c) * 255)):02x}" for c in (color or (0.0, 0.0, 0.0))[:3])
+
+
+def _run_counts(res, p3: str) -> dict:
+    """Per-page counts of one run (reported per form by the benchmark): text
+    by source, vectors per phase, OCR blanks and P2's per-colour-layer
+    output. Phase 1/2 detail comes off a verbose run's `extra`; a key whose
+    source is missing (legacy engine, a phase `final_stage` skipped) is
+    simply absent."""
+    texts = list(getattr(res, "texts", None) or [])
+    vectors = list(getattr(res, "vectors", None) or [])
+    extra = getattr(res, "extra", None) or {}
+    out: dict = {"run_failed": 0, "texts": len(texts), "vectors": len(vectors)}
+    phase1 = extra.get("phase1")
+    p2_texts = extra.get("phase2_texts")
+    p2_vectors = extra.get("phase2_vectors")
+    if phase1 is not None:
+        out["images"] = len(phase1.images or [])
+        out["native_texts"] = len(phase1.texts or [])
+        out["p1_vectors"] = len(phase1.vectors or [])
+    if p2_texts is not None:
+        out["p2_ocr_texts"] = sum(1 for t in p2_texts if t.source == "ocr")
+        out["p3_ocr_texts"] = sum(1 for t in texts if t.source == "ocr") - out["p2_ocr_texts"]
+    if p2_vectors is not None:
+        out["p2_vectors"] = len(p2_vectors)
+        out["p2_items"] = sum(len(v.items or []) for v in p2_vectors)
+        layers: dict = {}
+        for v in p2_vectors:
+            layer = layers.setdefault(_hex(v.color), {"vectors": 0, "items": 0})
+            layer["vectors"] += 1
+            layer["items"] += len(v.items or [])
+        out["p2_layers"] = layers
+        if "phase3" in (getattr(res, "step_durations", None) or {}):
+            out["p3_drawing_vectors"] = len(vectors) - len(p2_vectors)
+            if "p1_vectors" in out:
+                out["p3_consumed_as_text"] = out["p1_vectors"] - out["p3_drawing_vectors"]
+    prelude = (extra.get("p2_debug") or {}).get("raster_prelude")
+    if prelude is not None:
+        out["p2_ocr_blank"] = len(prelude.debug.boxes.get("refined_failed", []))
+    retry = _retry_stats(res, p3)
+    if retry is not None:
+        out["p3_ocr_blank"] = int(retry.get("failed", 0))
+    return out
+
+
+def _failed_page_dump(form: str, run_input: str, run_page: int, page_index: int, variant, exc) -> dump_io.PageDump:
+    """A placeholder page for a run that raised: empty output, counted as a
+    failed page (`counts["run_failed"]`) so the benchmark shows it rather
+    than silently scoring an empty page as a perfect miss."""
+    from rastervec.P1_Reading_Native.reader import Reader
+
+    meta = Reader(run_input).get_page(run_page).meta
+    meta.index, meta.number = page_index, page_index + 1
+    return dump_io.PageDump(
+        page_meta=meta, texts=[], vectors=[], engine=variant.engine, step_durations={},
+        counts={"run_failed": 1, "error": f"{type(exc).__name__}: {exc}"},
+    )
+
+
+def _form_dir_name(stem: str, form: str, forms: "list[str]") -> str:
+    """Normal mode: `<stem>/` for a single form, `<stem>__<form>/` each
+    when several forms run."""
+    return stem if len(forms) == 1 else f"{stem}__{form}"
+
+
+def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -> None:
+    forms = config.forms()
+    for form in forms:
+        _process_pdf_form(pdf_path, form, run_dir / _form_dir_name(pdf_path.stem, form, forms), config, variant)
+
+
+def _process_pdf_form(pdf_path: Path, form: str, doc_dir: Path, config: ReportConfig, variant) -> None:
+    """One normal-mode report folder: `pdf_path`'s pages run as `form`."""
     is_legacy = variant.engine == "legacy"
-    doc_dir = run_dir / pdf_path.stem
     doc_dir.mkdir(parents=True, exist_ok=True)
     reservoirs = (
         _image_reservoirs(_image_dirs(doc_dir), seed_name=doc_dir.name, cap=config.debug_image_cap)
@@ -266,40 +398,22 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
 
     writer = _LayerWriter(doc_dir / ".layer_parts")
     stats_pages: dict[str, list[tuple[int, dict]]] = {row[0]: [] for row in active}
-    dumps: list[dump_io.PageDump] = []
+    # Pages go to disk as they finish (not one list of every page's vectors).
+    dump = dump_io.DumpWriter(doc_dir / "dump.json", str(pdf_path), form=form)
 
     for pos, page_index in enumerate(pages):
         debug_durations: dict = {}
         clock = StepClock(debug_durations)
-        run_input, run_page = str(pdf_path), page_index
-        if config.vectorise:
-            conv_path = doc_dir / f"converted_p{page_index}.pdf"
-            with clock("conversion"):
-                _CONVERT[config.vectorise_mode](str(pdf_path), page_index, str(conv_path))
-            run_input, run_page = str(conv_path), 0
+        with clock("conversion"):
+            run_input, run_page, temp = _form_input(form, pdf_path, page_index, doc_dir, config)
         writer.begin_page(pos, *_page_geometry(run_input, run_page))
 
-        _LOG.info("running %s page %d (%s)", pdf_path.name, page_index, variant.name)
-        if is_legacy:
-            res = run_legacy(run_input, run_page, verbose=True)
-        else:
-            res = run_current(
-                run_input, run_page, p2=variant.p2, p3=variant.p3,
-                enable_fast=variant.enable_fast, verbose=True,
-                on_debug_layer=_debug_layer_sink(writer) if config.debug_layers else None,
-                on_debug_image=(
-                    _debug_image_sink(reservoirs, page_index) if reservoirs is not None else None
-                ),
-                keep_debug_arrays=config.debug_images,
-                stop_after=config.final_stage,
-            )
-        if run_page != page_index:
-            _restamp_page(res, page_index)
-
+        _LOG.info("running %s page %d as %s (%s)", pdf_path.name, page_index, form, variant.name)
+        res = _run_form_page(run_input, run_page, page_index, config, variant, writer, reservoirs)
         _accumulate_page(res, page_index, active, writer, stats_pages, reservoirs,
                          is_legacy=is_legacy, p3=variant.p3, clock=clock,
                          render_layers=config.debug_layers)
-        dumps.append(dump_io.PageDump(
+        dump.add(dump_io.PageDump(
             page_meta=res.page.meta, texts=list(res.texts or []),
             vectors=list(res.vectors or []), engine=variant.engine,
             step_durations=dict(res.step_durations or {}),
@@ -307,9 +421,12 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
             debug_durations=debug_durations,
             fast_cluster_stats=_fast_cluster_stats(res, variant.p3),
             retry_stats=_retry_stats(res, variant.p3),
+            raster_dpi=adapters.raster_dpi_for_page(run_input, run_page) if form != "vectorised" else None,
+            p2_vectors=_p2_vectors(res) if form == "original" else None,
+            counts=_run_counts(res, variant.p3),
         ))
-        if config.vectorise and not config.keep_converted_pdfs:
-            conv_path.unlink(missing_ok=True)
+        if temp is not None and not config.keep_converted_pdfs:
+            temp.unlink(missing_ok=True)
         # Drop this page's verbose result (Phase-1 images, debug_out, the
         # classification) before the next page runs -- otherwise two pages'
         # results are alive at once.
@@ -317,7 +434,13 @@ def _process_pdf(pdf_path: Path, config: ReportConfig, variant, run_dir: Path) -
         gc.collect()
 
     _finalize_doc_dir(doc_dir, pdf_path, pages, config, variant, active,
-                      writer, stats_pages, dumps)
+                      writer, stats_pages, dump)
+
+
+def _p2_vectors(res) -> "list | None":
+    """Phase 2's own output vectors off a verbose run (`None` without)."""
+    vs = (getattr(res, "extra", None) or {}).get("phase2_vectors")
+    return None if vs is None else list(vs)
 
 
 _OVERLAY_COLORS = {
@@ -467,59 +590,98 @@ def _process_pdf_benchmark(
     bench: BenchInput, config: ReportConfig, variant, run_dir: Path,
 ) -> dict:
     """One benchmark input -> `run_dir/<name>/` (named from `bench.key`, see
-    `_bench_doc_name`): the full per-stage report for a
-    `convert_page_to_vector_text` run per page (predictions for
-    `native_to_vector`/`original_vector`), plus -- when `bench.rasterised_
-    pdf_path` is set -- a SEPARATE pipeline run directly on that rasterised
-    PDF's own page (predictions for `vector_to_raster`/`original_raster`/
-    `native_to_raster`, and its vectors -- P2's output, that page has no
-    vector paths of its own -- for the vector metrics). Writes
-    `ground_truth_<type>.json` (only the non-empty types) and `<type>_{bbox,text}.pdf` overlays for whichever
-    types have labels. Returns the `benchmark.json` entry."""
-    from rastervec.core.pipeline import run_pipeline as run_current
-    from rastervec.pipelines.legacy import run_pipeline as run_legacy
-
-    is_legacy = variant.engine == "legacy"
+    `_bench_doc_name`): the ground truth (`ground_truth_<type>.json`, only
+    the non-empty types) + `benchmark_meta.json`, and one sub-folder per
+    input form (`config.forms()`) -- each a complete viewer folder of that
+    form's run (layers, `dump.json`, debug images, the label overlays of the
+    types scored on that form, `vector_eval` layers; see
+    `rastervec/Evaluation/forms.py` for what each form is scored on).
+    Returns the `benchmark.json` entry."""
     doc_name = _bench_doc_name(bench)
     doc_dir = run_dir / doc_name
     doc_dir.mkdir(parents=True, exist_ok=True)
-    reservoirs = (
-        _image_reservoirs(_image_dirs(doc_dir), seed_name=doc_name, cap=config.debug_image_cap)
-        if config.debug_images else None
-    )
     pages = _filter_valid_pages(bench.pdf_path, config.pages_for(doc_name), bench.key)
     cfg = metrics.MetricConfig(iou_edge_min=config.iou_edge_min)
-    active = _active_artifacts(config, variant)
     gt_by_type = _bench_ground_truth_by_type(bench, pages)
-    # Extra-prediction layers only when this input has manual vector labels.
-    has_manual = bool(gt_by_type["original_vector"].entries)
 
-    writer = _LayerWriter(doc_dir / ".layer_parts")
+    sources: list[str] = []
+    for text_type in TEXT_TYPES:
+        gt = gt_by_type[text_type]
+        if not gt.entries and not gt.geometry_entries:
+            if text_type != "native_to_vector":
+                _LOG.info("%s: no %s labels for pages %s", bench.key, text_type, pages)
+            continue
+        save_labels(gt, str(doc_dir / f"ground_truth_{text_type}.json"))
+        sources.append(text_type)
+
+    forms = config.forms()
+    for form in forms:
+        _process_benchmark_form(bench, form, doc_dir / form, pages, gt_by_type, config, variant, cfg)
+
+    (doc_dir / "benchmark_meta.json").write_text(json.dumps({
+        "key": bench.key,
+        "dir": doc_name,
+        "source_pdf": str(bench.pdf_path),
+        "labels": str(bench.labels_path) if bench.labels_path else None,
+        "rasterised_pdf": str(bench.rasterised_pdf_path) if bench.rasterised_pdf_path else None,
+        "pages": pages,
+        "sources": sources,
+        "forms": forms,
+        "final_stage": config.final_stage,
+        "variant": variant.name,
+    }, indent=2), encoding="utf-8")
+    return {
+        "key": bench.key,
+        "pdf_stem": bench.pdf_path.stem,
+        "dir": doc_name,
+        "sources": sources,
+        "forms": {form: f"{doc_name}/{form}" for form in forms},
+    }
+
+
+def _process_benchmark_form(
+    bench: BenchInput, form: str, form_dir: Path, pages: list[int], gt_by_type: "dict[str, LabelSet]",
+    config: ReportConfig, variant, cfg: "metrics.MetricConfig",
+) -> None:
+    is_legacy = variant.engine == "legacy"
+    form_dir.mkdir(parents=True, exist_ok=True)
+    reservoirs = (
+        _image_reservoirs(_image_dirs(form_dir), seed_name=f"{form_dir.parent.name}/{form}",
+                          cap=config.debug_image_cap)
+        if config.debug_images else None
+    )
+    active = _active_artifacts(config, variant)
+    writer = _LayerWriter(form_dir / ".layer_parts")
     stats_pages: dict[str, list[tuple[int, dict]]] = {row[0]: [] for row in active}
-    dumps: list[dump_io.PageDump] = []
+    # Pages go to disk as they finish; the label overlays only need each
+    # page's texts, so `overlay_pages` keeps copies without any vectors.
+    dump = dump_io.DumpWriter(form_dir / "dump.json", str(bench.pdf_path), form=form)
+    overlay_pages: list[dump_io.PageDump] = []
+    text_types = FORM_TEXT_TYPES[form]
+    vector_gt = FORM_VECTOR_GT[form]
+    # Extra-prediction layers where manual vector text is scored on this form.
+    has_manual = "original_vector" in text_types and bool(gt_by_type["original_vector"].entries)
 
     for pos, p in enumerate(pages):
         debug_durations: dict = {}
         clock = StepClock(debug_durations)
-        conv_path = doc_dir / f"converted_p{p}.pdf"
         with clock("conversion"):
-            conversion.convert_page_to_vector_text(str(bench.pdf_path), p, str(conv_path))
-        writer.begin_page(pos, *_page_geometry(conv_path, 0))
-        _LOG.info("benchmark %s page %d (%s)", bench.key, p, variant.name)
-        if is_legacy:
-            res = run_legacy(str(conv_path), 0, verbose=True)
-        else:
-            res = run_current(
-                str(conv_path), 0, p2=variant.p2, p3=variant.p3,
-                enable_fast=variant.enable_fast, verbose=True,
-                on_debug_layer=_debug_layer_sink(writer) if config.debug_layers else None,
-                on_debug_image=(
-                    _debug_image_sink(reservoirs, p) if reservoirs is not None else None
-                ),
-                keep_debug_arrays=config.debug_images,
-                stop_after=config.final_stage,
+            run_input, run_page, temp = _form_input(
+                form, bench.pdf_path, p, form_dir, config, bench.rasterised_pdf_path,
             )
-        _restamp_page(res, p)
+        writer.begin_page(pos, *_page_geometry(run_input, run_page))
+        _LOG.info("benchmark %s page %d as %s (%s)", bench.key, p, form, variant.name)
+        try:
+            res = _run_form_page(run_input, run_page, p, config, variant, writer, reservoirs)
+        except Exception as exc:  # noqa: BLE001 -- one failed page must not end the benchmark
+            _LOG.warning("%s: %s run failed for page %d: %s", bench.key, form, p, exc)
+            page_dump = _failed_page_dump(form, run_input, run_page, p, variant, exc)
+            dump.add(page_dump)
+            overlay_pages.append(page_dump)
+            if temp is not None and not config.keep_converted_pdfs:
+                temp.unlink(missing_ok=True)
+            continue
+
         _accumulate_page(res, p, active, writer, stats_pages, reservoirs,
                          is_legacy=is_legacy, p3=variant.p3, clock=clock,
                          render_layers=config.debug_layers)
@@ -538,127 +700,66 @@ def _process_pdf_benchmark(
                     ],
                 )
 
-        raster_texts = []
-        raster_vectors = []
-        raster_steps: dict = {}
-        raster_substeps: dict = {}
-        raster_dpi = None
-        if bench.rasterised_pdf_path is not None:
-            raster_page_path = doc_dir / f"rasterised_p{p}.pdf"
-            raster_dpi = adapters.raster_dpi_for_page(str(bench.rasterised_pdf_path), p)
-            try:
-                with clock("conversion"):
-                    _extract_single_page(bench.rasterised_pdf_path, p, raster_page_path)
-                if is_legacy:
-                    res_raster = run_legacy(str(raster_page_path), 0, verbose=True)
-                else:
-                    # Only texts, vectors + timings are read back from this
-                    # run, and run_pipeline fills step/substep durations without
-                    # verbose -- so no debug data is kept at all.
-                    res_raster = run_current(
-                        str(raster_page_path), 0, p2=variant.p2, p3=variant.p3,
-                        enable_fast=variant.enable_fast, verbose=False,
-                        keep_debug_arrays=False,
-                        stop_after=config.final_stage,
-                    )
-                _restamp_page(res_raster, p)
-                raster_texts = list(res_raster.texts or [])
-                raster_vectors = list(res_raster.vectors or [])
-                raster_steps = dict(res_raster.step_durations or {})
-                raster_substeps = _substeps(res_raster)
-                del res_raster
-            except Exception as exc:  # noqa: BLE001
-                _LOG.warning(
-                    "%s: rasterised-PDF run failed for page %d: %s", bench.key, p, exc,
-                )
-            finally:
-                if not config.keep_converted_pdfs:
-                    raster_page_path.unlink(missing_ok=True)
-
+        dpi = adapters.raster_dpi_for_page(run_input, run_page) if form != "vectorised" else None
+        p2_vectors = _p2_vectors(res) if form == "original" else None
+        if vector_gt and config.debug_layers:
             page_gt = LabelSet(
                 pdf_path=str(bench.pdf_path),
                 entries=[e for t in TEXT_TYPES for e in gt_by_type[t].entries if e.page_index == p],
                 geometry_entries=[
-                    g for t in ("vector_to_raster", "original_raster")
-                    for g in gt_by_type[t].geometry_entries if g.page_index == p
+                    g for t in vector_gt for g in gt_by_type[t].geometry_entries if g.page_index == p
                 ],
             )
-            if config.debug_layers and page_gt.geometry_entries:
+            if page_gt.geometry_entries:
                 try:
                     with clock("vector_eval"):
                         _add_vector_eval_layers(
-                            writer, res.page.meta, page_gt, raster_vectors,
-                            raster_dpi or vector_metrics.VectorMetricConfig().default_dpi,
+                            writer, res.page.meta, page_gt,
+                            p2_vectors if p2_vectors is not None else list(res.vectors or []),
+                            dpi or vector_metrics.VectorMetricConfig().default_dpi,
+                            gt_types=vector_gt,
                         )
                 except Exception as exc:  # noqa: BLE001
-                    _LOG.warning("%s: vector_eval layers failed for page %d: %s", bench.key, p, exc)
+                    _LOG.warning("%s: %s vector_eval layers failed for page %d: %s", bench.key, form, p, exc)
 
-        dumps.append(dump_io.PageDump(
+        page_dump = dump_io.PageDump(
             page_meta=res.page.meta, texts=list(res.texts or []),
             vectors=list(res.vectors or []), engine=variant.engine,
             step_durations=dict(res.step_durations or {}),
-            raster_texts=raster_texts,
-            raster_vectors=raster_vectors,
             substep_durations=_substeps(res),
-            raster_step_durations=raster_steps,
-            raster_substep_durations=raster_substeps,
             debug_durations=debug_durations,
             fast_cluster_stats=_fast_cluster_stats(res, variant.p3),
             retry_stats=_retry_stats(res, variant.p3),
-            raster_dpi=raster_dpi,
-        ))
-        if not config.keep_converted_pdfs:
-            conv_path.unlink(missing_ok=True)
+            raster_dpi=dpi,
+            p2_vectors=p2_vectors,
+            counts=_run_counts(res, variant.p3),
+        )
+        dump.add(page_dump)
+        overlay_pages.append(dataclasses.replace(page_dump, vectors=[], p2_vectors=None))
+        del page_dump, p2_vectors
+        if temp is not None and not config.keep_converted_pdfs:
+            temp.unlink(missing_ok=True)
         del res
         gc.collect()
 
-    sources: list[str] = []
-    # Types whose `<type>_{bbox,text}.pdf` overlays were actually written
-    # (a manifest layer entry per file) -- `sources` itself lists every
-    # type with ground truth, overlays or not.
-    overlay_sources: list[str] = []
     extra_layers: list[dict] = []
     doc_durations: dict = {}
-    for text_type in TEXT_TYPES:
+    all_texts = all_texts_are_predictions(form)
+    for text_type in text_types:
         gt = gt_by_type[text_type]
-        if not gt.entries and not gt.geometry_entries:
-            if text_type != "native_to_vector":
-                _LOG.info("%s: no %s labels for pages %s", bench.key, text_type, pages)
+        if not gt.entries or not config.debug_layers:
             continue
-        save_labels(gt, str(doc_dir / f"ground_truth_{text_type}.json"))
-        if gt.entries and config.debug_layers:
-            with StepClock(doc_durations)("label_overlays"):
-                _write_label_overlays(doc_dir, text_type, gt, dumps, cfg)
-            overlay_sources.append(text_type)
-        sources.append(text_type)
-
-    for s in overlay_sources:
+        with StepClock(doc_durations)("label_overlays"):
+            _write_label_overlays(form_dir, text_type, gt, overlay_pages, cfg, all_texts=all_texts)
         for kind in ("bbox", "text"):
             extra_layers.append({
-                "stage": "benchmark", "layer": f"{s} label {kind}",
-                "file": f"{s}_{kind}.pdf", "color": _OVERLAY_COLORS[s],
+                "stage": "benchmark", "layer": f"{type_label(form, text_type)} label {kind}",
+                "file": f"{text_type}_{kind}.pdf", "color": _OVERLAY_COLORS[text_type],
             })
 
-    _finalize_doc_dir(doc_dir, bench.pdf_path, pages, config, variant, active,
-                      writer, stats_pages, dumps,
+    _finalize_doc_dir(form_dir, bench.pdf_path, pages, config, variant, active,
+                      writer, stats_pages, dump,
                       extra_layers=tuple(extra_layers), doc_durations=doc_durations)
-
-    (doc_dir / "benchmark_meta.json").write_text(json.dumps({
-        "key": bench.key,
-        "dir": doc_name,
-        "source_pdf": str(bench.pdf_path),
-        "labels": str(bench.labels_path) if bench.labels_path else None,
-        "pages": pages,
-        "sources": sources,
-        "final_stage": config.final_stage,
-        "variant": variant.name,
-    }, indent=2), encoding="utf-8")
-    return {
-        "key": bench.key,
-        "pdf_stem": bench.pdf_path.stem,
-        "dir": doc_name,
-        "sources": sources,
-    }
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

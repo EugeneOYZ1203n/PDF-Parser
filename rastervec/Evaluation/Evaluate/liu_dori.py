@@ -77,10 +77,12 @@ class LiuDoriConfig:
 
 
 # --------------------------------------------------------------------------
-# Bars
+# Bars -- struct of arrays (a dense P2 page has 1e5-1e6 items; one Python
+# object per bar / overlap / line score cost seconds and hundreds of MB)
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Bar:
+    """One bar, as returned by indexing / iterating `Bars`."""
     p0: Point
     p1: Point
     width: float  # raw width (0 when the source had none)
@@ -88,14 +90,52 @@ class Bar:
     dashed: bool = False
     is_text: bool = False
     vector_type: str = ""
-    # Source: index of the GeometryEntry group (GT annotation / pred Vector)
-    # and of the entry within the flattened list.
+    # Source: GeometryEntry group (GT annotation / pred Vector) and index of
+    # the entry within the flattened entry list.
     group: int = -1
     entry: int = -1
 
     @property
     def length(self) -> float:
         return math.dist(self.p0, self.p1)
+
+
+@dataclass
+class Bars:
+    """N straight bars as parallel arrays (`p0`/`p1` (N, 2) page space)."""
+    p0: np.ndarray
+    p1: np.ndarray
+    width: np.ndarray
+    w_eff: np.ndarray
+    dashed: np.ndarray
+    is_text: np.ndarray
+    vector_type: np.ndarray  # str
+    group: np.ndarray
+    entry: np.ndarray
+
+    @classmethod
+    def empty(cls) -> "Bars":
+        z = np.zeros(0)
+        return cls(np.zeros((0, 2)), np.zeros((0, 2)), z, z.copy(), np.zeros(0, bool), np.zeros(0, bool),
+                   np.zeros(0, dtype="<U1"), np.zeros(0, np.int64), np.zeros(0, np.int64))
+
+    def __len__(self) -> int:
+        return len(self.width)
+
+    def __getitem__(self, i: int) -> Bar:
+        return Bar(
+            p0=(float(self.p0[i, 0]), float(self.p0[i, 1])), p1=(float(self.p1[i, 0]), float(self.p1[i, 1])),
+            width=float(self.width[i]), w_eff=float(self.w_eff[i]), dashed=bool(self.dashed[i]),
+            is_text=bool(self.is_text[i]), vector_type=str(self.vector_type[i]),
+            group=int(self.group[i]), entry=int(self.entry[i]),
+        )
+
+    def __iter__(self):
+        return (self[i] for i in range(len(self)))
+
+    @property
+    def length(self) -> np.ndarray:
+        return np.hypot(*(self.p1 - self.p0).T) if len(self) else np.zeros(0)
 
 
 def is_dashed(dashes) -> bool:
@@ -195,40 +235,54 @@ def _text_fraction(p0: np.ndarray, p1: np.ndarray, boxes: "list[Bbox]") -> np.nd
 def bars_from_entries(
     entries: list, dpi: float, cfg: LiuDoriConfig = LiuDoriConfig(), *,
     text_boxes: "list[Bbox] | None" = None,
-) -> list[Bar]:
+) -> Bars:
     """`entries`: `vector_metrics.GeometryEntry` list (GT or preds). Zero-
     length bars are dropped (they carry no length weight)."""
     floor = width_floor_pt(dpi, cfg)
     step = cfg.curve_sample_px * 72.0 / float(dpi)
-    raw: list[tuple] = []  # (p0, p1, width, w_eff, dashed, vtype, group, entry)
+    dashed_cache: dict = {}
+    # One row per *entry* for the straight items (the bulk), expanded rows
+    # for curves; per-bar attributes gathered by entry index.
+    a_pts: list = []
+    b_pts: list = []
+    owner: list[int] = []
+    widths = np.empty(len(entries))
+    dashed = np.empty(len(entries), dtype=bool)
     for ei, e in enumerate(entries):
-        width = float(e.width) if e.width is not None else 0.0
-        w_eff = max(width, floor)
-        dashed = is_dashed(getattr(e, "dashes", None))
-        if e.kind == "c" and len(e.points) == 4:
-            pts = _arc_length_samples(e.points, step)
-            pts = _rdp(pts, cfg.rdp_eps_frac * w_eff) if w_eff > 0 else pts
-            segs = list(zip(pts[:-1], pts[1:]))
+        widths[ei] = float(e.width) if e.width is not None else 0.0
+        dk = getattr(e, "dashes", None)
+        if dk not in dashed_cache:
+            dashed_cache[dk] = is_dashed(dk)
+        dashed[ei] = dashed_cache[dk]
+        pts = e.points
+        if e.kind == "c" and len(pts) == 4:
+            w_eff = max(widths[ei], floor)
+            poly = _arc_length_samples(pts, step)
+            if w_eff > 0:
+                poly = _rdp(poly, cfg.rdp_eps_frac * w_eff)
+            a_pts.extend(poly[:-1].tolist())
+            b_pts.extend(poly[1:].tolist())
+            owner.extend([ei] * (len(poly) - 1))
         else:
-            pts = [np.asarray(p, dtype=float) for p in e.points]
-            segs = list(zip(pts[:-1], pts[1:]))
-        for a, b in segs:
-            if math.dist(a, b) <= _EPS:
-                continue
-            raw.append((
-                (float(a[0]), float(a[1])), (float(b[0]), float(b[1])),
-                width, w_eff, dashed, e.vector_type, e.group, ei,
-            ))
-    if not raw:
-        return []
-    p0 = np.array([r[0] for r in raw])
-    p1 = np.array([r[1] for r in raw])
-    text = _text_fraction(p0, p1, list(text_boxes or [])) > 0.5
-    return [
-        Bar(p0=r[0], p1=r[1], width=r[2], w_eff=r[3], dashed=r[4], is_text=bool(text[i]),
-            vector_type=r[5], group=r[6], entry=r[7])
-        for i, r in enumerate(raw)
-    ]
+            for a, b in zip(pts[:-1], pts[1:]):
+                a_pts.append(a)
+                b_pts.append(b)
+                owner.append(ei)
+    if not owner:
+        return Bars.empty()
+    p0 = np.asarray(a_pts, dtype=float).reshape(-1, 2)
+    p1 = np.asarray(b_pts, dtype=float).reshape(-1, 2)
+    idx = np.asarray(owner, dtype=np.int64)
+    keep = np.hypot(*(p1 - p0).T) > _EPS
+    p0, p1, idx = p0[keep], p1[keep], idx[keep]
+    width = widths[idx]
+    vtypes = np.array([e.vector_type for e in entries], dtype=str)[idx] if len(idx) else np.zeros(0, "<U1")
+    groups = np.array([e.group for e in entries], dtype=np.int64)[idx]
+    return Bars(
+        p0=p0, p1=p1, width=width, w_eff=np.maximum(width, floor), dashed=dashed[idx],
+        is_text=_text_fraction(p0, p1, list(text_boxes or [])) > 0.5,
+        vector_type=vtypes, group=groups, entry=idx,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -236,6 +290,7 @@ def bars_from_entries(
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Overlap:
+    """One overlap, as returned by indexing `Overlaps`."""
     gt: int
     pred: int
     length: float  # l(c)
@@ -248,11 +303,35 @@ class Overlap:
     q_v: float
 
 
-def _arrays(bars: list[Bar]):
-    p0 = np.array([b.p0 for b in bars], dtype=float).reshape(-1, 2)
-    p1 = np.array([b.p1 for b in bars], dtype=float).reshape(-1, 2)
-    w = np.array([b.w_eff for b in bars], dtype=float)
-    return p0, p1, w
+_OVERLAP_FIELDS = ("gt", "pred", "length", "d1", "d2", "d_overlap", "q_pt", "q_od", "q_w", "q_v")
+
+
+@dataclass
+class Overlaps:
+    """Every accepted (g, k) overlap as parallel arrays."""
+    gt: np.ndarray
+    pred: np.ndarray
+    length: np.ndarray
+    d1: np.ndarray
+    d2: np.ndarray
+    d_overlap: np.ndarray
+    q_pt: np.ndarray
+    q_od: np.ndarray
+    q_w: np.ndarray
+    q_v: np.ndarray
+
+    @classmethod
+    def empty(cls) -> "Overlaps":
+        return cls(np.zeros(0, np.int64), np.zeros(0, np.int64), *(np.zeros(0) for _ in range(8)))
+
+    def __len__(self) -> int:
+        return len(self.gt)
+
+    def __getitem__(self, i: int) -> Overlap:
+        return Overlap(**{f: (int if f in ("gt", "pred") else float)(getattr(self, f)[i]) for f in _OVERLAP_FIELDS})
+
+    def __iter__(self):
+        return (self[i] for i in range(len(self)))
 
 
 def _proj(p: np.ndarray, a: np.ndarray, b: np.ndarray):
@@ -266,43 +345,81 @@ def _proj(p: np.ndarray, a: np.ndarray, b: np.ndarray):
     return q, np.hypot(*(p - q).T)
 
 
-def _candidate_pairs(gt: list[Bar], pred: list[Bar]) -> np.ndarray:
-    """(gi, pk) pairs where some endpoint of one may lie inside the other:
-    for every bar, the other side's endpoints within its bounding ball
-    (half length + half width) around its midpoint."""
+# Spacing (pt) of the probe points along each bar in the candidate search;
+# at least the widest bar, so a probe ball never gets smaller than a line.
+_PROBE_STEP_PT = 2.0
+
+
+def _probes(a0: np.ndarray, a1: np.ndarray, step: float) -> "tuple[np.ndarray, np.ndarray]":
+    """Points every <= `step` along each segment (ends included) and the
+    index of the segment each belongs to."""
+    lengths = np.hypot(*(a1 - a0).T)
+    n = np.maximum(1, np.ceil(lengths / step).astype(np.int64))
+    owner = np.repeat(np.arange(len(a0)), n + 1)
+    start = np.repeat(np.cumsum(n + 1) - (n + 1), n + 1)
+    t = (np.arange(len(owner)) - start) / np.repeat(n, n + 1)
+    pts = a0[owner] + t[:, None] * (a1 - a0)[owner]
+    return pts, owner
+
+
+def _candidate_pairs(gt: Bars, pred: Bars) -> np.ndarray:
+    """Unique (gi, pk) pairs where an endpoint of one bar may lie inside the
+    other bar's area -- the necessary condition of the 2-of-4 endpoint
+    rule. Each bar is probed every `_PROBE_STEP_PT` along its length; the
+    other side's endpoints within (step / 2 + max half-width) of a probe are
+    candidates. Local by construction: a long border line only meets the
+    endpoints actually lying along it, not every endpoint inside a ball of
+    its whole length. Vectorised (`sparse_distance_matrix` + `np.unique`)."""
     from scipy.spatial import cKDTree
 
-    pairs: set[tuple[int, int]] = set()
+    if not len(gt) or not len(pred):
+        return np.zeros((0, 2), dtype=np.int64)
+    m_pred = len(pred)
+    step = max(_PROBE_STEP_PT, float(max(gt.w_eff.max(), pred.w_eff.max())))
+    keys = []
     for own, other, flip in ((gt, pred, False), (pred, gt, True)):
-        if not own or not other:
+        probes, owner = _probes(own.p0, own.p1, step)
+        radius = step / 2.0 + float(own.w_eff.max()) / 2.0 + 1e-6
+        hits = cKDTree(probes).sparse_distance_matrix(
+            cKDTree(np.concatenate([other.p0, other.p1])), radius, output_type="ndarray",
+        )
+        del probes
+        if not len(hits):
             continue
-        o0, o1, _ = _arrays(other)
-        tree = cKDTree(np.concatenate([o0, o1]))
-        m = len(other)
-        a0, a1, w = _arrays(own)
-        mids = (a0 + a1) / 2.0
-        radii = np.hypot(*(a1 - a0).T) / 2.0 + w / 2.0 + 1e-6
-        for i, hits in enumerate(tree.query_ball_point(mids, radii)):
-            for j in hits:
-                j %= m
-                pairs.add((j, i) if flip else (i, j))
-    if not pairs:
-        return np.zeros((0, 2), dtype=int)
-    return np.array(sorted(pairs), dtype=int)
+        own_idx = owner[hits["i"]].astype(np.int64)
+        other_idx = (hits["j"] % len(other)).astype(np.int64)
+        del hits
+        gi, pk = (other_idx, own_idx) if flip else (own_idx, other_idx)
+        keys.append(np.unique(gi * m_pred + pk))
+    if not keys:
+        return np.zeros((0, 2), dtype=np.int64)
+    k = np.unique(np.concatenate(keys))
+    return np.stack([k // m_pred, k % m_pred], axis=1)
 
 
-def match(gt: list[Bar], pred: list[Bar], cfg: LiuDoriConfig = LiuDoriConfig()) -> list[Overlap]:
+# Candidate pairs evaluated per `match` chunk -- the geometry below holds
+# ~30 temporaries per pair, so this caps that working set (~50 MB).
+_MATCH_CHUNK = 200_000
+
+
+def match(gt: Bars, pred: Bars, cfg: LiuDoriConfig = LiuDoriConfig()) -> Overlaps:
     pairs = _candidate_pairs(gt, pred)
     if not len(pairs):
-        return []
+        return Overlaps.empty()
+    parts = [_match_pairs(gt, pred, pairs[i:i + _MATCH_CHUNK], cfg) for i in range(0, len(pairs), _MATCH_CHUNK)]
+    if len(parts) == 1:
+        return parts[0]
+    return Overlaps(**{f: np.concatenate([getattr(p, f) for p in parts]) for f in _OVERLAP_FIELDS})
+
+
+def _match_pairs(gt: Bars, pred: Bars, pairs: np.ndarray, cfg: LiuDoriConfig) -> Overlaps:
     gi, pk = pairs[:, 0], pairs[:, 1]
-    G0, G1, Wg_all = _arrays(gt)
-    K0, K1, Wk_all = _arrays(pred)
-    g0, g1, wg = G0[gi], G1[gi], Wg_all[gi]
-    k0, k1, wk = K0[pk], K1[pk], Wk_all[pk]
+    g0, g1 = gt.p0[gi], gt.p1[gi]
+    k0, k1 = pred.p0[pk], pred.p1[pk]
     if cfg.paper_mode:
-        wg = np.array([gt[i].width for i in gi], dtype=float)
-        wk = np.array([pred[j].width for j in pk], dtype=float)
+        wg, wk = gt.width[gi], pred.width[pk]
+    else:
+        wg, wk = gt.w_eff[gi], pred.w_eff[pk]
 
     keep = np.ones(len(pairs), dtype=bool)
     if not cfg.paper_mode:
@@ -317,20 +434,19 @@ def match(gt: list[Bar], pred: list[Bar], cfg: LiuDoriConfig = LiuDoriConfig()) 
     tol_k, tol_g = wk / 2.0 + _EPS, wg / 2.0 + _EPS
     g0_in, g1_in = dist_g0 <= tol_k, dist_g1 <= tol_k
     k0_in, k1_in = dist_k0 <= tol_g, dist_k1 <= tol_g
-    n_in = g0_in.astype(int) + g1_in + k0_in + k1_in
-    keep &= n_in >= 2
+    keep &= (g0_in.astype(int) + g1_in + k0_in + k1_in) >= 2
 
-    # Overlap segment c on k.
+    # Overlap segment c on k: all of k (both k ends inside g), g's ends
+    # projected onto k (both g ends inside k), or partial -- k's inside end
+    # to g's inside end projected onto k.
     pg0, _ = _proj(g0, k0, k1)
     pg1, _ = _proj(g1, k0, k1)
     both_k = k0_in & k1_in
     both_g = g0_in & g1_in & ~both_k
-    partial = ~both_k & ~both_g
     k_end = np.where(k0_in[:, None], k0, k1)
     g_proj = np.where(g0_in[:, None], pg0, pg1)
     c0 = np.where(both_k[:, None], k0, np.where(both_g[:, None], pg0, k_end))
     c1 = np.where(both_k[:, None], k1, np.where(both_g[:, None], pg1, g_proj))
-    keep &= ~(partial & ~((k0_in | k1_in) & (g0_in | g1_in)))
     lc = np.hypot(*(c1 - c0).T)
     keep &= lc > _EPS
 
@@ -347,26 +463,22 @@ def match(gt: list[Bar], pred: list[Bar], cfg: LiuDoriConfig = LiuDoriConfig()) 
         d_ov = np.where(even & (d_ov <= 1.0 + 1e-9), 0.0, d_ov)
     keep &= d_ov < wg / 2.0 + _EPS
 
+    idx = np.nonzero(keep)[0]
+    gi, pk, wg, wk = gi[idx], pk[idx], wg[idx], wk[idx]
+    d1, d2, d_ov, lc = d1[idx], d2[idx], d_ov[idx], lc[idx]
     with np.errstate(divide="ignore", invalid="ignore"):
         q_pt = np.exp(-(d1 + d2) / wg)
         q_od = np.exp(-2.0 * d_ov / wg)
         q_w = np.exp(-np.abs(wk - wg) / wg)
     if cfg.paper_mode:
-        st_g = np.array([2.0 if gt[i].dashed else 1.0 for i in gi])
-        st_k = np.array([2.0 if pred[j].dashed else 1.0 for j in pk])
+        st_g = np.where(gt.dashed[gi], 2.0, 1.0)
+        st_k = np.where(pred.dashed[pk], 2.0, 1.0)
         q_st = np.exp(-np.abs(st_k - st_g))
         q_v = (q_pt * q_od * q_w * q_st) ** (1.0 / 5.0)  # Q_sh == 1: every line is a bar
     else:
         q_v = (q_pt * q_od * q_w) ** (1.0 / 3.0)
-
-    out = []
-    for idx in np.nonzero(keep)[0]:
-        out.append(Overlap(
-            gt=int(gi[idx]), pred=int(pk[idx]), length=float(lc[idx]),
-            d1=float(d1[idx]), d2=float(d2[idx]), d_overlap=float(d_ov[idx]),
-            q_pt=float(q_pt[idx]), q_od=float(q_od[idx]), q_w=float(q_w[idx]), q_v=float(q_v[idx]),
-        ))
-    return out
+    return Overlaps(gt=gi, pred=pk, length=lc, d1=d1, d2=d2, d_overlap=d_ov,
+                    q_pt=q_pt, q_od=q_od, q_w=q_w, q_v=q_v)
 
 
 # --------------------------------------------------------------------------
@@ -383,32 +495,43 @@ class LineScore:
     q_v: float
 
 
-def _line_scores(n: int, lengths: np.ndarray, overlaps: list[Overlap], side: str) -> list[LineScore]:
-    sum_l = np.zeros(n)
-    sum_l2 = np.zeros(n)
-    sum_ql = np.zeros(n)
-    count = np.zeros(n, dtype=int)
-    for o in overlaps:
-        i = o.gt if side == "gt" else o.pred
-        sum_l[i] += o.length
-        sum_l2[i] += o.length ** 2
-        sum_ql[i] += o.q_v * o.length
-        count[i] += 1
-    out = []
-    for i in range(n):
-        if count[i] == 0:
-            out.append(LineScore(float(lengths[i]), 0, 0.0, math.nan, 0.0))
-            continue
-        q_b = sum_ql[i] / max(lengths[i], sum_l[i])
-        q_fr = math.sqrt(sum_l2[i]) / sum_l[i]
-        out.append(LineScore(float(lengths[i]), int(count[i]), float(q_b), float(q_fr), float(q_b * q_fr)))
-    return out
+@dataclass
+class LineScores:
+    """`LineScore` per bar as parallel arrays."""
+    length: np.ndarray
+    n_matched: np.ndarray
+    q_b: np.ndarray
+    q_fr: np.ndarray
+    q_v: np.ndarray
+
+    def __len__(self) -> int:
+        return len(self.length)
+
+    def __getitem__(self, i: int) -> LineScore:
+        return LineScore(float(self.length[i]), int(self.n_matched[i]), float(self.q_b[i]),
+                         float(self.q_fr[i]), float(self.q_v[i]))
+
+    def __iter__(self):
+        return (self[i] for i in range(len(self)))
 
 
-def _bucket(n: int) -> str:
-    if n <= 2:
-        return str(n)
-    return "3-5" if n <= 5 else "6+"
+def _line_scores(lengths: np.ndarray, idx: np.ndarray, ov: Overlaps) -> LineScores:
+    n = len(lengths)
+    sum_l = np.bincount(idx, weights=ov.length, minlength=n)
+    sum_l2 = np.bincount(idx, weights=ov.length ** 2, minlength=n)
+    sum_ql = np.bincount(idx, weights=ov.q_v * ov.length, minlength=n)
+    count = np.bincount(idx, minlength=n).astype(np.int64)
+    matched = count > 0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        q_b = np.where(matched, sum_ql / np.maximum(lengths, sum_l), 0.0)
+        q_fr = np.where(matched, np.sqrt(sum_l2) / sum_l, np.nan)
+    q_v = np.where(matched, q_b * q_fr, 0.0)
+    return LineScores(length=lengths, n_matched=count, q_b=q_b, q_fr=q_fr, q_v=q_v)
+
+
+def _bucket_counts(n_matched: np.ndarray) -> "dict[str, int]":
+    edges = {"0": (0, 0), "1": (1, 1), "2": (2, 2), "3-5": (3, 5), "6+": (6, np.iinfo(np.int64).max)}
+    return {b: int(((n_matched >= lo) & (n_matched <= hi)).sum()) for b, (lo, hi) in edges.items()}
 
 
 @dataclass(frozen=True)
@@ -425,18 +548,15 @@ class SideStats:
         return sum(self.histogram.values())
 
 
-def _side_stats(scores: list[LineScore]) -> SideStats:
-    total_l = sum(s.length for s in scores)
-    matched = [s for s in scores if s.n_matched]
-    hist = {b: 0 for b in FRAG_BUCKETS}
-    for s in scores:
-        hist[_bucket(s.n_matched)] += 1
+def _side_stats(s: LineScores) -> SideStats:
+    m = s.n_matched > 0
+    total_l = float(s.length.sum())
     return SideStats(
-        q_b=Ratio(sum(s.q_b * s.length for s in scores), total_l),
-        q_fr=Ratio(sum(s.q_fr * s.length for s in matched), sum(s.length for s in matched)),
-        q_v=Ratio(sum(s.q_v * s.length for s in scores), total_l),
-        histogram=hist,
-        matched_count=Ratio(float(sum(s.n_matched for s in matched)), float(len(matched))),
+        q_b=Ratio(float((s.q_b * s.length).sum()), total_l),
+        q_fr=Ratio(float((s.q_fr[m] * s.length[m]).sum()), float(s.length[m].sum())),
+        q_v=Ratio(float((s.q_v * s.length).sum()), total_l),
+        histogram=_bucket_counts(s.n_matched),
+        matched_count=Ratio(float(s.n_matched[m].sum()), float(m.sum())),
     )
 
 
@@ -471,14 +591,16 @@ class Detection:
 _NA = Ratio(0.0, math.nan)
 
 
-def _detection(gt_scores, pred_scores, beta: float) -> Detection:
-    gl = sum(s.length for s in gt_scores)
-    pl = sum(s.length for s in pred_scores)
-    return Detection(
-        d_v=Ratio(sum(s.q_v * s.length for s in gt_scores), gl) if gt_scores else _NA,
-        f_v=Ratio(sum((1.0 - s.q_v) * s.length for s in pred_scores), pl) if pred_scores else _NA,
-        beta=beta,
-    )
+def _d_v(s: LineScores, mask: np.ndarray) -> Ratio:
+    if not mask.any():
+        return _NA
+    return Ratio(float((s.q_v[mask] * s.length[mask]).sum()), float(s.length[mask].sum()))
+
+
+def _f_v(s: LineScores, mask: np.ndarray) -> Ratio:
+    if not mask.any():
+        return _NA
+    return Ratio(float(((1.0 - s.q_v[mask]) * s.length[mask]).sum()), float(s.length[mask].sum()))
 
 
 def _merge_detection(a: Detection, b: Detection) -> Detection:
@@ -507,9 +629,10 @@ class LiuDoriResult:
     n_overlaps: int
     gt_length: float
     pred_length: float
-    # Per page only (overlays); dropped by `aggregate_liu_dori`.
-    gt_scores: "list[LineScore]" = field(default_factory=list, repr=False)
-    pred_scores: "list[LineScore]" = field(default_factory=list, repr=False)
+    # Per-bar scores, only with `score(keep_lines=True)` (the viewer
+    # overlays); `None` otherwise and after `aggregate_liu_dori`.
+    gt_scores: "LineScores | None" = field(default=None, repr=False)
+    pred_scores: "LineScores | None" = field(default=None, repr=False)
 
     @property
     def d_v(self) -> float:
@@ -528,50 +651,43 @@ VECTOR_TYPES: tuple[str, ...] = ("vector_to_raster", "original_raster")
 
 
 def score(
-    gt: list[Bar], pred: list[Bar], overlaps: list[Overlap], cfg: LiuDoriConfig = LiuDoriConfig(),
+    gt: Bars, pred: Bars, overlaps: Overlaps, cfg: LiuDoriConfig = LiuDoriConfig(), *,
+    keep_lines: bool = True,
 ) -> LiuDoriResult:
-    gt_scores = _line_scores(len(gt), np.array([b.length for b in gt]), overlaps, "gt")
-    pred_scores = _line_scores(len(pred), np.array([b.length for b in pred]), overlaps, "pred")
-    w = sum(o.length for o in overlaps)
+    gs = _line_scores(gt.length, overlaps.gt, overlaps)
+    ps = _line_scores(pred.length, overlaps.pred, overlaps)
+    w = float(overlaps.length.sum())
 
-    def ov(attr: str) -> Ratio:
-        return Ratio(sum(getattr(o, attr) * o.length for o in overlaps), w)
+    def ov(arr: np.ndarray) -> Ratio:
+        return Ratio(float((arr * overlaps.length).sum()), w)
 
-    def sub(gt_pred, pred_pred=None) -> Detection:
-        gs = [s for b, s in zip(gt, gt_scores) if gt_pred(b)]
-        ps = [s for b, s in zip(pred, pred_scores) if pred_pred(b)] if pred_pred else []
-        d = _detection(gs, ps, cfg.beta)
-        return d if pred_pred else Detection(d_v=d.d_v, f_v=_NA, beta=cfg.beta)
+    def det(gmask, pmask=None) -> Detection:
+        return Detection(d_v=_d_v(gs, gmask), f_v=_f_v(ps, pmask) if pmask is not None else _NA, beta=cfg.beta)
 
+    all_g, all_p = np.ones(len(gt), bool), np.ones(len(pred), bool)
     return LiuDoriResult(
-        overall=_detection(gt_scores, pred_scores, cfg.beta),
-        q_pt=ov("q_pt"), q_od=ov("q_od"), q_w=ov("q_w"), q_v_overlap=ov("q_v"),
-        gt=_side_stats(gt_scores), pred=_side_stats(pred_scores),
-        by_text={
-            "text": sub(lambda b: b.is_text, lambda b: b.is_text),
-            "non-text": sub(lambda b: not b.is_text, lambda b: not b.is_text),
-        },
-        by_style={
-            "solid": sub(lambda b: not b.dashed),
-            "dashed": sub(lambda b: b.dashed),
-        },
-        by_type={t: sub(lambda b, t=t: b.vector_type == t) for t in VECTOR_TYPES},
+        overall=det(all_g, all_p),
+        q_pt=ov(overlaps.q_pt), q_od=ov(overlaps.q_od), q_w=ov(overlaps.q_w), q_v_overlap=ov(overlaps.q_v),
+        gt=_side_stats(gs), pred=_side_stats(ps),
+        by_text={"text": det(gt.is_text, pred.is_text), "non-text": det(~gt.is_text, ~pred.is_text)},
+        by_style={"solid": det(~gt.dashed), "dashed": det(gt.dashed)},
+        by_type={t: det(gt.vector_type == t) for t in VECTOR_TYPES},
         n_overlaps=len(overlaps),
-        gt_length=float(sum(s.length for s in gt_scores)),
-        pred_length=float(sum(s.length for s in pred_scores)),
-        gt_scores=gt_scores, pred_scores=pred_scores,
+        gt_length=float(gs.length.sum()),
+        pred_length=float(ps.length.sum()),
+        gt_scores=gs if keep_lines else None, pred_scores=ps if keep_lines else None,
     )
 
 
 def evaluate(
     gt_entries: list, pred_entries: list, dpi: float, cfg: LiuDoriConfig = LiuDoriConfig(), *,
-    text_boxes: "list[Bbox] | None" = None,
-) -> "tuple[list[Bar], list[Bar], list[Overlap], LiuDoriResult]":
+    text_boxes: "list[Bbox] | None" = None, keep_lines: bool = True,
+) -> "tuple[Bars, Bars, Overlaps, LiuDoriResult]":
     """Bars -> match -> score, for one page."""
     gt = bars_from_entries(gt_entries, dpi, cfg, text_boxes=text_boxes)
     pred = bars_from_entries(pred_entries, dpi, cfg, text_boxes=text_boxes)
     overlaps = match(gt, pred, cfg)
-    return gt, pred, overlaps, score(gt, pred, overlaps, cfg)
+    return gt, pred, overlaps, score(gt, pred, overlaps, cfg, keep_lines=keep_lines)
 
 
 def aggregate_liu_dori(results: "list[LiuDoriResult]") -> "LiuDoriResult | None":

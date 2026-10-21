@@ -67,14 +67,21 @@ def char_order(agg_by_run: "dict[str, TextMetricSuiteResult | None]", text_type:
 
 
 def _add_text_sections(
-    builder: ReportBuilder, agg_by_run: "dict[str, TextMetricSuiteResult | None]",
+    builder: ReportBuilder, agg_by_run: "dict[str, TextMetricSuiteResult | None]", *,
+    types: "tuple[str, ...]" = TEXT_TYPES, labels: "dict[str, str] | None" = None,
+    group: str = "Text",
 ) -> None:
-    builder.add_group_header("Text")
+    """`types`: the text types to show (a form's scored types); `labels`:
+    display names (e.g. "native text" on the original form)."""
+    builder.add_group_header(group)
+
+    def lbl(t: str) -> str:
+        return (labels or {}).get(t, t)
 
     headers = ["text_type"] + list(agg_by_run)
     rows = []
-    for t in TEXT_TYPES:
-        row = [t]
+    for t in types:
+        row = [lbl(t)]
         for res in agg_by_run.values():
             if res is None:
                 row.append("n/a")
@@ -86,8 +93,8 @@ def _add_text_sections(
 
     for field, name in (("char_overlap", "Char overlap"), ("word_overlap", "Word overlap")):
         rows = []
-        for t in TEXT_TYPES:
-            row = [t]
+        for t in types:
+            row = [lbl(t)]
             for res in agg_by_run.values():
                 if res is None:
                     row.append("n/a")
@@ -101,8 +108,8 @@ def _add_text_sections(
         builder.add_text_subsection(name, headers, rows)
 
     rows = []
-    for t in TEXT_TYPES:
-        row = [t]
+    for t in types:
+        row = [lbl(t)]
         for res in agg_by_run.values():
             if res is None:
                 row.append("n/a")
@@ -121,8 +128,8 @@ def _add_text_sections(
     builder.add_text_subsection("Bbox accuracy", headers, rows)
 
     rows = []
-    for t in TEXT_TYPES:
-        row = [t]
+    for t in types:
+        row = [lbl(t)]
         for res in agg_by_run.values():
             if res is None:
                 row.append("n/a")
@@ -133,7 +140,7 @@ def _add_text_sections(
 
     rows = []
     for t in ("native_to_vector", "original_vector"):
-        row = [t]
+        row = [lbl(t)]
         for res in agg_by_run.values():
             if res is None:
                 row.append("n/a")
@@ -144,8 +151,8 @@ def _add_text_sections(
     builder.add_text_subsection("Vector classification funnel", ["text_type"] + list(agg_by_run), rows)
 
     rows = []
-    for t in TEXT_TYPES:
-        row = [t]
+    for t in types:
+        row = [lbl(t)]
         for res in agg_by_run.values():
             if res is None:
                 row.append("n/a")
@@ -159,7 +166,7 @@ def _add_text_sections(
         rows.append(row)
     builder.add_text_subsection("Reading order accuracy", headers, rows)
 
-    for t in TEXT_TYPES:
+    for t in types:
         order = char_order(agg_by_run, t)
         c_rows = []
         for ch in order:
@@ -169,7 +176,7 @@ def _add_text_sections(
                 row.append("" if cs is None else _fmt_char_stats(cs))
             c_rows.append(row)
         builder.add_text_subsection(
-            f"Per-character OCR accuracy -- {t}", ["gt_char"] + list(agg_by_run), c_rows,
+            f"Per-character OCR accuracy -- {lbl(t)}", ["gt_char"] + list(agg_by_run), c_rows,
         )
 
     chars = set()
@@ -233,10 +240,14 @@ def _add_retry_stats_section(builder: ReportBuilder, stats_by_run: "dict[str, di
     )
 
 
-def _add_vector_sections(builder: ReportBuilder, agg_by_run: "dict[str, VectorMetricSuiteResult | None]") -> None:
+def _add_vector_sections(
+    builder: ReportBuilder, agg_by_run: "dict[str, VectorMetricSuiteResult | None]", *,
+    vector_types: "tuple[str, ...]" = VECTOR_TYPES, group: str = "Vector",
+) -> None:
+    """`vector_types`: the GT geometry types this form is scored on."""
     if not any(v is not None for v in agg_by_run.values()):
         return
-    builder.add_group_header("Vector")
+    builder.add_group_header(group)
     headers = ["metric"] + list(agg_by_run)
 
     def _rows(cells: "list[tuple[str, object]]") -> "list[list[str]]":
@@ -246,7 +257,7 @@ def _add_vector_sections(builder: ReportBuilder, agg_by_run: "dict[str, VectorMe
         return rows
 
     builder.add_vector_subsection("Label description", headers, _rows([
-        (f"{t} primitives", lambda r, t=t: str(r.label_counts.get(t, 0))) for t in VECTOR_TYPES
+        (f"{t} primitives", lambda r, t=t: str(r.label_counts.get(t, 0))) for t in vector_types
     ]))
     builder.add_vector_subsection("Headline (Liu & Dori 1997)", headers, _rows([
         ("D_v -- vector detection rate", lambda r: _fmt_ratio(r.liu_dori.overall.d_v)),
@@ -283,7 +294,7 @@ def _add_vector_sections(builder: ReportBuilder, agg_by_run: "dict[str, VectorMe
         (f"{k}: D_v", lambda r, k=k: _fmt_ratio(r.liu_dori.by_style[k].d_v)) for k in ("solid", "dashed")
     ]))
     builder.add_vector_subsection("Splits -- GT type (D_v only)", headers, _rows([
-        (f"{t}: D_v", lambda r, t=t: _fmt_ratio(r.liu_dori.by_type[t].d_v)) for t in VECTOR_TYPES
+        (f"{t}: D_v", lambda r, t=t: _fmt_ratio(r.liu_dori.by_type[t].d_v)) for t in vector_types
     ]))
     builder.add_vector_subsection("Fragmentation -- predicted lines per GT line |D(g)|", headers, _rows([
         *((f"{b}", lambda r, b=b: _fmt_hist(r.liu_dori.gt.histogram, b)) for b in FRAG_BUCKETS),
@@ -394,3 +405,74 @@ def _add_timing_sections(
         )
     if not any_table:
         builder.add_raw_html('<p class="empty">(no timing recorded in these runs)</p>')
+
+
+# Counts table rows: (label, key in `benchmark_run_loading._load_counts`).
+_COUNT_ROWS = (
+    ("pages", "pages"),
+    ("pages whose run failed", "run_failed"),
+    ("embedded images (P2 input)", "images"),
+    ("native words (P1)", "native_texts"),
+    ("OCR texts from P3 (vector text)", "p3_ocr_texts"),
+    ("OCR texts from P2 (embedded images)", "p2_ocr_texts"),
+    ("OCR blanks -- P3 (never recovered)", "p3_ocr_blank"),
+    ("OCR blanks -- P2 (failed recognition)", "p2_ocr_blank"),
+    ("P1 native vectors in", "p1_vectors"),
+    ("P3 drawing vectors out", "p3_drawing_vectors"),
+    ("P1 vectors consumed as text by P3", "p3_consumed_as_text"),
+    ("P2 traced vectors", "p2_vectors"),
+    ("P2 line items", "p2_items"),
+)
+
+
+def _add_counts_section(
+    builder: ReportBuilder, counts_by_run: "dict[str, dict | None]", *, label_counts: "dict[str, dict] | None" = None,
+    group: str = "Counts",
+) -> None:
+    """Per-run counts (summed over pages, `_load_counts`), P2's per-colour-
+    layer vectors / items, and the GT label count per scored type."""
+    if not any(counts_by_run.values()):
+        return
+    builder.add_group_header(group)
+    runs = list(counts_by_run)
+    rows = [[lbl] + [str((counts_by_run[r] or {}).get(key, "n/a")) for r in runs] for lbl, key in _COUNT_ROWS]
+    builder.add_text_subsection("Run output", ["count"] + runs, rows)
+
+    colours = sorted({c for r in runs for c in ((counts_by_run[r] or {}).get("p2_layers") or {})})
+    if colours:
+        layer_rows = []
+        for c in colours:
+            row = [c]
+            for r in runs:
+                layer = ((counts_by_run[r] or {}).get("p2_layers") or {}).get(c)
+                row.append(f"{layer['vectors']} vectors / {layer['items']} items" if layer else "")
+            layer_rows.append(row)
+        builder.add_text_subsection("P2 per colour layer", ["layer colour"] + runs, layer_rows)
+
+    if label_counts:
+        types = sorted({t for lc in label_counts.values() for t in (lc or {})})
+        if types:
+            builder.add_text_subsection(
+                "Ground truth on this form", ["label type"] + runs,
+                [[t] + [str((label_counts.get(r) or {}).get(t, "n/a")) for r in runs] for t in types],
+            )
+
+
+def _add_form_summary(
+    builder: ReportBuilder, rows_by_form: "dict[str, dict[str, dict]]",
+) -> None:
+    """One line per form at the top of an input: `{form_title: {run:
+    {"text_f1": .., "d_v": .., "vri": ..}}}` -- a cross-form glance before the
+    per-form groups."""
+    if not rows_by_form:
+        return
+    runs = sorted({r for by_run in rows_by_form.values() for r in by_run})
+    headers = ["form"] + [f"{r}: {m}" for r in runs for m in ("word F1", "D_v", "VRI")]
+    rows = []
+    for form, by_run in rows_by_form.items():
+        row = [form]
+        for r in runs:
+            cell = by_run.get(r) or {}
+            row += [_fmt_float(cell.get(m, math.nan)) for m in ("text_f1", "d_v", "vri")]
+        rows.append(row)
+    builder.add_text_subsection("Summary by input form", headers, rows)

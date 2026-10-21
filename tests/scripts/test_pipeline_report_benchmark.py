@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from rastervec.Evaluation import dump_io
+from rastervec.Evaluation.Evaluate.metrics import TEXT_TYPES
 from rastervec.Evaluation.Labelling.label_schema import LabelEntry, LabelSet, save_labels
 from rastervec.commons.models import PageMeta, Text
 
@@ -118,11 +119,15 @@ def test_two_runs_shared_key_report_html_and_viewer_cmds(tmp_path):
     assert 'src="charts/aggregate__timing__vectorised.png"' in html  # grand aggregate
 
     charts = sorted(p.name for p in (run_out / "charts").glob("*.png"))
-    assert "labels_C__aggregate__labels.png" in charts
+    assert "labels_C__vectorised__labels.png" in charts
     assert "labels_C__timing__vectorised.png" in charts
     assert "aggregate__timing__rasterised.png" in charts
     assert 'src="charts/labels_C__timing__vectorised.png"' in html
-    assert "aggregate__labels.png" in charts
+    assert "aggregate__vectorised__labels.png" in charts
+    # legacy single-dump runs: vectorised + rasterised form groups, one summary
+    assert "Summary by input form" in html
+    assert "Vectorised -- Text" in html and "Rasterised -- Text" in html
+    assert "Original PDF -- Text" not in html
     # per-page charts are no longer generated
     assert not any("__p0__" in c for c in charts)
 
@@ -176,11 +181,17 @@ def test_score_text_routes_vectorised_vs_rasterised_predictions(tmp_path):
         run_name="run", run_dir=tmp_path, key="labels:doc", pdf_stem="doc",
         doc_dir=doc, dump_path=doc / "dump.json", gt=prb._merge_gt(doc),
     )
-    _per_page, agg = prb._score_text(entry, prb.MetricConfig())
-    assert agg.by_type["native_to_vector"].char_overlap.matched == 5  # "HELLO"
-    assert agg.by_type["native_to_vector"].char_overlap.missing == 0
-    assert agg.by_type["vector_to_raster"].char_overlap.matched == 5  # "WORLD"
-    assert agg.by_type["vector_to_raster"].char_overlap.missing == 0
+    # Legacy single dump: `texts` = the vectorised run, `raster_texts` = the
+    # rasterised run, each scored only on its own form's types.
+    _per_page, vec = prb._score_text(entry, "vectorised", prb.MetricConfig())
+    assert vec.by_type["native_to_vector"].char_overlap.matched == 5  # "HELLO"
+    assert vec.by_type["native_to_vector"].char_overlap.missing == 0
+    assert vec.by_type["vector_to_raster"].label_stats.label_count == 0
+    _per_page, ras = prb._score_text(entry, "rasterised", prb.MetricConfig())
+    assert ras.by_type["vector_to_raster"].char_overlap.matched == 5  # "WORLD"
+    assert ras.by_type["vector_to_raster"].char_overlap.missing == 0
+    assert ras.by_type["native_to_vector"].label_stats.label_count == 0
+    assert prb._score_text(entry, "original", prb.MetricConfig()) is None
 
 
 def test_load_fast_cluster_stats_sums_across_pages(tmp_path):
@@ -203,7 +214,7 @@ def test_load_fast_cluster_stats_sums_across_pages(tmp_path):
         run_name="run", run_dir=tmp_path, key="pdf:doc", pdf_stem="doc",
         doc_dir=doc, dump_path=doc / "dump.json", gt=LabelSet(pdf_path="x.pdf"),
     )
-    stats = prb._load_fast_cluster_stats(entry)
+    stats = prb._load_fast_cluster_stats(entry, "vectorised")
     assert stats == {"total": 6, "passed": 3}
 
 
@@ -218,7 +229,7 @@ def test_load_fast_cluster_stats_none_when_no_page_recorded_it(tmp_path):
         run_name="run", run_dir=tmp_path, key="pdf:doc", pdf_stem="doc",
         doc_dir=doc, dump_path=doc / "dump.json", gt=LabelSet(pdf_path="x.pdf"),
     )
-    assert prb._load_fast_cluster_stats(entry) is None
+    assert prb._load_fast_cluster_stats(entry, "vectorised") is None
 
 
 def test_add_fast_cluster_section_renders_counts_and_skips_when_all_none():
@@ -255,7 +266,7 @@ def test_load_retry_stats_sums_across_pages(tmp_path):
         run_name="run", run_dir=tmp_path, key="pdf:doc", pdf_stem="doc",
         doc_dir=doc, dump_path=doc / "dump.json", gt=LabelSet(pdf_path="x.pdf"),
     )
-    stats = prb._load_retry_stats(entry)
+    stats = prb._load_retry_stats(entry, "vectorised")
     assert stats == {"0": 4, "1": 1, "2": 1, "3": 0, "failed": 1}
 
 
@@ -270,7 +281,7 @@ def test_load_retry_stats_none_when_no_page_recorded_it(tmp_path):
         run_name="run", run_dir=tmp_path, key="pdf:doc", pdf_stem="doc",
         doc_dir=doc, dump_path=doc / "dump.json", gt=LabelSet(pdf_path="x.pdf"),
     )
-    assert prb._load_retry_stats(entry) is None
+    assert prb._load_retry_stats(entry, "vectorised") is None
 
 
 def test_add_retry_stats_section_renders_counts_and_skips_when_all_none():
@@ -314,7 +325,7 @@ def test_char_order_sorts_by_error_rate():
 
     class _Res:
         def __init__(self, cs):
-            self.by_type = {t: _PT({}) for t in prb.TEXT_TYPES}
+            self.by_type = {t: _PT({}) for t in TEXT_TYPES}
             self.by_type["native_to_vector"] = _PT(cs)
 
     res = _Res({
@@ -338,3 +349,49 @@ def test_gallery_links_run_images_in_place(tmp_path):
     html = (run_out / "report.html").read_text(encoding="utf-8")
     assert 'src="../../run1/A/paddle_recog_images/p0_word_000__HELLO.png"' in html
     assert not any("extra_chars" in p.name for p in (run_out / "charts").glob("*.png"))
+
+
+def test_three_form_run_end_to_end(tmp_path, synthetic_pdf_factory):
+    """generate_pipeline_report (benchmark, all three forms, real pipeline on
+    a synthetic page) -> this script: one group per form, the original form's
+    native words reported as "native text", counts, per-form viewer lines."""
+    gpr_path = Path(__file__).resolve().parents[2] / "scripts" / "generate_pipeline_report.py"
+    spec = importlib.util.spec_from_file_location("generate_pipeline_report", gpr_path)
+    gpr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gpr)
+
+    doc = synthetic_pdf_factory([{"texts": [{"point": (20, 50), "text": "HELLO"}],
+                                  "drawings": [{"lines": [((10, 80), (150, 80))]}]}])
+    pdf = tmp_path / "A.pdf"
+    doc.save(str(pdf))
+    doc.close()
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(gpr.ReportConfig(
+        benchmark=True, input_files=[pdf], pages=[0], final_stage="phase1",
+        inputs=["original", "vectorised", "rasterised"],
+        debug_layers=False, debug_images=False, output_root=tmp_path / "reports",
+    ).model_dump_json(), encoding="utf-8")
+    assert gpr.main(["--config", str(cfg)]) == 0
+    (run,) = (tmp_path / "reports").iterdir()
+
+    entries = prb._load_run(run, None)
+    entry = entries["pdf:A"]
+    assert prb.entry_forms(entry) == ["original", "vectorised", "rasterised"]
+    _pp, original = prb._score_text(entry, "original", prb.MetricConfig())
+    # P1 reads the native word exactly on the original page
+    assert original.by_type["native_to_vector"].word_overlap.recall.value == 1.0
+    counts = prb._load_counts(entry, "original")
+    assert counts["native_texts"] == 1 and counts["pages"] == 1
+
+    out_root = tmp_path / "out"
+    assert prb.main(["--run", str(run), "--out-root", str(out_root)]) == 0
+    out = next(out_root.iterdir())
+    html = (out / "report.html").read_text(encoding="utf-8")
+    for group in ("Original PDF -- Text", "Vectorised -- Text", "Rasterised -- Text",
+                  "Original PDF -- Counts", "Summary by input form", "Run output"):
+        assert group in html, group
+    assert "Per-character OCR accuracy -- native text" in html
+    assert "Wall-clock per page -- original run" in html
+    cmds = (out / "viewer_commands.txt").read_text(encoding="utf-8").splitlines()
+    assert len([c for c in cmds if "pipeline_report_viewer.py" in c]) == 3
+    assert any(c.endswith('original"') for c in cmds)

@@ -103,6 +103,15 @@ class RasterPrelude:
     images: list[PreparedImage] = field(default_factory=list)
     debug: PreludeDebug = field(default_factory=PreludeDebug)
 
+    def consume_images(self):
+        """Yield each `PreparedImage` while dropping the prelude's own
+        reference to it -- a backend's loop then frees every image's
+        full-resolution arrays (enhanced RGB, int32 labels) as soon as it is
+        vectorized, and a prelude kept in `debug_out` (batch
+        `prelude_debug_layers`, which never reads `images`) pins none."""
+        while self.images:
+            yield self.images.pop(0)
+
 
 def prepare_images(
     images: list[Image], page: Page, *, compute=None, ocr_fns: "dict | None" = None,
@@ -183,6 +192,7 @@ def _prepare_one(image: Image, page_index: int, image_index: int, compute, ocr_f
     # 3. colour layers
     t0 = time.perf_counter()
     layers = split_layers(lab, rgb)
+    del rgb  # every later step works on `enhanced` / `layers`
     _LOG.info("  colour layers: %d %s, Otsu L %s (%.1fs)", layers.n_layers,
               [(_rgb_hex(c), k, n) for c, k, n in zip(layers.colors_rgb, layers.kinds, layers.pixel_counts)],
               layers.otsu_l, time.perf_counter() - t0)

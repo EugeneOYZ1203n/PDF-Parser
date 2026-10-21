@@ -1,11 +1,15 @@
 """Compare 1-2 benchmark report folders.
 
-Each folder is a `generate_pipeline_report.py` run with `benchmark: true`.
-Such a run scores **one** combined pipeline run per page
-(`convert_page_to_vector_text`) against ground truth for up to 4 text types
-and 2 vector types, and embeds `<pdf-stem>/dump.json` +
-`ground_truth_<text_type>.json` (only the non-empty types) + a
-`benchmark.json` marker.
+Each folder is a `generate_pipeline_report.py` run with `benchmark: true`:
+per input, `ground_truth_<text_type>.json` (only the non-empty types) and
+one sub-folder per input form it ran (`original/`, `vectorised/`,
+`rasterised/`, each with its own `dump.json`), plus a `benchmark.json`
+marker. A pre-`inputs` folder (one `<input>/dump.json` holding the
+vectorised run and the rasterised run's `raster_*` fields) still loads.
+Each form is scored on its own types (`rastervec/Evaluation/forms.py`), and
+the report shows, per input, a one-line-per-form summary followed by one
+group per form (Text / Vector / Counts); comparing two runs matches inputs
+and forms.
 
 This script matches the folders on the inputs they **share** (by input
 identity: `pdf:<stem>` = native_to_vector-only, `labels:<stem>` = whatever
@@ -33,8 +37,8 @@ rendered -- `pipeline_report_viewer.py` over the run folders (incl. the
     report.html             the primary deliverable (see above)
     benchmark.txt           supplementary plain-text dump (grep/diff-friendly)
     runs.json               the compared folders + threshold
-    viewer_commands.txt     a viewer CLI line per shared input
-    charts/                 <key>__aggregate__*.png, aggregate__*.png
+    viewer_commands.txt     a viewer CLI line per shared input and form
+    charts/                 <key>__<form>__*.png, aggregate__<form>__*.png
 
 This module's own run-loading + scoring (`RunEntry`/`_merge_gt`/`_load_run`/
 `_score_text`/`_score_vectors`) lives in
@@ -54,6 +58,7 @@ import argparse
 import datetime as _dt
 import hashlib
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -71,7 +76,6 @@ from rastervec.Evaluation.Evaluate.benchmark import (
 )
 from rastervec.Evaluation.Evaluate.html_report import ReportBuilder
 from rastervec.Evaluation.Evaluate.metrics import (
-    TEXT_TYPES,
     MetricConfig,
     TextMetricSuiteResult,
     aggregate_text_metrics,
@@ -85,7 +89,9 @@ from rastervec.commons.logging_setup import configure_logging, get_logger
 from rastervec.commons.paths import output_dir
 
 from rastervec.Evaluation.Evaluate.benchmark_report_sections import (  # noqa: F401 -- re-exported for callers/tests
+    _add_counts_section,
     _add_fast_cluster_section,
+    _add_form_summary,
     _add_retry_stats_section,
     _add_text_sections,
     _add_timing_sections,
@@ -93,6 +99,8 @@ from rastervec.Evaluation.Evaluate.benchmark_report_sections import (  # noqa: F
 )
 from rastervec.Evaluation.Evaluate.benchmark_run_loading import (  # noqa: F401 -- re-exported for callers/tests
     RunEntry,
+    _label_counts,
+    _load_counts,
     _load_fast_cluster_stats,
     _load_retry_stats,
     _load_run,
@@ -100,7 +108,11 @@ from rastervec.Evaluation.Evaluate.benchmark_run_loading import (  # noqa: F401 
     _merge_gt,
     _score_text,
     _score_vectors,
+    _sum_counts,
+    entry_forms,
+    form_dir,
 )
+from rastervec.Evaluation.forms import FORM_TEXT_TYPES, FORM_TITLES, FORM_VECTOR_GT, FORMS, type_label
 
 _LOG = get_logger("pipeline_report_benchmark")
 
@@ -130,6 +142,26 @@ def _link_from(out_dir: Path, target: Path) -> str:
         return Path(os.path.relpath(target.resolve(), out_dir.resolve())).as_posix()
     except ValueError:
         return target.resolve().as_uri()
+
+
+def _word_f1(result: "TextMetricSuiteResult | None", types: "tuple[str, ...]") -> float:
+    """Word-overlap F1 pooled over `types` (micro: numerators and
+    denominators summed) -- the per-form summary's text score."""
+    if result is None:
+        return math.nan
+    p_num = p_den = r_num = r_den = 0.0
+    for t in types:
+        wo = result.by_type[t].word_overlap
+        if wo.precision.applicable:
+            p_num += wo.precision.numerator
+            p_den += wo.precision.denominator
+        if wo.recall.applicable:
+            r_num += wo.recall.numerator
+            r_den += wo.recall.denominator
+    if not p_den or not r_den:
+        return math.nan
+    p, r = p_num / p_den, r_num / r_den
+    return 2 * p * r / (p + r) if p + r else 0.0
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -167,8 +199,6 @@ def main(argv: list[str] | None = None) -> int:
 
     builder = ReportBuilder(f"Pipeline benchmark report ({ts})")
     blocks: list[str] = []
-    grand_text: "dict[str, list[TextMetricSuiteResult]]" = {}
-    grand_vector: "dict[str, list[VectorMetricSuiteResult]]" = {}
     # {run: {kind: [flattened per-page timing row]}} over every shared key
     grand_timing: "dict[str, dict[str, list[dict]]]" = {}
     # {run: {"total": N, "passed": P}} FAST cluster counts, summed over every shared key
@@ -206,216 +236,225 @@ def main(argv: list[str] | None = None) -> int:
                     title=f"[{label} / {run}] report generation per document (seconds)"))
         _add_timing_sections(builder, summaries, chart_paths)
 
+    def _img_html(paths: "list[Path]") -> str:
+        existing = [p for p in paths if p.is_file()]
+        if not existing:
+            return ""
+        return '<div class="charts">' + "".join(
+            f'<img src="{p.relative_to(out_dir).as_posix()}">' for p in existing
+        ) + "</div>"
+
+    def _text_block(
+        text_by_run: "dict[str, TextMetricSuiteResult | None]", form: str, label: str, slug: str, *,
+        full: bool = True,
+    ) -> None:
+        """One form's Text group (+ charts) for one key or the grand aggregate."""
+        types = FORM_TEXT_TYPES[form]
+        labels = {t: type_label(form, t) for t in types}
+        if not any(v is not None for v in text_by_run.values()):
+            return
+        _add_text_sections(builder, text_by_run, types=types, labels=labels,
+                           group=f"{FORM_TITLES[form]} -- Text")
+        kw = dict(types=types, labels=labels)
+        paths = [charts_dir / f"{slug}__labels.png", charts_dir / f"{slug}__char.png",
+                 charts_dir / f"{slug}__bbox.png"]
+        charts.label_description_chart(text_by_run, title=f"{label} labels", path=paths[0], **kw)
+        charts.char_word_overlap_chart(text_by_run, field="char_overlap", title=f"{label} char recall",
+                                       path=paths[1], **kw)
+        charts.bbox_accuracy_chart(text_by_run, title=f"{label} bbox IoU", path=paths[2], **kw)
+        if full:
+            more = [charts_dir / f"{slug}__{n}.png" for n in ("word", "rotation", "funnel", "reading_order")]
+            charts.char_word_overlap_chart(text_by_run, field="word_overlap", title=f"{label} word recall",
+                                           path=more[0], **kw)
+            charts.rotation_chart(text_by_run, title=f"{label} rotation", path=more[1], **kw)
+            if any(t in types for t in ("native_to_vector", "original_vector")):
+                charts.funnel_chart(text_by_run, title=f"{label} funnel", path=more[2], **kw)
+            charts.reading_order_chart(text_by_run, title=f"{label} reading order", path=more[3], **kw)
+            paths += more
+        builder.add_raw_html(_img_html(paths))
+
+        font_html = ["<h4>Font size distribution</h4>"]
+        for text_type in types:
+            imgs = []
+            for name, agg in text_by_run.items():
+                path = charts_dir / f"{slug}__{_short_slug(name)}__{text_type}__font_size.png"
+                charts.font_size_histogram_chart(
+                    agg, text_type, title=f"{label} {name} {labels[text_type]} font size", path=path)
+                imgs.append(path)
+            html = _img_html(imgs)
+            if html:
+                font_html.append(f"<p>{labels[text_type]}</p>" + html)
+        builder.add_raw_html("".join(font_html))
+
+    def _vector_block(
+        vector_by_run: "dict[str, VectorMetricSuiteResult | None]", form: str, label: str, slug: str,
+    ) -> None:
+        if not any(v is not None for v in vector_by_run.values()):
+            return
+        _add_vector_sections(builder, vector_by_run, vector_types=FORM_VECTOR_GT[form],
+                             group=f"{FORM_TITLES[form]} -- Vector")
+        names = ("headline", "components", "fragmentation", "consolidation", "quality", "direction")
+        paths = {n: charts_dir / f"{slug}__vector_{n}.png" for n in names}
+        charts.vector_headline_chart(vector_by_run, title=f"{label} vector detection (Liu-Dori + pixel)",
+                                     path=paths["headline"])
+        charts.vector_components_chart(vector_by_run, title=f"{label} Q_v components", path=paths["components"])
+        charts.fragmentation_chart(vector_by_run, side="gt", title=f"{label} predicted lines per GT line |D(g)|",
+                                   path=paths["fragmentation"])
+        charts.fragmentation_chart(vector_by_run, side="pred", title=f"{label} GT lines per predicted line |G(k)|",
+                                   path=paths["consolidation"])
+        charts.vector_quality_chart(vector_by_run, title=f"{label} vector quality", path=paths["quality"])
+        charts.direction_histogram_chart(vector_by_run, title=f"{label} direction histogram",
+                                         path=paths["direction"])
+        builder.add_raw_html(_img_html(list(paths.values())))
+
+    def _scores_cell(text_res, vec_res, form: str) -> dict:
+        return {
+            "text_f1": _word_f1(text_res, FORM_TEXT_TYPES[form]),
+            "d_v": vec_res.liu_dori.d_v if vec_res is not None else math.nan,
+            "vri": vec_res.liu_dori.vri if vec_res is not None else math.nan,
+        }
+
+    # {form: {run: [per-page result]}} over every shared key
+    grand_text: "dict[str, dict[str, list[TextMetricSuiteResult]]]" = {}
+    grand_vector: "dict[str, dict[str, list[VectorMetricSuiteResult]]]" = {}
+    grand_counts: "dict[str, dict[str, dict]]" = {}
+    viewer_lines: list[str] = []
+
     for key in sorted(shared_keys):
         kslug = _short_slug(key)
-        text_scored = {r[key].run_name: _score_text(r[key], cfg) for r in runs}
-        vector_scored = {r[key].run_name: _score_vectors(r[key], vcfg) for r in runs}
-
-        text_by_run = {name: agg for name, (_pp, agg) in text_scored.items()}
-        vector_by_run = {name: agg for name, (_pp, agg) in vector_scored.items()}
-        blocks.append(format_aggregate_comparison(text_by_run, title=f"{key} -- text"))
-        for name, agg in text_by_run.items():
-            if agg is not None:
-                blocks.append(f"[{key} / {name}] " + format_confusion_table(agg))
-        blocks.append(format_vector_aggregate_comparison(vector_by_run, title=f"{key} -- vectors"))
-        fast_cluster_by_run = {r[key].run_name: _load_fast_cluster_stats(r[key]) for r in runs}
-        blocks.append(format_fast_cluster_comparison(fast_cluster_by_run, title=f"{key} -- clusters dropped by FAST"))
-        for name, stats in fast_cluster_by_run.items():
-            if stats is None:
-                continue
-            acc = grand_fast_cluster.setdefault(name, {"total": 0, "passed": 0})
-            acc["total"] += stats["total"]
-            acc["passed"] += stats["passed"]
-
-        retry_stats_by_run = {r[key].run_name: _load_retry_stats(r[key]) for r in runs}
-        blocks.append(format_retry_stats_comparison(retry_stats_by_run, title=f"{key} -- blank-recognition retries"))
-        for name, stats in retry_stats_by_run.items():
-            if stats is None:
-                continue
-            acc = grand_retry_stats.setdefault(name, {"0": 0, "1": 0, "2": 0, "3": 0, "failed": 0})
-            for k in acc:
-                acc[k] += stats.get(k, 0)
-
+        entries = {r[key].run_name: r[key] for r in runs}
+        forms = [f for f in FORMS if any(f in entry_forms(e) for e in entries.values())]
         builder.add_key_section(key)
-        _add_text_sections(builder, text_by_run)
-        _add_vector_sections(builder, vector_by_run)
-        _add_fast_cluster_section(builder, fast_cluster_by_run)
-        _add_retry_stats_section(builder, retry_stats_by_run)
-        timing_rows = {r[key].run_name: _load_timings(r[key]) for r in runs}
+
+        scored = {}
+        for form in forms:
+            ts = {n: _score_text(e, form, cfg) for n, e in entries.items()}
+            vs = {n: _score_vectors(e, form, vcfg) for n, e in entries.items()}
+            scored[form] = (
+                {n: (r[1] if r else None) for n, r in ts.items()},
+                {n: (r[1] if r else None) for n, r in vs.items()},
+            )
+            for n, r in ts.items():
+                if r:
+                    grand_text.setdefault(form, {}).setdefault(n, []).extend(res for _pi, res, _g in r[0])
+            for n, r in vs.items():
+                if r:
+                    grand_vector.setdefault(form, {}).setdefault(n, []).extend(res for _pi, res in r[0])
+        _add_form_summary(builder, {
+            FORM_TITLES[form]: {
+                n: _scores_cell(scored[form][0][n], scored[form][1][n], form)
+                for n in entries if form in entry_forms(entries[n])
+            }
+            for form in forms
+        })
+
+        for form in forms:
+            title = FORM_TITLES[form]
+            types = FORM_TEXT_TYPES[form]
+            labels = {t: type_label(form, t) for t in types}
+            fslug = f"{kslug}__{form}"
+            text_by_run, vector_by_run = scored[form]
+            blocks.append(format_aggregate_comparison(
+                text_by_run, title=f"{key} -- {title} -- text", types=types, labels=labels))
+            for name, agg in text_by_run.items():
+                if agg is not None:
+                    blocks.append(f"[{key} / {title} / {name}] "
+                                  + format_confusion_table(agg, types=types, labels=labels))
+            if FORM_VECTOR_GT[form]:
+                blocks.append(format_vector_aggregate_comparison(
+                    vector_by_run, title=f"{key} -- {title} -- vectors"))
+
+            counts_by_run = {n: _load_counts(e, form) for n, e in entries.items()}
+            for n, c in counts_by_run.items():
+                if c:
+                    _sum_counts(grand_counts.setdefault(form, {}).setdefault(n, {}), c)
+            fast_by_run = {n: _load_fast_cluster_stats(e, form) for n, e in entries.items()}
+            retry_by_run = {n: _load_retry_stats(e, form) for n, e in entries.items()}
+            for name, stats in fast_by_run.items():
+                if stats is not None:
+                    acc = grand_fast_cluster.setdefault(name, {"total": 0, "passed": 0})
+                    acc["total"] += stats["total"]
+                    acc["passed"] += stats["passed"]
+            for name, stats in retry_by_run.items():
+                if stats is not None:
+                    acc = grand_retry_stats.setdefault(name, {"0": 0, "1": 0, "2": 0, "3": 0, "failed": 0})
+                    for k in acc:
+                        acc[k] += stats.get(k, 0)
+            if any(v is not None for v in fast_by_run.values()):
+                blocks.append(format_fast_cluster_comparison(
+                    fast_by_run, title=f"{key} -- {title} -- clusters dropped by FAST"))
+            if any(v is not None for v in retry_by_run.values()):
+                blocks.append(format_retry_stats_comparison(
+                    retry_by_run, title=f"{key} -- {title} -- blank-recognition retries"))
+
+            _text_block(text_by_run, form, f"{key} {title}", fslug)
+            _vector_block(vector_by_run, form, f"{key} {title}", fslug)
+            _add_counts_section(
+                builder, counts_by_run,
+                label_counts={n: _label_counts(e, form) for n, e in entries.items()},
+                group=f"{title} -- Counts",
+            )
+            _add_fast_cluster_section(builder, fast_by_run)
+            _add_retry_stats_section(builder, retry_by_run)
+
+            # pipeline diagnostic image galleries, linked in place, never copied
+            for name, entry in entries.items():
+                if form not in entry_forms(entry):
+                    continue
+                for folder in sorted(form_dir(entry, form).glob("*_images")):
+                    files = sorted(folder.iterdir())[:5]
+                    if files:
+                        builder.add_image_gallery(f"{name} / {title}", folder.name,
+                                                  [_link_from(out_dir, f) for f in files])
+
+            dirs = " ".join(
+                f'"{form_dir(e, form).resolve()}"' for e in entries.values() if form in entry_forms(e)
+            )
+            command = f"{_VENV_PY} scripts/pipeline_report_viewer.py {dirs}"
+            builder.add_viewer_command(f"{key} / {title}", command)
+            viewer_lines.append(command)
+
+        timing_rows = {n: _load_timings(e) for n, e in entries.items()}
         _timing_block(timing_rows, key, kslug)
         for name, by_kind in timing_rows.items():
             for kind, rows in by_kind.items():
                 grand_timing.setdefault(name, {}).setdefault(kind, []).extend(rows)
 
-        charts.label_description_chart(
-            text_by_run, title=f"{key} aggregate labels", path=charts_dir / f"{kslug}__aggregate__labels.png")
-        charts.char_word_overlap_chart(
-            text_by_run, field="char_overlap", title=f"{key} aggregate char recall",
-            path=charts_dir / f"{kslug}__aggregate__char.png")
-        charts.char_word_overlap_chart(
-            text_by_run, field="word_overlap", title=f"{key} aggregate word recall",
-            path=charts_dir / f"{kslug}__aggregate__word.png")
-        charts.bbox_accuracy_chart(
-            text_by_run, title=f"{key} aggregate bbox IoU", path=charts_dir / f"{kslug}__aggregate__bbox.png")
-        charts.rotation_chart(
-            text_by_run, title=f"{key} aggregate rotation", path=charts_dir / f"{kslug}__aggregate__rotation.png")
-        charts.funnel_chart(
-            text_by_run, title=f"{key} aggregate funnel", path=charts_dir / f"{kslug}__aggregate__funnel.png")
-        charts.reading_order_chart(
-            text_by_run, title=f"{key} aggregate reading order",
-            path=charts_dir / f"{kslug}__aggregate__reading_order.png")
-
-        chart_paths_by_subsection: "dict[str, list[Path]]" = {
-            "labels": [charts_dir / f"{kslug}__aggregate__labels.png"],
-            "char": [charts_dir / f"{kslug}__aggregate__char.png"],
-            "word": [charts_dir / f"{kslug}__aggregate__word.png"],
-            "bbox": [charts_dir / f"{kslug}__aggregate__bbox.png"],
-            "rotation": [charts_dir / f"{kslug}__aggregate__rotation.png"],
-            "funnel": [charts_dir / f"{kslug}__aggregate__funnel.png"],
-            "reading_order": [charts_dir / f"{kslug}__aggregate__reading_order.png"],
-        }
-        for group, paths in chart_paths_by_subsection.items():
-            existing = [p for p in paths if p.is_file()]
-            if existing:
-                builder.add_raw_html(
-                    '<div class="charts">' + "".join(
-                        f'<img src="{p.relative_to(out_dir).as_posix()}">' for p in existing
-                    ) + "</div>"
-                )
-
-        font_size_paths: "dict[str, list[Path]]" = {t: [] for t in TEXT_TYPES}
-        for name, agg in text_by_run.items():
-            nslug = _short_slug(name)
-            for text_type in TEXT_TYPES:
-                path = charts_dir / f"{kslug}__{nslug}__{text_type}__font_size.png"
-                charts.font_size_histogram_chart(
-                    agg, text_type, title=f"{key} {name} {text_type} font size", path=path)
-                font_size_paths[text_type].append(path)
-
-        font_size_html = ["<h4>Font size distribution</h4>"]
-        for text_type in TEXT_TYPES:
-            imgs = [p for p in font_size_paths[text_type] if p.is_file()]
-            if imgs:
-                font_size_html.append(f"<p>{text_type}</p>")
-                font_size_html.append(
-                    '<div class="charts">' + "".join(
-                        f'<img src="{p.relative_to(out_dir).as_posix()}">' for p in imgs
-                    ) + "</div>"
-                )
-        builder.add_raw_html("".join(font_size_html))
-
-        if any(v is not None for v in vector_by_run.values()):
-            charts.vector_headline_chart(
-                vector_by_run, title=f"{key} aggregate vector detection (Liu-Dori + pixel)",
-                path=charts_dir / f"{kslug}__aggregate__vector_headline.png")
-            charts.vector_components_chart(
-                vector_by_run, title=f"{key} aggregate Q_v components",
-                path=charts_dir / f"{kslug}__aggregate__vector_components.png")
-            charts.fragmentation_chart(
-                vector_by_run, side="gt", title=f"{key} predicted lines per GT line |D(g)|",
-                path=charts_dir / f"{kslug}__aggregate__vector_fragmentation.png")
-            charts.fragmentation_chart(
-                vector_by_run, side="pred", title=f"{key} GT lines per predicted line |G(k)|",
-                path=charts_dir / f"{kslug}__aggregate__vector_consolidation.png")
-            charts.vector_quality_chart(
-                vector_by_run, title=f"{key} aggregate vector quality",
-                path=charts_dir / f"{kslug}__aggregate__vector_quality.png")
-            charts.direction_histogram_chart(
-                vector_by_run, title=f"{key} aggregate direction histogram",
-                path=charts_dir / f"{kslug}__aggregate__vector_direction.png")
-            builder.add_raw_html(
-                '<div class="charts">' + "".join(
-                    f'<img src="{(charts_dir / f"{kslug}__aggregate__vector_{name}.png").relative_to(out_dir).as_posix()}">'
-                    for name in ("headline", "components", "fragmentation", "consolidation",
-                                 "quality", "direction")
-                ) +
-                '</div>'
-            )
-
-        # ---- pipeline diagnostic image galleries ----
-        # linked in place from the run folder, never copied
-        for r in runs:
-            entry = r[key]
-            for folder in sorted(entry.doc_dir.glob("*_images")):
-                files = sorted(folder.iterdir())[:5]
-                if not files:
-                    continue
-                builder.add_image_gallery(
-                    entry.run_name, folder.name, [_link_from(out_dir, f) for f in files],
-                )
-
-        for name, (pp, _agg) in text_scored.items():
-            grand_text.setdefault(name, []).extend(r for _pi, r, _g in pp)
-        for name, (pp, _agg) in vector_scored.items():
-            grand_vector.setdefault(name, []).extend(r for _pi, r in pp)
-
-        dirs = " ".join(f'"{r[key].doc_dir.resolve()}"' for r in runs)
-        builder.add_viewer_command(key, f"{_VENV_PY} scripts/pipeline_report_viewer.py {dirs}")
-
     # ---- grand aggregate over every shared key ----
-    grand_text_agg = {name: aggregate_text_metrics(rs) for name, rs in grand_text.items()}
-    grand_vector_agg = {name: aggregate_vector_metrics(rs) for name, rs in grand_vector.items()}
-    if grand_text_agg:
-        charts.label_description_chart(
-            grand_text_agg, title="aggregate labels (all inputs)", path=charts_dir / "aggregate__labels.png")
-        charts.char_word_overlap_chart(
-            grand_text_agg, field="char_overlap", title="aggregate char recall (all inputs)",
-            path=charts_dir / "aggregate__char.png")
-        charts.bbox_accuracy_chart(
-            grand_text_agg, title="aggregate bbox IoU (all inputs)", path=charts_dir / "aggregate__bbox.png")
+    grand_header_done = False
 
-        builder.add_key_section("(grand aggregate over every shared input)")
-        _add_text_sections(builder, grand_text_agg)
-        _add_vector_sections(builder, grand_vector_agg)
-        builder.add_raw_html(
-            '<div class="charts">' + "".join(
-                f'<img src="{p.relative_to(out_dir).as_posix()}">'
-                for p in (charts_dir / "aggregate__labels.png", charts_dir / "aggregate__char.png", charts_dir / "aggregate__bbox.png")
-                if p.is_file()
-            ) + "</div>"
-        )
+    def _grand_header() -> None:
+        nonlocal grand_header_done
+        if not grand_header_done:
+            builder.add_key_section("(grand aggregate over every shared input)")
+            grand_header_done = True
 
-        grand_font_size_html = ["<h4>Font size distribution</h4>"]
-        for name, agg in grand_text_agg.items():
-            nslug = _short_slug(name)
-            for text_type in TEXT_TYPES:
-                path = charts_dir / f"aggregate__{nslug}__{text_type}__font_size.png"
-                charts.font_size_histogram_chart(
-                    agg, text_type, title=f"(all inputs) {name} {text_type} font size", path=path)
-        for text_type in TEXT_TYPES:
-            imgs = [
-                charts_dir / f"aggregate__{_short_slug(name)}__{text_type}__font_size.png"
-                for name in grand_text_agg
-            ]
-            imgs = [p for p in imgs if p.is_file()]
-            if imgs:
-                grand_font_size_html.append(f"<p>{text_type}</p>")
-                grand_font_size_html.append(
-                    '<div class="charts">' + "".join(
-                        f'<img src="{p.relative_to(out_dir).as_posix()}">' for p in imgs
-                    ) + "</div>"
-                )
-        builder.add_raw_html("".join(grand_font_size_html))
+    for form in FORMS:
+        text_agg = {n: aggregate_text_metrics(rs) for n, rs in grand_text.get(form, {}).items()}
+        vector_agg = {n: aggregate_vector_metrics(rs) for n, rs in grand_vector.get(form, {}).items()}
+        if not text_agg and not vector_agg:
+            continue
+        _grand_header()
+        _text_block(text_agg, form, f"(all inputs) {FORM_TITLES[form]}", f"aggregate__{form}", full=False)
+        _vector_block(vector_agg, form, f"(all inputs) {FORM_TITLES[form]}", f"aggregate__{form}")
+        _add_counts_section(builder, grand_counts.get(form, {}), group=f"{FORM_TITLES[form]} -- Counts")
 
     if grand_fast_cluster:
-        if not grand_text_agg:
-            builder.add_key_section("(grand aggregate over every shared input)")
+        _grand_header()
         blocks.append(format_fast_cluster_comparison(
             grand_fast_cluster, title="(all inputs) -- clusters dropped by FAST",
         ))
         _add_fast_cluster_section(builder, grand_fast_cluster)
 
     if grand_retry_stats:
-        if not grand_text_agg:
-            builder.add_key_section("(grand aggregate over every shared input)")
+        _grand_header()
         blocks.append(format_retry_stats_comparison(
             grand_retry_stats, title="(all inputs) -- blank-recognition retries",
         ))
         _add_retry_stats_section(builder, grand_retry_stats)
 
     if grand_timing:
-        if not grand_text_agg:
-            builder.add_key_section("(grand aggregate over every shared input)")
+        _grand_header()
         _timing_block(grand_timing, "(all inputs)", "aggregate")
 
     header = "compared runs:\n" + "\n".join(f"  {Path(d).name}" for d in args.run)
@@ -427,10 +466,7 @@ def main(argv: list[str] | None = None) -> int:
         "shared_keys": sorted(shared_keys),
     }, indent=2), encoding="utf-8")
 
-    lines = ["# Open each benchmarked input in the viewer (pipelines side by side):"]
-    for key in sorted(shared_keys):
-        dirs = " ".join(f'"{r[key].doc_dir.resolve()}"' for r in runs)
-        lines.append(f"{_VENV_PY} scripts/pipeline_report_viewer.py {dirs}")
+    lines = ["# Open each benchmarked input / form in the viewer (pipelines side by side):", *viewer_lines]
     (out_dir / "viewer_commands.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     (out_dir / "report.html").write_text(builder.render(), encoding="utf-8")

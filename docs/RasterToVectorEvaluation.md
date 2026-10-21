@@ -20,13 +20,27 @@ _score_vectors` (per page), `benchmark_report_sections.py::_add_vector_sections`
 
 ## 1. Inputs
 
-**Predictions.** `scripts/generate_pipeline_report.py` with `benchmark: true`, for an input that is
-a `scripts/label/master_label.py` folder with a `rasterised.pdf` (every page flattened to one
-full-page image): besides the normal vectorised-PDF run, each page of `rasterised.pdf` gets a
-**separate** pipeline run (same `p2`/`p3`). That page has no native vectors, so its output vectors
-are Phase 2's. They are stored as `PageDump.raster_vectors` in `<run>/<doc>/dump.json`, together
-with `PageDump.raster_dpi` — the resolution of that rasterised page, read off its embedded image
-(`adapters.raster_dpi_for_page`). A failed raster run is logged and leaves no predictions.
+**Predictions.** `scripts/generate_pipeline_report.py` with `benchmark: true` runs the pipeline
+(same `p2`/`p3`) on each selected **input form** of every page (`inputs`, see
+`scripts/report_configs/README.md` and `rastervec/Evaluation/forms.py`). Two forms are scored here:
+
+| form | pipeline input | P2 predictions | GT scored against |
+|---|---|---|---|
+| `rasterised` | the label folder's own `rasterised.pdf` page, else `conversion.rasterise_page` at the config's `dpi` | every output vector (the page has no native vectors, so all of them are Phase 2's) | `vector_to_raster` ∪ `original_raster` |
+| `original` | the source page | Phase 2's own vectors only (`PageDump.p2_vectors`, from the run's `extra["phase2_vectors"]`) — never P1/P3's native vectors | `original_raster` only (on the original page the `vector_to_raster` lines are real PDF vectors) |
+
+The vectorised form has no Phase 2 geometry ground truth and is not vector-scored. Each form's
+run lives in its own `<run>/<input>/<form>/dump.json`, with `PageDump.raster_dpi` — the resolution
+of the largest embedded image on the run's input page (`adapters.raster_dpi_for_page`). A form run
+that raises is logged and recorded as a failed page (`counts["run_failed"]`). Report folders made
+before input forms existed (one `<input>/dump.json`, the rasterised run in its `raster_*` fields)
+are still scored as the rasterised form.
+
+`rasterise_page` (and, since this change, `master_label.py`'s own `rasterised.pdf`) renders the page
+**unrotated** and re-applies `/Rotate`, so the run's coordinates match the labels' unrotated page
+space. A `rasterised.pdf` made by `master_label.py` before that fix baked the rotation into the
+image, which transposes every coordinate on a 90°/270° page — regenerate those pages (clear their
+`rasterise_done` flags in the folder's `manifest.json` and re-run `master_label.py`).
 
 **Ground truth.** The label folder's geometry annotations (`LabelSet.geometry_entries`):
 
@@ -35,8 +49,9 @@ with `PageDump.raster_dpi` — the resolution of that rasterised page, read off 
 | `vector_to_raster` | `source="auto"` | every drawing item of the original page (`raster_label.raster_geometry_for_page`) — incl. CAD vector-text glyph strokes, not native font text |
 | `original_raster` | `source="manual"` | lines/curves hand-traced in `raster_label.py` on embedded images with no vector backing |
 
-A page is scored against the **union** of both types (that is what P2 sees); D_v is also split per
-type. `original_vector` is a text type only and never scored here.
+A rasterised page is scored against the **union** of both types (that is what P2 sees), an
+original page against `original_raster` only; D_v is also split per type. `original_vector` is a
+text type only and never scored here.
 
 **Text boxes.** Every text label's `cluster_bbox` on the page (all five text types) — used only to
 split results into text / non-text (§5).
@@ -166,16 +181,19 @@ pooled MSE.
 
 ## 9. Where results show up
 
-- **`pipeline_report_benchmark.py` → `report.html`**, Vector group, one column per run:
-  Headline (D_v, F_v, VRI, PRI, SSIM, PSNR) · Q_v components (Q_pt, Q_od, Q_w, Q_v(c); Q_b, Q_fr,
-  Q_v for GT and for predictions) · Splits · Fragmentation |D(g)| and Consolidation |G(k)| ·
-  Counts · Pixel level · Length · Direction. Charts in `charts/`: `vector_headline`,
-  `vector_components`, `vector_fragmentation`, `vector_consolidation`, `vector_quality`,
-  `vector_direction`. `benchmark.txt` has the same in text.
-- **`pipeline_report_viewer.py`**, stage `vector_eval` (written by `generate_pipeline_report.py`
-  in benchmark mode, unless `debug_layers: false`): `gt by Q_v` and `pred by Q_v` (every bar
-  coloured red → yellow → green by its line's Q_v), `missed gt` (|D(g)| = 0), `false alarms`
-  (|G(k)| = 0), `gt endpoints` and `pred endpoints` (a dot at both ends of every bar).
+- **`pipeline_report_benchmark.py` → `report.html`**: per input, a one-line-per-form summary, then
+  one group per form; the Vector group of the rasterised and original forms has, one column per
+  run: Headline (D_v, F_v, VRI, PRI, SSIM, PSNR) · Q_v components (Q_pt, Q_od, Q_w, Q_v(c); Q_b,
+  Q_fr, Q_v for GT and for predictions) · Splits · Fragmentation |D(g)| and Consolidation |G(k)| ·
+  Counts · Pixel level · Length · Direction. Each form's Counts group adds the run's own output
+  counts, incl. Phase 2's per-colour-layer vectors / items and OCR blanks. Charts in `charts/`:
+  `<key>__<form>__vector_{headline,components,fragmentation,consolidation,quality,direction}.png`.
+  `benchmark.txt` has the same in text.
+- **`pipeline_report_viewer.py`** on `<run>/<input>/<form>/`, stage `vector_eval` (written by
+  `generate_pipeline_report.py` in benchmark mode, unless `debug_layers: false`): `gt by Q_v` and
+  `pred by Q_v` (every bar coloured red → yellow → green by its line's Q_v), `missed gt`
+  (|D(g)| = 0), `false alarms` (|G(k)| = 0), `gt endpoints` and `pred endpoints` (a dot at both ends
+  of every bar).
 
 ## 10. Known biases (accepted)
 

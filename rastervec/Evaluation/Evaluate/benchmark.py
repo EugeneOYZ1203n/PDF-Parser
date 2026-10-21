@@ -64,12 +64,16 @@ def _fmt_ratio(ratio) -> str:
     return f"{ratio.numerator:.4g}/{ratio.denominator:.4g} ({val})"
 
 
-def format_text_report(pdf_path: str, page_index: int, result: TextMetricSuiteResult) -> str:
-    """Per-page text-metric report: one block per text type, categories 1-8."""
+def format_text_report(
+    pdf_path: str, page_index: int, result: TextMetricSuiteResult, *,
+    types: "tuple[str, ...]" = TEXT_TYPES, labels: "dict[str, str] | None" = None,
+) -> str:
+    """Per-page text-metric report: one block per text type (`types`,
+    display names from `labels`), categories 1-8."""
     lines = [f"{pdf_path} page {page_index} [text]:"]
-    for text_type in TEXT_TYPES:
+    for text_type in types:
         r = result.by_type[text_type]
-        lines.append(f"  [{text_type}]")
+        lines.append(f"  [{(labels or {}).get(text_type, text_type)}]")
         ls = r.label_stats
         lines.append(
             f"    labels: {ls.label_count} | chars: {ls.char_count} | "
@@ -123,13 +127,16 @@ def format_text_report(pdf_path: str, page_index: int, result: TextMetricSuiteRe
     return "\n".join(lines)
 
 
-def format_confusion_table(result: TextMetricSuiteResult, *, top_n: int = 5) -> str:
+def format_confusion_table(
+    result: TextMetricSuiteResult, *, top_n: int = 5,
+    types: "tuple[str, ...]" = TEXT_TYPES, labels: "dict[str, str] | None" = None,
+) -> str:
     lines = ["OCR confusion characters (top {} replacements per gt char):".format(top_n)]
-    for text_type in TEXT_TYPES:
+    for text_type in types:
         confusion = result.by_type[text_type].confusion
         if not confusion:
             continue
-        lines.append(f"  [{text_type}]")
+        lines.append(f"  [{(labels or {}).get(text_type, text_type)}]")
         for ch, counter in sorted(confusion.items(), key=lambda kv: -sum(kv[1].values())):
             total = sum(counter.values())
             top = counter.most_common(top_n)
@@ -316,6 +323,7 @@ def format_variant_timing_comparison(
 def format_aggregate_comparison(
     aggregates_by_variant: dict[str, TextMetricSuiteResult | None], *,
     title: str = "Aggregate text metrics by variant (micro-averaged)",
+    types: "tuple[str, ...]" = TEXT_TYPES, labels: "dict[str, str] | None" = None,
 ) -> str:
     """One `format_text_report`-style block per variant. A `None` aggregate
     (a variant that produced no scored page) shows `(no results)`."""
@@ -327,7 +335,7 @@ def format_aggregate_comparison(
         if result is None:
             lines.append("  (no results)")
             continue
-        lines.append(format_text_report("", 0, result))
+        lines.append(format_text_report("", 0, result, types=types, labels=labels))
     return "\n".join(lines)
 
 

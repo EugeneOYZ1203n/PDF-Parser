@@ -1121,18 +1121,19 @@ generic parallel-pool mechanics), never phase-specific business logic.
   matches the existing `RASTERVEC_RUN_OCR_TESTS`-gated convention for OCR-dependent tests).
   `scripts/pipeline_report_benchmark.py` is the standalone folder-diff counterpart (replaced the old
   `benchmark_vector_classification.ipynb`): it takes **1 or 2** benchmark report folders (`--run`,
-  `generate_pipeline_report.py` runs with `benchmark: true`), each embedding its single
-  `<stem>/dump.json` + `ground_truth_auto.json` (+ `ground_truth_manual.json`), matches the folders
-  on the inputs they **share by identity** (`pdf:<stem>` auto-only vs `labels:<stem>` auto+manual — a
-  `B.pdf` run and a `B.json` run don't match on B), and per shared input scores every run with
-  `metrics.evaluate_multiclass` → an `AUTO` table, a `MANUAL` table, the
-  `{auto,manual}×{auto,manual,none}` GT-recall confusion matrix (`benchmark.format_confusion`), and
-  `combined_candidate_precision`, one column per folder. Writes a timestamped
-  `outputs/pipeline_report_benchmark/<ts>/` with `benchmark.txt`, `runs.json`, `viewer_commands.txt`
-  (a `pipeline_report_viewer.py` line per shared input), and `charts/` (`Evaluation/Evaluate/
-  charts.py` — matplotlib Agg; `metric_comparison_chart` grouped bars + `confusion_heatmap`, per
-  page + per-key-aggregate + grand-aggregate, split per source). Miss-attribution metrics are absent
-  (a dump has no classification state).
+  `generate_pipeline_report.py` runs with `benchmark: true`; per input the ground truth + one
+  `dump.json` per input form, or a pre-`inputs` folder's single `<input>/dump.json`), matches the
+  folders on the inputs they **share by identity** (`pdf:<stem>` auto-only vs `labels:<stem>` — a
+  `B.pdf` run and a `B.json` run don't match on B) and on forms (union, n/a where a run lacks one),
+  and per shared input writes a one-line-per-form summary (word F1 / D_v / VRI) then one group per
+  form — Text (only that form's types, `forms.FORM_TEXT_TYPES`; "native text" on the original),
+  Vector (Liu-Dori, rasterised + original only), Counts (`benchmark_run_loading._load_counts`) —
+  one column per folder, plus Timing per form. All loading/scoring is per form
+  (`benchmark_run_loading._score_text/_score_vectors/_load_*(entry, form, ...)`, dumps parsed once
+  and cached). Writes a timestamped `outputs/pipeline_report_benchmark/<ts>/` with `report.html`,
+  `benchmark.txt`, `runs.json`, `viewer_commands.txt` (a `pipeline_report_viewer.py` line per
+  shared input and form), and `charts/` (`Evaluation/Evaluate/charts.py` — matplotlib Agg,
+  `<key>__<form>__*.png` + `aggregate__<form>__*.png`).
 - **`Evaluation/Evaluate/label_overlays.py`** *(implemented, pure)*: `gt_bbox_overlay(graph)` and
   `gt_word_overlay(graph)` — GT-only visual-diff data (no rendering / pipeline import) reduced off a
   `metrics.OverlapGraph`, used by `generate_pipeline_report.py`'s benchmark mode for the
@@ -1280,26 +1281,40 @@ generic parallel-pool mechanics), never phase-specific business logic.
   `p2`/`p3` [only meaningful when `pipeline == "current"`, validated against
   `core.registry.P2_REGISTRY`/`P3_REGISTRY`], `enable_fast`, `final_stage` = one of `core.pipeline`'s
   short `phase1`/`phase2`/`phase3` step names [`"legacy"` ignores it entirely], `input_dir`/
-  `input_files`, per-PDF `pages`, `vectorise` + `vectorise_mode` = an `Evaluation/conversion.py`
-  mode), runs `core.pipeline.run_pipeline(..., p2=, p3=, verbose=True)` once per (pdf, page) for the
-  `current` engine (`pipelines.legacy.run_pipeline` unchanged for `legacy` — always a full run;
-  `final_stage` is passed as `run_pipeline(stop_after=...)`, so later phases really don't run —
-  value table in `scripts/report_configs/README.md`), and writes
-  `outputs/pipeline_report/<ts>__<config-stem>/<pdf-stem>/` (the run's source config path is
-  also recorded inside `config_and_hyperparameters.txt`) — see the artifact breakdown below.
-  **`benchmark: true`** (mutually exclusive with `vectorise`) additionally makes each input's own
-  scoring artifact for `pipeline_report_benchmark.py` — `input_files` may be `.pdf` or `.json` label
-  sidecars; per page the pipeline runs **once** on `convert_page_to_vector_text` output (text-as-
-  vectors over the untouched drawings) and that one run's OCR is scored against both label classes.
-  In benchmark mode the per-input folder is named from `BenchInput.key` with its `pdf:`/`labels:`
-  prefix stripped (`generate_pipeline_report.py::_bench_doc_name`), not the literal `<pdf-stem>` —
-  a `scripts/label/master_label.py` folder's `pdf_path` is always that folder's own `original.pdf`,
+  `input_files`, per-PDF `pages`, `inputs` = any combination of the input forms `original` /
+  `vectorised` (`convert_page_to_vector_text`) / `rasterised` (a label folder's `rasterised.pdf`,
+  else `conversion.rasterise_page` at `dpi` -- unrotated render + `/Rotate` re-applied, so
+  coordinates match the labels; `master_label.py` uses it too), default `["original"]` /
+  benchmark `["vectorised", "rasterised"]`; `vectorise` + `vectorise_mode` are a deprecated alias
+  for `["vectorised"]`), runs `core.pipeline.run_pipeline(..., p2=, p3=, verbose=True)` once per
+  (pdf, page, form) for the `current` engine (`pipelines.legacy.run_pipeline` unchanged for
+  `legacy` — always a full run; `final_stage` is passed as `run_pipeline(stop_after=...)`, so later
+  phases really don't run — value table in `scripts/report_configs/README.md`), and writes one
+  viewer folder per form, `outputs/pipeline_report/<ts>__<config-stem>/<pdf-stem>/` for a single
+  form else `<pdf-stem>__<form>/` (the run's source config path is also recorded inside
+  `config_and_hyperparameters.txt`) — see the artifact breakdown below. Every page's `dump.json`
+  entry records `counts` (texts by source, vectors per phase, OCR blanks, Phase 2's per-colour-layer
+  output, `run_failed`), and `dump.json` is written incrementally (`dump_io.DumpWriter`: pages
+  spilled to disk as they finish, never every page's vectors in memory at once).
+  **`benchmark: true`** additionally makes each input's own scoring artifact for
+  `pipeline_report_benchmark.py` — `input_files` may be `.pdf`, `.json` label sidecars or
+  `master_label.py` folders. Each input folder `<run>/<input>/` holds the ground truth
+  (`ground_truth_<text_type>.json`) + `benchmark_meta.json` and **one sub-folder per form**
+  (`original/`, `vectorised/`, `rasterised/`, each a full viewer folder with its own `dump.json`,
+  the label overlays of the types scored on that form and the `vector_eval` layers);
+  `rastervec/Evaluation/forms.py` is the single source of which types each form is scored on
+  (original: "native text" [P1's own words, every output text a prediction], `original_vector`,
+  `original_raster` + its geometry vs P2's own vectors; vectorised: `native_to_vector`,
+  `original_vector`; rasterised: the three raster text types + both geometry types). A form run
+  that raises is logged and recorded as a failed page, not fatal. The per-input folder is named
+  from `BenchInput.key` with its `pdf:`/`labels:` prefix stripped
+  (`generate_pipeline_report.py::_bench_doc_name`), not the literal `<pdf-stem>` — a
+  `scripts/label/master_label.py` folder's `pdf_path` is always that folder's own `original.pdf`,
   so keying off the PDF filename would collide (and silently overwrite) whenever a config
-  benchmarks more than one labelled folder.
-  Alongside the normal report artifacts (below) it writes `ground_truth_auto.json` (+
-  `ground_truth_manual.json`), the split `{auto,manual}_{bbox,text}.pdf` overlays (`label_overlays.py`,
-  registered in the manifest under stage `benchmark`), and a run-root `benchmark.json` marker
-  (`entries[].key` = `pdf:<stem>` / `labels:<json-stem>`). Runs under `pipeline: legacy` too (archive's
+  benchmarks more than one labelled folder. The run-root `benchmark.json` marker lists
+  `entries[].key` (`pdf:<stem>` / `labels:<json-stem>`) and `entries[].forms` (form -> sub-folder);
+  `pipeline_report_benchmark.py` still reads pre-`inputs` folders (one `<input>/dump.json` with the
+  rasterised run in `raster_*` fields). Runs under `pipeline: legacy` too (archive's
   pipeline per converted page — `legacy_adapter.run_archive_pipeline` imports `torch` before the
   paddle-first archive import for the Windows `shm.dll` gotcha; legacy emits only `reconstructed`).
   Every mode writes: one multi-page PDF **per visual layer** (`<stage>__<layer>.pdf`), `dump.json`

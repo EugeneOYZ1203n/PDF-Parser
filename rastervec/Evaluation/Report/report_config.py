@@ -10,6 +10,7 @@ from typing import Literal, NamedTuple
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from rastervec.Evaluation import conversion
+from rastervec.Evaluation.forms import FORMS
 from rastervec.Evaluation.Evaluate import metrics
 from rastervec.Evaluation.Labelling.label_schema import (
     load_labels,
@@ -22,6 +23,11 @@ from rastervec.core.registry import P2_REGISTRY, P3_REGISTRY, DEFAULT_P2, DEFAUL
 # regardless of `pipeline`, and what `report_artifacts.py::_reached` gates
 # `_NEW_ARTIFACTS` rows on.
 NEW_STEP_NAMES = ["phase1", "phase2", "phase3"]
+
+# The input forms a report can run the pipeline on (`Evaluation/forms.py`):
+# the source page as-is, its `convert_page_to_vector_text` conversion, and
+# a flattened-to-one-image raster of it.
+InputForm = Literal["original", "vectorised", "rasterised"]
 
 _CONVERT = {
     "text_only": conversion.convert_page_text_only,
@@ -52,6 +58,17 @@ class ReportConfig(BaseModel):
     input_files: list[Path] = Field(default_factory=list)
     label_files: dict[str, Path] = Field(default_factory=dict)
     pages: list[int] | dict[str, list[int]] | None = None
+    # Which forms of each input page the pipeline runs on -- any non-empty
+    # subset of `FORMS`. Unset: `["original"]`, or `["vectorised",
+    # "rasterised"]` in benchmark mode (see `forms()`). Normal mode writes
+    # one report folder per form (`<stem>__<form>/`, plain `<stem>/` for a
+    # single form); benchmark mode one sub-folder per form inside each
+    # input's folder.
+    inputs: list[InputForm] | None = None
+    # DEPRECATED alias for `inputs: ["vectorised"]` (normal mode only), kept
+    # so old configs run unchanged. `vectorise_mode` picks that alias's
+    # conversion and is only valid with it; `inputs`' "vectorised" is always
+    # `to_vector_text`.
     vectorise: bool = False
     vectorise_mode: str = "to_vector_text"
     benchmark: bool = False
@@ -112,14 +129,47 @@ class ReportConfig(BaseModel):
             raise ValueError(f"vectorise_mode must be one of {list(_CONVERT)}")
         return v
 
+    @field_validator("inputs")
+    @classmethod
+    def _valid_inputs(cls, v: "list[str] | None") -> "list[str] | None":
+        if v is None:
+            return v
+        if not v:
+            raise ValueError(f"inputs must list at least one of {list(FORMS)}")
+        if len(set(v)) != len(v):
+            raise ValueError("inputs must not repeat a form")
+        return v
+
     @model_validator(mode="after")
-    def _benchmark_excludes_vectorise(self) -> "ReportConfig":
+    def _deprecated_vectorise(self) -> "ReportConfig":
+        if self.vectorise and self.inputs is not None:
+            raise ValueError(
+                "vectorise is a deprecated alias for inputs: [\"vectorised\"] -- set only inputs"
+            )
         if self.benchmark and self.vectorise:
             raise ValueError(
-                "benchmark mode runs its own text-only / drawings-only conversions; "
-                "set vectorise=false"
+                "vectorise is not used in benchmark mode -- select forms with inputs "
+                "(default [\"vectorised\", \"rasterised\"])"
+            )
+        if self.vectorise_mode != "to_vector_text" and not self.vectorise:
+            raise ValueError(
+                "vectorise_mode only applies to the deprecated vectorise: true; "
+                "inputs' \"vectorised\" form is always to_vector_text"
             )
         return self
+
+    def forms(self) -> list[str]:
+        """The forms to run, in `FORMS` order (see `inputs`)."""
+        if self.inputs is not None:
+            return [f for f in FORMS if f in self.inputs]
+        if self.vectorise:
+            return ["vectorised"]
+        return ["vectorised", "rasterised"] if self.benchmark else ["original"]
+
+    def vectorise_fn(self):
+        """The conversion behind the "vectorised" form: `to_vector_text`,
+        or `vectorise_mode`'s under the deprecated `vectorise: true`."""
+        return _CONVERT[self.vectorise_mode] if self.vectorise else conversion.convert_page_to_vector_text
 
     def resolved_pdfs(self) -> list[Path]:
         pdfs: list[Path] = list(self.input_files)
@@ -191,12 +241,10 @@ class BenchInput(NamedTuple):
     pdf_path: Path
     labels_path: Path | None
     # A master_label.py folder's own `rasterised.pdf` (per-page flattened-
-    # to-image renders, 1:1 page-index-aligned with `original.pdf`) -- when
-    # present, `_process_pdf_benchmark` runs the pipeline a SECOND time per
-    # page directly on this file, and vector_to_raster/original_raster/
-    # native_to_raster are scored from that run's own OCR output instead of
-    # the vectorised run's. `None` for a bare `.pdf`/`.json` input (no
-    # rasterised counterpart known) -- those 3 types stay GT-only.
+    # to-image renders, 1:1 page-index-aligned with `original.pdf`, the file
+    # the raster labels were drawn against) -- the "rasterised" form's input
+    # when present; without one, each page is rasterised on the fly at
+    # `ReportConfig.dpi` (`conversion.rasterise_page`).
     rasterised_pdf_path: Path | None = None
 
 

@@ -118,6 +118,13 @@ class PageDump:
     # (`adapters.raster_dpi_for_page`) -- sets the Liu-Dori width floor.
     # `None` when unknown (no rasterised run, older dumps).
     raster_dpi: "float | None" = None
+    # Phase 2's own vectors (from embedded images) when they differ from
+    # `vectors` -- the "original" form, where P3's drawing vectors share
+    # the output. `None` elsewhere (a rasterised page's output *is* P2's).
+    p2_vectors: "list[Vector] | None" = None
+    # Per-run counts (`generate_pipeline_report._run_counts`): texts by
+    # source, vectors per phase, OCR blanks, P2 per-colour-layer counts.
+    counts: "dict | None" = None
 
 
 def _page_dump_to_json(pd: PageDump) -> dict:
@@ -136,6 +143,8 @@ def _page_dump_to_json(pd: PageDump) -> dict:
         "fast_cluster_stats": pd.fast_cluster_stats,
         "retry_stats": pd.retry_stats,
         "raster_dpi": pd.raster_dpi,
+        "p2_vectors": None if pd.p2_vectors is None else [vector_to_json(v) for v in pd.p2_vectors],
+        "counts": pd.counts,
     }
 
 
@@ -161,6 +170,8 @@ def _page_dump_from_json(d: dict) -> PageDump:
         fast_cluster_stats=d.get("fast_cluster_stats"),
         retry_stats=d.get("retry_stats"),
         raster_dpi=d.get("raster_dpi"),
+        p2_vectors=None if d.get("p2_vectors") is None else [vector_from_json(v) for v in d["p2_vectors"]],
+        counts=d.get("counts"),
     )
 
 
@@ -179,11 +190,47 @@ def write_dump(
     Path(path).write_text(json.dumps(payload, indent=1), encoding="utf-8")
 
 
+class DumpWriter:
+    """Incremental `dump.json` writer -- same file as `write_dump`, but each
+    page is serialised and spilled to `<path>.pages.part` the moment it is
+    added, so a long document never holds every page's texts / vectors /
+    P2 `raster_vectors` in memory at once (nor one giant JSON string of all
+    of them). `finish` streams the spilled pages into the final file."""
+
+    def __init__(self, path: str | Path, pdf_path: str, *, form: str = "") -> None:
+        self.path = Path(path)
+        self.pdf_path = str(pdf_path)
+        self.form = form
+        self._spill = self.path.with_name(self.path.name + ".pages.part")
+        self._fh = open(self._spill, "w", encoding="utf-8")
+        self.n_pages = 0
+
+    def add(self, pd: PageDump) -> None:
+        self._fh.write(json.dumps(_page_dump_to_json(pd)) + "\n")
+        self.n_pages += 1
+
+    def finish(self, doc_durations: "dict | None" = None) -> None:
+        self._fh.close()
+        with open(self.path, "w", encoding="utf-8") as out, open(self._spill, encoding="utf-8") as src:
+            out.write(f'{{"schema": {json.dumps(_SCHEMA)}, "pdf_path": {json.dumps(self.pdf_path)}, '
+                      f'"form": {json.dumps(self.form)}, "pages": [\n')
+            for i, line in enumerate(src):
+                if i:
+                    out.write(",\n")
+                out.write(line.rstrip("\n"))
+            out.write(f'\n], "doc_durations": {json.dumps(dict(doc_durations or {}))}}}\n')
+        self._spill.unlink()
+
+
 @dataclasses.dataclass
 class Dump:
     pdf_path: str
     pages: list[PageDump]
     doc_durations: dict = dataclasses.field(default_factory=dict)
+    # Which input form the pages are a run of ("original" / "vectorised" /
+    # "rasterised"); "" for a pre-`inputs` dump (vectorised run in
+    # `texts`/`vectors`, rasterised run in the `raster_*` fields).
+    form: str = ""
 
 
 def load_dump(path: str | Path) -> Dump:
@@ -192,4 +239,5 @@ def load_dump(path: str | Path) -> Dump:
         pdf_path=payload.get("pdf_path", ""),
         pages=[_page_dump_from_json(p) for p in payload.get("pages", [])],
         doc_durations=payload.get("doc_durations", {}),
+        form=payload.get("form", ""),
     )

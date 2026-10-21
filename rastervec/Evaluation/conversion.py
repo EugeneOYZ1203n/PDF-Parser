@@ -12,7 +12,11 @@ Three modes, none of which ever rewrites pre-existing vector-path geometry:
 - `convert_page_to_vector_text` -- both of the above overlaid (text-as-vectors
   on top of the untouched drawings). No longer used by the benchmark (which
   scores auto/manual from the two disjoint inputs above); kept as a general
-  "how is this text drawn" utility and for its tests.
+  "how is this text drawn" utility and for its tests. The report's
+  "vectorised" input form.
+
+Plus `rasterise_page` -- the page flattened to one full-page image, the
+report's "rasterised" input form (same unrotated-space convention).
 
 Verified API sequence (installed pymupdf 1.28.2, see
 `tests/rastervec/Evaluation/test_conversion.py`):
@@ -175,4 +179,30 @@ def convert_page_to_vector_text(
         out_page.set_rotation(rotation)
     finally:
         text_vectors.close()
+    return _emit(out, pdf_path, page_index, output_path)
+
+
+def rasterise_page(
+    pdf_path: str, page_index: int, output_path: str | None = None, *, dpi: int = 300,
+) -> bytes:
+    """The page flattened to one full-page image (no vectors, no text): the
+    "rasterised" benchmark / report input. Rendered at rotation 0 (the
+    unrotated, CropBox-relative space every extraction and label uses),
+    placed on an unrotated page of the CropBox's size, and the original
+    `/Rotate` re-applied last -- so a pipeline run on it reports coordinates
+    in the same space as the source page. (`page.get_pixmap()` on the
+    rotated page would bake the rotation into the image and transpose every
+    coordinate on a 90/270 page.)"""
+    rotation, w, h = _page_geometry(pdf_path, page_index)
+    copy = _one_page_copy(pdf_path, page_index)
+    try:
+        page = copy[0]
+        page.set_rotation(0)
+        png = page.get_pixmap(matrix=fitz.Matrix(dpi / 72.0, dpi / 72.0)).tobytes("png")
+    finally:
+        copy.close()
+    out = fitz.open()
+    out_page = out.new_page(width=w, height=h)
+    out_page.insert_image(out_page.rect, stream=png)
+    out_page.set_rotation(rotation)
     return _emit(out, pdf_path, page_index, output_path)
