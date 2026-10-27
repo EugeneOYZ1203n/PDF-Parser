@@ -840,12 +840,19 @@ generic parallel-pool mechanics), never phase-specific business logic.
     `geometry_annotations_for_vector`, **restricted to what the page render shows**
     (`visible_geometry.py::visible_geometry_for_page`, 300 dpi: RasterText `split_layers` colour
     layers; a path whose stroke and fill both read as paper under that split's own ink rule is
-    dropped; every piece sampled every 0.5 px against the 1 px-dilated ink mask and cut to its
+    dropped; every piece sampled every 0.5 px against the 1 px-dilated ink mask — the split's ink
+    **plus** any pixel ≥ 40 levels off the paper colour (`rendered_ink`; the split labels glyph
+    anti-aliasing / sub-pixel serifs paper, which made ~0.4 % of glyph-outline pieces read hidden)
+    — and cut to its
     visible runs — clipped / dashed / covered pieces keep only what's drawn, partial runs < 3 px
     dropped, untouched pieces keep their exact points; each run tagged with the layers on ≥ 50 % of
     it). Font text, images, shadings, annots have no GT by construction. `_all_geometry_for_page`
     keeps the old paint-blind output (for `notebooks/gt_fidelity_showcase.ipynb`, which scores
-    original-vs-GT renders with the benchmark's SSIM/PSNR over a list of PDFs). Saved label-folder
+    original-vs-GT renders with the benchmark's SSIM/PSNR over a list of PDFs).
+    `notebooks/gt_problem_scan.ipynb` (`_gt_problem_scan_helpers.py`) searches a list of PDFs for
+    every GT problem class — paper-reading paint next to ink, light fills, clipped / dashed /
+    occluded paths, ink with no vector (text / image / other), dark ink the split calls paper —
+    with page overlays, per-category crop galleries and `findings.csv`. Saved label-folder
     geometry from before this change is still the paint-blind kind — re-run `master_label.py`'s
     geometry step to refresh it. `sync_text_from_vector_labels(raster_labels, vector_labels,
     page_indices)`: mutates `raster_labels.entries` in place, dropping then re-adding every

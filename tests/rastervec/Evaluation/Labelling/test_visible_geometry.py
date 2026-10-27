@@ -140,3 +140,15 @@ def test_paint_reads_as_ink():
     assert not vg.paint_reads_as_ink((0.95, 0.95, 0.95), 120.0)
     assert vg.paint_reads_as_ink((1, 1, 0), 120.0)          # pale but chromatic
     assert not vg.paint_reads_as_ink(None, 120.0)
+
+
+def test_subpixel_feature_rendered_only_as_antialiasing_stays_visible(tmp_path):
+    # a 0.15 pt black sliver (a serif foot) renders as light-grey anti-aliasing the split calls
+    # paper; its outline must still count as visible (next to a real line so the page has ink)
+    path = _pdf(tmp_path, b"0 0 0 RG 1 w 20 250 m 280 250 l S 0 0 0 rg 100 100.25 20 0.15 re f")
+    geom = vg.visible_geometry_for_page(path, 0, dpi=150)
+    sliver = [a for a in geom.annotations if a.fill is not None]
+    assert len(sliver) == 4 and geom.stats["invisible_pieces"] == 0
+    # without the rendered-ink rule the whole sliver read as hidden
+    assert vg.visible_runs(vg._pieces_px(sliver, geom.matrix), geom.labels, geom.n_layers,
+                           vg.PAPER_LABEL)[1]["invisible_pieces"] == 4

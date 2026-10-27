@@ -19,8 +19,11 @@ render of the page:
             outright -- a white table-cell fill whose edge sits next to a grid
             line would otherwise pass the pixel test below.
 4. visible  each piece is sampled every `SAMPLE_STEP_PX`; a sample is visible
-            when any non-paper pixel lies within `VISIBLE_DILATE_PX` (Chebyshev)
-            of it. Each maximal visible run becomes its own piece (a line ->
+            when rendered ink lies within `VISIBLE_DILATE_PX` (Chebyshev) of it --
+            a non-paper pixel of the split, or any pixel at least
+            `VISIBLE_MIN_CONTRAST` levels (max RGB channel) off the paper colour:
+            the split labels a glyph's anti-aliased edge / sub-pixel serif paper,
+            and the outline pieces running along it would otherwise read hidden. Each maximal visible run becomes its own piece (a line ->
             sub-line, a cubic -> its de Casteljau sub-curve, an untouched piece
             keeps its exact points), so a clipped line keeps only its visible
             span, a dashed line becomes one piece per dash, and the part of a
@@ -63,6 +66,7 @@ _LOG = logging.getLogger("rastervec.Labelling.visible_geometry")
 DEFAULT_DPI = 300.0
 SAMPLE_STEP_PX = 0.5
 VISIBLE_DILATE_PX = 1
+VISIBLE_MIN_CONTRAST = 40  # > a 0.9-grey fill's 25, so light fills stay paper
 MIN_VISIBLE_PX = 3.0
 LAYER_MIN_FRAC = 0.5
 SAMPLE_CHUNK = 2_000_000
@@ -245,7 +249,20 @@ class Runs:
         return len(self.piece)
 
 
+def rendered_ink(rgb: np.ndarray, paper_rgb, min_contrast: int = VISIBLE_MIN_CONTRAST) -> np.ndarray:
+    """`uint8` mask (0/1) of pixels at least `min_contrast` levels off the
+    paper colour in some RGB channel -- per channel and banded with cv2 (a
+    numpy `max(axis=2)` over a full A1 render was ~5x slower)."""
+    out = np.empty(rgb.shape[:2], np.uint8)
+    for y0 in range(0, rgb.shape[0], 1024):
+        band = rgb[y0:y0 + 1024]
+        diff = [cv2.absdiff(np.ascontiguousarray(band[:, :, k]), int(paper_rgb[k])) for k in range(3)]
+        out[y0:y0 + 1024] = cv2.max(cv2.max(diff[0], diff[1]), diff[2]) >= min_contrast
+    return out
+
+
 def visible_runs(pieces: np.ndarray, labels: np.ndarray, n_layers: int, paper: int, *,
+                 extra_ink: "np.ndarray | None" = None,
                  step: float = SAMPLE_STEP_PX, radius: int = VISIBLE_DILATE_PX,
                  min_px: float = MIN_VISIBLE_PX, layer_min_frac: float = LAYER_MIN_FRAC,
                  chunk: int = SAMPLE_CHUNK) -> tuple[Runs, dict]:
@@ -258,6 +275,8 @@ def visible_runs(pieces: np.ndarray, labels: np.ndarray, n_layers: int, paper: i
         poly_len = np.linalg.norm(np.diff(pieces, axis=1), axis=2).sum(axis=1)   # control polygon >= arc
         n_samp = np.maximum(2, np.ceil(poly_len / step).astype(np.int64) + 1)
         ink = np.ascontiguousarray(labels != paper).view(np.uint8)
+        if extra_ink is not None:
+            ink = ink | extra_ink
         if radius > 0:
             ink = cv2.dilate(ink, np.ones((2 * radius + 1, 2 * radius + 1), np.uint8))
         bounds = np.searchsorted(np.cumsum(n_samp), np.arange(chunk, int(n_samp.sum()), chunk), side="right")
@@ -317,6 +336,8 @@ def _chunk_runs(pieces, n_samp, poly_len, labels, ink, n_layers, paper, radius, 
     del near
     mask = frac[:, :n_layers] >= layer_min_frac
     orphan = ~mask.any(axis=1)
+    # a run seen only on unlabelled anti-aliased fringe (`extra_ink`) gets no layer
+    orphan &= frac[:, :n_layers].max(axis=1, initial=0.0) > 0
     if n_layers and orphan.any():
         mask[np.flatnonzero(orphan), np.argmax(frac[orphan, :n_layers], axis=1)] = True
 
@@ -393,6 +414,7 @@ def visible_geometry_for_page(pdf_path: str, page_index: int, dpi: float = DEFAU
         layers = color_layers(rgb)
         n_layers = layers.n_layers
         paper_rgb = _paper_rgb(rgb, layers.labels == PAPER)
+        fringe = rendered_ink(rgb, paper_rgb)
         labels = _compact_labels(layers.labels, n_layers)
         colors_rgb, otsu_l = layers.colors_rgb, layers.otsu_l
         del rgb, layers
@@ -414,7 +436,8 @@ def visible_geometry_for_page(pdf_path: str, page_index: int, dpi: float = DEFAU
         secs["paint"] = time.perf_counter() - t
 
         t = time.perf_counter()
-        runs, vstats = visible_runs(_pieces_px(anns, matrix), labels, n_layers, paper)
+        runs, vstats = visible_runs(_pieces_px(anns, matrix), labels, n_layers, paper, extra_ink=fringe)
+        del fringe
         out_anns: list[GeometryAnnotation] = []
         for i, full, t0, t1 in zip(runs.piece.tolist(), runs.full.tolist(), runs.t0.tolist(), runs.t1.tolist()):
             a = anns[i]
