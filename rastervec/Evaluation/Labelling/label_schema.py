@@ -165,13 +165,21 @@ def geometry_annotations_for_vector(v: "Vector") -> list[GeometryAnnotation]:
         page_index=v.page_index, color=v.color, fill=v.fill, width=v.width,
         dashes=v.dashes, opacity=v.stroke_opacity, source="auto",
     )
+    # Validated once per Vector, then built unvalidated per piece: a dense
+    # sheet has ~10^6 pieces and per-piece pydantic validation was ~10 s.
+    GeometryAnnotation(kind="l", points=[(0.0, 0.0), (0.0, 0.0)], **common)
+
+    def make(kind, points):
+        return GeometryAnnotation.model_construct(
+            kind=kind, points=[(float(p[0]), float(p[1])) for p in points], **common)
+
     for item in v.items:
         kind = item[0]
         pts = item_points(item)
         if kind == "l":
-            out.append(GeometryAnnotation(kind="l", points=pts, **common))
+            out.append(make("l", pts))
         elif kind == "c":
-            out.append(GeometryAnnotation(kind="c", points=pts, **common))
+            out.append(make("c", pts))
         elif kind in ("re", "qu"):
             # "re" gives 2 diagonal corners; expand to all 4. "qu" already
             # gives all 4, in polygon order (ul, ur, lr, ll) per
@@ -182,7 +190,7 @@ def geometry_annotations_for_vector(v: "Vector") -> list[GeometryAnnotation]:
             else:
                 corners = pts
             for p1, p2 in zip(corners, corners[1:] + corners[:1]):
-                out.append(GeometryAnnotation(kind="l", points=[p1, p2], **common))
+                out.append(make("l", [p1, p2]))
     return out
 
 

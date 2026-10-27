@@ -47,7 +47,7 @@ image, which transposes every coordinate on a 90°/270° page — regenerate tho
 
 | type | source | what |
 |---|---|---|
-| `vector_to_raster` | `source="auto"` | every drawing item of the original page (`raster_label.raster_geometry_for_page`) — incl. CAD vector-text glyph strokes, not native font text. Taken from the label folder / sidecar where that page has any saved; otherwise derived live from the original page at benchmark time (`_bench_ground_truth_by_type`), so a bare PDF, or a label folder whose geometry step never ran, is still scored |
+| `vector_to_raster` | `source="auto"` | every drawing item of the original page (`raster_label.raster_geometry_for_page`) — incl. CAD vector-text glyph strokes, not native font text — **cut to what the page render shows** (`visible_geometry.visible_geometry_for_page`: paper-coloured paths dropped; clipped, dashed and covered pieces reduced to their visible runs, so a dashed GT line is one entry per dash, still tagged `dashed` by its `dashes` attr). Label folders saved before this filter hold the paint-blind kind until their geometry step is re-run. Taken from the label folder / sidecar where that page has any saved; otherwise derived live from the original page at benchmark time (`_bench_ground_truth_by_type`), so a bare PDF, or a label folder whose geometry step never ran, is still scored |
 | `original_raster` | `source="manual"` | lines/curves hand-traced in `raster_label.py` on embedded images with no vector backing |
 
 A rasterised page is scored against the **union** of both types (that is what P2 sees), an
@@ -358,6 +358,11 @@ Every printed value matches within 0.01, except "Errors" (0.02 — the paper rou
 distance to 3 px) and the "Merged" VRI: the paper prints 0.71, inconsistent with its own Eq. 27
 for its printed D_v = 1 and F_v = 0.41 (= 0.795); every other column satisfies Eq. 27. The
 production config's deviations are covered by synthetic cases in the same file.
+
+`rastervec/notebooks/liu_dori_showcase.ipynb` (helpers `_liu_dori_showcase_helpers.py`) runs the
+real scorer on small synthetic cases and draws them, one section per number in this document
+(matching, every Q factor with sweeps against its closed form, D_v / F_v / VRI, histograms,
+splits, pixel level, SSIM / PSNR, length / direction, the §11 biases, the diagnostic patterns).
 
 ## Tunables
 

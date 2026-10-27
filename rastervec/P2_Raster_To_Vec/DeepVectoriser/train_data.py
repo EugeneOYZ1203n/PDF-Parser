@@ -1,12 +1,14 @@
 """Training-data helpers for `prep_dataset.py` and `train.py` (numpy only;
 never imported by the pipeline itself).
 
-Ground truth is the repo's own vector -> raster labelling method
-(`scripts/label/master_label.py`'s raster geometry step): the page rendered
-with `get_pixmap(Matrix(dpi/72))` (exactly how `rasterised.pdf` is built)
-and `Evaluation.Labelling.raster_label.raster_geometry_for_page`'s
-`GeometryAnnotation`s -- unrotated page space -- mapped into the render's
-pixel frame through `page.rotation_matrix * Matrix(dpi/72)`.
+Ground truth is the repo's own vector -> raster labelling method:
+`Evaluation.Labelling.visible_geometry.visible_geometry_for_page` -- every
+drawing piece cut down to what the page render (`get_pixmap(Matrix(dpi/72))`,
+exactly how `rasterised.pdf` is built) actually shows, plus the render's
+colour layers from the P2 prelude's own `RasterText` split (the layers
+inference sees) and each piece's layers. Pieces are unrotated page space,
+mapped into the render's pixel frame through
+`page.rotation_matrix * Matrix(dpi/72)`.
 
 On-disk layout (one entry per page x ink color layer that has GT strokes,
 `<key>` = `<page key>__L<layer>`):
@@ -48,24 +50,6 @@ PNG_COMPRESSION = 3          # cv2 PNG level: fast, ~15-100x smaller than raw
 # ---------------------------------------------------------------------------
 # Ground truth from a PDF page
 # ---------------------------------------------------------------------------
-def render_page(page, dpi: float) -> np.ndarray:
-    """RGB uint8 render, identical to `master_label._run_raster_step`'s."""
-    import fitz
-
-    zoom = dpi / 72.0
-    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-    arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-    return np.array(arr[:, :, :3], dtype=np.uint8, copy=True)  # writable (erase_text edits it)
-
-
-def page_to_pixel_matrix(page, dpi: float):
-    """Unrotated page space -> the render's pixel frame."""
-    import fitz
-
-    zoom = dpi / 72.0
-    return page.rotation_matrix * fitz.Matrix(zoom, zoom)
-
-
 def chain_annotations(annotations, matrix, tol_px: float = 0.05) -> list[tuple[np.ndarray, float]]:
     """`GeometryAnnotation`s (in their extraction order) -> strokes in px.
 
@@ -76,9 +60,19 @@ def chain_annotations(annotations, matrix, tol_px: float = 0.05) -> list[tuple[n
     piece repeating earlier geometry (either direction) is dropped -- two GT
     strokes over the same pixels would be unlearnable.
     Returns `[(stroke (K,4,2), width_px), ...]`; width = annotation width
-    (1 px minimum; fill-only edges have none).
+    (1 px minimum; fill-only edges have none)."""
+    return [(s, w) for s, w, _g in _chain(annotations, matrix, tol_px, None)]
 
-    Vectorized: every piece is mapped and keyed up front; only the
+
+def chain_annotations_by_layer(annotations, matrix, layers_of, tol_px: float = 0.05):
+    """As `chain_annotations`, but a chain also never crosses a change of
+    colour layers (`layers_of[i]`, from `visible_geometry_for_page`). Returns
+    `[(stroke, width_px, layers), ...]`."""
+    return _chain(annotations, matrix, tol_px, [tuple(g) for g in layers_of])
+
+
+def _chain(annotations, matrix, tol_px: float, groups) -> list[tuple[np.ndarray, float, tuple]]:
+    """Vectorized: every piece is mapped and keyed up front; only the
     order-dependent chaining walks the annotations one by one."""
     scale = float(np.hypot(matrix.a, matrix.b))
     usable, pieces = _pieces_px(annotations, matrix)
@@ -88,15 +82,16 @@ def chain_annotations(annotations, matrix, tol_px: float = 0.05) -> list[tuple[n
     keys = _piece_keys(pieces)
     starts, ends = pieces[:, 0], pieces[:, 3]
 
-    out: list[tuple[np.ndarray, float]] = []
+    out: list[tuple[np.ndarray, float, tuple]] = []
     cur: list[int] = []
     cur_key = None
     cur_w = 1.0
+    cur_g: tuple = ()
     seen: set = set()
 
     def flush():
         if cur:
-            out.append((pieces[cur], cur_w))
+            out.append((pieces[cur], cur_w, cur_g))
             cur.clear()
 
     for n, i in enumerate(usable):
@@ -106,13 +101,15 @@ def chain_annotations(annotations, matrix, tol_px: float = 0.05) -> list[tuple[n
             continue  # same geometry again (e.g. a closed 2-point path retracing itself)
         seen.add(keys[n])
         ann = annotations[i]
-        key = (tuple(ann.color) if ann.color else None, tuple(ann.fill) if ann.fill else None, ann.width)
+        g = groups[i] if groups is not None else ()
+        key = (tuple(ann.color) if ann.color else None, tuple(ann.fill) if ann.fill else None, ann.width, g)
         if cur and key == cur_key and math.hypot(*(ends[cur[-1]] - starts[n])) <= tol_px:
             cur.append(n)
             continue
         flush()
         cur.append(n)
         cur_key = key
+        cur_g = g
         cur_w = max(1.0, float(ann.width or 0.0) * scale)
     flush()
     return out
@@ -159,18 +156,12 @@ def _piece_keys(pieces: np.ndarray) -> list[bytes]:
 
 
 def page_ground_truth(pdf_path: str, page_index: int, dpi: float):
-    """`(rgb render, [(stroke px, width px)], page rotation)` for one page."""
-    import fitz
+    """`(VisibleGeometry, [(stroke px, width px, layers)])` for one page --
+    `geom.labels` / `geom.colors_rgb` are the render's colour layers."""
+    from rastervec.Evaluation.Labelling.visible_geometry import visible_geometry_for_page
 
-    from rastervec.Evaluation.Labelling.raster_label import raster_geometry_for_page
-
-    with fitz.open(pdf_path) as doc:
-        page = doc[page_index]
-        rgb = render_page(page, dpi)
-        matrix = page_to_pixel_matrix(page, dpi)
-        rotation = int(page.rotation)
-    anns = raster_geometry_for_page(str(pdf_path), page_index)
-    return rgb, chain_annotations(anns, matrix), rotation
+    geom = visible_geometry_for_page(str(pdf_path), page_index, dpi)
+    return geom, chain_annotations_by_layer(geom.annotations, geom.matrix, geom.layers_of)
 
 
 def cut_by_mask(strokes, keep_mask: np.ndarray) -> list[tuple[np.ndarray, float]]:
@@ -192,61 +183,10 @@ def cut_by_mask(strokes, keep_mask: np.ndarray) -> list[tuple[np.ndarray, float]
     return out
 
 
-def assign_layers(strokes, labels: np.ndarray, ink_layers: list[int], min_frac: float = 0.5) -> list[list[int]]:
-    """Each stroke's color layers: every ink layer found in the 3x3
-    neighbourhood of at least `min_frac` of its sample points. A stroke can
-    belong to several layers -- e.g. a filled shape's outline is both its
-    stroke layer's ink and its fill layer's boundary ("outline as strokes")
-    -- or to none (an invisible / fully covered stroke).
-
-    Vectorized: all strokes are sampled in one batch (the same points as
-    `geo.sample_stroke(s, 6)`), and "layer in the 3x3 neighbourhood" is one
-    lookup into that layer's 3x3-dilated mask."""
-    if not strokes:
-        return []
-    h, w = labels.shape
-    counts = np.array([len(s) for s, _ in strokes])
-    pieces = np.concatenate([s for s, _ in strokes if len(s)]) if counts.any() else np.zeros((0, 4, 2))
-    t = np.linspace(0.0, 1.0, 7)[:, None]
-    mt = 1.0 - t
-    p0, c1, c2, p3 = (pieces[:, None, k] for k in range(4))
-    samples = mt ** 3 * p0 + 3 * mt ** 2 * t * c1 + 3 * mt * t ** 2 * c2 + t ** 3 * p3   # (P, 7, 2)
-    first = np.zeros(len(pieces), bool)
-    first[(np.cumsum(counts) - counts)[counts > 0]] = True
-    take = np.ones(samples.shape[:2], bool)
-    take[~first, 0] = False                         # shared joints counted once, as sample_stroke
-    pts = np.floor(samples[take]).astype(np.int64)
-    x = np.clip(pts[:, 0], 0, w - 1)
-    y = np.clip(pts[:, 1], 0, h - 1)
-    # An off-page coordinate clips every neighbour offset onto the edge, so
-    # that axis contributes no neighbours: off in x -> vertical only, off in
-    # y -> horizontal only, off in both -> the corner pixel itself.
-    in_x = (pts[:, 0] >= 0) & (pts[:, 0] < w)
-    in_y = (pts[:, 1] >= 0) & (pts[:, 1] < h)
-    off_page = {(3, 1): ~in_x & in_y, (1, 3): in_x & ~in_y, (1, 1): ~in_x & ~in_y}
-    n_pts = np.where(counts > 0, 6 * counts + 1, 0)
-    starts = np.cumsum(n_pts) - n_pts
-    nonempty = n_pts > 0
-    frac: dict[int, np.ndarray] = {}
-    for layer in ink_layers:
-        mask = (labels == layer).view(np.uint8)
-        near = cv2.dilate(mask, np.ones((3, 3), np.uint8))[y, x].astype(np.int64)
-        for (kh, kw), sel in off_page.items():
-            if sel.any():
-                kmask = mask if (kh, kw) == (1, 1) else cv2.dilate(mask, np.ones((kh, kw), np.uint8))
-                near[sel] = kmask[y[sel], x[sel]]
-        hits = np.zeros(len(strokes))
-        if len(near):
-            hits[nonempty] = np.add.reduceat(near, starts[nonempty])
-        frac[layer] = hits / np.maximum(n_pts, 1)
-    return [[layer for layer in ink_layers if nonempty[i] and frac[layer][i] >= min_frac]
-            for i in range(len(strokes))]
-
-
 def scale_strokes(strokes, factor: float):
     if abs(factor - 1.0) < 1e-9:
         return strokes
-    return [(s * factor, wpx * factor) for s, wpx in strokes]
+    return [(s * factor, wpx * factor) for s, wpx, *_rest in strokes]
 
 
 # ---------------------------------------------------------------------------

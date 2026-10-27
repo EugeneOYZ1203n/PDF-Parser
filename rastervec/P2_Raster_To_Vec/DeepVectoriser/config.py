@@ -6,33 +6,11 @@ colour layers, text removal; its tunables are in `RasterText/config.py`) ->
 per ink layer: binary layer mask -> 128 px vectorizer tiles -> learned
 stroke vectorizer -> tile merge.
 
-The color separation constants are kept for `prep_dataset.py` only (the
-training set is still built with DBSCAN layers); the diff constants are
+The training set (`prep_dataset.py`) uses the same `RasterText` colour
+layers (via `Evaluation.Labelling.visible_geometry`); the diff constants are
 *copied* from `P2_Raster_To_Vec/Junction/config.py` (not imported).
 """
 from __future__ import annotations
-
-# ======================================================================
-# Color separation (color_separation.py) -- DBSCAN over weighted unique
-# quantized colors in HSV cone space (S*V*cosH, S*V*sinH, V), V in [0, 1].
-# ======================================================================
-
-# Levels per RGB channel before de-duplicating colors (32 -> at most 32^3
-# unique colors, so DBSCAN never sees more than ~33k points).
-COLOR_QUANT_LEVELS = 32
-# DBSCAN neighbourhood radius, in cone units (V spans 0..1).
-DBSCAN_EPS = 0.08
-# DBSCAN min_samples, counted in *pixels* (sample_weight = pixel count per
-# unique color): a color family needs this many pixels to seed a cluster.
-DBSCAN_MIN_PIXELS = 200
-# A cluster whose members span more than this much Value (0..1) is split in
-# two at a weighted Otsu threshold on V (repeatedly, up to
-# VALUE_SPLIT_MAX_DEPTH). Guards against DBSCAN's density chaining: on a
-# blurred scan the antialiased mid-grays between black ink and white paper
-# are dense enough to be core points, which would otherwise fuse ink and
-# paper into one layer.
-VALUE_SPLIT_RANGE = 0.5
-VALUE_SPLIT_MAX_DEPTH = 2
 
 # ======================================================================
 # Vector/ink diff debug (diff.py)

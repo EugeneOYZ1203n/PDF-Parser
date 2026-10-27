@@ -8,7 +8,10 @@ Two auto-derived pieces of raster ground truth:
   unconverted* PDF page (CAD-vector text glyphs included -- a raster/
   scanned pipeline has to trace all of it regardless of what it "means"),
   decomposed via `label_schema.geometry_annotations_for_vector` into
-  `GeometryAnnotation` line/curve entries carrying real paint attrs.
+  `GeometryAnnotation` line/curve entries carrying real paint attrs, and
+  cut down to what the page render actually shows
+  (`visible_geometry.visible_geometry_for_page`: paper-coloured paint
+  dropped, clipped / dashed / covered pieces cut to their visible runs).
 - `sync_text_from_vector_labels` -- reuses `vector_label`'s own
   human-vetted text labels as raster text ground truth, since raster and
   vector share the same page-space coordinates. Re-run on every
@@ -50,9 +53,20 @@ _NATSYNC_PREFIX = "natsync:"
 
 
 def raster_geometry_for_page(pdf_path: str, page_index: int) -> list[GeometryAnnotation]:
-    """`GeometryAnnotation`s for every `Vector` on `page_index` of the
-    original, unconverted `pdf_path` -- flat-mapped through
-    `geometry_annotations_for_vector`."""
+    """The visible `GeometryAnnotation`s of `page_index` of the original,
+    unconverted `pdf_path` -- `visible_geometry_for_page` at its default dpi
+    (see that module for the filters)."""
+    from rastervec.Evaluation.Labelling.visible_geometry import visible_geometry_for_page
+
+    geom = visible_geometry_for_page(pdf_path, page_index)
+    _LOG.debug("raster_geometry_for_page: page %d, %s", page_index, geom.stats)
+    return geom.annotations
+
+
+def _all_geometry_for_page(pdf_path: str, page_index: int) -> list[GeometryAnnotation]:
+    """Every `Vector`'s pieces, visible or not -- the paint-blind GT
+    `raster_geometry_for_page` returned before the visibility filter (kept for
+    `notebooks/gt_fidelity_showcase.ipynb`'s before/after comparison)."""
     with Reader(pdf_path) as reader:
         page = reader.get_page(page_index)
         vectors: list[Vector] = extract_vectors(page)
@@ -60,7 +74,7 @@ def raster_geometry_for_page(pdf_path: str, page_index: int) -> list[GeometryAnn
     for v in vectors:
         out.extend(geometry_annotations_for_vector(v))
     _LOG.debug(
-        "raster_geometry_for_page: page %d, %d vector(s) -> %d annotation(s)",
+        "_all_geometry_for_page: page %d, %d vector(s) -> %d annotation(s)",
         page_index, len(vectors), len(out),
     )
     return out

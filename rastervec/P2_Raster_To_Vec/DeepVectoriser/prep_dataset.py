@@ -7,13 +7,15 @@
 `--pdf-dir` takes every `*.pdf` under the directory (recursive); `--pdf` adds
 single files. Per page:
 
-  render   page -> RGB at --dpi (`get_pixmap`, same as master_label.py's
-           rasterised.pdf)
-  gt       `raster_geometry_for_page` -> strokes in px (rotation-aware),
-           chained per drawing (train_data.chain_annotations)
-  colors   DBSCAN color layers (copied Junction color separation)
-  layers   each GT stroke -> every color layer it lies on (pixel vote); per
-           ink layer with GT strokes, the layer mask (masks.layer_image,
+  gt       `visible_geometry_for_page` (Evaluation.Labelling): page -> RGB at
+           --dpi (`get_pixmap`, same as master_label.py's rasterised.pdf),
+           colour layers from the P2 prelude's `RasterText` split (the layers
+           inference sees, OCR not run), every drawing piece cut to what the
+           render shows (paper-coloured paint dropped; clipped / dashed /
+           covered pieces cut to their visible runs), each run tagged with the
+           layers it lies on -> strokes in px (rotation-aware), chained per
+           drawing and layer set (train_data.chain_annotations_by_layer)
+  layers   per ink layer with GT strokes, the layer mask (masks.layer_image,
            resampled to the canonical 300 dpi) cropped to its content, as a
            lossless PNG, + its strokes are saved (train_data.save_layer); a
            layer with no strokes is listed in the manifest but not saved
@@ -23,8 +25,9 @@ prep does no OCR/erase (and imports no OCR code), so text glyph strokes stay
 in the ground truth.
 
 `--workers N` (default 1) prepares N pages at once in separate processes.
-Memory is per worker: roughly 0.7-1 GB for an A1 sheet at 300 dpi (RGB render
-+ layer labels + one layer mask).
+Memory is per worker: peaks around 1.5 GB for an A1 sheet at 300 dpi (RGB
+render + LAB + the colour split's temporaries); afterwards ~0.3 GB (uint8
+layer labels + one dilated ink mask + one layer mask).
 
 Resumable: a page whose manifest (`<out>/pages/<key>.json`) exists is
 skipped. A failing page is logged (pdf, page, stage, traceback -> console +
@@ -50,7 +53,6 @@ from pathlib import Path
 from tqdm import tqdm
 
 from rastervec.P2_Raster_To_Vec.DeepVectoriser import train_data as td
-from rastervec.P2_Raster_To_Vec.DeepVectoriser.color_separation import separate_colors
 from rastervec.P2_Raster_To_Vec.DeepVectoriser.config import TARGET_PX_PER_PT
 from rastervec.P2_Raster_To_Vec.DeepVectoriser.masks import layer_image
 
@@ -84,37 +86,35 @@ def prep_page(pdf: Path, page_index: int, out: Path, dpi: float, *, key: str | N
     """Process one page; returns its manifest (also written to disk)."""
     key = key or page_key(pdf, page_index)
     steps: list[str] = []
-    stage = "render+gt"
+    stage = "gt"
     t0 = time.perf_counter()
     try:
-        rgb, strokes, rotation = td.page_ground_truth(str(pdf), page_index, dpi)
-        steps.append(f"render {rgb.shape[1]}x{rgb.shape[0]}")
-        steps.append(f"gt {len(strokes)} strokes")
+        geom, strokes = td.page_ground_truth(str(pdf), page_index, dpi)
+        rotation = geom.rotation
+        st = geom.stats
+        steps.append(f"render {geom.shape[1]}x{geom.shape[0]}")
+        steps.append(f"{geom.n_layers} ink layer(s)")
+        steps.append(f"gt {st['vectors']} vectors ({st['paint_dropped_vectors']} paper-coloured dropped), "
+                     f"{st['pieces']} pieces ({st['invisible_pieces']} invisible, {st['cut_pieces']} cut, "
+                     f"{st['short_runs']} short runs dropped) -> {len(strokes)} strokes")
         log(f"[{key}] " + " -> ".join(steps))
-
-        stage = "colors"
-        layers = separate_colors(rgb)
-        del rgb
-        steps.append(f"colors {len(layers.ink_layers())} ink layer(s)")
-        if layers.n_layers == 0:
-            raise RuntimeError("no color layers (blank page?)")
+        if geom.n_layers == 0:
+            raise RuntimeError("no ink layers (blank page?)")
 
         stage = "layers"
         scale = TARGET_PX_PER_PT / (dpi / 72.0)
-        ink_layers = layers.ink_layers()
-        owner = td.assign_layers(strokes, layers.labels, ink_layers)
         saved = []
-        for layer in ink_layers:
-            mine = [s for s, o in zip(strokes, owner) if layer in o]
+        for layer in range(geom.n_layers):
+            mine = [(s, w) for s, w, lay in strokes if layer in lay]
             lkey = f"{key}__L{layer}"
             entry = {"key": lkey, "n_strokes": len(mine),
-                     "color": [int(c) for c in layers.centroids_rgb[layer]]}
+                     "color": [int(c) for c in geom.colors_rgb[layer]]}
             if not mine:  # never trained on (write_index skips it) -- don't store its mask
                 saved.append({**entry, "saved": False})
                 continue
-            gray = layer_image(layers.labels, layer, scale)
+            gray = layer_image(geom.labels, layer, scale)
             stored = td.save_layer(out / "layers", lkey, gray, td.scale_strokes(mine, scale),
-                                   layers.centroids_rgb[layer],
+                                   geom.colors_rgb[layer],
                                    seed=int(hashlib.md5(lkey.encode()).hexdigest()[:8], 16))
             saved.append({**entry, "saved": True, "page_shape": list(gray.shape), **stored})
             del gray
@@ -126,7 +126,7 @@ def prep_page(pdf: Path, page_index: int, out: Path, dpi: float, *, key: str | N
 
     manifest = {
         "pdf": str(pdf), "page": page_index, "key": key, "dpi": dpi, "rotation": rotation,
-        "px_per_pt": TARGET_PX_PER_PT, "layers": saved,
+        "px_per_pt": TARGET_PX_PER_PT, "layers": saved, "gt_stats": geom.stats,
         "seconds": round(time.perf_counter() - t0, 2),
     }
     (out / "pages").mkdir(parents=True, exist_ok=True)

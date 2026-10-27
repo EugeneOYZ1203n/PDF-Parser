@@ -26,11 +26,15 @@ def _pdf(tmp_path, synthetic_pdf_factory, rotation=0):
 @pytest.mark.parametrize("rotation", [0, 90, 270])
 def test_ground_truth_lands_on_rendered_ink(tmp_path, synthetic_pdf_factory, rotation):
     path = _pdf(tmp_path, synthetic_pdf_factory, rotation)
-    rgb, strokes, rot = td.page_ground_truth(str(path), 0, dpi=144)
-    assert rot == rotation
-    gray = rgb.mean(axis=2)
+    geom, strokes = td.page_ground_truth(str(path), 0, dpi=144)
+    assert geom.rotation == rotation
+    import fitz
+
+    from rastervec.Evaluation.Labelling.visible_geometry import render_page
+    with fitz.open(path) as doc:
+        gray = render_page(doc[0], 144).mean(axis=2)
     assert len(strokes) == 2
-    for s, _w in strokes:
+    for s, _w, _layers in strokes:
         pts = np.floor(geo.sample_stroke(s, 8)).astype(int)
         pts[:, 0] = np.clip(pts[:, 0], 0, gray.shape[1] - 1)
         pts[:, 1] = np.clip(pts[:, 1], 0, gray.shape[0] - 1)
@@ -40,10 +44,10 @@ def test_ground_truth_lands_on_rendered_ink(tmp_path, synthetic_pdf_factory, rot
 
 
 def test_rectangle_chains_into_one_stroke(tmp_path, synthetic_pdf_factory):
-    _rgb, strokes, _ = td.page_ground_truth(str(_pdf(tmp_path, synthetic_pdf_factory)), 0, dpi=72)
-    lengths = sorted(len(s) for s, _ in strokes)
+    _geom, strokes = td.page_ground_truth(str(_pdf(tmp_path, synthetic_pdf_factory)), 0, dpi=72)
+    lengths = sorted(len(s) for s, _, _ in strokes)
     assert lengths == [1, 4]
-    line_w = [w for s, w in strokes if len(s) == 1][0]
+    line_w = [w for s, w, _ in strokes if len(s) == 1][0]
     assert line_w == pytest.approx(1.5)
 
 
@@ -57,20 +61,25 @@ def test_cut_by_mask_drops_erased_ink():
     assert parts[1][0][0, 0][0] == pytest.approx(60, abs=0.1)
 
 
-def test_assign_layers_by_pixel_coverage():
-    labels = np.zeros((20, 20), int)
-    labels[5, :] = 1
-    labels[:, 15] = 2
-    strokes = [(geo.line_to_cubic((0, 5.5), (12, 5.5))[None], 1.0),
-               (geo.line_to_cubic((15.5, 8), (15.5, 19)), 1.0),
-               (geo.line_to_cubic((2, 15), (8, 15))[None], 1.0)]
-    strokes[1] = (strokes[1][0][None], 1.0)
-    assert td.assign_layers(strokes, labels, [1, 2]) == [[1], [2], []]
-    # an outline lying on two layers (stroke ink + fill boundary) goes to both
-    both = np.zeros((20, 20), int)
-    both[5, :] = 1
-    both[6, :] = 2
-    assert td.assign_layers([(geo.line_to_cubic((0, 6.0), (19, 6.0))[None], 1.0)], both, [1, 2]) == [[1, 2]]
+def test_chain_never_crosses_a_layer_change(tmp_path, synthetic_pdf_factory):
+    from rastervec.Evaluation.Labelling.label_schema import GeometryAnnotation
+    import fitz
+
+    pts = [(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)]
+    anns = [GeometryAnnotation(page_index=0, kind="l", points=[a, b], color=(0, 0, 0), width=1.0)
+            for a, b in zip(pts, pts[1:])]
+    out = td.chain_annotations_by_layer(anns, fitz.Matrix(1, 1), [(0,), (0,), (0, 1), (0, 1)])
+    assert [(len(s), lay) for s, _w, lay in out] == [(2, (0,)), (2, (0, 1))]
+    assert [len(s) for s, _w in td.chain_annotations(anns, fitz.Matrix(1, 1))] == [4]
+
+
+def test_prep_layers_come_from_rastertext(tmp_path, synthetic_pdf_factory):
+    # black line + red rect: exactly two ink layers, each with its own stroke(s), no fringe layers
+    manifest = prep_dataset.prep_page(_pdf(tmp_path, synthetic_pdf_factory), 0, tmp_path / "prep", dpi=300)
+    by_count = sorted(layer["n_strokes"] for layer in manifest["layers"])
+    assert by_count == [1, 1]
+    st = manifest["gt_stats"]  # (the factory closes the line path: 6 pieces, the retrace deduped later)
+    assert st["annotations"] == st["pieces"] and st["cut_pieces"] == st["invisible_pieces"] == 0
 
 
 def test_augment_keeps_strokes_on_ink():
@@ -90,8 +99,8 @@ def test_prep_page_writes_layers_and_index_and_resumes(tmp_path, synthetic_pdf_f
     out = tmp_path / "prep"
     logs: list[str] = []
     manifest = prep_dataset.prep_page(path, 0, out, dpi=144, log=logs.append)
-    # both GT strokes saved; an antialiased line may also sit on a fringe layer
-    assert manifest["layers"] and sum(layer["n_strokes"] for layer in manifest["layers"]) >= 2
+    # both GT strokes saved, one per colour layer
+    assert manifest["layers"] and sum(layer["n_strokes"] for layer in manifest["layers"]) == 2
     saved = [layer for layer in manifest["layers"] if layer["saved"]]
     by_len = {len(s) for layer in saved for s in td.load_layer(out / "layers", layer["key"]).strokes}
     assert by_len == {1, 4}
@@ -125,10 +134,10 @@ def test_prep_failure_is_reported_with_stage(tmp_path, synthetic_pdf_factory, mo
     def boom(*_a, **_k):
         raise ValueError("bad colors")
 
-    monkeypatch.setattr(prep_dataset, "separate_colors", boom)
+    monkeypatch.setattr(prep_dataset.td, "page_ground_truth", boom)
     assert prep_dataset.main(["--pdf", str(path), "--out", str(out)]) == 1
     log_text = (out / "prep_log.txt").read_text()
-    assert "FAILED at stage 'colors'" in log_text and "bad colors" in log_text
+    assert "FAILED at stage 'gt'" in log_text and "bad colors" in log_text
 
 
 def test_pdf_dir_recursive_with_distinct_keys(tmp_path, synthetic_pdf_factory):
@@ -177,9 +186,9 @@ def test_worker_job_reports_failure_as_data(tmp_path, synthetic_pdf_factory, mon
     def boom(*_a, **_k):
         raise ValueError("bad colors")
 
-    monkeypatch.setattr(prep_dataset, "separate_colors", boom)
+    monkeypatch.setattr(prep_dataset.td, "page_ground_truth", boom)
     result = prep_dataset._prep_job(path, 0, tmp_path / "prep", 72.0, "k_p0")
-    assert result[0] == "fail" and result[1] == "k_p0" and result[2] == "colors"
+    assert result[0] == "fail" and result[1] == "k_p0" and result[2] == "gt"
     assert "bad colors" in result[3] and "Traceback" in result[4]
 
 

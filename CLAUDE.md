@@ -490,14 +490,16 @@ generic parallel-pool mechanics), never phase-specific business logic.
     `$DEEPVEC_WEIGHTS_PATH`; missing → `FileNotFoundError`. Training (never imported by the
     pipeline, the only files allowed to import `Evaluation.Labelling`): **`prep_dataset.py`**
     (run once; `--pdf-dir DIR` — every `*.pdf` under it, recursive, keyed by relative path — and/or
-    `--pdf ...`: per page render at `--dpi` + `raster_geometry_for_page` GT mapped via
-    `rotation_matrix` — the same vector→raster labelling method as `master_label.py` — chained
-    into strokes (`train_data.chain_annotations`, duplicate/retraced pieces dropped), **no text
+    `--pdf ...`: per page `Evaluation.Labelling.visible_geometry.visible_geometry_for_page` at
+    `--dpi` — the same visible vector→raster GT as `master_label.py` / the benchmark (see the
+    `raster_label.py` bullet), mapped via `rotation_matrix`, with the render's colour layers from
+    RasterText's own `split_layers` (CLAHE'd LAB, OCR not run — the layers inference sees) and each
+    visible run's layers — chained into strokes per layer set (`train_data.
+    chain_annotations_by_layer`, duplicate/retraced pieces dropped), **no text
     cleanup** (no OCR/erase, and no OCR module is even imported — `layer_image` lives in
-    `masks.py`, not the OCR-importing `adapter.py`; text glyph strokes stay in the GT), color
-    layers from DeepVectoriser's own DBSCAN `color_separation.py` (kept for prep only — inference
-    uses RasterText's layers; prep is due to be rewritten) (a stroke goes to every layer covering ≥ 50 % of it; `assign_layers`/
-    `chain_annotations` are vectorized), one `layers/<key>.gray.png` (lossless, cropped to the
+    `masks.py`, not the OCR-importing `adapter.py`; text glyph strokes stay in the GT), a stroke
+    goes to every layer it lies on (the old DBSCAN `color_separation.py` + 7-sample
+    `assign_layers` vote are gone), per-page GT drop counts in the manifest's `gt_stats`, one `layers/<key>.gray.png` (lossless, cropped to the
     layer's content + 256 px) + `.strokes.npz` (crop frame) per (page, layer) **with GT strokes**
     (stroke-less layers are listed in the manifest, not stored), `--sample N` random pages (`--seed`, reproducible so re-runs resume), `--workers N` page processes,
     resumable via `pages/<key>.json`, `index.json` split by page) and **`train.py`** (`--data
@@ -835,7 +837,17 @@ generic parallel-pool mechanics), never phase-specific business logic.
   - **`raster_label.py`** (library) — `raster_geometry_for_page(pdf_path, page_index)`:
     `extract_vectors` on the *original, unconverted* page (CAD-vector text glyphs included — a
     raster/scanned pipeline has to trace all of it), flat-mapped through
-    `geometry_annotations_for_vector`. `sync_text_from_vector_labels(raster_labels, vector_labels,
+    `geometry_annotations_for_vector`, **restricted to what the page render shows**
+    (`visible_geometry.py::visible_geometry_for_page`, 300 dpi: RasterText `split_layers` colour
+    layers; a path whose stroke and fill both read as paper under that split's own ink rule is
+    dropped; every piece sampled every 0.5 px against the 1 px-dilated ink mask and cut to its
+    visible runs — clipped / dashed / covered pieces keep only what's drawn, partial runs < 3 px
+    dropped, untouched pieces keep their exact points; each run tagged with the layers on ≥ 50 % of
+    it). Font text, images, shadings, annots have no GT by construction. `_all_geometry_for_page`
+    keeps the old paint-blind output (for `notebooks/gt_fidelity_showcase.ipynb`, which scores
+    original-vs-GT renders with the benchmark's SSIM/PSNR over a list of PDFs). Saved label-folder
+    geometry from before this change is still the paint-blind kind — re-run `master_label.py`'s
+    geometry step to refresh it. `sync_text_from_vector_labels(raster_labels, vector_labels,
     page_indices)`: mutates `raster_labels.entries` in place, dropping then re-adding every
     `label_id=f"vecsync:{v.label_id}"` entry from the current `vector_labels` on those pages —
     reuses `vector_label`'s human-vetted text as raster ground truth (raster and vector share page
@@ -963,7 +975,9 @@ generic parallel-pool mechanics), never phase-specific business logic.
   (`vector_render.py`, 150 dpi, via `draw.stroke_batch_spec`), **length ratio** and a
   length-weighted **direction-histogram intersection** as sanity checks. Viewer overlays: stage
   `vector_eval` (`report_artifacts._add_vector_eval_layers`). Everything — formulas, deviations,
-  accepted biases — is in `docs/RasterToVectorEvaluation.md`. Pure except `vector_render.py`;
+  accepted biases — is in `docs/RasterToVectorEvaluation.md`; `rastervec/notebooks/
+  liu_dori_showcase.ipynb` (+ `_liu_dori_showcase_helpers.py`) illustrates every number on
+  synthetic cases through the real scorer. Pure except `vector_render.py`;
   `adapters.build_vector_eval_inputs(labels, raster_vectors)` builds the `GeometryEntry` inputs.
 - **`Evaluation/Evaluate/adapters.py`** *(implemented)*: the only `Evaluation/Evaluate/` module that
   imports `rastervec.pipeline`. `gt_regions_from_labelset` / `predictions_from_cluster_ocr` /
