@@ -1,9 +1,28 @@
 import os
 import shutil
+import threading
 from pathlib import Path
 from subprocess import run
 import re
 # import xml.etree.ElementTree as ET
+
+# LibreOffice keeps its user profile under a profile-format version folder ("4" since
+# LibreOffice 4.0).
+LO_CONFIG_DIR = "~/.config/libreoffice/4"
+# Same path the package __init__ used to pass when it registered on import.
+MACRO_SCRIPT_FP = Path(__file__).parents[3] / "raster_parser/libreoffice_setup/DeleteDrawings.xba"
+
+_registered = False
+_register_lock = threading.Lock()
+
+
+def ensure_macro_registered() -> None:
+    """Register the DeleteDrawings macro once per process, before the first LibreOffice call."""
+    global _registered
+    with _register_lock:
+        if not _registered:
+            register_libreoffice_macro(LO_CONFIG_DIR, MACRO_SCRIPT_FP)
+            _registered = True
 
 
 def init_config():

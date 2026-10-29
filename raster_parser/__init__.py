@@ -12,18 +12,9 @@ from raster_parser.delete_natives.delete_native import delete_drawings_from_pdf
 import sys
 
 sys.path.append(".")
-from pathlib import Path
-from raster_parser.delete_natives.libreoffice_setup.libreoffice_macro import (
-    register_libreoffice_macro,
-)
-
-# LibreOffice keeps its user profile under a profile-format version folder ("4" since
-# LibreOffice 4.0).
-lo_config_dir = "~/.config/libreoffice/4"
-raster_parser_dir = Path(__file__).parent.parent
-register_libreoffice_macro(
-    lo_config_dir, raster_parser_dir / "raster_parser/libreoffice_setup/DeleteDrawings.xba"
-)
+# The LibreOffice DeleteDrawings macro is registered lazily, on the first LibreOffice call
+# (``libreoffice_macro.ensure_macro_registered``), so importing the package doesn't need
+# LibreOffice installed.
 
 
 __all__ = [
