@@ -11,7 +11,7 @@ Pipeline:
 
 from dataclasses import dataclass, asdict
 import numpy as np
-import pymupdf as fitz
+import pymupdf
 from typing import List, Dict, Any, Optional, Tuple
 from raster_parser.models import Text
 from raster_parser.models import Vector
@@ -76,7 +76,7 @@ class PdfRasterParser:
 
     def __init__(self, pdf_path: str, page: int):
         self.pdf_path = pdf_path
-        self.doc = fitz.open(pdf_path)
+        self.doc = pymupdf.open(pdf_path)
         self.page_index = page
         self.page = self.doc[page]
 

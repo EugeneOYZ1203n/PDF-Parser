@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-import pymupdf as fitz
+import pymupdf
 
 
 @dataclass
@@ -52,9 +52,9 @@ class OverlayItem:
         Optional short display label.
     """
 
-    bbox: fitz.Rect
+    bbox: pymupdf.Rect
 
-    quad: fitz.Quad | None = None
+    quad: pymupdf.Quad | None = None
 
     angle: float | None = None
 
@@ -62,7 +62,7 @@ class OverlayItem:
 
     shape: str = "rect"
 
-    points: list[fitz.Point] | None = None
+    points: list[pymupdf.Point] | None = None
 
     attrs: dict[str, Any] = field(default_factory=dict)
 
@@ -73,22 +73,22 @@ class OverlayItem:
     def __post_init__(self) -> None:
         """Normalize geometry after construction."""
 
-        if not isinstance(self.bbox, fitz.Rect):
-            self.bbox = fitz.Rect(self.bbox)
+        if not isinstance(self.bbox, pymupdf.Rect):
+            self.bbox = pymupdf.Rect(self.bbox)
 
         if self.points is not None:
             self.points = [
-                point if isinstance(point, fitz.Point) else fitz.Point(point)
+                point if isinstance(point, pymupdf.Point) else pymupdf.Point(point)
                 for point in self.points
             ]
 
         if self.quad is not None and not isinstance(
             self.quad,
-            fitz.Quad,
+            pymupdf.Quad,
         ):
-            self.quad = fitz.Quad(self.quad)
+            self.quad = pymupdf.Quad(self.quad)
 
-    def get_geometry_points(self) -> list[fitz.Point]:
+    def get_geometry_points(self) -> list[pymupdf.Point]:
         """Return the object's visual geometry as points.
 
         Priority:
@@ -118,7 +118,7 @@ class OverlayItem:
 
     def transformed(
         self,
-        matrix: fitz.Matrix,
+        matrix: pymupdf.Matrix,
     ) -> "OverlayItem":
         """Return a copy transformed by a PyMuPDF matrix.
 
@@ -202,7 +202,7 @@ class OverlayItem:
 
 
 def _point_to_tuple(
-    point: fitz.Point,
+    point: pymupdf.Point,
 ) -> tuple[float, float]:
     """Convert a point to a compact serializable tuple."""
 
@@ -213,7 +213,7 @@ def _point_to_tuple(
 
 
 def _rect_to_tuple(
-    rect: fitz.Rect,
+    rect: pymupdf.Rect,
 ) -> tuple[float, float, float, float]:
     """Convert a rectangle to a compact serializable tuple."""
 
@@ -226,7 +226,7 @@ def _rect_to_tuple(
 
 
 def _quad_to_tuple(
-    quad: fitz.Quad,
+    quad: pymupdf.Quad,
 ) -> tuple[
     tuple[float, float],
     tuple[float, float],
@@ -283,7 +283,7 @@ class LayerSpec:
     color: str
 
     extractor: Callable[
-        [fitz.Page],
+        [pymupdf.Page],
         list[OverlayItem],
     ]
 

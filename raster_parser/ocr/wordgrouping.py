@@ -2,7 +2,7 @@ from raster_parser.models import Vector
 from dataclasses import dataclass
 import numpy as np
 from typing import List
-import pymupdf as fitz
+import pymupdf
 from raster_parser.models import GlyphOrientation as Orientation
 
 # Two glyphs side by side join when the gap along the reading direction is under the mean
@@ -41,7 +41,7 @@ class WordGroup:
     x1: float
     y0: float
     y1: float
-    bbox: fitz.Rect
+    bbox: pymupdf.Rect
     orientation: Orientation
 
 
@@ -57,7 +57,7 @@ def build_word_group(glyphs: List[Glyph], page_rotation: int) -> WordGroup:
         y0=y0,
         x1=x1,
         y1=y1,
-        bbox=fitz.Rect(x0, y0, x1, y1),
+        bbox=pymupdf.Rect(x0, y0, x1, y1),
         orientation=orientation_of_word_group(glyphs, page_rotation),
     )
 

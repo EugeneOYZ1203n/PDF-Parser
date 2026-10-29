@@ -5,33 +5,32 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pymupdf as fitz
-
+import pymupdf
 from raster_parser.models import Text
 from raster_parser.models import TextDTO, NativePDFElements, VectorDTO
 from raster_parser.serialisation.serialization import drawing_item_to_dict
 
 
 def test_drawing_item_to_dict_line() -> None:
-    item = ("l", fitz.Point(1, 2), fitz.Point(3, 4))
+    item = ("l", pymupdf.Point(1, 2), pymupdf.Point(3, 4))
     d = drawing_item_to_dict(item)
     assert d == {"op": "l", "args": [[1.0, 2.0], [3.0, 4.0]]}
     json.dumps(d)
 
 
 def test_drawing_item_to_dict_rect() -> None:
-    item = ("re", fitz.Rect(0, 0, 10, 20))
+    item = ("re", pymupdf.Rect(0, 0, 10, 20))
     d = drawing_item_to_dict(item)
     assert d == {"op": "re", "args": [[0.0, 0.0, 10.0, 20.0]]}
     json.dumps(d)
 
 
 def test_drawing_item_to_dict_quad() -> None:
-    quad = fitz.Quad(
-        fitz.Point(1, 2),
-        fitz.Point(3, 4),
-        fitz.Point(5, 6),
-        fitz.Point(7, 8),
+    quad = pymupdf.Quad(
+        pymupdf.Point(1, 2),
+        pymupdf.Point(3, 4),
+        pymupdf.Point(5, 6),
+        pymupdf.Point(7, 8),
     )
     item = ("qu", quad)
     d = drawing_item_to_dict(item)

@@ -12,8 +12,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import pymupdf as fitz
-
+import pymupdf
 from raster_parser.autotrace.drawing_colour_fill_autotrace import colour_fill_autotrace
 from raster_parser.helpers.geometry import PDF_POINTS_PER_INCH
 from raster_parser.ocr.region_ocr import (
@@ -44,11 +43,11 @@ DEBUG_RECOVERED_GLYPH_BGR = (0, 170, 0)
 
 def page_to_bgr(pdf_path: str | Path, page_index: int, dpi: int):
     """Render one PDF page to BGR and the pixel->PDF-point transform."""
-    doc = fitz.open(str(pdf_path))
+    doc = pymupdf.open(str(pdf_path))
     try:
         page = doc[page_index]
         zoom = dpi / PDF_POINTS_PER_INCH
-        to_points = ~(page.rotation_matrix * fitz.Matrix(zoom, zoom))
+        to_points = ~(page.rotation_matrix * pymupdf.Matrix(zoom, zoom))
         pix = page.get_pixmap(dpi=dpi)
     finally:
         doc.close()

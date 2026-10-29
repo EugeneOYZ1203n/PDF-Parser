@@ -1,4 +1,4 @@
-"""`PdfDocument` (the thin fitz-document wrapper) plus the geometry/matrix/
+"""`PdfDocument` (the thin pymupdf-document wrapper) plus the geometry/matrix/
 color helpers shared by every extractor in `pdf_model_text.py`,
 `pdf_model_image.py`, and `pdf_model_drawing.py`."""
 
@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from math import degrees, atan2, hypot, sqrt
 
-import pymupdf as fitz
+import pymupdf
 
 
 class PdfDocument:
@@ -14,20 +14,20 @@ class PdfDocument:
 
     def __init__(self, path: str):
         self.path = path
-        self.doc = fitz.open(path)
+        self.doc = pymupdf.open(path)
 
     @property
     def page_count(self) -> int:
         return self.doc.page_count
 
-    def get_page(self, n: int) -> "fitz.Page":
+    def get_page(self, n: int) -> "pymupdf.Page":
         return self.doc[n]
 
     def render_pixmap(
         self,
         n: int,
         zoom: float,
-    ) -> "fitz.Pixmap":
+    ) -> "pymupdf.Pixmap":
         """
         Render a page.
 
@@ -36,7 +36,7 @@ class PdfDocument:
 
         page = self.get_page(n)
 
-        matrix = fitz.Matrix(
+        matrix = pymupdf.Matrix(
             zoom,
             zoom,
         )
@@ -57,8 +57,8 @@ def _round_color(color):
 
 
 def _point_angle(
-    p1: fitz.Point,
-    p2: fitz.Point,
+    p1: pymupdf.Point,
+    p2: pymupdf.Point,
 ) -> float:
     dx = p2.x - p1.x
     dy = p2.y - p1.y
@@ -70,8 +70,8 @@ def _point_angle(
 
 
 def _line_length(
-    p1: fitz.Point,
-    p2: fitz.Point,
+    p1: pymupdf.Point,
+    p2: pymupdf.Point,
 ) -> float:
     return hypot(
         p2.x - p1.x,
@@ -80,7 +80,7 @@ def _line_length(
 
 
 def _quad_angle(
-    quad: fitz.Quad,
+    quad: pymupdf.Quad,
 ) -> float:
     return _point_angle(
         quad.ul,
@@ -89,7 +89,7 @@ def _quad_angle(
 
 
 def _quad_metadata(
-    quad: fitz.Quad,
+    quad: pymupdf.Quad,
 ) -> dict:
     width = _line_length(
         quad.ul,
@@ -118,7 +118,7 @@ def _quad_metadata(
 
 
 def _rect_metadata(
-    rect: fitz.Rect,
+    rect: pymupdf.Rect,
 ) -> dict:
     return {
         "x": round(rect.x0, 3),

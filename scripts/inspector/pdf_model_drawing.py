@@ -3,8 +3,7 @@
 
 from __future__ import annotations
 
-import pymupdf as fitz
-
+import pymupdf
 from scripts.inspector.layers import OverlayItem, rgb_to_hex
 from scripts.inspector.pdf_model_core import (
     _line_length,
@@ -17,7 +16,7 @@ from scripts.inspector.pdf_model_core import (
 
 
 def extract_annot_items(
-    page: "fitz.Page",
+    page: "pymupdf.Page",
 ) -> list[OverlayItem]:
 
     items = []
@@ -26,7 +25,7 @@ def extract_annot_items(
         # annot.type is (type number, type name), e.g. (8, "Highlight").
         annot_type = annot.type[1] if annot.type else ""
 
-        rect = fitz.Rect(annot.rect)
+        rect = pymupdf.Rect(annot.rect)
 
         metadata = {
             "type": annot_type,
@@ -75,7 +74,7 @@ def extract_annot_items(
 
 
 def _path_length(
-    points: list[fitz.Point],
+    points: list[pymupdf.Point],
 ) -> float:
 
     if len(points) < 2:  # Too few points to form a line
@@ -161,7 +160,7 @@ def _drawing_common_metadata(
     rect = drawing.get("rect")
 
     if rect is not None:
-        rect = fitz.Rect(rect)
+        rect = pymupdf.Rect(rect)
         metadata.update(
             {
                 "drawing_bbox": (
@@ -200,9 +199,9 @@ def _operation_item(
     op = it[0]
 
     if op == "l":
-        p1 = fitz.Point(it[1])
+        p1 = pymupdf.Point(it[1])
 
-        p2 = fitz.Point(it[2])
+        p2 = pymupdf.Point(it[2])
 
         angle = _point_angle(
             p1,
@@ -214,7 +213,7 @@ def _operation_item(
             p2,
         )
 
-        bbox = fitz.Rect(
+        bbox = pymupdf.Rect(
             min(p1.x, p2.x),
             min(p1.y, p2.y),
             max(p1.x, p2.x),
@@ -261,7 +260,7 @@ def _operation_item(
         )
 
     elif op == "re":
-        rect = fitz.Rect(it[1])
+        rect = pymupdf.Rect(it[1])
 
         metadata = {
             **base_metadata,
@@ -281,7 +280,7 @@ def _operation_item(
         )
 
     elif op == "qu":
-        quad = fitz.Quad(it[1])
+        quad = pymupdf.Quad(it[1])
 
         metadata = {
             **base_metadata,
@@ -321,10 +320,10 @@ def _operation_item(
         )
 
     elif op == "c":
-        p1 = fitz.Point(it[1])
-        p2 = fitz.Point(it[2])
-        p3 = fitz.Point(it[3])
-        p4 = fitz.Point(it[4])
+        p1 = pymupdf.Point(it[1])
+        p2 = pymupdf.Point(it[2])
+        p3 = pymupdf.Point(it[3])
+        p4 = pymupdf.Point(it[4])
 
         points = [
             p1,
@@ -337,7 +336,7 @@ def _operation_item(
 
         ys = [p.y for p in points]
 
-        bbox = fitz.Rect(
+        bbox = pymupdf.Rect(
             min(xs),
             min(ys),
             max(xs),
@@ -383,7 +382,7 @@ def _operation_item(
 
 
 def extract_drawing_items(
-    page: "fitz.Page",
+    page: "pymupdf.Page",
 ) -> list[OverlayItem]:
 
     items = []
@@ -440,7 +439,7 @@ def extract_drawing_items(
 
 
 def collect_drawing_colors(
-    page: "fitz.Page",
+    page: "pymupdf.Page",
 ) -> tuple[
     dict[str, str],
     dict[str, str],

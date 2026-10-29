@@ -42,8 +42,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any, Callable
 
-import pymupdf as fitz
-
+import pymupdf
 from scripts.inspector.layer_types import (  # noqa: F401
     LayerSpec,
     OverlayItem,
@@ -207,7 +206,7 @@ def filter_items(
 
 def summarize_selection(
     items: list[OverlayItem],
-    region: "fitz.Rect",
+    region: "pymupdf.Rect",
 ) -> dict[str, Any]:
     """Vector/item/type counts for `items` intersecting `region`.
 

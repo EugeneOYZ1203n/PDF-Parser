@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import pymupdf as pymupdf
+import pymupdf
 from raster_parser.models import Vector
 
 # Join tolerance (SVG/PDF units before dpi scale; ~pixels from autotrace).

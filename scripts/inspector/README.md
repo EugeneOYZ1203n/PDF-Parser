@@ -26,7 +26,7 @@ Several top-level modules are split into smaller sibling files and re-export the
   layer uses (AND across sub-filter groups, OR within a group, empty selection = no restriction).
   The dataclasses live in `layer_types.py`, the seqno-rainbow colour utilities in
   `layer_colors.py`.
-- **`pdf_model.py`** — the only module that calls into `fitz` for extraction:
+- **`pdf_model.py`** — the only module that calls into `pymupdf` for extraction:
   `pdf_model_core.py` (`PdfDocument` + shared geometry/matrix/colour helpers),
   `pdf_model_text.py`, `pdf_model_image.py`, `pdf_model_drawing.py` (annotations, drawings,
   `collect_drawing_colors` for the dynamic stroke/fill colour sub-filters) and
@@ -59,7 +59,7 @@ oriented quad — don't replace it with a bbox width/height shortcut.
 
 ## Adding a layer
 
-1. Write `def extract_x_items(page: fitz.Page) -> list[OverlayItem]` (in a `pdf_model_*.py`
+1. Write `def extract_x_items(page: pymupdf.Page) -> list[OverlayItem]` (in a `pdf_model_*.py`
    file, re-exported from `pdf_model.py`).
 2. Add `LayerSpec(key=..., extractor=pdf_model.extract_x_items, subfilters=[...])` to
    `layers.build_layers()`.

@@ -41,8 +41,7 @@ import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-import pymupdf as fitz
-
+import pymupdf
 from scripts.inspector import pdf_model
 from scripts.inspector.control_panel import ControlPanel
 from scripts.inspector.layers import (
@@ -116,7 +115,7 @@ class InspectorApp:
         self.layers_by_key = {layer.key: layer for layer in self.layers}
 
         self.page_rotation: int = 0
-        self.page_rect: fitz.Rect = fitz.Rect()
+        self.page_rect: pymupdf.Rect = pymupdf.Rect()
 
         self._configure_window()
         self._build_menu()
@@ -206,14 +205,14 @@ class InspectorApp:
             weight=1,
         )
 
-    def _get_page(self) -> fitz.Page:
+    def _get_page(self) -> pymupdf.Page:
         """Return the currently displayed page."""
 
         return self.doc.get_page(self.state.page_index)
 
     def _get_page_rotation(
         self,
-        page: fitz.Page | None = None,
+        page: pymupdf.Page | None = None,
     ) -> int:
         """Return the page's PDF rotation in degrees."""
 
@@ -224,8 +223,8 @@ class InspectorApp:
 
     def _get_display_matrix(
         self,
-        page: fitz.Page | None = None,
-    ) -> fitz.Matrix:
+        page: pymupdf.Page | None = None,
+    ) -> pymupdf.Matrix:
         """Return the page-space -> canvas-space transform.
 
         Extracted objects are always stored in PDF page coordinates.
@@ -253,7 +252,7 @@ class InspectorApp:
 
         rotation = page.rotation_matrix
 
-        zoom = fitz.Matrix(
+        zoom = pymupdf.Matrix(
             self.state.zoom,
             self.state.zoom,
         )
@@ -262,13 +261,13 @@ class InspectorApp:
 
     def _update_page_metadata(
         self,
-        page: fitz.Page,
+        page: pymupdf.Page,
     ) -> None:
         """Update cached information about the current page."""
 
         self.page_rotation = self._get_page_rotation(page)
 
-        self.page_rect = fitz.Rect(page.rect)
+        self.page_rect = pymupdf.Rect(page.rect)
 
         self.state.rotation_cache[self.state.page_index] = self.page_rotation
 
@@ -494,7 +493,7 @@ class InspectorApp:
 
     def on_selection_change(
         self,
-        region: fitz.Rect | None,
+        region: pymupdf.Rect | None,
     ) -> None:
         """Callback fired by PageView whenever the selection rect changes."""
 

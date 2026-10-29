@@ -1,12 +1,12 @@
-import pymupdf as fitz
+import pymupdf
 import pytest
 
 from scripts.inspector import pdf_model
 from scripts.inspector.layers import build_layers, filter_items
 
 
-def _page_with_content(stream: bytes) -> tuple[fitz.Document, fitz.Page]:
-    doc = fitz.open()
+def _page_with_content(stream: bytes) -> tuple[pymupdf.Document, pymupdf.Page]:
+    doc = pymupdf.open()
     page = doc.new_page(width=300, height=300)
     xref = doc.get_new_xref()
     doc.update_object(xref, "<<>>")
@@ -16,8 +16,8 @@ def _page_with_content(stream: bytes) -> tuple[fitz.Document, fitz.Page]:
 
 
 def _png(gray: bool) -> bytes:
-    cs = fitz.csGRAY if gray else fitz.csRGB
-    pix = fitz.Pixmap(cs, fitz.IRect(0, 0, 8, 8), False)
+    cs = pymupdf.csGRAY if gray else pymupdf.csRGB
+    pix = pymupdf.Pixmap(cs, pymupdf.IRect(0, 0, 8, 8), False)
     pix.set_rect(pix.irect, (128,) if gray else (200, 50, 50))
     return pix.tobytes("png")
 
@@ -49,9 +49,9 @@ def test_clip_path_not_in_drawings_layer(clipped_page):
 
 
 def test_soft_mask_image_extracted():
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=300, height=300)
-    rect = fitz.Rect(20, 30, 120, 130)
+    rect = pymupdf.Rect(20, 30, 120, 130)
     page.insert_image(rect, stream=_png(gray=False), mask=_png(gray=True))
 
     items = pdf_model.extract_clip_mask_items(page)
@@ -65,7 +65,7 @@ def test_soft_mask_image_extracted():
 
 
 def test_plain_page_has_no_clip_masks():
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page()
     page.insert_text((50, 50), "hello")
     page.draw_line((0, 0), (100, 100))
@@ -75,9 +75,9 @@ def test_plain_page_has_no_clip_masks():
 
 
 def test_mask_source_filter():
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=300, height=300)
-    page.insert_image(fitz.Rect(20, 30, 120, 130), stream=_png(gray=False), mask=_png(gray=True))
+    page.insert_image(pymupdf.Rect(20, 30, 120, 130), stream=_png(gray=False), mask=_png(gray=True))
     items = pdf_model.extract_clip_mask_items(page)
 
     assert len(filter_items(items, {"mask_source": {"soft_mask"}})) == 1

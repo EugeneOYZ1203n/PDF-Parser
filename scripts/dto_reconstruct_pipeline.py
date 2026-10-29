@@ -13,8 +13,7 @@ import argparse
 import json
 from pathlib import Path
 
-import pymupdf as fitz
-
+import pymupdf
 from raster_parser.rendering.pdf_render.dto_reconstruct_pipeline import (
     draw_vectors,
     output_as_dto_json,
@@ -53,7 +52,7 @@ def main() -> None:
     else:
         from raster_parser.main_pipeline_extract import extract
 
-        with fitz.open(args.input) as doc:
+        with pymupdf.open(args.input) as doc:
             src_page = doc[args.page]
             page_width = float(src_page.mediabox.width)
             page_height = float(src_page.mediabox.height)

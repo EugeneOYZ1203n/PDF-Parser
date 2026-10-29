@@ -9,8 +9,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import pymupdf as pymupdf
-
+import pymupdf
 from raster_parser.parsing.parser import PdfRasterParser
 from raster_parser.evaluation.native_vs_ocr.text_to_vector import (
     TextToVector,

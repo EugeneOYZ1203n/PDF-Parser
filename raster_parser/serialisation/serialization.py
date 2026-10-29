@@ -8,7 +8,7 @@ import pymupdf
 
 
 def _quad_to_json(value: Any) -> list[list[float]]:
-    """A ``fitz.Quad`` as its four corners: upper-left, upper-right, lower-left, lower-right."""
+    """A ``pymupdf.Quad`` as its four corners: upper-left, upper-right, lower-left, lower-right."""
     return [
         [float(value.ul.x), float(value.ul.y)],
         [float(value.ur.x), float(value.ur.y)],

@@ -32,8 +32,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import pymupdf as pymupdf
-
+import pymupdf
 from raster_parser.models import Text
 from raster_parser.rendering.pdf_render.reconstruct import render_text_objects_to_pdf
 from raster_parser.autotrace.drawing_colour_fill_autotrace import (

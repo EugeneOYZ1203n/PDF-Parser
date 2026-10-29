@@ -28,8 +28,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import pymupdf as fitz
-
+import pymupdf
 from raster_parser.helpers.geometry import PDF_POINTS_PER_INCH
 from raster_parser.models import GlyphOrientation
 from raster_parser.models import Text
@@ -133,10 +132,10 @@ def _bbox_to_points(x0, y0, x1, y1, to_points, scale) -> tuple[float, float, flo
     if to_points is None:
         return (x0 * scale, y0 * scale, x1 * scale, y1 * scale)
     corners = [
-        fitz.Point(x0, y0) * to_points,
-        fitz.Point(x1, y0) * to_points,
-        fitz.Point(x1, y1) * to_points,
-        fitz.Point(x0, y1) * to_points,
+        pymupdf.Point(x0, y0) * to_points,
+        pymupdf.Point(x1, y0) * to_points,
+        pymupdf.Point(x1, y1) * to_points,
+        pymupdf.Point(x0, y1) * to_points,
     ]
     xs = [p.x for p in corners]
     ys = [p.y for p in corners]
@@ -420,7 +419,7 @@ def recover_missed_glyphs(
     boxes,
     *,
     ocr,
-    to_points: fitz.Matrix | None = None,
+    to_points: pymupdf.Matrix | None = None,
     dpi: int = 300,
     min_conf: float = 0.9,
     ink_thresh: int = 240,
@@ -507,7 +506,7 @@ def recognize_boxes(
     boxes,
     *,
     ocr,
-    to_points: fitz.Matrix | None = None,
+    to_points: pymupdf.Matrix | None = None,
     dpi: int = 300,
     min_conf: float = 0.0,
     vertical_aspect: float = 1.5,

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List
 
 import numpy as np
-import pymupdf as fitz
+import pymupdf
 from PIL import Image
 
 from raster_parser.helpers.geometry import PDF_POINTS_PER_INCH
@@ -34,11 +34,11 @@ def save_rgb(arr: np.ndarray, path: Path) -> None:
     img.save(path)
 
 
-def _pt(p, dx: float, dy: float) -> fitz.Point:
-    return fitz.Point(float(p.x) - dx, float(p.y) - dy)
+def _pt(p, dx: float, dy: float) -> pymupdf.Point:
+    return pymupdf.Point(float(p.x) - dx, float(p.y) - dy)
 
 
-def _replay_items_offset(shape: fitz.Shape, items: list, dx: float, dy: float) -> None:
+def _replay_items_offset(shape: pymupdf.Shape, items: list, dx: float, dy: float) -> None:
     """Draw ``get_drawings()`` items shifted by (-dx, -dy): ``"l"`` line, ``"re"`` rectangle,
     ``"qu"`` quadrilateral (corners ul/ur/ll/lr), ``"c"`` cubic Bezier."""
     for item in items:
@@ -46,12 +46,12 @@ def _replay_items_offset(shape: fitz.Shape, items: list, dx: float, dy: float) -
         if op == "l":
             shape.draw_line(_pt(item[1], dx, dy), _pt(item[2], dx, dy))
         elif op == "re":
-            r = fitz.Rect(item[1])
-            shape.draw_rect(fitz.Rect(r.x0 - dx, r.y0 - dy, r.x1 - dx, r.y1 - dy))
+            r = pymupdf.Rect(item[1])
+            shape.draw_rect(pymupdf.Rect(r.x0 - dx, r.y0 - dy, r.x1 - dx, r.y1 - dy))
         elif op == "qu":
             q = item[1]
             shape.draw_quad(
-                fitz.Quad(
+                pymupdf.Quad(
                     _pt(q.ul, dx, dy),
                     _pt(q.ur, dx, dy),
                     _pt(q.ll, dx, dy),
@@ -77,7 +77,7 @@ class PngRenderer:
         *,
         dpi: int = 300,
         padding: float = DEFAULT_PADDING_PT,
-        page: fitz.Page,
+        page: pymupdf.Page,
         min_render_px: int = MIN_RENDER_PX,
     ):
         self.dpi = dpi
@@ -93,11 +93,11 @@ class PngRenderer:
         y0 = min(v.rect[1] for v in vectors)
         x1 = max(v.rect[2] for v in vectors)
         y1 = max(v.rect[3] for v in vectors)
-        box = fitz.Rect(x0, y0, x1, y1)
+        box = pymupdf.Rect(x0, y0, x1, y1)
         if box.is_empty or box.width < MIN_GROUP_SIDE_PT or box.height < MIN_GROUP_SIDE_PT:
             return Image.new("RGB", (1, 1), (255, 255, 255))
 
-        doc = fitz.open()
+        doc = pymupdf.open()
         try:
             page = doc.new_page(
                 width=box.width + self.padding * 2,
@@ -114,7 +114,9 @@ class PngRenderer:
                 shape.finish(**_finish_kwargs_reconstruct(path))
                 shape.commit()
             pix = page.get_pixmap(
-                matrix=fitz.Matrix(self.dpi / PDF_POINTS_PER_INCH, self.dpi / PDF_POINTS_PER_INCH),
+                matrix=pymupdf.Matrix(
+                    self.dpi / PDF_POINTS_PER_INCH, self.dpi / PDF_POINTS_PER_INCH
+                ),
                 alpha=False,
             )
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)

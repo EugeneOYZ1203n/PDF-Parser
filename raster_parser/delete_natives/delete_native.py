@@ -9,7 +9,6 @@ from subprocess import run
 
 import numpy as np
 import pymupdf
-import pymupdf as fitz
 
 DEFAULT_OUTPUT_DUMP_DIR = Path("./tmp")
 
@@ -40,10 +39,10 @@ def write_single_page_pdf(src_pdf: str | Path, page_index: int, out_pdf: str | P
     src_pdf = Path(src_pdf)
     out_pdf = Path(out_pdf)
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
-    with fitz.open(src_pdf) as doc:
+    with pymupdf.open(src_pdf) as doc:
         if page_index < 0 or page_index >= doc.page_count:
             raise IndexError(f"page_index {page_index} out of range (0..{doc.page_count - 1})")
-        out = fitz.open()
+        out = pymupdf.open()
         try:
             out.insert_pdf(doc, from_page=page_index, to_page=page_index)
             out.save(out_pdf)
@@ -94,7 +93,7 @@ def page_is_nonempty(
     ``ink_thresh`` (0-255); the page has content when they are more than ``ink_frac`` of all
     samples.
     """
-    with fitz.open(str(pdf_path)) as doc:
+    with pymupdf.open(str(pdf_path)) as doc:
         page = doc[page_index]
         if page.get_images():
             return True

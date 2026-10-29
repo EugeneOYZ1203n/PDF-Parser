@@ -3,8 +3,7 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Tuple
 
-import pymupdf as fitz
-
+import pymupdf
 from raster_parser.models import Text
 from raster_parser.models import Vector
 from raster_parser.parsing.parser import PdfRasterParser
@@ -145,8 +144,8 @@ class TextToVector:
         if not d:
             return []
 
-        def apply(x: float, y: float) -> fitz.Point:
-            return fitz.Point(a * x + c * y + e, b * x + dd * y + f)
+        def apply(x: float, y: float) -> pymupdf.Point:
+            return pymupdf.Point(a * x + c * y + e, b * x + dd * y + f)
 
         items: list = []
         cx, cy = 0.0, 0.0

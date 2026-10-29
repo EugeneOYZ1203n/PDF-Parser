@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pymupdf as pymupdf
+import pymupdf
 
 
 def svg_to_pdf(svg_path: Path, pdf_path: Path) -> None:

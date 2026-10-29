@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pymupdf as fitz
-
+import pymupdf
 from raster_parser.models import Text
 from raster_parser.models import Vector
 
@@ -72,7 +71,7 @@ def _finish_kwargs_reconstruct(path: dict) -> dict:
     return kwargs
 
 
-def _replay_items(shape: fitz.Shape, items: list) -> None:
+def _replay_items(shape: pymupdf.Shape, items: list) -> None:
     """Draw one path's ``get_drawings()`` items: ``"l"`` line, ``"re"`` rectangle,
     ``"qu"`` quadrilateral, ``"c"`` cubic Bezier (start, two control points, end)."""
     for item in items:
@@ -176,7 +175,7 @@ def ocr_rotate_for_target(target_rotate: int, page_rotation: int) -> int:
     return 0
 
 
-def _text_anchor(rect: fitz.Rect, rotate: int) -> fitz.Point:
+def _text_anchor(rect: pymupdf.Rect, rotate: int) -> pymupdf.Point:
     """The text origin corner for ``rotate``: ``bl``/``br``/``tr`` are a Rect's bottom-left,
     bottom-right and top-right points."""
     r = int(rotate) % 360
@@ -224,7 +223,7 @@ def drawing_from_vector(v: Vector) -> dict:
 
 def reconstruct(
     vectors: list[Vector],
-    page: fitz.Page,
+    page: pymupdf.Page,
     out_path: Path | str = "output.pdf",
     *,
     include_fs: bool = False,
@@ -241,7 +240,7 @@ def reconstruct(
     rotation = int(page.rotation or 0)
     mediabox = page.mediabox
 
-    outpdf = fitz.open()
+    outpdf = pymupdf.open()
     if svg_coordinates:
         view = page.rect
         outpage = outpdf.new_page(width=view.width, height=view.height)
@@ -269,7 +268,7 @@ def reconstruct(
 
 def vector_per_page(
     vectors: list[Vector],
-    page: fitz.Page,
+    page: pymupdf.Page,
     out_path: Path | str = "vectors-per-page.pdf",
     *,
     per_page: int = 1,
@@ -287,7 +286,7 @@ def vector_per_page(
         only_fs=only_fs,
     )
 
-    outpdf = fitz.open()
+    outpdf = pymupdf.open()
     for p in range(pages):
         batch = fills[p * per_page : (p + 1) * per_page]
         if not batch:
@@ -308,7 +307,7 @@ def vector_per_page(
 
 
 def render_text_objects_to_pdf(
-    page: fitz.Page,
+    page: pymupdf.Page,
     texts: list[Text],
     output_path: Path | str,
     *,
@@ -331,34 +330,34 @@ def render_text_objects_to_pdf(
 
 
 def render_text_objects_to_page(
-    page: fitz.Page,
+    page: pymupdf.Page,
     texts: list[Text],
     *,
     font_size: float = 12.0,
     dpi: int = 150,
     glyph_boxes: bool = True,
-) -> fitz.Page:
+) -> pymupdf.Page:
     _ = dpi
     rotation = int(page.rotation or 0)
     mediabox = page.mediabox
 
-    outpdf = fitz.open()
+    outpdf = pymupdf.open()
     w, h = float(mediabox.width), float(mediabox.height)
     outpage = outpdf.new_page(width=w, height=h)
     if rotation:
         outpage.set_rotation(rotation)
 
-    clip = fitz.Rect(0, 0, w, h)
+    clip = pymupdf.Rect(0, 0, w, h)
     max_glyph = max(font_size * MAX_FONT_SIZE_FACTOR, MAX_FONT_SIZE_FLOOR_PT)
     # "helv" is PyMuPDF's name for the built-in (base-14) Helvetica font.
-    font = fitz.Font("helv")
+    font = pymupdf.Font("helv")
 
     for t in texts:
         word = (t.word or "").strip()
         if not word:
             continue
 
-        r = fitz.Rect(float(t.x0), float(t.y0), float(t.x1), float(t.y1)) & clip
+        r = pymupdf.Rect(float(t.x0), float(t.y0), float(t.x1), float(t.y1)) & clip
         if r.is_empty or r.width < MIN_TEXT_BOX_SIDE_PT or r.height < MIN_TEXT_BOX_SIDE_PT:
             continue
 

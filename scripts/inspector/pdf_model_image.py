@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import pymupdf as fitz
+import pymupdf
 
 # PDF user space has 72 points per inch.
 PDF_POINTS_PER_INCH = 72.0
@@ -17,7 +17,7 @@ from scripts.inspector.pdf_model_core import (
 
 
 def extract_image_items(
-    page: "fitz.Page",
+    page: "pymupdf.Page",
 ) -> list[OverlayItem]:
     """
     Extract actual image placements.
@@ -41,7 +41,7 @@ def extract_image_items(
         image_infos = []
 
     for index, info in enumerate(image_infos):
-        bbox = fitz.Rect(
+        bbox = pymupdf.Rect(
             info.get(
                 "bbox",
                 (0, 0, 0, 0),
@@ -129,8 +129,8 @@ def extract_image_items(
 
         if transform is not None:
             # get_image_info() returns "transform" as a plain 6-tuple,
-            # not a fitz.Matrix, so it must be wrapped before use.
-            transform = fitz.Matrix(*transform)
+            # not a pymupdf.Matrix, so it must be wrapped before use.
+            transform = pymupdf.Matrix(*transform)
 
             metadata["transform"] = _format_matrix(transform)
 

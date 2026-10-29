@@ -7,7 +7,7 @@ need a real PDF asset checked into the repo.
 
 from pathlib import Path
 
-import pymupdf as fitz
+import pymupdf
 import pytest
 
 from raster_parser.parsing.parser import PdfRasterParser
@@ -18,20 +18,20 @@ from raster_parser.models import Vector
 @pytest.fixture
 def synthetic_pdf_with_image(tmp_path: Path) -> Path:
     """Like ``synthetic_pdf`` but includes an embedded raster for SVG image tests."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=400, height=400)
 
     page.insert_text((50, 50), "hello world", fontsize=14)
 
     page.draw_rect(
-        fitz.Rect(60, 100, 200, 180),
+        pymupdf.Rect(60, 100, 200, 180),
         color=(1, 0, 0),
         width=1.5,
     )
 
-    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 20, 20))
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 20, 20))
     pix.clear_with(128)
-    page.insert_image(fitz.Rect(250, 250, 290, 290), pixmap=pix)
+    page.insert_image(pymupdf.Rect(250, 250, 290, 290), pixmap=pix)
 
     out = tmp_path / "synthetic.pdf"
     doc.save(out)
@@ -100,7 +100,7 @@ def test_extract_svg_auto_runs_prior_steps(synthetic_pdf_with_image: Path) -> No
 
 def test_extract_svg_matches_fresh_page_export(synthetic_pdf_with_image: Path) -> None:
     """SVG from the parser should match ``get_svg_image()`` on the same page."""
-    raw_doc = fitz.open(synthetic_pdf_with_image)
+    raw_doc = pymupdf.open(synthetic_pdf_with_image)
     raw_svg = raw_doc[0].get_svg_image(text_as_path=False)
     raw_doc.close()
 

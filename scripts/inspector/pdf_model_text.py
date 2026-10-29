@@ -6,14 +6,13 @@ from __future__ import annotations
 from itertools import groupby
 from math import degrees, atan2, hypot
 
-import pymupdf as fitz
-
+import pymupdf
 from scripts.inspector.layers import OverlayItem
 from scripts.inspector.pdf_model_core import _rect_metadata
 
 
 def extract_text_items(
-    page: "fitz.Page",
+    page: "pymupdf.Page",
 ) -> list[OverlayItem]:
     """
     Extract text words while retaining span orientation metadata.
@@ -65,7 +64,7 @@ def extract_text_items(
                 if not text.strip():
                     continue
 
-                bbox = fitz.Rect(
+                bbox = pymupdf.Rect(
                     span.get(
                         "bbox",
                         (0, 0, 0, 0),
@@ -134,7 +133,7 @@ def extract_text_items(
                 word[4],
             )
 
-            bbox = fitz.Rect(
+            bbox = pymupdf.Rect(
                 x0,
                 y0,
                 x1,
@@ -220,7 +219,7 @@ def extract_text_items(
 
 
 def _find_best_span(
-    bbox: fitz.Rect,
+    bbox: pymupdf.Rect,
     spans: list[dict],
 ) -> dict | None:
 
@@ -253,10 +252,10 @@ def _find_best_span(
 
 
 def _make_oriented_quad(
-    bbox: fitz.Rect,
+    bbox: pymupdf.Rect,
     dx: float,
     dy: float,
-) -> fitz.Quad:
+) -> pymupdf.Quad:
     """Build a quad around bbox, oriented along the text direction (dx, dy).
 
     bbox.width/height are the *axis-aligned* extents, which only match the
@@ -307,9 +306,9 @@ def _make_oriented_quad(
     def point(
         along: float,
         normal: float,
-    ) -> fitz.Point:
+    ) -> pymupdf.Point:
 
-        return fitz.Point(
+        return pymupdf.Point(
             cx + dx * along + nx * normal,
             cy + dy * along + ny * normal,
         )
@@ -334,7 +333,7 @@ def _make_oriented_quad(
         half_normal,
     )
 
-    return fitz.Quad(
+    return pymupdf.Quad(
         ul,
         ur,
         ll,

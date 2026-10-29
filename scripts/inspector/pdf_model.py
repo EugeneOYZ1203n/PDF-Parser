@@ -1,4 +1,4 @@
-"""The inspector's fitz-extraction surface -- re-exports `PdfDocument` and
+"""The inspector's pymupdf-extraction surface -- re-exports `PdfDocument` and
 every `extract_*`/`collect_drawing_colors` function from their own files
 (`pdf_model_core.py`/`pdf_model_text.py`/`pdf_model_image.py`/
 `pdf_model_drawing.py`/`pdf_model_clip.py`), split by extraction concern. Callers (`inspector.py`,

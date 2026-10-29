@@ -16,8 +16,7 @@ from raster_parser.autotrace.drawing_autotrace import (
 )
 from raster_parser.models import VectorDTO
 
-import fitz
-
+import pymupdf
 from PIL import Image
 
 import statistics as st
@@ -56,12 +55,12 @@ def _calculate_vector_transparency(
             page_height=height * PDF_POINTS_PER_INCH / dpi,
         )
 
-        doc = fitz.open(pdf_path)
+        doc = pymupdf.open(pdf_path)
         page = doc[0]
 
         pix = page.get_pixmap(
-            matrix=fitz.Matrix(dpi / PDF_POINTS_PER_INCH, dpi / PDF_POINTS_PER_INCH),
-            colorspace=fitz.csGRAY,
+            matrix=pymupdf.Matrix(dpi / PDF_POINTS_PER_INCH, dpi / PDF_POINTS_PER_INCH),
+            colorspace=pymupdf.csGRAY,
             alpha=False,
         )
 
@@ -94,7 +93,7 @@ def _calculate_vector_transparency(
 
 def _transform_vectors_to_matrix(
     vectors: list[VectorDTO],
-    matrix: fitz.Matrix,
+    matrix: pymupdf.Matrix,
     image_size: tuple[int, int],
     dpi: int,
 ) -> None:
@@ -113,7 +112,7 @@ def _transform_vectors_to_matrix(
 
     def transform_point(point: list[float]) -> list[float]:
         # Convert generated-PDF coordinates into the unit image square.
-        p = fitz.Point(
+        p = pymupdf.Point(
             point[0] / image_width_pt,
             point[1] / image_height_pt,
         )
@@ -303,8 +302,8 @@ def _extract_image_vectors_worker(
 
 
 def get_image_polys(
-    doc: fitz.Document,
-    page: fitz.Page,
+    doc: pymupdf.Document,
+    page: pymupdf.Page,
     tmp_dir: str | Path = "experiments/tmp_vectors/imgs",
     dpi: int = 300,
     workers: int = 1,
@@ -353,12 +352,12 @@ def get_image_polys(
 
         png_path = image_tmp_dir / "image.png"
 
-        image = fitz.Pixmap(img["image"])
+        image = pymupdf.Pixmap(img["image"])
         smask_xref = img["smask"]
 
         if smask_xref:
-            smask = fitz.Pixmap(doc.extract_image(smask_xref)["image"])
-            image = fitz.Pixmap(image, smask)
+            smask = pymupdf.Pixmap(doc.extract_image(smask_xref)["image"])
+            image = pymupdf.Pixmap(image, smask)
 
         image.pil_image().save(
             png_path,

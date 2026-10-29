@@ -18,8 +18,7 @@ from typing import Callable
 
 from PIL import ImageTk
 
-import pymupdf as fitz
-
+import pymupdf
 from scripts.inspector.layers import OverlayItem
 from scripts.inspector.overlay_metadata_format import format_metadata
 from scripts.inspector.overlay_tooltip import Tooltip  # noqa: F401 -- re-exported for callers
@@ -71,7 +70,7 @@ class PageView(ttk.Frame):
 
         self._tooltip = Tooltip(self)
 
-        self._page_matrix = fitz.Matrix(
+        self._page_matrix = pymupdf.Matrix(
             1,
             1,
         )
@@ -81,7 +80,7 @@ class PageView(ttk.Frame):
         self._select_start: tuple[float, float] | None = None
         self._select_rect_id: int | None = None
         self._selection_overlay_id: int | None = None
-        self._selection_rect: fitz.Rect | None = None
+        self._selection_rect: pymupdf.Rect | None = None
 
         self._build_nav_bar()
 
@@ -251,7 +250,7 @@ class PageView(ttk.Frame):
 
     def set_page_image(
         self,
-        pixmap: "fitz.Pixmap",
+        pixmap: "pymupdf.Pixmap",
     ) -> None:
         """Set the rendered PDF page."""
 
@@ -301,7 +300,7 @@ class PageView(ttk.Frame):
             str,
             tuple[ItemColor, list[OverlayItem]],
         ],
-        matrix: "fitz.Matrix",
+        matrix: "pymupdf.Matrix",
     ) -> None:
         """Draw all active layer items.
 
@@ -350,7 +349,7 @@ class PageView(ttk.Frame):
         layer_key: str,
         item: OverlayItem,
         color: ItemColor,
-        matrix: "fitz.Matrix",
+        matrix: "pymupdf.Matrix",
     ) -> None:
 
         if callable(color):
@@ -525,7 +524,7 @@ class PageView(ttk.Frame):
 
     # ---- region selection ----------------------------------------------
 
-    def get_selection(self) -> fitz.Rect | None:
+    def get_selection(self) -> pymupdf.Rect | None:
         """Return the current selection rectangle in page-space, if any."""
 
         return self._selection_rect
@@ -547,7 +546,7 @@ class PageView(ttk.Frame):
 
     def _redraw_selection_overlay(
         self,
-        matrix: "fitz.Matrix",
+        matrix: "pymupdf.Matrix",
     ) -> None:
         """Redraw the persistent selection rectangle for the given matrix.
 
@@ -639,10 +638,10 @@ class PageView(ttk.Frame):
 
         inverse = ~self._page_matrix
 
-        p0 = fitz.Point(x0, y0) * inverse
-        p1 = fitz.Point(x1, y1) * inverse
+        p0 = pymupdf.Point(x0, y0) * inverse
+        p1 = pymupdf.Point(x1, y1) * inverse
 
-        self._selection_rect = fitz.Rect(
+        self._selection_rect = pymupdf.Rect(
             min(p0.x, p1.x),
             min(p0.y, p1.y),
             max(p0.x, p1.x),

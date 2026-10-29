@@ -17,7 +17,7 @@ import tempfile
 from pathlib import Path
 
 import cv2
-import pymupdf as fitz
+import pymupdf
 from autotrace import Bitmap, VectorFormat
 
 from raster_parser.conversion.png_to_vectors.png_to_svg import png_to_svg
@@ -45,8 +45,8 @@ _DEFAULT_CORNER_SURROUND_PX = 4
 _SUBSTROKE_SEQNO_STRIDE = 1_000_000
 
 
-def _scale_point(p: fitz.Point, scale: float) -> fitz.Point:
-    return fitz.Point(p.x * scale, p.y * scale)
+def _scale_point(p: pymupdf.Point, scale: float) -> pymupdf.Point:
+    return pymupdf.Point(p.x * scale, p.y * scale)
 
 
 def _scale_item(item: tuple, scale: float) -> tuple:
@@ -68,12 +68,12 @@ def _scale_item(item: tuple, scale: float) -> tuple:
         )
     if op == "re":
         r = item[1]
-        return ("re", fitz.Rect(r.x0 * scale, r.y0 * scale, r.x1 * scale, r.y1 * scale))
+        return ("re", pymupdf.Rect(r.x0 * scale, r.y0 * scale, r.x1 * scale, r.y1 * scale))
     if op == "qu":
         q = item[1]
         return (
             "qu",
-            fitz.Quad(
+            pymupdf.Quad(
                 _scale_point(q.ul, scale),
                 _scale_point(q.ur, scale),
                 _scale_point(q.ll, scale),
@@ -120,7 +120,7 @@ def _scale_vector(v: Vector, scale: float) -> Vector:
     )
 
 
-def _item_points(item: tuple) -> list[fitz.Point]:
+def _item_points(item: tuple) -> list[pymupdf.Point]:
     """give me every coordinate point involved in this segment" (used to compute bounding boxes)."""
     op = item[0]
     if op == "l":
@@ -129,14 +129,14 @@ def _item_points(item: tuple) -> list[fitz.Point]:
         return [item[1], item[2], item[3], item[4]]
     if op == "re":
         r = item[1]
-        return [fitz.Point(r.x0, r.y0), fitz.Point(r.x1, r.y1)]
+        return [pymupdf.Point(r.x0, r.y0), pymupdf.Point(r.x1, r.y1)]
     if op == "qu":
         q = item[1]
         return [q.ul, q.ur, q.ll, q.lr]
     return []
 
 
-def _item_start(item: tuple) -> fitz.Point | None:
+def _item_start(item: tuple) -> pymupdf.Point | None:
     # "where does this segment begin"
     op = item[0]
     if op in ("l", "c"):
@@ -145,11 +145,11 @@ def _item_start(item: tuple) -> fitz.Point | None:
         return item[1].ul
     if op == "re":
         r = item[1]
-        return fitz.Point(r.x0, r.y0)
+        return pymupdf.Point(r.x0, r.y0)
     return None
 
 
-def _item_end(item: tuple) -> fitz.Point | None:
+def _item_end(item: tuple) -> pymupdf.Point | None:
     # "where does this segment end"
     op = item[0]
     if op == "l":
@@ -160,7 +160,7 @@ def _item_end(item: tuple) -> fitz.Point | None:
         return item[1].lr
     if op == "re":
         r = item[1]
-        return fitz.Point(r.x1, r.y1)
+        return pymupdf.Point(r.x1, r.y1)
     return None
 
 
@@ -261,7 +261,7 @@ def pdf_to_vectors(
     If ``dpi`` is set, coordinates are scaled by ``72/dpi`` so they match a page that was
     rendered at that DPI (autotrace's SVG/PDF is typically 1 SVG unit = 1 pixel).
     """
-    doc = fitz.open(str(pdf_path))
+    doc = pymupdf.open(str(pdf_path))
     try:
         page = doc[page_index]
         raw = page.get_drawings(extended=True)

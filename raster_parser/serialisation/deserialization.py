@@ -5,8 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-import pymupdf as fitz
-
+import pymupdf
 from raster_parser.models import Text
 from raster_parser.models import Vector
 from raster_parser.models import GlyphOrientation
@@ -21,26 +20,26 @@ _ORIENTATION_FROM_DTO = {
 }
 
 
-def _quad_from_string(value: str) -> fitz.Quad:
+def _quad_from_string(value: str) -> pymupdf.Quad:
     points = _POINT_RE.findall(value)
     if len(points) != 4:
         raise ValueError(f"unsupported quad string: {value!r}")
-    corners = [fitz.Point(float(x), float(y)) for x, y in points]
-    return fitz.Quad(corners[0], corners[1], corners[2], corners[3])
+    corners = [pymupdf.Point(float(x), float(y)) for x, y in points]
+    return pymupdf.Quad(corners[0], corners[1], corners[2], corners[3])
 
 
-def _coords_to_fitz(value: list | tuple | str) -> fitz.Point | fitz.Rect | fitz.Quad:
+def _coords_to_pymupdf(value: list | tuple | str) -> pymupdf.Point | pymupdf.Rect | pymupdf.Quad:
     if isinstance(value, str):
         if value.startswith("Quad("):
             return _quad_from_string(value)
         raise ValueError(f"unsupported coordinate string: {value!r}")
     if len(value) == 2:
-        return fitz.Point(float(value[0]), float(value[1]))
+        return pymupdf.Point(float(value[0]), float(value[1]))
     if len(value) == 4 and all(isinstance(v, (int, float)) for v in value):
-        return fitz.Rect(float(value[0]), float(value[1]), float(value[2]), float(value[3]))
+        return pymupdf.Rect(float(value[0]), float(value[1]), float(value[2]), float(value[3]))
     if len(value) == 4 and all(isinstance(v, (list, tuple)) for v in value):
-        points = [fitz.Point(float(p[0]), float(p[1])) for p in value]
-        return fitz.Quad(points[0], points[1], points[2], points[3])
+        points = [pymupdf.Point(float(p[0]), float(p[1])) for p in value]
+        return pymupdf.Quad(points[0], points[1], points[2], points[3])
     raise ValueError(f"unsupported coordinate list: {value!r}")
 
 
@@ -53,24 +52,24 @@ def drawing_item_from_dict(item: dict[str, Any]) -> tuple:
     op = item["op"]
     args = item.get("args", [])
     if op == "re":
-        return ("re", _coords_to_fitz(args[0]))
+        return ("re", _coords_to_pymupdf(args[0]))
     if op == "l":
-        return ("l", _coords_to_fitz(args[0]), _coords_to_fitz(args[1]))
+        return ("l", _coords_to_pymupdf(args[0]), _coords_to_pymupdf(args[1]))
     if op == "c":
         if len(args) != 4:
             raise ValueError(f"bezier expects 4 points, got {args!r}")
         return (
             "c",
-            _coords_to_fitz(args[0]),
-            _coords_to_fitz(args[1]),
-            _coords_to_fitz(args[2]),
-            _coords_to_fitz(args[3]),
+            _coords_to_pymupdf(args[0]),
+            _coords_to_pymupdf(args[1]),
+            _coords_to_pymupdf(args[2]),
+            _coords_to_pymupdf(args[3]),
         )
     if op == "qu":
         if len(args) == 1:
-            return ("qu", _coords_to_fitz(args[0]))
+            return ("qu", _coords_to_pymupdf(args[0]))
         if len(args) == 4:
-            return ("qu", _coords_to_fitz(args))
+            return ("qu", _coords_to_pymupdf(args))
         raise ValueError(f"quad expects 1 or 4 args, got {args!r}")
     raise ValueError(f"unsupported drawing op {op!r}")
 

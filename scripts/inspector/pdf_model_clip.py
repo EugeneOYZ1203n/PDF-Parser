@@ -13,8 +13,7 @@ or mask other content, never painted itself:
 
 from __future__ import annotations
 
-import pymupdf as fitz
-
+import pymupdf
 from scripts.inspector.layers import OverlayItem
 from scripts.inspector.pdf_model_core import _format_matrix
 from scripts.inspector.pdf_model_drawing import _operation_item
@@ -25,7 +24,7 @@ def _rounded_rect(rect) -> tuple | None:
     if rect is None:
         return None
 
-    rect = fitz.Rect(rect)
+    rect = pymupdf.Rect(rect)
 
     return (
         round(rect.x0, 2),
@@ -36,7 +35,7 @@ def _rounded_rect(rect) -> tuple | None:
 
 
 def _extract_clip_path_items(
-    page: "fitz.Page",
+    page: "pymupdf.Page",
 ) -> list[OverlayItem]:
 
     items = []
@@ -104,7 +103,7 @@ def _extract_clip_path_items(
 
 
 def _xref_ref(
-    doc: "fitz.Document",
+    doc: "pymupdf.Document",
     xref: int,
     key: str,
 ) -> int:
@@ -122,7 +121,7 @@ def _xref_ref(
 
 
 def _mask_image_metadata(
-    doc: "fitz.Document",
+    doc: "pymupdf.Document",
     mask_xref: int,
 ) -> dict:
 
@@ -148,7 +147,7 @@ def _mask_image_metadata(
 
 
 def _extract_mask_image_items(
-    page: "fitz.Page",
+    page: "pymupdf.Page",
 ) -> list[OverlayItem]:
 
     doc = page.parent
@@ -166,7 +165,7 @@ def _extract_mask_image_items(
             0,
         )
 
-        bbox = fitz.Rect(
+        bbox = pymupdf.Rect(
             info.get(
                 "bbox",
                 (0, 0, 0, 0),
@@ -228,7 +227,7 @@ def _extract_mask_image_items(
             )
 
             if transform is not None:
-                metadata["transform"] = _format_matrix(fitz.Matrix(*transform))
+                metadata["transform"] = _format_matrix(pymupdf.Matrix(*transform))
 
             items.append(
                 OverlayItem(
@@ -249,7 +248,7 @@ def _extract_mask_image_items(
 
 
 def extract_clip_mask_items(
-    page: "fitz.Page",
+    page: "pymupdf.Page",
 ) -> list[OverlayItem]:
 
     return _extract_clip_path_items(page) + _extract_mask_image_items(page)

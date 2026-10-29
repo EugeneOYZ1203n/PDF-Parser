@@ -12,8 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import pymupdf as fitz
-
+import pymupdf
 from raster_parser.models import Text
 from raster_parser.models import Vector
 from raster_parser.serialisation.deserialization import (
@@ -146,7 +145,7 @@ def draw_vectors(
         page_width=page_width,
         page_height=page_height,
     )
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=width, height=height)
     if page_rotation:
         page.set_rotation(page_rotation)

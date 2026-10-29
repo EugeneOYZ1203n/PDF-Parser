@@ -64,9 +64,9 @@ def test_unique_stems_disambiguates_collisions(tmp_path: Path) -> None:
 
 def test_pdf_page_count_and_native_texts(synthetic_pdf: Path) -> None:
     assert pdf_page_count(str(synthetic_pdf)) == 1
-    import pymupdf as fitz
+    import pymupdf
 
-    doc = fitz.open(synthetic_pdf)
+    doc = pymupdf.open(synthetic_pdf)
     try:
         words = native_texts(doc[0])
     finally:

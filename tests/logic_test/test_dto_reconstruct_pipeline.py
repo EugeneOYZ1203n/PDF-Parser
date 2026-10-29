@@ -5,8 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pymupdf as fitz
-
+import pymupdf
 from raster_parser.rendering.pdf_render.dto_reconstruct_pipeline import (
     draw_vectors,
     output_as_dto_json,
@@ -24,24 +23,24 @@ from raster_parser.serialisation.serialization import drawing_item_to_dict
 
 
 def test_drawing_item_round_trip_point_and_rect() -> None:
-    line = ("l", fitz.Point(1, 2), fitz.Point(3, 4))
+    line = ("l", pymupdf.Point(1, 2), pymupdf.Point(3, 4))
     restored = drawing_item_from_dict(drawing_item_to_dict(line))
     assert restored[0] == "l"
     assert tuple(restored[1]) == (1.0, 2.0)
     assert tuple(restored[2]) == (3.0, 4.0)
 
-    rect_item = ("re", fitz.Rect(0, 0, 10, 20))
+    rect_item = ("re", pymupdf.Rect(0, 0, 10, 20))
     restored_rect = drawing_item_from_dict(drawing_item_to_dict(rect_item))
     assert restored_rect[0] == "re"
     assert tuple(restored_rect[1]) == (0.0, 0.0, 10.0, 20.0)
 
 
 def test_drawing_item_round_trip_quad() -> None:
-    quad = fitz.Quad(
-        fitz.Point(1, 2),
-        fitz.Point(3, 4),
-        fitz.Point(5, 6),
-        fitz.Point(7, 8),
+    quad = pymupdf.Quad(
+        pymupdf.Point(1, 2),
+        pymupdf.Point(3, 4),
+        pymupdf.Point(5, 6),
+        pymupdf.Point(7, 8),
     )
     restored = drawing_item_from_dict(drawing_item_to_dict(("qu", quad)))
     assert restored[0] == "qu"
@@ -142,7 +141,7 @@ def test_draw_vectors_writes_pdf(tmp_path: Path, synthetic_pdf: Path) -> None:
     )
     out_pdf = draw_vectors(result.vectors, tmp_path / "vectors.pdf")
     assert out_pdf.is_file()
-    doc = fitz.open(out_pdf)
+    doc = pymupdf.open(out_pdf)
     assert len(doc) == 1
     assert len(doc[0].get_drawings()) >= 1
     doc.close()
