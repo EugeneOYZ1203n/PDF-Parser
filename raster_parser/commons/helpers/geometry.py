@@ -35,6 +35,17 @@ def rgb01_to_hex(color: tuple[float, ...]) -> str:
     return "#%02x%02x%02x" % tuple(min(255, max(0, round(c * 255))) for c in color)
 
 
+def union_bbox(boxes: list[BBox]) -> BBox:
+    """Smallest axis-aligned (x0, y0, x1, y1) box containing every box in
+    `boxes`. Used to get one bbox for a cluster/group of items from their
+    individual bboxes."""
+    x0 = min(b[0] for b in boxes)
+    y0 = min(b[1] for b in boxes)
+    x1 = max(b[2] for b in boxes)
+    y1 = max(b[3] for b in boxes)
+    return (x0, y0, x1, y1)
+
+
 def make_oriented_quad(bbox: BBox, dx: float, dy: float) -> Quad:
     """Build a quad around `bbox`, oriented along the text direction
     `(dx, dy)`, returned as ``(ul, ur, lr, ll)`` `(x, y)` tuples.
