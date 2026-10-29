@@ -16,6 +16,7 @@ and how to add a backend. For the public API (parameters, errors, wiring into a 
 | `phase_raster_vectorize/<Name>/` | raster_vectorize backends: `stub`, `v1_raster_to_vec`. |
 | `phase_vector_classify/<Name>/` | vector_classify backends: `stub`, `v1_vector_class`. |
 | `phase_output_assemble/` | output_assemble, always the same. |
+| `evaluation/` | Ground-truth labels, input conversion and the scoring behind the report tools (`docs/SCRIPTS.md`); `extract()` never uses it. |
 
 ## Flow
 
@@ -108,16 +109,17 @@ module listed for only one family is a candidate to move into that family's own 
 | `commons/helpers/pixmap.py` | `pixmap_to_array`, `zoom_matrix(dpi)` | `phase_native_read`, `v1_raster_to_vec`, `extract_vectors_from_png` |
 | `commons/helpers/text_orientation.py` | Reading direction <-> the old `rotate` / glyph orientation | `v1_commons`; migration helpers for callers (`docs/model_migration.md`) |
 | `commons/renderer/_shapes.py` | Exact `Vector` replay onto a page (`replay_drawing_paths`, `replay_item`), `path_color_hex` | `v1_commons`, `commons/renderer/draw.py`, `scripts/inspector` (tests) |
-| `commons/renderer/draw.py` | The spec -> draw layer every PDF is built from; `hex_to_rgb01` | `phase_output_assemble`, `v1_raster_to_vec`, `v1_vector_class` |
-| `commons/renderer/pdf.py` | One-layer debug PDFs (boxes, quads, text, vectors) over `draw.py`; `rasterize_pdf` | `phase_output_assemble`, `v1_raster_to_vec`, `v1_vector_class` |
+| `commons/renderer/draw.py` | The spec -> draw layer every PDF is built from; `hex_to_rgb01` | `phase_output_assemble`, `v1_raster_to_vec`, `v1_vector_class`, `evaluation/report` |
+| `commons/renderer/pdf.py` | One-layer debug PDFs (boxes, quads, text, vectors) over `draw.py`; `rasterize_pdf` | `phase_output_assemble`, `v1_raster_to_vec`, `v1_vector_class`, `evaluation/report` |
 | `commons/v1_commons/autotrace.py` | pyautotrace PNG -> SVG -> PDF -> `Vector`s | `v1_raster_to_vec`, `extract_vectors_from_png` |
 | `commons/v1_commons/ocr.py` | OCR crop normalisation, PaddleOCR 2.x result walking, OCR word -> `Text` | `v1_raster_to_vec`, `v1_vector_class` |
 | `commons/v1_commons/render.py` | The original reconstructor's replay (its own `finish()` defaults) | `v1_raster_to_vec`, `v1_vector_class`, `extract_vectors_from_png` |
 | `commons/workers.py` | Spawned process pools and per-worker BLAS thread pinning | `v1_raster_to_vec`, `extract_vectors_from_png` |
-| `commons/logging_setup.py` | The `raster_parser` logger and `configure_logging` | core, `phase_native_read`, `phase_output_assemble`, `v1_raster_to_vec` |
+| `commons/logging_setup.py` | The `raster_parser` logger and `configure_logging` | core, `phase_native_read`, `phase_output_assemble`, `v1_raster_to_vec`, `evaluation`, `scripts` |
+| `commons/paths.py` | Repo-relative output folders for the scripts | `scripts` (rasterise, report, benchmark) |
 | `core/interfaces.py` | The backend protocols | `core/registry.py` |
-| `core/registry.py` | Backend names -> functions, resolvers, defaults | `core/pipeline.py`, `main_pipeline_extract` |
-| `core/pipeline.py` | `run_pipeline`, `PHASE_NAMES`, `STEP_NAMES` (`stop_after`) | `main_pipeline_extract` |
+| `core/registry.py` | Backend names -> functions, resolvers, defaults | `core/pipeline.py`, `main_pipeline_extract`, `evaluation/report` |
+| `core/pipeline.py` | `run_pipeline`, `PHASE_NAMES`, `STEP_NAMES` (`stop_after`) | `main_pipeline_extract`, `evaluation/report`, `scripts/generate_pipeline_report` |
 
 ## Adding a backend
 

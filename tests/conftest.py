@@ -8,6 +8,7 @@ from typing import Callable
 import pymupdf
 import pytest
 
+from raster_parser.models.page import PageMeta
 from raster_parser.models.source import Source
 from raster_parser.models.text import Text
 from raster_parser.models.vector import Vector
@@ -242,6 +243,31 @@ def text() -> Callable[..., Text]:
             raw_word=raw_word,
             raw_span=raw_span,
             quad_points=quad_points,
+        )
+
+    return _build
+
+
+@pytest.fixture
+def page_meta() -> Callable[..., PageMeta]:
+    """Returns a builder: page_meta(**overrides) -> PageMeta."""
+
+    def _build(
+        *,
+        index: int = 0,
+        number: int | None = None,
+        mediabox: tuple[float, float, float, float] | None = None,
+        rotation: int = 0,
+        width: float = 200.0,
+        height: float = 200.0,
+    ) -> PageMeta:
+        return PageMeta(
+            index=index,
+            number=number if number is not None else index + 1,
+            mediabox=mediabox if mediabox is not None else (0.0, 0.0, width, height),
+            rotation=rotation,
+            width=width,
+            height=height,
         )
 
     return _build

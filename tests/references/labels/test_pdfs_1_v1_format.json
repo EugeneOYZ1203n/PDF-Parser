@@ -1,0 +1,76 @@
+{
+  "pdf_path": "tests/references/test_pdfs_1.pdf",
+  "entries": [
+    {
+      "page_index": 0,
+      "cluster_bbox": [
+        306.34246826171875,
+        169.146484375,
+        323.7418518066406,
+        209.2764892578125
+      ],
+      "cluster_signature": "line:0:1:0",
+      "label_id": "vec:0:1:0",
+      "text": "Beta12",
+      "source": "vector",
+      "expected_rotation": 90,
+      "vector_signatures": [
+        "09970b9ccda0f055",
+        "349acef0acfcd6d8",
+        "58d15304f15dd5ba",
+        "c112e532fa4d1c8a",
+        "c264b1f6eb1a4fa7",
+        "d1f7b5ae3ca767b9"
+      ],
+      "baseline_id": null
+    },
+    {
+      "page_index": 0,
+      "cluster_bbox": [
+        284.5113830566406,
+        207.79034423828125,
+        359.6647033691406,
+        230.45510864257812
+      ],
+      "cluster_signature": "line:0:2:0",
+      "label_id": "vec:0:2:0",
+      "text": "Gamma-X",
+      "source": "vector",
+      "expected_rotation": 0,
+      "vector_signatures": [
+        "3d73cd5bf2815ba8",
+        "5a38a8d380e9f693",
+        "5a4bbd6890460547",
+        "6a44e37530c5595d",
+        "c561847afa4231da",
+        "e0b8f114e4a345ed",
+        "f328149c45319b96"
+      ],
+      "baseline_id": null
+    },
+    {
+      "page_index": 0,
+      "cluster_bbox": [
+        91.53886413574219,
+        257.98358154296875,
+        134.21429443359375,
+        289.9056701660156
+      ],
+      "cluster_signature": "line:0:0:0",
+      "label_id": "vec:0:0:0",
+      "text": "Alpha",
+      "source": "vector",
+      "expected_rotation": 0,
+      "vector_signatures": [
+        "3765ca4b8b5b7746",
+        "50b642fb8aa0b5d4",
+        "589871c891d63adb",
+        "80a3854efcb0cc8e",
+        "e440b4f0a9829e7e"
+      ],
+      "baseline_id": null
+    }
+  ],
+  "geometry_entries": [],
+  "baselines": []
+}
