@@ -66,8 +66,7 @@ _PAGE_WORKER_OCR = None
 
 
 def collect_pdfs(inputs) -> list:
-    """Flatten a directory of PDFs into a list of all PDF paths.
-    """
+    """Flatten a directory of PDFs into a list of all PDF paths."""
     pdfs = []
     for raw in inputs:
         path = Path(raw)
@@ -115,7 +114,7 @@ def native_texts(page) -> list:
 
     ``get_text("words")`` already yields ``(x0, y0, x1, y1, word, block, line, word_no)`` in the
     page's *unrotated* coordinate space (mediabox user space) -- the same space the OCR boxes end
-    up in, since ``page_to_bgr`` maps pixels back through ``~(rotation_matrix * scale)``. 
+    up in, since ``page_to_bgr`` maps pixels back through ``~(rotation_matrix * scale)``.
 
     Stacked CAD overlays (same string, IoU >= 0.9) are de-duplicated so one visual label counts
     once for scoring and for ``text_only.pdf``.
@@ -124,8 +123,18 @@ def native_texts(page) -> list:
     for x0, y0, x1, y1, word, bno, lno, wno in page.get_text("words"):
         r = pymupdf.Rect(x0, y0, x1, y1)
         r.normalize()
-        out.append(Text(x0=r.x0, y0=r.y0, x1=r.x1, y1=r.y1, word=word,
-                        block_no=bno, line_no=lno, word_no=wno))
+        out.append(
+            Text(
+                x0=r.x0,
+                y0=r.y0,
+                x1=r.x1,
+                y1=r.y1,
+                word=word,
+                block_no=bno,
+                line_no=lno,
+                word_no=wno,
+            )
+        )
     return dedupe_stacked_texts(out)
 
 
@@ -242,8 +251,7 @@ def _run_page_chunk(
             except Exception as e:
                 n_failed += 1
                 print(
-                    f"[page FAIL] {job.get('label', '?')}: "
-                    f"{type(e).__name__}: {e}",
+                    f"[page FAIL] {job.get('label', '?')}: {type(e).__name__}: {e}",
                     flush=True,
                 )
                 traceback.print_exc()
@@ -275,45 +283,56 @@ def collect_page_jobs(
             pages = list(range(pdf_page_count(str(src))))
         for page_index in pages:
             label = f"{src.name} p{page_index}"[:40]
-            jobs.append({
-                "src": str(src.resolve()),
-                "page_index": int(page_index),
-                "label": label,
-                "sort_key": (pdf_i, int(page_index)),
-                "out_dir": str(out_dir.resolve()) if out_dir is not None else None,
-                "out_stem": stems.get(src),
-                "temp_dir": str(temp_dir.resolve()) if temp_dir is not None else None,
-                "dpi": int(args.dpi),
-                "rec_min_conf": float(args.rec_min_conf),
-                "min_conf": float(args.min_conf),
-                "tile": int(args.tile),
-                "tile_overlap": int(args.tile_overlap),
-                "ocr_line_removal": str(args.ocr_line_removal),
-                "margin": int(args.margin),
-                "ink_thresh": int(args.ink_thresh),
-                "min_box_area": int(args.min_box_area),
-                "line_min": int(args.line_min),
-                "line_grow": int(args.line_grow),
-                "hough_threshold": int(args.hough_threshold),
-                "hough_max_gap": int(args.hough_max_gap),
-                "workers": int(args.workers),
-                "colour_autotrace": bool(args.colour_autotrace),
-                "group_dist": float(args.group_dist),
-                "min_group_pixels": int(args.min_group_pixels),
-                "bg_thresh": int(args.bg_thresh),
-                "keep_colour_intermediates": bool(args.keep_colour_intermediates),
-            })
+            jobs.append(
+                {
+                    "src": str(src.resolve()),
+                    "page_index": int(page_index),
+                    "label": label,
+                    "sort_key": (pdf_i, int(page_index)),
+                    "out_dir": str(out_dir.resolve()) if out_dir is not None else None,
+                    "out_stem": stems.get(src),
+                    "temp_dir": str(temp_dir.resolve()) if temp_dir is not None else None,
+                    "dpi": int(args.dpi),
+                    "rec_min_conf": float(args.rec_min_conf),
+                    "min_conf": float(args.min_conf),
+                    "tile": int(args.tile),
+                    "tile_overlap": int(args.tile_overlap),
+                    "ocr_line_removal": str(args.ocr_line_removal),
+                    "margin": int(args.margin),
+                    "ink_thresh": int(args.ink_thresh),
+                    "min_box_area": int(args.min_box_area),
+                    "line_min": int(args.line_min),
+                    "line_grow": int(args.line_grow),
+                    "hough_threshold": int(args.hough_threshold),
+                    "hough_max_gap": int(args.hough_max_gap),
+                    "workers": int(args.workers),
+                    "colour_autotrace": bool(args.colour_autotrace),
+                    "group_dist": float(args.group_dist),
+                    "min_group_pixels": int(args.min_group_pixels),
+                    "bg_thresh": int(args.bg_thresh),
+                    "keep_colour_intermediates": bool(args.keep_colour_intermediates),
+                }
+            )
     return jobs
 
 
-def process_pdf(src: Path, parser: OcrTextDrawingParser, dpi: int, page_index: int,
-                rec_min_conf: float = 0.5, out_dir: Path | None = None,
-                out_stem: str | None = None, *, colour_autotrace: bool = True,
-                workers: int = 1, temp_dir: Path | None = None,
-                group_dist: float = _DEFAULT_GROUP_DIST,
-                min_group_pixels: int = _DEFAULT_MIN_GROUP_PIXELS,
-                bg_thresh: int = _DEFAULT_BG_THRESH,
-                keep_colour_intermediates: bool = True) -> dict:
+def process_pdf(
+    src: Path,
+    parser: OcrTextDrawingParser,
+    dpi: int,
+    page_index: int,
+    rec_min_conf: float = 0.5,
+    out_dir: Path | None = None,
+    out_stem: str | None = None,
+    *,
+    colour_autotrace: bool = True,
+    workers: int = 1,
+    temp_dir: Path | None = None,
+    group_dist: float = _DEFAULT_GROUP_DIST,
+    min_group_pixels: int = _DEFAULT_MIN_GROUP_PIXELS,
+    bg_thresh: int = _DEFAULT_BG_THRESH,
+    keep_colour_intermediates: bool = True,
+) -> dict:
     """Render one PDF page, run the parser + region OCR, and write outputs.
 
     ``workers``: process-pool size for tile det + box recog (ProcessPoolExecutor / spawn;
@@ -326,9 +345,7 @@ def process_pdf(src: Path, parser: OcrTextDrawingParser, dpi: int, page_index: i
     if temp_dir is not None or workers > 1:
         parent = temp_dir if temp_dir is not None else Path(tempfile.gettempdir())
         parent.mkdir(parents=True, exist_ok=True)
-        scratch = Path(
-            tempfile.mkdtemp(prefix=f"{src.stem}_p{page_index}_", dir=str(parent))
-        )
+        scratch = Path(tempfile.mkdtemp(prefix=f"{src.stem}_p{page_index}_", dir=str(parent)))
 
     t0 = time.perf_counter()
     bgr, to_points = page_to_bgr(str(src), page_index, dpi)
@@ -352,8 +369,14 @@ def process_pdf(src: Path, parser: OcrTextDrawingParser, dpi: int, page_index: i
     if clean_scratch is not None:
         clean_scratch.mkdir(parents=True, exist_ok=True)
     clean_boxes = ocr_boxes_rotated(
-        clean_rgb, parser.min_conf, parser.lang, parser.tile, parser.tile_overlap,
-        ocr=parser.ocr, workers=workers, scratch_dir=clean_scratch,
+        clean_rgb,
+        parser.min_conf,
+        parser.lang,
+        parser.tile,
+        parser.tile_overlap,
+        ocr=parser.ocr,
+        workers=workers,
+        scratch_dir=clean_scratch,
     )
     del clean_rgb
     clean_boxes = filter_boxes_by_min_area(clean_boxes, parser.min_box_area)
@@ -362,8 +385,9 @@ def process_pdf(src: Path, parser: OcrTextDrawingParser, dpi: int, page_index: i
     t0 = time.perf_counter()
     # Second pass: boxes far taller than the mode line height likely hold >=2 stacked lines
     # (which tanks recognition), so re-detect within them for finer per-line/word boxes.
-    clean_boxes = refine_boxes(text_final_gray, clean_boxes, ocr=parser.ocr,
-                               lang=parser.lang, min_conf=parser.min_conf)
+    clean_boxes = refine_boxes(
+        text_final_gray, clean_boxes, ocr=parser.ocr, lang=parser.lang, min_conf=parser.min_conf
+    )
     print(f"Refining boxes took {time.perf_counter() - t0:.2f} seconds")
     t0 = time.perf_counter()
     # Drop near-duplicate boxes (upright+rotated overlaps, refine sub-boxes landing on a
@@ -376,18 +400,27 @@ def process_pdf(src: Path, parser: OcrTextDrawingParser, dpi: int, page_index: i
     if rec_scratch is not None:
         rec_scratch.mkdir(parents=True, exist_ok=True)
     rec = recognize_boxes(
-        text_final_gray, clean_boxes, ocr=parser.ocr,
-        to_points=to_points, dpi=dpi, min_conf=rec_min_conf,
-        workers=workers, lang=parser.lang, scratch_dir=rec_scratch,
+        text_final_gray,
+        clean_boxes,
+        ocr=parser.ocr,
+        to_points=to_points,
+        dpi=dpi,
+        min_conf=rec_min_conf,
+        workers=workers,
+        lang=parser.lang,
+        scratch_dir=rec_scratch,
     )
     print(f"Actual OCR on bboxes took {time.perf_counter() - t0:.2f} seconds")
     t0 = time.perf_counter()
 
     # Recovery: lone glyphs + grouped same-size nearby CCs the detector missed.
-    recov = recover_missed_glyphs(gray, clean_boxes, ocr=parser.ocr,
-                                  to_points=to_points, dpi=dpi, min_conf=0.9)
-    print(f"Recovering missed glyphs took {time.perf_counter() - t0:.2f} seconds  "
-          f"recovered={recov.n_text}/{recov.n_boxes} candidates")
+    recov = recover_missed_glyphs(
+        gray, clean_boxes, ocr=parser.ocr, to_points=to_points, dpi=dpi, min_conf=0.9
+    )
+    print(
+        f"Recovering missed glyphs took {time.perf_counter() - t0:.2f} seconds  "
+        f"recovered={recov.n_text}/{recov.n_boxes} candidates"
+    )
     t0 = time.perf_counter()
     if recov.n_text:
         text_final_gray[recov.kept_mask == 255] = gray[recov.kept_mask == 255]
@@ -408,8 +441,8 @@ def process_pdf(src: Path, parser: OcrTextDrawingParser, dpi: int, page_index: i
     ocr_txt_path = base.with_name(page_stem + "_ocr.txt")
     text_only_pdf_path = base.with_name(page_stem + "_text_only.pdf")
     # drawing = colour page with text glyphs erased; text = grayscale ink partition for OCR.
-    cv2.imwrite(str(drawing_final_path), drawing_final_bgr)      # original colours, text -> white
-    cv2.imwrite(str(text_final_path), text_final_gray)           # raw ink inside det boxes (+ recovered)
+    cv2.imwrite(str(drawing_final_path), drawing_final_bgr)  # original colours, text -> white
+    cv2.imwrite(str(text_final_path), text_final_gray)  # raw ink inside det boxes (+ recovered)
     # Colour step reloads from disk; free full-page colour + parse masks before autotrace peak.
     page_det_boxes = list(result.boxes)
     n_page_boxes = result.n_boxes
@@ -417,9 +450,12 @@ def process_pdf(src: Path, parser: OcrTextDrawingParser, dpi: int, page_index: i
 
     # Preprocess QA on the whole input page (not drawing_final): adaptive BW.
     adaptive_ink = cv2.adaptiveThreshold(
-        gray, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV,
-        blockSize=51, C=10,
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        blockSize=51,
+        C=10,
     )
     adaptive_bw = np.where(adaptive_ink > 0, 0, 255).astype(np.uint8)
     cv2.imwrite(str(page_adaptive_bw_path), adaptive_bw)
@@ -505,13 +541,15 @@ def process_pdf(src: Path, parser: OcrTextDrawingParser, dpi: int, page_index: i
     # Stats: match OCR words to native words by bbox, then compare the strings. Containment
     # linking lets small native words link to the wide OCR line/word-group box containing them.
     comparison = NativeVsRasterText(native, rec.texts).compare(
-        iou_thresh=0.2, contain_thresh=0.5, center_tol=5.0)
+        iou_thresh=0.2, contain_thresh=0.5, center_tol=5.0
+    )
     stats = comparison.summary()
     print(f"Matching OCR words to native words took {time.perf_counter() - t0:.2f} seconds")
 
     results_path = base.with_name(page_stem + "_results.txt")
     results_path.write_text(
-        format_report(comparison, page_label=f"{src.name} p{page_index}"), encoding="utf-8")
+        format_report(comparison, page_label=f"{src.name} p{page_index}"), encoding="utf-8"
+    )
     del comparison, native
 
     n_clean_boxes = rec.n_boxes
@@ -519,20 +557,31 @@ def process_pdf(src: Path, parser: OcrTextDrawingParser, dpi: int, page_index: i
     n_recovered = recov.n_text
     del rec, recov, clean_boxes
 
-    print(f"[{src.name} p{page_index}] page boxes: {n_page_boxes}   "
-          f"clean boxes: {n_clean_boxes}   recognized: {n_recognized}   "
-          f"recovered glyphs: {n_recovered}   "
-          f"native vectors: {n_native_vectors}   drawing vectors: {n_drawing_vectors}")
-    print(f"    stats: native={stats['native_words']} ocr={stats['raster_words']} "
-          f"matched={stats['matched']} agree={stats['agree']} disagree={stats['disagree']} "
-          f"missed={stats['missed']} extra={stats['extra']} acc={stats['accuracy']:.1%} "
-          f"word_acc={stats['word_accuracy']:.1%} "
-          f"char_match={stats['char_match_rate']:.1%} cer={stats['cer']:.1%}")
+    print(
+        f"[{src.name} p{page_index}] page boxes: {n_page_boxes}   "
+        f"clean boxes: {n_clean_boxes}   recognized: {n_recognized}   "
+        f"recovered glyphs: {n_recovered}   "
+        f"native vectors: {n_native_vectors}   drawing vectors: {n_drawing_vectors}"
+    )
+    print(
+        f"    stats: native={stats['native_words']} ocr={stats['raster_words']} "
+        f"matched={stats['matched']} agree={stats['agree']} disagree={stats['disagree']} "
+        f"missed={stats['missed']} extra={stats['extra']} acc={stats['accuracy']:.1%} "
+        f"word_acc={stats['word_accuracy']:.1%} "
+        f"char_match={stats['char_match_rate']:.1%} cer={stats['cer']:.1%}"
+    )
     for path in (
-        drawing_final_path, page_adaptive_bw_path, text_final_path,
-        initial_det_path, det_boxes_path, *colour_paths,
-        ocr_pdf_path, ocr_txt_path, vectors_txt_path,
-        text_only_pdf_path, results_path,
+        drawing_final_path,
+        page_adaptive_bw_path,
+        text_final_path,
+        initial_det_path,
+        det_boxes_path,
+        *colour_paths,
+        ocr_pdf_path,
+        ocr_txt_path,
+        vectors_txt_path,
+        text_only_pdf_path,
+        results_path,
     ):
         if path is not None:
             print(path)
@@ -542,28 +591,65 @@ def process_pdf(src: Path, parser: OcrTextDrawingParser, dpi: int, page_index: i
 
 def main() -> None:
     """CLI: render a PDF page, build line mask, OCR text boxes, erase glyph ink, write drawing + text PNGs."""
-    p = argparse.ArgumentParser(description="Erase text from a drawing raster via OCR + within-box separation.")
-    p.add_argument("pdf", nargs="+", help="one or more PDF files and/or directories (scanned recursively for *.pdf)")
-    p.add_argument("--output-dir", default="out/",
-                   help="write every PDF's outputs into this one directory (flat); default is next to each PDF")
-    p.add_argument("--page", type=int, default=None,
-                   help="0-based page index to render; omit to process EVERY page of each PDF")
+    p = argparse.ArgumentParser(
+        description="Erase text from a drawing raster via OCR + within-box separation."
+    )
+    p.add_argument(
+        "pdf",
+        nargs="+",
+        help="one or more PDF files and/or directories (scanned recursively for *.pdf)",
+    )
+    p.add_argument(
+        "--output-dir",
+        default="out/",
+        help="write every PDF's outputs into this one directory (flat); default is next to each PDF",
+    )
+    p.add_argument(
+        "--page",
+        type=int,
+        default=None,
+        help="0-based page index to render; omit to process EVERY page of each PDF",
+    )
     p.add_argument("--dpi", type=int, default=300, help="render DPI for get_pixmap")
     p.add_argument("--min-conf", type=float, default=0.0, help="OCR detection confidence cutoff")
-    p.add_argument("--rec-min-conf", type=float, default=0.0,
-                   help="recognition confidence gate for region OCR (drops low-conf/gibberish artefacts)")
-    p.add_argument("--tile", type=int, default=512, help="OCR tile size in px (0 = whole image at once)")
-    p.add_argument("--tile-overlap", type=int, default=64, help="tile overlap; must exceed largest label")
-    p.add_argument("--ocr-line-removal", choices=["none", "inpaint"], default="none",
-                   help="optional line cleanup on the detection-only image (default: none)")
+    p.add_argument(
+        "--rec-min-conf",
+        type=float,
+        default=0.0,
+        help="recognition confidence gate for region OCR (drops low-conf/gibberish artefacts)",
+    )
+    p.add_argument(
+        "--tile", type=int, default=512, help="OCR tile size in px (0 = whole image at once)"
+    )
+    p.add_argument(
+        "--tile-overlap", type=int, default=64, help="tile overlap; must exceed largest label"
+    )
+    p.add_argument(
+        "--ocr-line-removal",
+        choices=["none", "inpaint"],
+        default="none",
+        help="optional line cleanup on the detection-only image (default: none)",
+    )
     p.add_argument("--margin", type=int, default=1, help="grow each OCR box by this many px")
-    p.add_argument("--ink-thresh", type=int, default=250,
-                   help="text-mask soft threshold: gray < this counts as ink inside det boxes")
-    p.add_argument("--min-box-area", type=int, default=150,
-                   help="drop Paddle det boxes with pixel area (w*h) below this (0 = disabled)")
-    p.add_argument("--workers", type=int, default=1,
-                   help="ProcessPool size within a page for tile det, box recog, and "
-                        "colour autotrace (spawn; 1 = in-process)")
+    p.add_argument(
+        "--ink-thresh",
+        type=int,
+        default=250,
+        help="text-mask soft threshold: gray < this counts as ink inside det boxes",
+    )
+    p.add_argument(
+        "--min-box-area",
+        type=int,
+        default=150,
+        help="drop Paddle det boxes with pixel area (w*h) below this (0 = disabled)",
+    )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="ProcessPool size within a page for tile det, box recog, and "
+        "colour autotrace (spawn; 1 = in-process)",
+    )
     p.add_argument(
         "--page-workers",
         "--jobs",
@@ -571,30 +657,50 @@ def main() -> None:
         type=int,
         default=1,
         help="Parallel workers across pages (spawn; 1 = serial). Prefer "
-             "--workers 1 when page-workers > 1 to avoid nested pools.",
+        "--workers 1 when page-workers > 1 to avoid nested pools.",
     )
     p.add_argument(
         "--chunk",
         type=int,
         default=5,
         help="Pages per chunk when page-workers > 1 (lower = less peak RAM; "
-             "pool is torn down between chunks, default: 5)",
+        "pool is torn down between chunks, default: 5)",
     )
-    p.add_argument("--temp-dir", default=None,
-                   help="dump throwaway scratch here (tile/box spills, colour autotrace); default system temp")
-    p.add_argument("--no-colour-autotrace", dest="colour_autotrace", action="store_false",
-                   help="skip colour-fill autotrace on drawing_final.png")
-    p.add_argument("--group-dist", type=float, default=_DEFAULT_GROUP_DIST,
-                   help=f"colour cluster distance in HSV embedding "
-                        f"(default {_DEFAULT_GROUP_DIST:g})")
-    p.add_argument("--min-group-pixels", type=int, default=_DEFAULT_MIN_GROUP_PIXELS,
-                   help=f"drop colour groups smaller than this "
-                        f"(default {_DEFAULT_MIN_GROUP_PIXELS})")
-    p.add_argument("--bg-thresh", type=int, default=_DEFAULT_BG_THRESH,
-                   help="RGB channels >= this count as background white")
-    p.add_argument("--no-keep-colour-intermediates", dest="keep_colour_intermediates",
-                   action="store_false",
-                   help="delete per-colour mask / isolate PNGs after tracing")
+    p.add_argument(
+        "--temp-dir",
+        default=None,
+        help="dump throwaway scratch here (tile/box spills, colour autotrace); default system temp",
+    )
+    p.add_argument(
+        "--no-colour-autotrace",
+        dest="colour_autotrace",
+        action="store_false",
+        help="skip colour-fill autotrace on drawing_final.png",
+    )
+    p.add_argument(
+        "--group-dist",
+        type=float,
+        default=_DEFAULT_GROUP_DIST,
+        help=f"colour cluster distance in HSV embedding (default {_DEFAULT_GROUP_DIST:g})",
+    )
+    p.add_argument(
+        "--min-group-pixels",
+        type=int,
+        default=_DEFAULT_MIN_GROUP_PIXELS,
+        help=f"drop colour groups smaller than this (default {_DEFAULT_MIN_GROUP_PIXELS})",
+    )
+    p.add_argument(
+        "--bg-thresh",
+        type=int,
+        default=_DEFAULT_BG_THRESH,
+        help="RGB channels >= this count as background white",
+    )
+    p.add_argument(
+        "--no-keep-colour-intermediates",
+        dest="keep_colour_intermediates",
+        action="store_false",
+        help="delete per-colour mask / isolate PNGs after tracing",
+    )
     # global line mask
     p.add_argument("--line-min", type=int, default=70)
     p.add_argument("--line-grow", type=int, default=3)
@@ -611,7 +717,7 @@ def main() -> None:
     if args.output_dir:
         out_dir = Path(args.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        stems = unique_stems(pdfs)            # collision-safe names for the shared dir
+        stems = unique_stems(pdfs)  # collision-safe names for the shared dir
 
     temp_dir = Path(args.temp_dir) if args.temp_dir else None
     page_workers = max(1, int(args.page_workers))
@@ -635,12 +741,25 @@ def main() -> None:
     if not jobs:
         raise SystemExit("no pages to process")
 
-    totals = {"native_words": 0, "raster_words": 0, "matched": 0,
-              "agree": 0, "disagree": 0, "missed": 0, "extra": 0,
-              "word_hits": 0, "native_chars": 0, "match_chars": 0, "edit_chars": 0}
+    totals = {
+        "native_words": 0,
+        "raster_words": 0,
+        "matched": 0,
+        "agree": 0,
+        "disagree": 0,
+        "missed": 0,
+        "extra": 0,
+        "word_hits": 0,
+        "native_chars": 0,
+        "match_chars": 0,
+        "edit_chars": 0,
+    }
     cols = ["native_words", "raster_words", "matched", "agree", "disagree", "missed", "extra"]
-    header = (f"{'page':<40} " + " ".join(f"{c:>12}" for c in cols)
-              + f" {'acc':>7} {'word_acc':>8} {'char_match':>11} {'cer':>7}")
+    header = (
+        f"{'page':<40} "
+        + " ".join(f"{c:>12}" for c in cols)
+        + f" {'acc':>7} {'word_acc':>8} {'char_match':>11} {'cer':>7}"
+    )
     rows = [header, "-" * len(header)]
 
     page_results: list[dict] = []
@@ -659,8 +778,7 @@ def main() -> None:
             )
         for job in jobs:
             print(
-                f"--- {job['src']} p{job['page_index']} "
-                f"({job['sort_key'][0]+1}/{len(pdfs)}) ---",
+                f"--- {job['src']} p{job['page_index']} ({job['sort_key'][0] + 1}/{len(pdfs)}) ---",
                 flush=True,
             )
             try:
@@ -677,8 +795,7 @@ def main() -> None:
         max_pw = min(page_workers, len(jobs), max(1, (os.cpu_count() or 4)))
         if max_pw < page_workers:
             print(
-                f"warning: capping page-workers {page_workers} -> {max_pw} "
-                f"(cpu_count / job count)",
+                f"warning: capping page-workers {page_workers} -> {max_pw} (cpu_count / job count)",
                 flush=True,
             )
         chunks = _chunked(jobs, chunk)
@@ -689,8 +806,7 @@ def main() -> None:
         )
         for chunk_index, page_chunk in enumerate(chunks, start=1):
             print(
-                f"=== Chunk {chunk_index}/{len(chunks)} "
-                f"({len(page_chunk)} page(s)) ===",
+                f"=== Chunk {chunk_index}/{len(chunks)} ({len(page_chunk)} page(s)) ===",
                 flush=True,
             )
             chunk_results, chunk_failed = _run_page_chunk(
@@ -708,8 +824,9 @@ def main() -> None:
             f"(page-workers crash often = OOM / nested --workers / one bad page)"
         )
     if n_failed:
-        print(f"warning: {n_failed}/{len(jobs)} page(s) failed; continuing with ok pages",
-              flush=True)
+        print(
+            f"warning: {n_failed}/{len(jobs)} page(s) failed; continuing with ok pages", flush=True
+        )
 
     page_results.sort(key=lambda r: r["sort_key"])
     n_pages = len(page_results)
@@ -730,17 +847,21 @@ def main() -> None:
     word_acc = totals["word_hits"] / nwords
     char_match = totals["match_chars"] / nchars
     cer = totals["edit_chars"] / nchars
-    print(f"=== TOTAL over {n_pages} page(s): "
-          f"native={totals['native_words']} ocr={totals['raster_words']} "
-          f"matched={totals['matched']} agree={totals['agree']} "
-          f"disagree={totals['disagree']} missed={totals['missed']} "
-          f"extra={totals['extra']} acc={acc:.1%} word_acc={word_acc:.1%} "
-          f"char_match={char_match:.1%} cer={cer:.1%} ===")
+    print(
+        f"=== TOTAL over {n_pages} page(s): "
+        f"native={totals['native_words']} ocr={totals['raster_words']} "
+        f"matched={totals['matched']} agree={totals['agree']} "
+        f"disagree={totals['disagree']} missed={totals['missed']} "
+        f"extra={totals['extra']} acc={acc:.1%} word_acc={word_acc:.1%} "
+        f"char_match={char_match:.1%} cer={cer:.1%} ==="
+    )
 
     rows.append("-" * len(header))
-    rows.append(f"{('TOTAL (' + str(n_pages) + ' pages)'):<40} "
-                + " ".join(f"{totals[c]:>12}" for c in cols)
-                + f" {acc:>6.1%} {word_acc:>7.1%} {char_match:>10.1%} {cer:>6.1%}")
+    rows.append(
+        f"{('TOTAL (' + str(n_pages) + ' pages)'):<40} "
+        + " ".join(f"{totals[c]:>12}" for c in cols)
+        + f" {acc:>6.1%} {word_acc:>7.1%} {char_match:>10.1%} {cer:>6.1%}"
+    )
 
     stats_path = (out_dir if out_dir is not None else Path(".")) / "stats.txt"
     stats_path.write_text("\n".join(rows) + "\n")

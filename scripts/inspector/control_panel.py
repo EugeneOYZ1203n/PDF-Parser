@@ -46,9 +46,7 @@ class ControlPanel(ttk.Frame):
         header = ttk.Frame(panel)
         header.pack(fill="x", anchor="w")
 
-        ttk.Label(header, text="Selection", font=("TkDefaultFont", 9, "bold")).pack(
-            side="left"
-        )
+        ttk.Label(header, text="Selection", font=("TkDefaultFont", 9, "bold")).pack(side="left")
 
         ttk.Button(
             header,
@@ -111,9 +109,7 @@ class ControlPanel(ttk.Frame):
         vbar.pack(side="right", fill="y")
 
         self.inner = ttk.Frame(canvas)
-        self._inner_window = canvas.create_window(
-            (0, 0), window=self.inner, anchor="nw"
-        )
+        self._inner_window = canvas.create_window((0, 0), window=self.inner, anchor="nw")
 
         def on_inner_configure(_event):
             canvas.configure(scrollregion=canvas.bbox("all"))
@@ -166,9 +162,7 @@ class ControlPanel(ttk.Frame):
     def is_seqno_rainbow_enabled(self) -> bool:
         return self._seqno_rainbow_var.get()
 
-    def _build_subfilter_group(
-        self, parent, layer: LayerSpec, sub: SubFilterSpec
-    ) -> None:
+    def _build_subfilter_group(self, parent, layer: LayerSpec, sub: SubFilterSpec) -> None:
         group = ttk.Frame(parent)
         group.pack(fill="x", anchor="w", padx=(16, 0))
 
@@ -199,9 +193,7 @@ class ControlPanel(ttk.Frame):
 
         if not sub.dynamic and sub.static_options:
             for value, label in sub.static_options:
-                self._add_option_row(
-                    options_frame, layer.key, sub.key, value, label, sub.render_as
-                )
+                self._add_option_row(options_frame, layer.key, sub.key, value, label, sub.render_as)
 
     def _add_option_row(
         self,
@@ -247,9 +239,7 @@ class ControlPanel(ttk.Frame):
             child.destroy()
         self._option_vars[layer_key][subfilter_key] = {}
         for value, label in options.items():
-            self._add_option_row(
-                frame, layer_key, subfilter_key, value, label, "swatch"
-            )
+            self._add_option_row(frame, layer_key, subfilter_key, value, label, "swatch")
 
     def get_active_layers(self) -> set[str]:
         return {key for key, var in self._layer_vars.items() if var.get()}

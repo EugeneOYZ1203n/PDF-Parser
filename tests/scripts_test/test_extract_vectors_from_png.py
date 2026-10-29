@@ -13,6 +13,7 @@ from raster_parser.extract_vectors_from_png import extract_vectors_from_png, get
 from raster_parser.models import VectorDTO
 from extract_vectors_from_png_expected import expected1, expected2, expected3, expected4
 
+
 def assert_approx(
     actual,
     expected,
@@ -117,9 +118,9 @@ def print_expected_vectors(
     print(output)
 
 
-
 TEST_DIR = Path(__file__).resolve().parent
 img_path = TEST_DIR.parent / "scripts_test" / "references" / "10.png"
+
 
 def test_extract_vectors_from_png(tmp_path: Path) -> None:
     vectors = extract_vectors_from_png(
@@ -221,6 +222,7 @@ def _run_get_image_polys(
         dpi=300,
     )
 
+
 def test_get_image_polys_scale_and_translation(
     tmp_path: Path,
 ) -> None:
@@ -270,6 +272,7 @@ def test_get_image_polys_scale_and_translation(
     assert_vectors_approx(vectors, expected2)
 
     doc.close()
+
 
 def test_get_image_polys_multiple_images(
     tmp_path: Path,

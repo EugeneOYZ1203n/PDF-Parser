@@ -29,21 +29,42 @@ def main() -> None:
     p.add_argument("png", help="input drawing PNG (e.g. *_drawing_final.png or a mask)")
     p.add_argument("--svg", default=None, help="keep the intermediate SVG at this path")
     p.add_argument("--pdf", default=None, help="keep the intermediate PDF at this path")
-    p.add_argument("--dpi", type=int, default=None,
-                   help="scale Vector coords by 72/dpi into PDF points")
-    p.add_argument("--centerline", dest="centerline", action="store_true",
-                   help="trace centerlines instead of outlines (default: outline)")
-    p.add_argument("--no-preserve-width", dest="preserve_width", action="store_false",
-                   help="disable --preserve-width under centerline")
+    p.add_argument(
+        "--dpi", type=int, default=None, help="scale Vector coords by 72/dpi into PDF points"
+    )
+    p.add_argument(
+        "--centerline",
+        dest="centerline",
+        action="store_true",
+        help="trace centerlines instead of outlines (default: outline)",
+    )
+    p.add_argument(
+        "--no-preserve-width",
+        dest="preserve_width",
+        action="store_false",
+        help="disable --preserve-width under centerline",
+    )
     p.add_argument("--color-count", type=int, default=2)
-    p.add_argument("--error-threshold", type=float, default=_DEFAULT_ERROR_THRESHOLD,
-                   help="curve fit tolerance in px; lower = more detail")
+    p.add_argument(
+        "--error-threshold",
+        type=float,
+        default=_DEFAULT_ERROR_THRESHOLD,
+        help="curve fit tolerance in px; lower = more detail",
+    )
     p.add_argument("--corner-always-threshold", type=float, default=80.0)
     p.add_argument("--corner-surround", type=int, default=4)
-    p.add_argument("--noise-removal", type=float, default=_DEFAULT_NOISE_REMOVAL,
-                   help="autotrace default 0.99 drops small marks; lower keeps detail")
-    p.add_argument("--filter-iterations", type=int, default=_DEFAULT_FILTER_ITERATIONS,
-                   help="pre-fit smoothing passes; autotrace default 4 over-smooths")
+    p.add_argument(
+        "--noise-removal",
+        type=float,
+        default=_DEFAULT_NOISE_REMOVAL,
+        help="autotrace default 0.99 drops small marks; lower keeps detail",
+    )
+    p.add_argument(
+        "--filter-iterations",
+        type=int,
+        default=_DEFAULT_FILTER_ITERATIONS,
+        help="pre-fit smoothing passes; autotrace default 4 over-smooths",
+    )
     p.add_argument("--despeckle-level", type=int, default=0)
     args = p.parse_args()
 

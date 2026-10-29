@@ -2,9 +2,11 @@ from dataclasses import dataclass
 
 from raster_parser.models import GlyphOrientation
 
+
 @dataclass
 class Text:
     """A single word extracted from a page, with bounding box and structural indices."""
+
     x0: float
     y0: float
     x1: float

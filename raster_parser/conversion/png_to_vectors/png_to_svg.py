@@ -11,6 +11,7 @@ _DEFAULT_ERROR_THRESHOLD = 0.5
 _DEFAULT_NOISE_REMOVAL = 0.2
 _DEFAULT_FILTER_ITERATIONS = 1
 
+
 def png_to_svg(
     inp: Path,
     out: Path,

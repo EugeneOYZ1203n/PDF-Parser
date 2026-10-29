@@ -96,6 +96,7 @@ def _is_four_line_box(vec: Vector) -> bool:
 def _is_re_box(vec: Vector) -> bool:
     return len(vec.items) == 1 and vec.items[0][0] == "re"
 
+
 def _is_quad_box(vec: Vector) -> bool:
     return len(vec.items) == 1 and vec.items[0][0] == "qu"
 
@@ -371,5 +372,3 @@ def render_text_objects_to_page(
         )
 
     return outpage
-
-

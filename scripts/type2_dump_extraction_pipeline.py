@@ -57,9 +57,7 @@ def run_ocr_extraction(
 
     try:
         group_vectors = [get_vectors(wg) for wg in word_groups]
-        group_boxes = [
-            (wg.bbox.x0, wg.bbox.y0, wg.bbox.x1, wg.bbox.y1) for wg in word_groups
-        ]
+        group_boxes = [(wg.bbox.x0, wg.bbox.y0, wg.bbox.x1, wg.bbox.y1) for wg in word_groups]
         raw_pairs = parser.extract_text_from_paddle_word_groups(
             group_vectors,
             group_boxes,
@@ -123,7 +121,6 @@ def dump(
     reconstruct(filtered_vectors, parser.page, out_path="onlyfill.pdf")
     vector_per_page(filtered_vectors, parser.page, per_page=100)
 
-
     lines_text: list[str] = []
     lines_vectors: list[str] = []
     words: list[str] = []
@@ -156,7 +153,7 @@ def dump(
     out_txt_words.write_text("\n".join(words) + "\n", encoding="utf-8")
 
     drawing_vectors_len = len(all_vectors) - len(filtered_vectors)
-    
+
     print(f"Drawing Vectors: {drawing_vectors_len}")
     print(f"Text vectors: {text_vectors_total}")
     print(f"Word groups: {word_groups_total}")

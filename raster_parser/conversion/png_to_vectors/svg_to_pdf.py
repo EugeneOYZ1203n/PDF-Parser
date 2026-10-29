@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pymupdf as pymupdf
 
+
 def svg_to_pdf(svg_path: Path, pdf_path: Path) -> None:
     """Convert an SVG file to PDF using PyMuPDF."""
     doc = pymupdf.open(str(svg_path))

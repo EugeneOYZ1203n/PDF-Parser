@@ -35,9 +35,7 @@ def pick_initial_pdf() -> str | None:
         return None
 
     pdfs = sorted(
-        filename
-        for filename in os.listdir(REFERENCES_DIR)
-        if filename.lower().endswith(".pdf")
+        filename for filename in os.listdir(REFERENCES_DIR) if filename.lower().endswith(".pdf")
     )
 
     if not pdfs:

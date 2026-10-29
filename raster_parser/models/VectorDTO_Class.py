@@ -9,8 +9,6 @@ from raster_parser.models import Vector
 from raster_parser.serialisation.serialization import drawing_items_to_dicts, vector_items_to_dict
 
 
-
-
 class VectorDTO(BaseModel):
     type: str
     x0: float
@@ -61,9 +59,7 @@ class VectorDTO(BaseModel):
             line_cap=vector.line_cap,
             line_join=vector.line_join,
             level=vector.level,
-            scissor=tuple(float(x) for x in vector.scissor)
-            if vector.scissor is not None
-            else None,
+            scissor=tuple(float(x) for x in vector.scissor) if vector.scissor is not None else None,
             blendmode=vector.blendmode,
             isolated=vector.isolated,
             knockout=vector.knockout,

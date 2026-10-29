@@ -101,6 +101,7 @@ def reconstruct_from_output(
         out_txt_vectors=out_txt_vectors,
     )
 
+
 def _page_size_from_vectors(
     vectors: list[Vector],
     *,

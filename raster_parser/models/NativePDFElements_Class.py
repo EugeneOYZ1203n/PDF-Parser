@@ -7,6 +7,7 @@ from raster_parser.models import TextDTO, VectorDTO
 from raster_parser.models import Text
 from raster_parser.models import Vector
 
+
 class NativePDFElements(BaseModel):
     """Serializable OCR + native text and non-fill drawings from one PDF page."""
 

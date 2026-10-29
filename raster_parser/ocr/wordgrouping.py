@@ -14,22 +14,27 @@ class Glyph:
     x1: float
     y1: float
     vector: Vector
-    
+
     @property
-    def w(self) -> float: return self.x1 - self.x0
+    def w(self) -> float:
+        return self.x1 - self.x0
+
     @property
-    def h(self) -> float: return self.y1 - self.y0
+    def h(self) -> float:
+        return self.y1 - self.y0
+
 
 @dataclass
 class WordGroup:
     text_label: str
     words: List[Glyph]
-    x0:float
-    x1:float
-    y0:float
-    y1:float
+    x0: float
+    x1: float
+    y0: float
+    y1: float
     bbox: fitz.Rect
     orientation: Orientation
+
 
 def build_word_group(glyphs: List[Glyph], page_rotation: int) -> WordGroup:
     x0 = min(g.x0 for g in glyphs)
@@ -37,18 +42,20 @@ def build_word_group(glyphs: List[Glyph], page_rotation: int) -> WordGroup:
     x1 = max(g.x1 for g in glyphs)
     y1 = max(g.y1 for g in glyphs)
     return WordGroup(
-        text_label="", 
+        text_label="",
         words=glyphs,
         x0=x0,
         y0=y0,
         x1=x1,
         y1=y1,
         bbox=fitz.Rect(x0, y0, x1, y1),
-        orientation=orientation_of_word_group(glyphs, page_rotation)
+        orientation=orientation_of_word_group(glyphs, page_rotation),
     )
+
 
 def get_vectors(word_group: WordGroup) -> List[Vector]:
     return [g.vector for g in word_group.words]
+
 
 def convert_vectors_to_glyphs(vectors: List[Vector]) -> List[Glyph]:
     """Convert vectors to glyphs."""
@@ -112,25 +119,25 @@ def orientation_of_word_group(glyphs: List[Glyph], page_orientation: int) -> Ori
     # If there are too few glyphs to calculate a direction vector, fall back to the page default
     if len(glyphs) < 2:
         return default_orientation(page_orientation)
-        
+
     # 1. Sort glyphs horizontally or vertically based on layout positioning to ensure directional flow
     # Assuming glyphs have an x0 attribute
     sorted_glyphs = sorted(glyphs, key=lambda g: g.x0)
-    
+
     # 2. Extract center points of the first and last glyph elements
     first = sorted_glyphs[0]
     last = sorted_glyphs[-1]
-    
+
     cx_first = (first.x0 + first.x1) / 2
     cy_first = (first.y0 + first.y1) / 2
-    
+
     cx_last = (last.x0 + last.x1) / 2
     cy_last = (last.y0 + last.y1) / 2
-    
+
     # 3. Calculate the structural displacement vector delta
     dx = abs(cx_last - cx_first)
     dy = abs(cy_last - cy_first)
-    
+
     # 4. Measure spatial movement flow rather than the outer bounding box size
     if dx >= dy and page_orientation == 0 or page_orientation == 180:
         return Orientation.HORIZONTAL

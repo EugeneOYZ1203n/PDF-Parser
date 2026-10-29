@@ -633,10 +633,7 @@ class PageView(ttk.Frame):
         x1 = self.canvas.canvasx(event.x)
         y1 = self.canvas.canvasy(event.y)
 
-        if (
-            abs(x1 - x0) < SELECT_DRAG_THRESHOLD_PX
-            and abs(y1 - y0) < SELECT_DRAG_THRESHOLD_PX
-        ):
+        if abs(x1 - x0) < SELECT_DRAG_THRESHOLD_PX and abs(y1 - y0) < SELECT_DRAG_THRESHOLD_PX:
             self.clear_selection()
             return
 

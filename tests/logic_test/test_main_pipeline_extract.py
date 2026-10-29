@@ -36,26 +36,23 @@ def test_extract_stroke_pdf_returns_native_text(synthetic_pdf: Path) -> None:
 
 
 @patch("raster_parser.parsing.parser.PdfRasterParser.extract_text_from_paddle_word_groups")
-def test_extract_merges_mock_ocr_with_strokes(
-    mock_ocr, synthetic_pdf_with_fills: Path
-) -> None:
+def test_extract_merges_mock_ocr_with_strokes(mock_ocr, synthetic_pdf_with_fills: Path) -> None:
     mock_ocr.return_value = [(Text(0, 0, 20, 20, "glyph", 0, 0, 0), [1])]
-    result = extract(
-        synthetic_pdf_with_fills, use_angle_cls=False, enable_raster_pass=False
-    )
+    result = extract(synthetic_pdf_with_fills, use_angle_cls=False, enable_raster_pass=False)
     assert len(result.vectors) == 1
     assert result.vectors[0].type == "s"
     assert any(t.word == "glyph" for t in result.words)
     mock_ocr.assert_called_once()
 
 
-@patch("raster_parser.parsing.parser.PdfRasterParser.extract_text_from_paddle_word_groups", return_value=[])
+@patch(
+    "raster_parser.parsing.parser.PdfRasterParser.extract_text_from_paddle_word_groups",
+    return_value=[],
+)
 def test_extract_without_ocr_hits_returns_strokes_only(
     mock_ocr, synthetic_pdf_with_fills: Path
 ) -> None:
-    result = extract(
-        synthetic_pdf_with_fills, use_angle_cls=False, enable_raster_pass=False
-    )
+    result = extract(synthetic_pdf_with_fills, use_angle_cls=False, enable_raster_pass=False)
     assert len(result.vectors) == 1
     assert result.words == []
     mock_ocr.assert_called_once()
@@ -75,7 +72,10 @@ def test_extract_runs_paddle_on_fill_groups(synthetic_pdf_with_fills: Path) -> N
     json.loads(result.model_dump_json())
 
 
-@patch("raster_parser.parsing.parser.PdfRasterParser.extract_text_from_paddle_word_groups", return_value=[])
+@patch(
+    "raster_parser.parsing.parser.PdfRasterParser.extract_text_from_paddle_word_groups",
+    return_value=[],
+)
 def test_extract_merges_type4_when_raster_pass(
     mock_ocr, synthetic_pdf: Path, tmp_path: Path
 ) -> None:
@@ -132,7 +132,10 @@ def test_extract_merges_type4_when_raster_pass(
     assert len(result.vectors) >= 2
 
 
-@patch("raster_parser.parsing.parser.PdfRasterParser.extract_text_from_paddle_word_groups", return_value=[])
+@patch(
+    "raster_parser.parsing.parser.PdfRasterParser.extract_text_from_paddle_word_groups",
+    return_value=[],
+)
 def test_extract_cleans_dump_dir_when_debug_false(
     mock_ocr, synthetic_pdf: Path, tmp_path: Path
 ) -> None:
@@ -164,7 +167,10 @@ def test_extract_cleans_dump_dir_when_debug_false(
     mock_ocr.assert_called_once()
 
 
-@patch("raster_parser.parsing.parser.PdfRasterParser.extract_text_from_paddle_word_groups", return_value=[])
+@patch(
+    "raster_parser.parsing.parser.PdfRasterParser.extract_text_from_paddle_word_groups",
+    return_value=[],
+)
 def test_extract_keeps_dump_dir_when_debug_true(
     mock_ocr, synthetic_pdf: Path, tmp_path: Path
 ) -> None:

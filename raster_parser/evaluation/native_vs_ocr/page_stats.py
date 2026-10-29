@@ -64,20 +64,30 @@ class GlyphSummary:
         rate = (100.0 * pass_n / total) if total else 0.0
         char_match_pct = (
             (
-                self.character_match_percentage * self.total_native_characters
-                + other.character_match_percentage * other.total_native_characters
+                (
+                    self.character_match_percentage * self.total_native_characters
+                    + other.character_match_percentage * other.total_native_characters
+                )
+                / total
             )
-            / total
-        ) if total else 0.0
+            if total
+            else 0.0
+        )
         text_chars = self.native_text_characters + other.native_text_characters
         cer_weight = text_chars or total
         cer_pct = (
             (
-                self.cer_percentage * (self.native_text_characters or self.total_native_characters)
-                + other.cer_percentage * (other.native_text_characters or other.total_native_characters)
+                (
+                    self.cer_percentage
+                    * (self.native_text_characters or self.total_native_characters)
+                    + other.cer_percentage
+                    * (other.native_text_characters or other.total_native_characters)
+                )
+                / cer_weight
             )
-            / cer_weight
-        ) if cer_weight else 0.0
+            if cer_weight
+            else 0.0
+        )
         return GlyphSummary(
             total_native_characters=total,
             pass_characters=pass_n,
@@ -144,6 +154,7 @@ class RunStats:
     @property
     def pages_failed(self) -> int:
         return sum(1 for p in self.pages if not p.ok)
+
 
 def load_native_mapping_for_page(page: PageStats) -> Dict[int, Tuple[str, Vector]]:
     """Load ``native_mapping.pkl`` for a page (for viz / offline analysis)."""
@@ -241,9 +252,7 @@ def parse_total_statistics(path: Path) -> tuple[Path, GlyphSummary, dict[tuple[s
         elif line.startswith("exact_match_rate:"):
             summary.exact_match_rate = float(line.split(":", 1)[1].strip().rstrip("%"))
         elif line.startswith("character_match_rate:"):
-            summary.character_match_percentage = float(
-                line.split(":", 1)[1].strip().rstrip("%")
-            )
+            summary.character_match_percentage = float(line.split(":", 1)[1].strip().rstrip("%"))
         elif line.startswith("cer:"):
             summary.cer_percentage = float(line.split(":", 1)[1].strip().rstrip("%"))
         elif line.startswith("ocr_word_rows:"):
@@ -312,18 +321,14 @@ def load_run_from_disk(run_dir: str | Path) -> RunStats:
                 stats, not_ocred = load_stats_from_out_results(out_results)
                 text_chars = page_native_text_char_count(stats, not_ocred)
                 page_summary.native_text_characters = text_chars
-                page_summary.cer_percentage = page_cer_percentage(
-                    stats, not_ocred, text_chars
-                )
+                page_summary.cer_percentage = page_cer_percentage(stats, not_ocred, text_chars)
         elif out_results.is_file():
             stats, not_ocred = load_stats_from_out_results(out_results)
             page_summary = GlyphSummary.from_comparison(stats, not_ocred)
 
         pages.append(
             PageStats(
-                pdf_path=(pdf_dir / pdf_name).resolve()
-                if pdf_dir != Path(".")
-                else Path(pdf_name),
+                pdf_path=(pdf_dir / pdf_name).resolve() if pdf_dir != Path(".") else Path(pdf_name),
                 page_index=page_index,
                 onlyfill_pdf=page_dir / "onlyfill.pdf",
                 ocr_pdf=page_dir / "ocr.pdf",
@@ -360,22 +365,24 @@ def list_run_dirs(runs_root: str | Path) -> List[Path]:
     runs_root = Path(runs_root)
     if not runs_root.is_dir():
         return []
-    runs = [
-        p for p in runs_root.iterdir()
-        if p.is_dir() and (p / "total_statistics.txt").is_file()
-    ]
+    runs = [p for p in runs_root.iterdir() if p.is_dir() and (p / "total_statistics.txt").is_file()]
     return sorted(runs, key=lambda p: p.name, reverse=True)
 
 
 def flatten_page_statistics(run: RunStats) -> List[GlyphSummary]:
     return [p.summary for p in run.pages]
 
+
 def run_character_match_percentage(summaries: List[GlyphSummary]) -> float:
     total_chars = sum(s.total_native_characters for s in summaries)
     return (
-        sum(s.character_match_percentage * s.total_native_characters for s in summaries)
-        / total_chars
-    ) if total_chars else 0.0
+        (
+            sum(s.character_match_percentage * s.total_native_characters for s in summaries)
+            / total_chars
+        )
+        if total_chars
+        else 0.0
+    )
 
 
 def run_cer_percentage(summaries: List[GlyphSummary]) -> float:
@@ -384,9 +391,10 @@ def run_cer_percentage(summaries: List[GlyphSummary]) -> float:
 
     total_chars = sum(_weight(s) for s in summaries)
     return (
-        sum(s.cer_percentage * _weight(s) for s in summaries)
-        / total_chars
-    ) if total_chars else 0.0
+        (sum(s.cer_percentage * _weight(s) for s in summaries) / total_chars)
+        if total_chars
+        else 0.0
+    )
 
 
 def format_total_statistics(run: RunStats) -> str:

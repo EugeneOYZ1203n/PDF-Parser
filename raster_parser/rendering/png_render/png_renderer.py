@@ -38,9 +38,7 @@ def _replay_items_offset(shape: fitz.Shape, items: list, dx: float, dy: float) -
             shape.draw_line(_pt(item[1], dx, dy), _pt(item[2], dx, dy))
         elif op == "re":
             r = fitz.Rect(item[1])
-            shape.draw_rect(
-                fitz.Rect(r.x0 - dx, r.y0 - dy, r.x1 - dx, r.y1 - dy)
-            )
+            shape.draw_rect(fitz.Rect(r.x0 - dx, r.y0 - dy, r.x1 - dx, r.y1 - dy))
         elif op == "qu":
             q = item[1]
             shape.draw_quad(

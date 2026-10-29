@@ -67,17 +67,17 @@ def test_vector_dto_serializes_items(synthetic_pdf: Path) -> None:
 
 def test_native_pdf_elements_round_trip() -> None:
     out = NativePDFElements(
-      words=[TextDTO(x0=0, y0=0, x1=1, y1=1, word="a", block_no=0, line_no=0, word_no=0)],
-      vectors=[
-        VectorDTO(
-          type="s",
-          x0=0,
-          y0=0,
-          x1=10,
-          y1=10,
-          items=[{"op": "re", "args": [[0, 0, 10, 10]]}],
-        )
-      ],
+        words=[TextDTO(x0=0, y0=0, x1=1, y1=1, word="a", block_no=0, line_no=0, word_no=0)],
+        vectors=[
+            VectorDTO(
+                type="s",
+                x0=0,
+                y0=0,
+                x1=10,
+                y1=10,
+                items=[{"op": "re", "args": [[0, 0, 10, 10]]}],
+            )
+        ],
     )
     restored = NativePDFElements.model_validate_json(out.model_dump_json())
     assert restored.words[0].word == "a"

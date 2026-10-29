@@ -39,12 +39,6 @@ class StrokeFillResult:
     q_thresh: float = _DEFAULT_Q_THRESH
 
 
-
-
-
-
-
-
 def is_stroke_like(v: Vector, *, q_thresh: float = _DEFAULT_Q_THRESH) -> bool:
     """True if the path is elongated (stroke-like) by isoperimetric Q."""
     # White hole covers belong with fills (topology), not stroke ink.
@@ -90,12 +84,18 @@ def stroke_fill_parser(
         if strokes:
             stroke_pdf = parent / f"{stem}_colour_strokes.pdf"
             draw_vectors(
-                strokes, stroke_pdf, page_width=page_width, page_height=page_height,
+                strokes,
+                stroke_pdf,
+                page_width=page_width,
+                page_height=page_height,
             )
         if fills:
             fill_pdf = parent / f"{stem}_colour_fills.pdf"
             draw_vectors(
-                fills, fill_pdf, page_width=page_width, page_height=page_height,
+                fills,
+                fill_pdf,
+                page_width=page_width,
+                page_height=page_height,
             )
 
     return StrokeFillResult(

@@ -6,6 +6,7 @@ from raster_parser.models import Vector
 
 _JOIN_EPS = 1e-3
 
+
 def _pt(p: Any) -> tuple[float, float]:
     if hasattr(p, "x"):
         return (float(p.x), float(p.y))
@@ -76,6 +77,7 @@ def _split_loops(items: list) -> list[list[tuple[float, float]]]:
             cur.extend(pts[1:])
     flush()
     return loops
+
 
 def _perimeter(pts: list[tuple[float, float]]) -> float:
     if len(pts) < 2:

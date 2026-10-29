@@ -24,22 +24,40 @@ def main() -> None:
         description="Per-colour mask autotrace + combine (standalone experiment).",
     )
     p.add_argument("png", help="colour drawing PNG (e.g. *_drawing_final.png)")
-    p.add_argument("--out-dir", default=None,
-                   help="write QA / SVG / PDF here (default: beside PNG)")
+    p.add_argument(
+        "--out-dir", default=None, help="write QA / SVG / PDF here (default: beside PNG)"
+    )
     p.add_argument("--dpi", type=int, default=300, help="scale Vector coords by 72/dpi")
-    p.add_argument("--bg-thresh", type=int, default=_DEFAULT_BG_THRESH,
-                   help="RGB channels >= this count as background white")
-    p.add_argument("--group-dist", type=float, default=_DEFAULT_GROUP_DIST,
-                   help=f"max RGB Euclidean distance to merge colours "
-                        f"(default {_DEFAULT_GROUP_DIST:g})")
-    p.add_argument("--min-group-pixels", type=int, default=_DEFAULT_MIN_GROUP_PIXELS,
-                   help=f"drop colour groups smaller than this "
-                        f"(default {_DEFAULT_MIN_GROUP_PIXELS})")
-    p.add_argument("--no-keep-intermediates", dest="keep_intermediates",
-                   action="store_false",
-                   help="delete per-colour mask / isolate PNGs after tracing")
-    p.add_argument("--workers", type=int, default=1,
-                   help="ProcessPool size for per-colour-group autotrace (1 = serial)")
+    p.add_argument(
+        "--bg-thresh",
+        type=int,
+        default=_DEFAULT_BG_THRESH,
+        help="RGB channels >= this count as background white",
+    )
+    p.add_argument(
+        "--group-dist",
+        type=float,
+        default=_DEFAULT_GROUP_DIST,
+        help=f"max RGB Euclidean distance to merge colours (default {_DEFAULT_GROUP_DIST:g})",
+    )
+    p.add_argument(
+        "--min-group-pixels",
+        type=int,
+        default=_DEFAULT_MIN_GROUP_PIXELS,
+        help=f"drop colour groups smaller than this (default {_DEFAULT_MIN_GROUP_PIXELS})",
+    )
+    p.add_argument(
+        "--no-keep-intermediates",
+        dest="keep_intermediates",
+        action="store_false",
+        help="delete per-colour mask / isolate PNGs after tracing",
+    )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="ProcessPool size for per-colour-group autotrace (1 = serial)",
+    )
     args = p.parse_args()
 
     result = colour_fill_autotrace(

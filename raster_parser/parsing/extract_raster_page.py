@@ -75,9 +75,7 @@ def extract_raster_page(
     from raster_parser.delete_natives.delete_native import DEFAULT_OUTPUT_DUMP_DIR
 
     pdf_path = Path(pdf_path)
-    dump_root = (
-        Path(output_dump_dir) if output_dump_dir is not None else DEFAULT_OUTPUT_DUMP_DIR
-    )
+    dump_root = Path(output_dump_dir) if output_dump_dir is not None else DEFAULT_OUTPUT_DUMP_DIR
     dump_root.mkdir(parents=True, exist_ok=True)
     dump = Path(
         tempfile.mkdtemp(
@@ -195,8 +193,7 @@ def extract_raster_page(
     drawing_vectors = list(colour.combined_vectors)
 
     (dump / "ocr.txt").write_text(
-        "\n".join([f"=== TEXT (PaddleOCR @ {dpi} dpi) ===", *(str(t) for t in rec.texts)])
-        + "\n",
+        "\n".join([f"=== TEXT (PaddleOCR @ {dpi} dpi) ===", *(str(t) for t in rec.texts)]) + "\n",
         encoding="utf-8",
     )
     (dump / "vectors.txt").write_text(

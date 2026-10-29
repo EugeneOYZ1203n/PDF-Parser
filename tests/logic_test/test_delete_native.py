@@ -41,7 +41,9 @@ def test_clear_page_uses_dump_dir(tmp_path: Path) -> None:
         out.save(cleared)
         out.close()
 
-    with patch("raster_parser.delete_natives.delete_native.delete_drawing_page", side_effect=_fake_delete):
+    with patch(
+        "raster_parser.delete_natives.delete_native.delete_drawing_page", side_effect=_fake_delete
+    ):
         work_dir, cleared = clear_page(src, 0, dump_dir=dump)
 
     assert work_dir.parent == dump
@@ -67,7 +69,9 @@ def test_delete_drawings_from_pdf_writes_under_dump_dir(tmp_path: Path) -> None:
         out.save(cleared)
         out.close()
 
-    with patch("raster_parser.delete_natives.delete_native.delete_drawing_page", side_effect=_fake_delete):
+    with patch(
+        "raster_parser.delete_natives.delete_native.delete_drawing_page", side_effect=_fake_delete
+    ):
         cleared = delete_drawings_from_pdf(src, num_parallel=1, dump_dir=dump)
 
     assert cleared == dump / "drawing_cleared.pdf"

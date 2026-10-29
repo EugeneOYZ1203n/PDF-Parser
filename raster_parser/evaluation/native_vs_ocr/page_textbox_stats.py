@@ -102,21 +102,25 @@ def format_textbox_statistics(
         "",
     ]
     if total:
-        lines.extend([
-            "=== Run totals ===",
-            f"native_text: {total.total_native_text}",
-            f"correct: {total.correct_total}",
-            f"split: {total.split_total}",
-            f"joint: {total.joint_total}",
-            f"split_score: {total.split_score:.4f}",
-            f"joint_score: {total.joint_score:.4f}",
-            f"f1: {total.f1_score:.4f}",
-            "",
-        ])
-    lines.extend([
-        "=== Per page ===",
-        "pdf | page | native_text | correct | split | joint | split_score | joint_score | f1",
-    ])
+        lines.extend(
+            [
+                "=== Run totals ===",
+                f"native_text: {total.total_native_text}",
+                f"correct: {total.correct_total}",
+                f"split: {total.split_total}",
+                f"joint: {total.joint_total}",
+                f"split_score: {total.split_score:.4f}",
+                f"joint_score: {total.joint_score:.4f}",
+                f"f1: {total.f1_score:.4f}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "=== Per page ===",
+            "pdf | page | native_text | correct | split | joint | split_score | joint_score | f1",
+        ]
+    )
     for p in run.pages:
         tb = textbox_by_page.get((p.pdf_path.name, p.page_index))
         if tb is None:
@@ -169,7 +173,9 @@ def compute_textbox_grouping_for_page(
     return analyze_page_textbox_stats(words, vecs, groups)
 
 
-def _word_vectors(words: List[Text], ordered: List[Vector]) -> Tuple[List[Text], List[List[Vector]]]:
+def _word_vectors(
+    words: List[Text], ordered: List[Vector]
+) -> Tuple[List[Text], List[List[Vector]]]:
     out_w: List[Text] = []
     out_v: List[List[Vector]] = []
     idx = 0
@@ -198,11 +204,7 @@ def _resolve_source_pdf(
         return None
 
     page_dir = Path(page.out_results).parent
-    label = (
-        page_dir.parent.name
-        if page_dir.name.startswith("page_")
-        else page_dir.stem
-    )
+    label = page_dir.parent.name if page_dir.name.startswith("page_") else page_dir.stem
     pdf_name = label if label.endswith(".pdf") else f"{label}.pdf"
     rel = label.replace("__", "/")
     rel_pdf = rel if rel.endswith(".pdf") else f"{rel}.pdf"

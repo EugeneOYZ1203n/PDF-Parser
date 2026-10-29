@@ -46,6 +46,7 @@ def _rec_worker_init(lang: str, min_conf: float) -> None:
     os.environ.setdefault("MKL_NUM_THREADS", "1")
     os.environ.setdefault("FLAGS_use_mkldnn", "0")
     from raster_parser.parsing.text_drawing_parser import make_ocr
+
     _REC_WORKER_OCR = make_ocr(lang, min_conf, use_gpu=False)
 
 
@@ -64,17 +65,23 @@ def _box_rec_job(job: dict) -> dict:
     return {
         "job_id": job["job_id"],
         "bidx": job["bidx"],
-        "x0": job["x0"], "y0": job["y0"], "x1": job["x1"], "y1": job["y1"],
-        "word": word, "conf": float(conf), "rotate": rotate,
+        "x0": job["x0"],
+        "y0": job["y0"],
+        "x1": job["x1"],
+        "y1": job["y1"],
+        "word": word,
+        "conf": float(conf),
+        "rotate": rotate,
         "vertical": job["vertical"],
     }
 
+
 @dataclass
 class RegionOcrResult:
-    texts: list[Text]       # recognized words, bbox in PDF points
-    kept_mask: np.ndarray   # uint8 mask: ink of boxes that passed the confidence gate
-    n_boxes: int            # detection boxes fed in
-    n_text: int             # boxes that recognized as confident text
+    texts: list[Text]  # recognized words, bbox in PDF points
+    kept_mask: np.ndarray  # uint8 mask: ink of boxes that passed the confidence gate
+    n_boxes: int  # detection boxes fed in
+    n_text: int  # boxes that recognized as confident text
 
 
 def _extract_text_conf(res) -> tuple[str, float]:
@@ -83,8 +90,11 @@ def _extract_text_conf(res) -> tuple[str, float]:
     while stack:
         cur = stack.pop()
         if isinstance(cur, (list, tuple)):
-            if (len(cur) >= 2 and isinstance(cur[0], str)
-                    and isinstance(cur[1], (int, float, np.floating))):
+            if (
+                len(cur) >= 2
+                and isinstance(cur[0], str)
+                and isinstance(cur[1], (int, float, np.floating))
+            ):
                 return cur[0], float(cur[1])
             stack.extend(cur)
     return "", 0.0
@@ -93,9 +103,11 @@ def _extract_text_conf(res) -> tuple[str, float]:
 def _recognize(ocr, img_gray) -> tuple[str, float]:
     """Recognition-only PaddleOCR on a single box crop, robust to version differences."""
     img_bgr = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR) if img_gray.ndim == 2 else img_gray
-    for kwargs in ({"det": False, "rec": True, "cls": True},
-                   {"det": False, "cls": True},
-                   {"det": False}):
+    for kwargs in (
+        {"det": False, "rec": True, "cls": True},
+        {"det": False, "cls": True},
+        {"det": False},
+    ):
         try:
             res = paddle_ocr_call(ocr, img_bgr, **kwargs)
         except Exception:
@@ -113,8 +125,12 @@ def _bbox_to_points(x0, y0, x1, y1, to_points, scale) -> tuple[float, float, flo
     """
     if to_points is None:
         return (x0 * scale, y0 * scale, x1 * scale, y1 * scale)
-    corners = [fitz.Point(x0, y0) * to_points, fitz.Point(x1, y0) * to_points,
-               fitz.Point(x1, y1) * to_points, fitz.Point(x0, y1) * to_points]
+    corners = [
+        fitz.Point(x0, y0) * to_points,
+        fitz.Point(x1, y0) * to_points,
+        fitz.Point(x1, y1) * to_points,
+        fitz.Point(x0, y1) * to_points,
+    ]
     xs = [p.x for p in corners]
     ys = [p.y for p in corners]
     return (min(xs), min(ys), max(xs), max(ys))
@@ -150,7 +166,7 @@ def split_words(
     if crop.size == 0:
         return [(x0, y0, x1, y1)]
 
-    col_has_ink = (crop < 250).any(axis=0)          # columns that contain dark glyph ink
+    col_has_ink = (crop < 250).any(axis=0)  # columns that contain dark glyph ink
     cols = np.where(col_has_ink)[0]
     if cols.size == 0:
         return [(x0, y0, x1, y1)]
@@ -169,12 +185,12 @@ def split_words(
         return [(x0, y0, x1, y1)]
 
     gaps = [runs[i + 1][0] - runs[i][1] - 1 for i in range(len(runs) - 1)]
-    thresh = max(2.0, gap_factor * float(np.median(gaps)))   # a bigger-than-usual gap = new word
+    thresh = max(2.0, gap_factor * float(np.median(gaps)))  # a bigger-than-usual gap = new word
 
     words: list[list[tuple[int, int]]] = [[runs[0]]]
     for gap, run in zip(gaps, runs[1:]):
         if gap > thresh:
-            words.append([run])           # gap grew -> start a new word
+            words.append([run])  # gap grew -> start a new word
         else:
             words[-1].append(run)
     if len(words) < 2:
@@ -249,7 +265,7 @@ def _batch_recognize(ocr, crops, batch: int = 256) -> list[tuple[str, float]]:
     rec_fn = getattr(ocr, "text_recognizer", None)
     out: list[tuple[str, float]] = []
     for i in range(0, len(crops), batch):
-        chunk = crops[i:i + batch]
+        chunk = crops[i : i + batch]
         if rec_fn is not None:
             try:
                 res, _ = rec_fn(chunk)
@@ -313,8 +329,9 @@ def _find_glyph_ccs(
     return out
 
 
-def _cc_size_similar(a: _GlyphCc, b: _GlyphCc, *, height_ratio: float = 0.5,
-                       area_ratio: float = 0.3) -> bool:
+def _cc_size_similar(
+    a: _GlyphCc, b: _GlyphCc, *, height_ratio: float = 0.5, area_ratio: float = 0.3
+) -> bool:
     ha, hb = a.h, b.h
     if min(ha, hb) / max(ha, hb) < height_ratio:
         return False
@@ -322,8 +339,9 @@ def _cc_size_similar(a: _GlyphCc, b: _GlyphCc, *, height_ratio: float = 0.5,
     return min(aa, ab) / max(aa, ab) >= area_ratio
 
 
-def _cc_close(a: _GlyphCc, b: _GlyphCc, *, gap_factor: float = 2.5,
-              align_factor: float = 0.6) -> bool:
+def _cc_close(
+    a: _GlyphCc, b: _GlyphCc, *, gap_factor: float = 2.5, align_factor: float = 0.6
+) -> bool:
     """True when two glyph CCs sit on the same text line/column (horizontal or vertical)."""
     ref = max(a.h, b.h, 1)
     gx = max(0, max(a.x0, b.x0) - min(a.x1, b.x1))
@@ -361,10 +379,9 @@ def _cluster_glyph_ccs(
 
     for i in range(n):
         for j in range(i + 1, n):
-            if _cc_size_similar(ccs[i], ccs[j], height_ratio=height_ratio,
-                                area_ratio=area_ratio) and _cc_close(
-                                    ccs[i], ccs[j], gap_factor=gap_factor,
-                                    align_factor=align_factor):
+            if _cc_size_similar(
+                ccs[i], ccs[j], height_ratio=height_ratio, area_ratio=area_ratio
+            ) and _cc_close(ccs[i], ccs[j], gap_factor=gap_factor, align_factor=align_factor):
                 union(i, j)
 
     buckets: dict[int, list[_GlyphCc]] = {}
@@ -381,8 +398,12 @@ def _cluster_glyph_ccs(
 
 
 def _cluster_bbox(grp: list[_GlyphCc]) -> tuple[int, int, int, int]:
-    return (min(c.x0 for c in grp), min(c.y0 for c in grp),
-            max(c.x1 for c in grp), max(c.y1 for c in grp))
+    return (
+        min(c.x0 for c in grp),
+        min(c.y0 for c in grp),
+        max(c.x1 for c in grp),
+        max(c.y1 for c in grp),
+    )
 
 
 def recover_missed_glyphs(
@@ -412,8 +433,13 @@ def recover_missed_glyphs(
     scale = 72.0 / dpi
     cov = np.zeros((H, W), np.uint8)
     for x0, y0, x1, y1 in boxes:
-        cv2.rectangle(cov, (int(x0) - box_margin, int(y0) - box_margin),
-                      (int(x1) + box_margin, int(y1) + box_margin), 255, -1)
+        cv2.rectangle(
+            cov,
+            (int(x0) - box_margin, int(y0) - box_margin),
+            (int(x1) + box_margin, int(y1) + box_margin),
+            255,
+            -1,
+        )
 
     ccs = _find_glyph_ccs(gray, cov, ink_thresh=ink_thresh)
     clusters = _cluster_glyph_ccs(ccs)
@@ -432,7 +458,7 @@ def recover_missed_glyphs(
 
     crops = []
     for x0, y0, x1, y1, _grp in cand:
-        crop = gray[max(0, y0 - pad):min(H, y1 + pad), max(0, x0 - pad):min(W, x1 + pad)]
+        crop = gray[max(0, y0 - pad) : min(H, y1 + pad), max(0, x0 - pad) : min(W, x1 + pad)]
         big = cv2.resize(crop, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
         norm = PdfRasterParser.normalise_crop_for_ocr(big)
         crops.append(cv2.cvtColor(norm, cv2.COLOR_GRAY2BGR) if norm.ndim == 2 else norm)
@@ -447,14 +473,23 @@ def recover_missed_glyphs(
             continue
         n_text += 1
         for cc in grp:
-            sub = gray[cc.y0:cc.y1, cc.x0:cc.x1]
-            kept[cc.y0:cc.y1, cc.x0:cc.x1][sub < ink_thresh] = 255
+            sub = gray[cc.y0 : cc.y1, cc.x0 : cc.x1]
+            kept[cc.y0 : cc.y1, cc.x0 : cc.x1][sub < ink_thresh] = 255
         bx0, by0, bx1, by1 = _bbox_to_points(x0, y0, x1, y1, to_points, scale)
-        texts.append(Text(
-            x0=bx0, y0=by0, x1=bx1, y1=by1, word=word,
-            block_no=-1, line_no=0, word_no=0,
-            rotate=0, glyph_orientation=GlyphOrientation.HORIZONTAL,
-        ))
+        texts.append(
+            Text(
+                x0=bx0,
+                y0=by0,
+                x1=bx1,
+                y1=by1,
+                word=word,
+                block_no=-1,
+                line_no=0,
+                word_no=0,
+                rotate=0,
+                glyph_orientation=GlyphOrientation.HORIZONTAL,
+            )
+        )
     return RegionOcrResult(texts=texts, kept_mask=kept, n_boxes=len(cand), n_text=n_text)
 
 
@@ -521,8 +556,8 @@ def recognize_boxes(
 
         if is_split:
             crop = crop.copy()
-            crop[:, :bx0 - x0] = 255
-            crop[:, bx1 - x0:] = 255
+            crop[:, : bx0 - x0] = 255
+            crop[:, bx1 - x0 :] = 255
             if (crop < 255).sum() == 0:
                 return None
 
@@ -530,13 +565,21 @@ def recognize_boxes(
             cw = cv2.rotate(crop, cv2.ROTATE_90_CLOCKWISE)
             ccw = cv2.rotate(crop, cv2.ROTATE_90_COUNTERCLOCKWISE)
             return {
-                "bidx": bidx, "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+                "bidx": bidx,
+                "x0": x0,
+                "y0": y0,
+                "x1": x1,
+                "y1": y1,
                 "vertical": True,
                 "cw": PdfRasterParser.normalise_crop_for_ocr(cw),
                 "ccw": PdfRasterParser.normalise_crop_for_ocr(ccw),
             }
         return {
-            "bidx": bidx, "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+            "bidx": bidx,
+            "x0": x0,
+            "y0": y0,
+            "x1": x1,
+            "y1": y1,
             "vertical": False,
             "norm": PdfRasterParser.normalise_crop_for_ocr(crop),
         }
@@ -556,16 +599,25 @@ def recognize_boxes(
             else:
                 word, conf = _recognize(ocr, p["norm"])
                 rotate = 0
-            raw_hits.append({
-                "bidx": p["bidx"],
-                "x0": p["x0"], "y0": p["y0"], "x1": p["x1"], "y1": p["y1"],
-                "word": word, "conf": conf, "rotate": rotate,
-                "vertical": p["vertical"],
-            })
+            raw_hits.append(
+                {
+                    "bidx": p["bidx"],
+                    "x0": p["x0"],
+                    "y0": p["y0"],
+                    "x1": p["x1"],
+                    "y1": p["y1"],
+                    "word": word,
+                    "conf": conf,
+                    "rotate": rotate,
+                    "vertical": p["vertical"],
+                }
+            )
     else:
         own_scratch = scratch_dir is None
-        root = Path(scratch_dir) if scratch_dir is not None else Path(
-            tempfile.mkdtemp(prefix="rec_boxes_")
+        root = (
+            Path(scratch_dir)
+            if scratch_dir is not None
+            else Path(tempfile.mkdtemp(prefix="rec_boxes_"))
         )
         root.mkdir(parents=True, exist_ok=True)
         crop_dir = root / "box_crops"
@@ -578,13 +630,18 @@ def recognize_boxes(
                     np.savez_compressed(path, cw=p["cw"], ccw=p["ccw"])
                 else:
                     np.savez_compressed(path, norm=p["norm"])
-                jobs.append({
-                    "job_id": i,
-                    "bidx": p["bidx"],
-                    "x0": p["x0"], "y0": p["y0"], "x1": p["x1"], "y1": p["y1"],
-                    "vertical": p["vertical"],
-                    "crop_path": str(path),
-                })
+                jobs.append(
+                    {
+                        "job_id": i,
+                        "bidx": p["bidx"],
+                        "x0": p["x0"],
+                        "y0": p["y0"],
+                        "x1": p["x1"],
+                        "y1": p["y1"],
+                        "vertical": p["vertical"],
+                        "crop_path": str(path),
+                    }
+                )
 
             ctx = mp.get_context("spawn")
             with ProcessPoolExecutor(
@@ -613,13 +670,17 @@ def recognize_boxes(
         if not word or len(word) < min_len or h["conf"] < min_conf:
             continue
         x0, y0, x1, y1 = h["x0"], h["y0"], h["x1"], h["y1"]
-        orient = (
-            GlyphOrientation.VERTICAL if h["vertical"] else GlyphOrientation.HORIZONTAL
-        )
+        orient = GlyphOrientation.VERTICAL if h["vertical"] else GlyphOrientation.HORIZONTAL
         bpx0, bpy0, bpx1, bpy1 = _bbox_to_points(x0, y0, x1, y1, to_points, scale)
         text = Text(
-            x0=bpx0, y0=bpy0, x1=bpx1, y1=bpy1, word=word,
-            block_no=h["bidx"], line_no=0, word_no=0,
+            x0=bpx0,
+            y0=bpy0,
+            x1=bpx1,
+            y1=bpy1,
+            word=word,
+            block_no=h["bidx"],
+            line_no=0,
+            word_no=0,
             rotate=h["rotate"],
             glyph_orientation=orient,
         )

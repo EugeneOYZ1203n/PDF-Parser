@@ -21,8 +21,8 @@ from raster_parser import extract, NativePDFElements
 
 result = extract("/path/to/drawing.pdf", page_index=0)
 json_str = result.model_dump_json()
-result.words     # list[TextDTO] — native + Type-2 OCR + Type-4 OCR
-result.vectors   # list[VectorDTO] — non-fill drawings + Type-4 colour-fill autotrace
+result.words  # list[TextDTO] — native + Type-2 OCR + Type-4 OCR
+result.vectors  # list[VectorDTO] — non-fill drawings + Type-4 colour-fill autotrace
 ```
 
 ### Parameters

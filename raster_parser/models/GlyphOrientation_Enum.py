@@ -1,5 +1,6 @@
 from enum import Enum
 
+
 class GlyphOrientation(Enum):
     """Deduced text-line orientation for a word group (see ``orientation_of_word_group``)."""
 

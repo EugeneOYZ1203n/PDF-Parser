@@ -3,12 +3,20 @@ import shutil
 from pathlib import Path
 from subprocess import run
 import re
-#import xml.etree.ElementTree as ET
+# import xml.etree.ElementTree as ET
 
 
 def init_config():
     """Run to initialise default configuration for libreoffice."""
-    cmd = ["libreoffice", "--invisible", "--headless", "--norestore", "--nologo", "--nofirststartwizard", "macro:///Standard.Module1.Main"]
+    cmd = [
+        "libreoffice",
+        "--invisible",
+        "--headless",
+        "--norestore",
+        "--nologo",
+        "--nofirststartwizard",
+        "macro:///Standard.Module1.Main",
+    ]
     run(cmd)
 
 
@@ -53,7 +61,7 @@ def register_libreoffice_macro(config_dir_path: str, script_fp: str | Path):
         if f'library:name="{module_name}"' not in xlb_content:
             # Inject our element exactly one line above the closing tag
             insertion = f' <library:element library:name="{module_name}"/>\n</library:library>'
-            xlb_content = xlb_content.replace('</library:library>', insertion)
+            xlb_content = xlb_content.replace("</library:library>", insertion)
 
             with open(script_xlb, "w", encoding="utf-8") as f:
                 f.write(xlb_content)
@@ -83,12 +91,16 @@ def register_libreoffice_macro(config_dir_path: str, script_fp: str | Path):
             if new_xcu != xcu_content:
                 with open(registry_xcu, "w", encoding="utf-8") as f:
                     f.write(new_xcu)
-                print("[*] Success: Updated existing Macro Security in registrymodifications.xcu to Level 1")
+                print(
+                    "[*] Success: Updated existing Macro Security in registrymodifications.xcu to Level 1"
+                )
             else:
-                print("[-] Notice: Macro Security is already at Level 1 in registrymodifications.xcu")
+                print(
+                    "[-] Notice: Macro Security is already at Level 1 in registrymodifications.xcu"
+                )
         else:
             # If it doesn't exist at all, inject it right before the end of the file
-            new_xcu = xcu_content.replace('</oor:items>', f'{security_item}\n</oor:items>')
+            new_xcu = xcu_content.replace("</oor:items>", f"{security_item}\n</oor:items>")
             with open(registry_xcu, "w", encoding="utf-8") as f:
                 f.write(new_xcu)
             print("[*] Success: Appended Macro Security Level 1 to registrymodifications.xcu")

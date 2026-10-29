@@ -88,6 +88,7 @@ def _calculate_vector_transparency(
 
     return result
 
+
 def _transform_vectors_to_matrix(
     vectors: list[VectorDTO],
     matrix: fitz.Matrix,
@@ -152,50 +153,53 @@ def _transform_vectors_to_matrix(
             args = item["args"]
 
             if op == "l":
-                transformed_items.append({
-                    "op": op,
-                    "args": [
-                        transform_point(args[0]),
-                        transform_point(args[1]),
-                    ],
-                })
+                transformed_items.append(
+                    {
+                        "op": op,
+                        "args": [
+                            transform_point(args[0]),
+                            transform_point(args[1]),
+                        ],
+                    }
+                )
 
             elif op == "c":
-                transformed_items.append({
-                    "op": op,
-                    "args": [
-                        transform_point(point)
-                        for point in args
-                    ],
-                })
+                transformed_items.append(
+                    {
+                        "op": op,
+                        "args": [transform_point(point) for point in args],
+                    }
+                )
 
             elif op == "re":
-                transformed_items.append({
-                    "op": op,
-                    "args": [
-                        transform_rect(args[0]),
-                        *args[1:],
-                    ],
-                })
+                transformed_items.append(
+                    {
+                        "op": op,
+                        "args": [
+                            transform_rect(args[0]),
+                            *args[1:],
+                        ],
+                    }
+                )
 
             elif op == "qu":
                 quad = args[0]
 
-                transformed_items.append({
-                    "op": op,
-                    "args": [
-                        [
-                            transform_point(point)
-                            for point in quad
+                transformed_items.append(
+                    {
+                        "op": op,
+                        "args": [
+                            [transform_point(point) for point in quad],
+                            *args[1:],
                         ],
-                        *args[1:],
-                    ],
-                })
+                    }
+                )
 
             else:
                 transformed_items.append(item)
 
         vector.items = transformed_items
+
 
 def extract_vectors_from_png(
     png_path: Path,
@@ -247,6 +251,7 @@ def extract_vectors_from_png(
 
     return [VectorDTO.from_vector(vector) for vector in vectors]
 
+
 def _extract_image_vectors_worker(
     job: tuple[
         int,
@@ -287,6 +292,7 @@ def _extract_image_vectors_worker(
             )
 
     return imgxref, vectors, image_size
+
 
 def get_image_polys(
     doc: fitz.Document,
@@ -364,10 +370,7 @@ def get_image_polys(
     ] = {}
 
     if workers == 1:
-        results = (
-            _extract_image_vectors_worker(job)
-            for job in jobs
-        )
+        results = (_extract_image_vectors_worker(job) for job in jobs)
 
         for imgxref, vectors, image_size in results:
             extracted[imgxref] = (
@@ -430,7 +433,3 @@ def get_image_polys(
         vector_dict[imgxref] = vectors_by_rect
 
     return vector_dict
-
-
-
-

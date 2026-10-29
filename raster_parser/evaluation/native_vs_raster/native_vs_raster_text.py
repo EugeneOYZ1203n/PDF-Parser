@@ -118,8 +118,7 @@ def _ordered_norm_tokens(tokens: list[Text], *, drop_punct: bool) -> list[str]:
         return []
     heights = sorted(max(1.0, t.y1 - t.y0) for t in tokens)
     tol = max(1.0, heights[len(heights) // 2] * 0.5)
-    ordered = sorted(tokens, key=lambda t: (round(((t.y0 + t.y1) / 2) / tol),
-                                            (t.x0 + t.x1) / 2))
+    ordered = sorted(tokens, key=lambda t: (round(((t.y0 + t.y1) / 2) / tol), (t.x0 + t.x1) / 2))
     return [_norm(t.word, drop_punct=drop_punct) for t in ordered]
 
 
@@ -216,22 +215,22 @@ def _same_word_bag(native_norms: list[str], ocr_str: str) -> bool:
 
 @dataclass
 class GroupMatch:
-    native: list[Text]          # native words stitched into this cluster
-    raster: list[Text]          # OCR words stitched into this cluster
-    native_str: str             # stitched native text (normalized, forward reading order)
-    raster_str: str             # stitched OCR text (normalized)
-    same: bool                  # exact string equality after stitching
-    n_chars: int = 0            # native character count (comparison basis)
-    match_chars: int = 0        # positional char matches (best of forward/reverse)
-    edit_chars: int = 0         # edit distance native<->ocr (best of forward/reverse)
-    word_hits: int = 0          # granularity-robust: native words found verbatim in OCR stitch
+    native: list[Text]  # native words stitched into this cluster
+    raster: list[Text]  # OCR words stitched into this cluster
+    native_str: str  # stitched native text (normalized, forward reading order)
+    raster_str: str  # stitched OCR text (normalized)
+    same: bool  # exact string equality after stitching
+    n_chars: int = 0  # native character count (comparison basis)
+    match_chars: int = 0  # positional char matches (best of forward/reverse)
+    edit_chars: int = 0  # edit distance native<->ocr (best of forward/reverse)
+    word_hits: int = 0  # granularity-robust: native words found verbatim in OCR stitch
 
 
 @dataclass
 class ComparisonResult:
-    groups: list[GroupMatch] = field(default_factory=list)   # clusters with both native + OCR
-    missed: list[Text] = field(default_factory=list)         # native, no overlapping OCR
-    extra: list[Text] = field(default_factory=list)          # OCR, no overlapping native
+    groups: list[GroupMatch] = field(default_factory=list)  # clusters with both native + OCR
+    missed: list[Text] = field(default_factory=list)  # native, no overlapping OCR
+    extra: list[Text] = field(default_factory=list)  # OCR, no overlapping native
 
     @property
     def agree(self) -> list[GroupMatch]:
@@ -260,8 +259,8 @@ class ComparisonResult:
         return {
             "native_words": native_words,
             "raster_words": raster_words,
-            "matched": agree + disagree,       # native words that landed in a both-sided cluster
-            "agree": agree,                    # ... whose stitched text matched exactly
+            "matched": agree + disagree,  # native words that landed in a both-sided cluster
+            "agree": agree,  # ... whose stitched text matched exactly
             "disagree": disagree,
             "missed": len(self.missed),
             "extra": len(self.extra),
@@ -352,8 +351,9 @@ class NativeVsRasterText:
                     edit_chars = min(_edit_distance(ns, rs), _edit_distance(ns_rev, rs))
                     # any-order cover already; still take max against reversed OCR stitch
                     # in case OCR split into multiple tokens whose stitch order is odd.
-                    word_hits = max(_greedy_word_hits(native_norms, rs),
-                                    _greedy_word_hits(native_norms, rs_rev))
+                    word_hits = max(
+                        _greedy_word_hits(native_norms, rs), _greedy_word_hits(native_norms, rs_rev)
+                    )
                 else:
                     same = ns == rs or bag_same
                     match_chars = _positional_matches(ns, rs)
@@ -366,12 +366,17 @@ class NativeVsRasterText:
                     edit_chars = 0
                     match_chars = max(match_chars, len(ns))
                 result.groups.append(
-                    GroupMatch(native=natives, raster=rasters,
-                               native_str=ns, raster_str=rs, same=same,
-                               n_chars=len(ns),
-                               match_chars=match_chars,
-                               edit_chars=edit_chars,
-                               word_hits=word_hits)
+                    GroupMatch(
+                        native=natives,
+                        raster=rasters,
+                        native_str=ns,
+                        raster_str=rs,
+                        same=same,
+                        n_chars=len(ns),
+                        match_chars=match_chars,
+                        edit_chars=edit_chars,
+                        word_hits=word_hits,
+                    )
                 )
             elif natives:
                 result.missed.extend(natives)
@@ -425,15 +430,21 @@ def format_report(result: ComparisonResult, *, page_label: str = "") -> str:
 
     agree, disagree = result.agree, result.disagree
     if agree:
-        lines.append(f"=== Agree ({sum(len(g.native) for g in agree)} native words, {len(agree)} groups) ===")
+        lines.append(
+            f"=== Agree ({sum(len(g.native) for g in agree)} native words, {len(agree)} groups) ==="
+        )
         for g in agree:
             lines.append(f"[n={len(g.native)}/{len(g.raster)}] {g.native_str!r}")
         lines.append("")
 
     if disagree:
-        lines.append(f"=== Disagree ({sum(len(g.native) for g in disagree)} native words, {len(disagree)} groups) ===")
+        lines.append(
+            f"=== Disagree ({sum(len(g.native) for g in disagree)} native words, {len(disagree)} groups) ==="
+        )
         for g in disagree:
-            lines.append(f"[n={len(g.native)}/{len(g.raster)}] native={g.native_str!r} ocr={g.raster_str!r}")
+            lines.append(
+                f"[n={len(g.native)}/{len(g.raster)}] native={g.native_str!r} ocr={g.raster_str!r}"
+            )
         lines.append("")
 
     if result.missed:

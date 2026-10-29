@@ -189,9 +189,7 @@ class TextToVector:
                 y2 = cy + args[3] if rel else args[3]
                 nx = cx + args[4] if rel else args[4]
                 ny = cy + args[5] if rel else args[5]
-                items.append(
-                    ("c", apply(cx, cy), apply(x1, y1), apply(x2, y2), apply(nx, ny))
-                )
+                items.append(("c", apply(cx, cy), apply(x1, y1), apply(x2, y2), apply(nx, ny)))
                 cx, cy = nx, ny
 
         return items
@@ -223,9 +221,26 @@ class TextToVector:
             d,
         )
         counts = {
-            "M": 2, "m": 2, "L": 2, "l": 2, "H": 1, "h": 1, "V": 1, "v": 1,
-            "C": 6, "c": 6, "S": 4, "s": 4, "Q": 4, "q": 4, "T": 2, "t": 2,
-            "A": 7, "a": 7, "Z": 0, "z": 0,
+            "M": 2,
+            "m": 2,
+            "L": 2,
+            "l": 2,
+            "H": 1,
+            "h": 1,
+            "V": 1,
+            "v": 1,
+            "C": 6,
+            "c": 6,
+            "S": 4,
+            "s": 4,
+            "Q": 4,
+            "q": 4,
+            "T": 2,
+            "t": 2,
+            "A": 7,
+            "a": 7,
+            "Z": 0,
+            "z": 0,
         }
 
         segments: List[Tuple[str, List[float]]] = []

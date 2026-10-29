@@ -19,7 +19,10 @@ from pathlib import Path
 import pymupdf as pymupdf
 
 from raster_parser.parsing.parser import PdfRasterParser
-from raster_parser.evaluation.native_vs_ocr.text_to_vector import TextToVector, extract_text_from_page
+from raster_parser.evaluation.native_vs_ocr.text_to_vector import (
+    TextToVector,
+    extract_text_from_page,
+)
 from raster_parser.rendering.png_render.png_renderer import PngRenderer, save_rgb
 from raster_parser.ocr.wordgrouping import cluster_by_seqno, convert_vectors_to_glyphs, get_vectors
 

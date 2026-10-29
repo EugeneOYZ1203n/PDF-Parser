@@ -19,6 +19,7 @@ class PaddleOcr:
         use_gpu: bool = False,
     ) -> None:
         from paddleocr import PaddleOCR
+
         self.use_angle_cls = use_angle_cls
         self.use_gpu = use_gpu
         self._ocr = PaddleOCR(
@@ -27,7 +28,7 @@ class PaddleOcr:
             use_gpu=self.use_gpu,
             show_log=False,
             det_limit_side_len=4096,
-            det_limit_type='max',   
+            det_limit_type="max",
             drop_score=drop_score,
         )
 

@@ -34,12 +34,6 @@ _DEFAULT_NOISE_REMOVAL = 0.2
 _DEFAULT_FILTER_ITERATIONS = 1
 
 
-
-
-
-
-
-
 def _scale_point(p: fitz.Point, scale: float) -> fitz.Point:
     return fitz.Point(p.x * scale, p.y * scale)
 
@@ -125,7 +119,7 @@ def _item_points(item: tuple) -> list[fitz.Point]:
 
 
 def _item_start(item: tuple) -> fitz.Point | None:
-    #"where does this segment begin"
+    # "where does this segment begin"
     op = item[0]
     if op in ("l", "c"):
         return item[1]
@@ -138,7 +132,7 @@ def _item_start(item: tuple) -> fitz.Point | None:
 
 
 def _item_end(item: tuple) -> fitz.Point | None:
-    #"where does this segment end"
+    # "where does this segment end"
     op = item[0]
     if op == "l":
         return item[2]
@@ -343,4 +337,3 @@ def autotrace_drawing(
             tmp_dir.rmdir()
         except OSError:
             pass
-

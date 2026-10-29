@@ -12,7 +12,11 @@ from pathlib import Path
 import pymupdf as pymupdf
 
 from raster_parser.parsing.parser import PdfRasterParser
-from raster_parser.evaluation.native_vs_ocr.text_to_vector import TextToVector, extract_text_from_page, text_bbox
+from raster_parser.evaluation.native_vs_ocr.text_to_vector import (
+    TextToVector,
+    extract_text_from_page,
+    text_bbox,
+)
 from raster_parser.rendering.pdf_render.reconstruct import reconstruct
 
 
@@ -86,8 +90,7 @@ def dump(
     for word, char_vectors in zip(words, word_vectors):
         chars = "".join(mapping[v.seqno][0] for v in char_vectors)
         lines_text.append(
-            f"Word {word.word!r} bbox={text_bbox(word)} "
-            f"({len(char_vectors)} glyphs, svg={chars!r})"
+            f"Word {word.word!r} bbox={text_bbox(word)} ({len(char_vectors)} glyphs, svg={chars!r})"
         )
         for vector in char_vectors:
             ch = mapping[vector.seqno][0]

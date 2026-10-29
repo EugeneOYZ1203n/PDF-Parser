@@ -37,9 +37,7 @@ def _coords_to_fitz(value: list | tuple | str) -> fitz.Point | fitz.Rect | fitz.
     if len(value) == 2:
         return fitz.Point(float(value[0]), float(value[1]))
     if len(value) == 4 and all(isinstance(v, (int, float)) for v in value):
-        return fitz.Rect(
-            float(value[0]), float(value[1]), float(value[2]), float(value[3])
-        )
+        return fitz.Rect(float(value[0]), float(value[1]), float(value[2]), float(value[3]))
     if len(value) == 4 and all(isinstance(v, (list, tuple)) for v in value):
         points = [fitz.Point(float(p[0]), float(p[1])) for p in value]
         return fitz.Quad(points[0], points[1], points[2], points[3])

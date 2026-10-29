@@ -39,7 +39,9 @@ def _rect_iou(a: Tuple[float, float, float, float], b: Tuple[float, float, float
     return inter / union if union > 0 else 0.0
 
 
-def _union_rect(rects: List[Tuple[float, float, float, float]]) -> Tuple[float, float, float, float]:
+def _union_rect(
+    rects: List[Tuple[float, float, float, float]],
+) -> Tuple[float, float, float, float]:
     xs0, ys0, xs1, ys1 = zip(*rects)
     return (min(xs0), min(ys0), max(xs1), max(ys1))
 
@@ -61,15 +63,10 @@ def _edit_distance(a: str, b: str) -> int:
     return prev[-1]
 
 
-
 def _text_for_compare(text: str) -> str:
     """Strip whitespace; uppercase ambiguous letters zxcvmskwuop (case-insensitive)."""
     target_chars = set("zxcvmskwuop")
-    return "".join(
-        c.upper() if c.lower() in target_chars else c
-        for c in "".join(text.split())
-    )
-
+    return "".join(c.upper() if c.lower() in target_chars else c for c in "".join(text.split()))
 
 
 def _cer(native: str, ocr: str) -> float:
@@ -155,7 +152,7 @@ class NativeVsOcr:
         native_nums: List[int],
         native_string: str,
         ocr_word: str,
-    ) -> Stats:  
+    ) -> Stats:
         iou = self._bbox_iou(text, native_nums)
         cer = _cer(native_string, ocr_word)
         match = _text_for_compare(native_string) == _text_for_compare(ocr_word)
@@ -222,8 +219,10 @@ def format_stats_report(
         "",
     ]
     not_ocred = not_ocred or []
-    total = total_native_characters if total_native_characters is not None else (
-        len({idx for s in stats for idx in s.native_nums}) + len(not_ocred)
+    total = (
+        total_native_characters
+        if total_native_characters is not None
+        else (len({idx for s in stats for idx in s.native_nums}) + len(not_ocred))
     )
     if total == 0 and not stats and not not_ocred:
         lines.append("(no native glyphs to compare)")
@@ -241,23 +240,25 @@ def format_stats_report(
     fail_rows = [s for s in stats if not s.match and s.native_char]
     empty_ocr_rows = [s for s in stats if not s.native_char]
 
-    lines.extend([
-        "=== Summary (by native character) ===",
-        f"total_native_characters: {total}",
-        f"pass_characters: {pass_chars}",
-        f"failure_characters: {fail_chars}",
-        f"failed_ocr_characters: {failed_ocr_chars}",
-        f"exact_match_characters: {pass_chars}",
-        f"exact_match_rate: {rate:.2f}%",
-        f"character_match_rate: {char_match_pct:.2f}%",
-        f"cer: {cer_pct:.2f}%",
-        "",
-        f"ocr_word_rows: {len(stats)}",
-        f"ocr_rows_pass: {len(pass_rows)}",
-        f"ocr_rows_failure: {len(fail_rows)}",
-        f"ocr_rows_no_native_in_box: {len(empty_ocr_rows)}",
-        "",
-    ])
+    lines.extend(
+        [
+            "=== Summary (by native character) ===",
+            f"total_native_characters: {total}",
+            f"pass_characters: {pass_chars}",
+            f"failure_characters: {fail_chars}",
+            f"failed_ocr_characters: {failed_ocr_chars}",
+            f"exact_match_characters: {pass_chars}",
+            f"exact_match_rate: {rate:.2f}%",
+            f"character_match_rate: {char_match_pct:.2f}%",
+            f"cer: {cer_pct:.2f}%",
+            "",
+            f"ocr_word_rows: {len(stats)}",
+            f"ocr_rows_pass: {len(pass_rows)}",
+            f"ocr_rows_failure: {len(fail_rows)}",
+            f"ocr_rows_no_native_in_box: {len(empty_ocr_rows)}",
+            "",
+        ]
+    )
 
     if pass_rows:
         lines.append(f"=== Pass ({pass_chars} characters, {len(pass_rows)} OCR rows) ===")
@@ -266,9 +267,7 @@ def format_stats_report(
         lines.append("")
 
     if fail_rows:
-        lines.append(
-            f"=== Failure ({fail_chars} characters, {len(fail_rows)} OCR rows) ==="
-        )
+        lines.append(f"=== Failure ({fail_chars} characters, {len(fail_rows)} OCR rows) ===")
         for s in fail_rows:
             lines.append(_format_ocr_line(s))
         lines.append("")
@@ -282,17 +281,15 @@ def format_stats_report(
         lines.append("")
 
     if not_ocred:
-        lines.append(
-            f"=== Failed OCR ({failed_ocr_chars} characters, no OCR word box) ==="
-        )
+        lines.append(f"=== Failed OCR ({failed_ocr_chars} characters, no OCR word box) ===")
         for idx, char in not_ocred:
             lines.append(
-                f"native[{idx}] failed_ocr=True orientation=n/a rotate=n/a "
-                f"native={char!r} ocr=''"
+                f"native[{idx}] failed_ocr=True orientation=n/a rotate=n/a native={char!r} ocr=''"
             )
         lines.append("")
 
     return "\n".join(lines) + "\n"
+
 
 def character_match_percentage(
     stats: List[Stats],
@@ -332,5 +329,3 @@ def cer_percentage(
     for _, char in not_ocred:
         edit_sum += _edit_distance(_text_for_compare(char), "")
     return 100.0 * edit_sum / char_total
-
-

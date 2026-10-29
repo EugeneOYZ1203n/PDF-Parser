@@ -118,14 +118,18 @@ def _extract_impl(
     dump_root: Path,
 ) -> NativePDFElements:
     from raster_parser.parsing.parser import PdfRasterParser
-    from raster_parser.rendering.pdf_render.reconstruct import ocr_rotate_for_target, filter_text_vectors
+    from raster_parser.rendering.pdf_render.reconstruct import (
+        ocr_rotate_for_target,
+        filter_text_vectors,
+    )
     from raster_parser.ocr.wordgrouping import (
         Orientation,
         cluster_by_seqno,
         convert_vectors_to_glyphs,
         get_vectors,
     )
-     # Actual Implementation of the extraction pipeline
+
+    # Actual Implementation of the extraction pipeline
     with PdfRasterParser(str(pdf_path), page_index) as parser:
         native_text = parser.extract_text()
         all_vectors = parser.extract_vectors()

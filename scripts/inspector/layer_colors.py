@@ -36,11 +36,7 @@ def seqno_rainbow_color_map(items: list[OverlayItem]) -> dict[int, str]:
     omitted from the result.
     """
 
-    seqnos = [
-        item.attrs.get("seqno")
-        for item in items
-        if isinstance(item.attrs.get("seqno"), int)
-    ]
+    seqnos = [item.attrs.get("seqno") for item in items if isinstance(item.attrs.get("seqno"), int)]
 
     if not seqnos:
         return {}

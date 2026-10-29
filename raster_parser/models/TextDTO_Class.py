@@ -2,6 +2,7 @@ from pydantic import BaseModel
 
 from raster_parser.models import Text
 
+
 class TextDTO(BaseModel):
     x0: float
     y0: float

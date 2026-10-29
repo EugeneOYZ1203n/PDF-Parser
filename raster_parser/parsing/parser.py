@@ -162,7 +162,6 @@ class PdfRasterParser:
             large_group=large_group,
         ), vector_indices
 
-
     def _paddle_ocr_prepared(
         self,
         prep: _PreparedPaddleGroup,
@@ -222,9 +221,7 @@ class PdfRasterParser:
         out: List[Tuple[Text, List[int]]] = []
 
         for i, (vectors, box) in enumerate(zip(vector_groups, group_boxes)):
-            prepared, vector_indices = self._prepare_paddle_word_group(
-                i, vectors, box, renderer
-            )
+            prepared, vector_indices = self._prepare_paddle_word_group(i, vectors, box, renderer)
             if prepared is None:
                 continue
             text, vector_indices = self._paddle_ocr_prepared(
@@ -251,10 +248,12 @@ class PdfRasterParser:
         return crop
 
     @staticmethod
-    def normalise_crop_for_ocr(crop: np.ndarray, target_height: int = 48, target_width: int = 1024) -> np.ndarray:
+    def normalise_crop_for_ocr(
+        crop: np.ndarray, target_height: int = 48, target_width: int = 1024
+    ) -> np.ndarray:
         if crop.size == 0:
             return crop
-        
+
         h, w = crop.shape[:2]
         if h <= 0 or w <= 0:
             return crop
@@ -262,35 +261,39 @@ class PdfRasterParser:
         # 1. FIX THE IMBALANCE:
         # We want VERY tight vertical padding so the letters fill the height,
         # but GENEROUS horizontal padding so the edges don't clip.
-        pad_h = max(2, int(h * 0.05))   # Only 5% vertical padding (keeps text tall)
+        pad_h = max(2, int(h * 0.05))  # Only 5% vertical padding (keeps text tall)
         pad_w = max(40, int(h * 0.30))  # 30% horizontal padding cushion based on font height
-        
+
         padded_crop = cv2.copyMakeBorder(
-            crop, 
-            top=pad_h, bottom=pad_h, left=pad_w, right=pad_w, 
-            borderType=cv2.BORDER_CONSTANT, 
-            value=[255, 255, 255] if len(crop.shape) == 3 else 255
+            crop,
+            top=pad_h,
+            bottom=pad_h,
+            left=pad_w,
+            right=pad_w,
+            borderType=cv2.BORDER_CONSTANT,
+            value=[255, 255, 255] if len(crop.shape) == 3 else 255,
         )
-        
+
         # Recalculate padded dimensions
         hp, wp = padded_crop.shape[:2]
-        
+
         # 2. PROPORTIONAL ASPECT SCALE (Drop the rigid 320px width restriction!)
         # Let the width expand naturally to accommodate long strings like your image
         scale = target_height / hp
         new_w = max(1, int(wp * scale))
-        
+
         # 3. CRITICAL OVERRIDE: Ensure it fits PaddleOCR's recognition shape ceiling
         # If the text is incredibly long, clamp it to your max target width parameter
         final_w = min(new_w, target_width)
-        
+
         # 4. RESIZE PRESERVING SHAPE GEOMETRY
         if scale > 1.0:
-            resized = cv2.resize(padded_crop, (final_w, target_height), interpolation=cv2.INTER_CUBIC)
+            resized = cv2.resize(
+                padded_crop, (final_w, target_height), interpolation=cv2.INTER_CUBIC
+            )
         else:
-            resized = cv2.resize(padded_crop, (final_w, target_height), interpolation=cv2.INTER_AREA)
-            
-        return resized  
+            resized = cv2.resize(
+                padded_crop, (final_w, target_height), interpolation=cv2.INTER_AREA
+            )
 
-
-    
+        return resized

@@ -73,7 +73,9 @@ def test_vector_from_dto_round_trip(synthetic_pdf: Path) -> None:
 
 
 def test_deserialize_output(tmp_path: Path, synthetic_pdf: Path) -> None:
-    output = extract(synthetic_pdf, page_index=0, ocr_dpi=150, use_angle_cls=False, enable_raster_pass=False)
+    output = extract(
+        synthetic_pdf, page_index=0, ocr_dpi=150, use_angle_cls=False, enable_raster_pass=False
+    )
     words, vectors = deserialize_output(output)
     assert len(words) == len(output.words)
     assert len(vectors) == len(output.vectors)
@@ -81,7 +83,9 @@ def test_deserialize_output(tmp_path: Path, synthetic_pdf: Path) -> None:
 
 
 def test_output_as_dto_json_round_trip(tmp_path: Path, synthetic_pdf: Path) -> None:
-    output = extract(synthetic_pdf, page_index=0, ocr_dpi=150, use_angle_cls=False, enable_raster_pass=False)
+    output = extract(
+        synthetic_pdf, page_index=0, ocr_dpi=150, use_angle_cls=False, enable_raster_pass=False
+    )
     out_json = output_as_dto_json(output, tmp_path / "output.json")
     assert out_json.is_file()
     restored = NativePDFElements.model_validate_json(out_json.read_text(encoding="utf-8"))
@@ -91,7 +95,9 @@ def test_output_as_dto_json_round_trip(tmp_path: Path, synthetic_pdf: Path) -> N
 
 
 def test_reconstruct_from_extract_output(tmp_path: Path, synthetic_pdf: Path) -> None:
-    output = extract(synthetic_pdf, page_index=0, ocr_dpi=150, use_angle_cls=False, enable_raster_pass=False)
+    output = extract(
+        synthetic_pdf, page_index=0, ocr_dpi=150, use_angle_cls=False, enable_raster_pass=False
+    )
     result = reconstruct_from_output(
         output,
         out_txt_words=tmp_path / "words.txt",
@@ -107,7 +113,9 @@ def test_reconstruct_from_extract_output(tmp_path: Path, synthetic_pdf: Path) ->
 
 
 def test_reconstruct_from_json_dtos(tmp_path: Path, synthetic_pdf: Path) -> None:
-    output = extract(synthetic_pdf, page_index=0, ocr_dpi=150, use_angle_cls=False, enable_raster_pass=False)
+    output = extract(
+        synthetic_pdf, page_index=0, ocr_dpi=150, use_angle_cls=False, enable_raster_pass=False
+    )
     payload = json.loads(output.model_dump_json())
     words = [TextDTO.model_validate(w) for w in payload["words"]]
     vectors = [VectorDTO.model_validate(v) for v in payload["vectors"]]
@@ -124,7 +132,9 @@ def test_reconstruct_from_json_dtos(tmp_path: Path, synthetic_pdf: Path) -> None
 
 
 def test_draw_vectors_writes_pdf(tmp_path: Path, synthetic_pdf: Path) -> None:
-    output = extract(synthetic_pdf, page_index=0, ocr_dpi=150, use_angle_cls=False, enable_raster_pass=False)
+    output = extract(
+        synthetic_pdf, page_index=0, ocr_dpi=150, use_angle_cls=False, enable_raster_pass=False
+    )
     result = reconstruct_from_output(
         output,
         out_txt_words=tmp_path / "words.txt",

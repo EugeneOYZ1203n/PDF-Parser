@@ -15,7 +15,9 @@ from raster_parser.models import TextDTO, NativePDFElements, VectorDTO
 
 
 def test_deserialize_text_from_json(synthetic_pdf: Path) -> None:
-    output = extract(synthetic_pdf, page_index=0, ocr_dpi=150, use_angle_cls=False, enable_raster_pass=False)
+    output = extract(
+        synthetic_pdf, page_index=0, ocr_dpi=150, use_angle_cls=False, enable_raster_pass=False
+    )
     payload = json.loads(output.words[0].model_dump_json())
     text = deserialize_text(TextDTO.model_validate(payload))
     assert text.word == output.words[0].word
@@ -33,7 +35,9 @@ def test_deserialize_vector_from_json(synthetic_pdf: Path) -> None:
 
 
 def test_deserialize_lists(synthetic_pdf: Path) -> None:
-    output = extract(synthetic_pdf, page_index=0, ocr_dpi=150, use_angle_cls=False, enable_raster_pass=False)
+    output = extract(
+        synthetic_pdf, page_index=0, ocr_dpi=150, use_angle_cls=False, enable_raster_pass=False
+    )
     payload = NativePDFElements.model_validate_json(output.model_dump_json())
     words, vectors = deserialize(payload.words, payload.vectors)
     assert len(words) == len(payload.words)

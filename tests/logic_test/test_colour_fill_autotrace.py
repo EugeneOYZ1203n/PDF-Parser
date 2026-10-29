@@ -127,17 +127,13 @@ def test_label_map_and_exclusive_masks_partition_ink() -> None:
     for i, g in enumerate(groups):
         assert (labels == i).sum() > 0
 
-    masks = colour_masks_exclusive(
-        bgr, groups, dist_thresh=150.0, bg_thresh=250, chunk_rows=8
-    )
+    masks = colour_masks_exclusive(bgr, groups, dist_thresh=150.0, bg_thresh=250, chunk_rows=8)
     assert set(masks) == {g.label for g in groups}
     # Exclusive: no pixel in two masks.
     stacked = np.stack([masks[g.label].astype(np.int32) for g in groups], axis=0)
     assert int(stacked.sum(axis=0).max()) <= 1
     # Every ink pixel assigned.
-    ink = ~(
-        (bgr[:, :, 0] >= 250) & (bgr[:, :, 1] >= 250) & (bgr[:, :, 2] >= 250)
-    )
+    ink = ~((bgr[:, :, 0] >= 250) & (bgr[:, :, 1] >= 250) & (bgr[:, :, 2] >= 250))
     assert bool(np.all(stacked.sum(axis=0)[ink] == 1))
 
 

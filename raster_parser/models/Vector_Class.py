@@ -14,6 +14,7 @@ def _as_rect_tuple(r: Any) -> tuple[float, float, float, float]:
         return (float(r[0]), float(r[1]), float(r[2]), float(r[3]))
     return (0.0, 0.0, 0.0, 0.0)
 
+
 def _as_line_cap(value: Any) -> Optional[Tuple[int, int, int]]:
     if value is None:
         return None
@@ -23,6 +24,7 @@ def _as_line_cap(value: Any) -> Optional[Tuple[int, int, int]]:
         i = int(value)
         return (i, i, i)
     return None
+
 
 @dataclass
 class Vector:
@@ -34,6 +36,7 @@ class Vector:
     Also maps stroke extras that appear in the base dict: ``lineCap``, ``lineJoin``.
     ``rect`` is a plain 4-tuple ``(x0, y0, x1, y1)``.
     """
+
     items: List[Any]
     type: str
     rect: tuple

@@ -6,6 +6,7 @@ from raster_parser.models import Vector
 # Join tolerance (SVG/PDF units before dpi scale; ~pixels from autotrace).
 _STROKE_JOIN_EPS = 0.05
 
+
 def _item_points(item: tuple) -> list[pymupdf.Point]:
     """give me every coordinate point involved in this segment" (used to compute bounding boxes)."""
     op = item[0]
@@ -23,7 +24,7 @@ def _item_points(item: tuple) -> list[pymupdf.Point]:
 
 
 def _item_start(item: tuple) -> pymupdf.Point | None:
-    #"where does this segment begin"
+    # "where does this segment begin"
     op = item[0]
     if op in ("l", "c"):
         return item[1]
@@ -36,7 +37,7 @@ def _item_start(item: tuple) -> pymupdf.Point | None:
 
 
 def _item_end(item: tuple) -> pymupdf.Point | None:
-    #"where does this segment end"
+    # "where does this segment end"
     op = item[0]
     if op == "l":
         return item[2]

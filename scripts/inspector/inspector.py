@@ -56,9 +56,7 @@ from scripts.inspector.overlay_canvas import ItemColor, PageView
 # This file lives at scripts/inspector/inspector.py -- two dirname() calls
 # from its own directory reach the repo root (inspector -> scripts -> repo
 # root).
-_REPO_ROOT = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-)
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 if __name__ == "__main__" and __package__ is None:
     # Allow running this file directly (`python scripts/inspector/
@@ -474,10 +472,7 @@ class InspectorApp:
 
             color: ItemColor = layer.color
 
-            if (
-                layer_key == "drawings"
-                and self.control_panel.is_seqno_rainbow_enabled()
-            ):
+            if layer_key == "drawings" and self.control_panel.is_seqno_rainbow_enabled():
                 color = seqno_rainbow_colorer(
                     items,
                     layer.color,

@@ -60,13 +60,16 @@ def line_mask(bw: np.ndarray, line_min: int, grow: int, threshold: int, max_gap:
         cv2.morphologyEx(bw, cv2.MORPH_OPEN, h_kernel),
         cv2.morphologyEx(bw, cv2.MORPH_OPEN, v_kernel),
     )
-    segs = cv2.HoughLinesP(bw, 1, np.pi / 180, threshold, minLineLength=line_min, maxLineGap=max_gap)
+    segs = cv2.HoughLinesP(
+        bw, 1, np.pi / 180, threshold, minLineLength=line_min, maxLineGap=max_gap
+    )
     if segs is not None:
         # OpenCV may return (N, 1, 4) or (N, 4) depending on build/version.
         for x1, y1, x2, y2 in np.asarray(segs).reshape(-1, 4):
             cv2.line(lines, (int(x1), int(y1)), (int(x2), int(y2)), 255, thickness=grow)
     lines = cv2.dilate(lines, cv2.getStructuringElement(cv2.MORPH_RECT, (grow, grow)))
     return cv2.bitwise_and(lines, bw)
+
 
 def remove_lines_for_ocr(rgb: np.ndarray, lines: np.ndarray, mode: str) -> np.ndarray:
     """Return a DETECTION-ONLY copy of `rgb` with the line mask cleaned off, so PaddleOCR's
@@ -99,8 +102,14 @@ def _boxes_from_result(raw, min_conf, ox, oy):
             if not isinstance(rec, (list, tuple)) or len(rec) < 2 or float(rec[1]) < min_conf:
                 continue
             arr = np.asarray(box, dtype=np.float64)
-            out.append((int(arr[:, 0].min()) + ox, int(arr[:, 1].min()) + oy,
-                        int(arr[:, 0].max()) + ox, int(arr[:, 1].max()) + oy))
+            out.append(
+                (
+                    int(arr[:, 0].min()) + ox,
+                    int(arr[:, 1].min()) + oy,
+                    int(arr[:, 0].max()) + ox,
+                    int(arr[:, 1].max()) + oy,
+                )
+            )
     return out
 
 
@@ -115,8 +124,9 @@ def merge_boxes(boxes, gap=0):
         while merged:
             merged, rest = False, []
             for b in boxes:
-                if not (a[2] + gap < b[0] or b[2] + gap < a[0]
-                        or a[3] + gap < b[1] or b[3] + gap < a[1]):
+                if not (
+                    a[2] + gap < b[0] or b[2] + gap < a[0] or a[3] + gap < b[1] or b[3] + gap < a[1]
+                ):
                     a = [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
                     merged = True
                 else:
@@ -163,10 +173,7 @@ def filter_boxes_by_min_area(boxes, min_area: int):
     """
     if min_area <= 0:
         return [tuple(b) for b in boxes]
-    return [
-        tuple(b) for b in boxes
-        if (b[2] - b[0]) * (b[3] - b[1]) >= min_area
-    ]
+    return [tuple(b) for b in boxes if (b[2] - b[0]) * (b[3] - b[1]) >= min_area]
 
 
 def make_ocr(lang: str, min_conf: float, *, use_gpu: bool = True):
@@ -177,14 +184,32 @@ def make_ocr(lang: str, min_conf: float, *, use_gpu: bool = True):
     # OneDNN multi-thread inference has been observed to SIGSEGV; keep it off for safety.
     os.environ.setdefault("FLAGS_use_mkldnn", "0")
     from paddleocr import PaddleOCR
-    return PaddleOCR(use_angle_cls=True, lang=lang, show_log=False, use_gpu=use_gpu,
-                     det_db_box_thresh=0.6, det_limit_side_len=9000,
-                     det_db_unclip_ratio=1.0, det_db_thresh=0.3,
-                     det_limit_type="max", drop_score=min_conf)
+
+    return PaddleOCR(
+        use_angle_cls=True,
+        lang=lang,
+        show_log=False,
+        use_gpu=use_gpu,
+        det_db_box_thresh=0.6,
+        det_limit_side_len=9000,
+        det_db_unclip_ratio=1.0,
+        det_db_thresh=0.3,
+        det_limit_type="max",
+        drop_score=min_conf,
+    )
 
 
-def ocr_boxes(rgb: np.ndarray, min_conf: float, lang: str, tile: int, overlap: int,
-              ocr=None, *, workers: int = 1, scratch_dir: str | Path | None = None):
+def ocr_boxes(
+    rgb: np.ndarray,
+    min_conf: float,
+    lang: str,
+    tile: int,
+    overlap: int,
+    ocr=None,
+    *,
+    workers: int = 1,
+    scratch_dir: str | Path | None = None,
+):
     """Text boxes [(x0,y0,x1,y1), ...] via PaddleOCR.
 
     PaddleOCR downscales any side > det_limit_side_len before detection, so on a big
@@ -201,8 +226,9 @@ def ocr_boxes(rgb: np.ndarray, min_conf: float, lang: str, tile: int, overlap: i
     H, W = rgb.shape[:2]
     if tile <= 0 or (W <= tile and H <= tile):
         return merge_boxes(
-            _boxes_from_result(paddle_ocr_call(ocr, np.ascontiguousarray(rgb), cls=True),
-                               min_conf, 0, 0)
+            _boxes_from_result(
+                paddle_ocr_call(ocr, np.ascontiguousarray(rgb), cls=True), min_conf, 0, 0
+            )
         )
 
     step = max(1, tile - overlap)
@@ -214,17 +240,17 @@ def ocr_boxes(rgb: np.ndarray, min_conf: float, lang: str, tile: int, overlap: i
     if n_workers == 1 or len(coords) <= 1:
         boxes: list = []
         for oy, ox in coords:
-            crop = np.ascontiguousarray(rgb[oy:min(oy + tile, H), ox:min(ox + tile, W)])
+            crop = np.ascontiguousarray(rgb[oy : min(oy + tile, H), ox : min(ox + tile, W)])
             if crop.size == 0:
                 continue
-            boxes += _boxes_from_result(
-                paddle_ocr_call(ocr, crop, cls=True), min_conf, ox, oy
-            )
+            boxes += _boxes_from_result(paddle_ocr_call(ocr, crop, cls=True), min_conf, ox, oy)
         return merge_boxes(boxes)
 
     own_scratch = scratch_dir is None
-    root = Path(scratch_dir) if scratch_dir is not None else Path(
-        tempfile.mkdtemp(prefix="det_tiles_")
+    root = (
+        Path(scratch_dir)
+        if scratch_dir is not None
+        else Path(tempfile.mkdtemp(prefix="det_tiles_"))
     )
     root.mkdir(parents=True, exist_ok=True)
     tile_dir = root / "tiles"
@@ -233,17 +259,19 @@ def ocr_boxes(rgb: np.ndarray, min_conf: float, lang: str, tile: int, overlap: i
     jobs: list[dict] = []
     try:
         for i, (oy, ox) in enumerate(coords):
-            crop = rgb[oy:min(oy + tile, H), ox:min(ox + tile, W)]
+            crop = rgb[oy : min(oy + tile, H), ox : min(ox + tile, W)]
             if crop.size == 0:
                 continue
             path = tile_dir / f"t{i:05d}.png"
             cv2.imwrite(str(path), cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
-            jobs.append({
-                "crop_path": str(path),
-                "ox": ox,
-                "oy": oy,
-                "min_conf": float(min_conf),
-            })
+            jobs.append(
+                {
+                    "crop_path": str(path),
+                    "ox": ox,
+                    "oy": oy,
+                    "min_conf": float(min_conf),
+                }
+            )
 
         boxes = []
         ctx = mp.get_context("spawn")
@@ -278,8 +306,7 @@ def _rotate_image(rgb: np.ndarray, angle: float):
     nw, nh = int(h * sin + w * cos), int(h * cos + w * sin)
     M[0, 2] += nw / 2.0 - cx
     M[1, 2] += nh / 2.0 - cy
-    rotated = cv2.warpAffine(rgb, M, (nw, nh), flags=cv2.INTER_LINEAR,
-                             borderValue=(255, 255, 255))
+    rotated = cv2.warpAffine(rgb, M, (nw, nh), flags=cv2.INTER_LINEAR, borderValue=(255, 255, 255))
     return rotated, M
 
 
@@ -288,13 +315,22 @@ def _map_box_back(box, Minv) -> tuple:
     inverse affine, returning the axis-aligned bbox of the four mapped corners."""
     x0, y0, x1, y1 = box
     corners = np.array([[x0, y0, 1], [x1, y0, 1], [x1, y1, 1], [x0, y1, 1]], dtype=np.float64)
-    pts = corners @ Minv.T                       # 4x2 in original coords
+    pts = corners @ Minv.T  # 4x2 in original coords
     xs, ys = pts[:, 0], pts[:, 1]
     return (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
 
 
-def ocr_boxes_rotated(rgb: np.ndarray, min_conf: float, lang: str, tile: int, overlap: int,
-                      ocr=None, *, workers: int = 1, scratch_dir: str | Path | None = None):
+def ocr_boxes_rotated(
+    rgb: np.ndarray,
+    min_conf: float,
+    lang: str,
+    tile: int,
+    overlap: int,
+    ocr=None,
+    *,
+    workers: int = 1,
+    scratch_dir: str | Path | None = None,
+):
     """Upright OCR plus a fixed 90° CCW pass for vertical labels.
 
     Rotates the page 90° CCW, runs detection, maps boxes back to the original frame,
@@ -303,8 +339,11 @@ def ocr_boxes_rotated(rgb: np.ndarray, min_conf: float, lang: str, tile: int, ov
     """
     if ocr is None:
         ocr = make_ocr(lang, min_conf)
-    boxes = list(ocr_boxes(rgb, min_conf, lang, tile, overlap, ocr=ocr,
-                           workers=workers, scratch_dir=scratch_dir))
+    boxes = list(
+        ocr_boxes(
+            rgb, min_conf, lang, tile, overlap, ocr=ocr, workers=workers, scratch_dir=scratch_dir
+        )
+    )
     rot, M = _rotate_image(rgb, 90.0)
     Minv = cv2.invertAffineTransform(M)
     # Separate scratch subtree so upright/rotated spills do not collide.
@@ -312,8 +351,9 @@ def ocr_boxes_rotated(rgb: np.ndarray, min_conf: float, lang: str, tile: int, ov
     if scratch_dir is not None:
         rot_scratch = Path(scratch_dir) / "rot90"
         rot_scratch.mkdir(parents=True, exist_ok=True)
-    for b in ocr_boxes(rot, min_conf, lang, tile, overlap, ocr=ocr,
-                       workers=workers, scratch_dir=rot_scratch):
+    for b in ocr_boxes(
+        rot, min_conf, lang, tile, overlap, ocr=ocr, workers=workers, scratch_dir=rot_scratch
+    ):
         boxes.append(_map_box_back(b, Minv))
     return merge_boxes(boxes)
 
@@ -345,12 +385,12 @@ def nonwhite_ink_in_boxes(gray, boxes, *, margin: int = 0, thresh: int = 250) ->
 
 @dataclass
 class OcrParseResult:
-    drawing: np.ndarray   # uint8 grayscale: text erased -> white, lines/drawing kept
-    text: np.ndarray      # uint8 mask, text ink = 255 on 0 background
-    text_gray: np.ndarray # uint8 grayscale: original ink where text, white elsewhere
-    lines: np.ndarray     # uint8 mask, line ink = 255 on 0 background
-    binary: np.ndarray    # uint8 mask, all ink = 255 on 0 background
-    boxes: list           # OCR boxes [(x0, y0, x1, y1), ...]
+    drawing: np.ndarray  # uint8 grayscale: text erased -> white, lines/drawing kept
+    text: np.ndarray  # uint8 mask, text ink = 255 on 0 background
+    text_gray: np.ndarray  # uint8 grayscale: original ink where text, white elsewhere
+    lines: np.ndarray  # uint8 mask, line ink = 255 on 0 background
+    binary: np.ndarray  # uint8 mask, all ink = 255 on 0 background
+    boxes: list  # OCR boxes [(x0, y0, x1, y1), ...]
 
     @property
     def n_boxes(self) -> int:
@@ -413,18 +453,29 @@ class OcrTextDrawingParser:
         ``scratch_dir``: spill dir for process-pool tile crops when ``workers > 1``.
         """
         gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB) if image.ndim == 2 \
+        rgb = (
+            cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+            if image.ndim == 2
             else cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        )
 
         bw = binarize(gray)
-        lines = line_mask(bw, self.line_min, self.line_grow, self.hough_threshold, self.hough_max_gap)
+        lines = line_mask(
+            bw, self.line_min, self.line_grow, self.hough_threshold, self.hough_max_gap
+        )
         # Detection-only: strip the line mask so lines crossing labels don't break OCR detection.
         # Boxes come back in the SAME coordinates; erasing/outputs still use the original arrays.
         ocr_rgb = remove_lines_for_ocr(rgb, lines, self.ocr_line_removal)
         ocr = self._get_ocr()
         boxes = ocr_boxes_rotated(
-            ocr_rgb, self.min_conf, self.lang, self.tile, self.tile_overlap,
-            ocr=ocr, workers=self.workers, scratch_dir=scratch_dir,
+            ocr_rgb,
+            self.min_conf,
+            self.lang,
+            self.tile,
+            self.tile_overlap,
+            ocr=ocr,
+            workers=self.workers,
+            scratch_dir=scratch_dir,
         )
         boxes = filter_boxes_by_min_area(boxes, self.min_box_area)
 
@@ -437,5 +488,6 @@ class OcrTextDrawingParser:
         drawing[erase] = 255
         text_gray = np.full_like(gray, 255)
         text_gray[text == 255] = gray[text == 255]
-        return OcrParseResult(drawing=drawing, text=text, text_gray=text_gray,
-                              lines=lines, binary=bw, boxes=boxes)
+        return OcrParseResult(
+            drawing=drawing, text=text, text_gray=text_gray, lines=lines, binary=bw, boxes=boxes
+        )

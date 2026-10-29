@@ -25,12 +25,13 @@ from raster_parser.autotrace.drawing_colour_fill_autotrace import (
 from raster_parser.archive.stroke_fill_parser import stroke_fill_parser
 
 
-def load_colour_vectors_json(path: Path | str) -> tuple[list, float | None, float | None, str | None]:
+def load_colour_vectors_json(
+    path: Path | str,
+) -> tuple[list, float | None, float | None, str | None]:
     """Load vectors + page size from a colour vectors JSON dump."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     vectors = [
-        deserialize_vector(VectorDTO.model_validate(row))
-        for row in data.get("vectors") or []
+        deserialize_vector(VectorDTO.model_validate(row)) for row in data.get("vectors") or []
     ]
     page_w = data.get("page_width")
     page_h = data.get("page_height")
@@ -107,10 +108,7 @@ def main() -> None:
         write_pdfs=True,
     )
 
-    print(
-        f"Q<{sf.q_thresh:g}: strokes={len(sf.stroke_vectors)} "
-        f"fills={len(sf.fill_vectors)}"
-    )
+    print(f"Q<{sf.q_thresh:g}: strokes={len(sf.stroke_vectors)} fills={len(sf.fill_vectors)}")
     if sf.stroke_pdf_path is not None:
         print(f"strokes pdf: {sf.stroke_pdf_path}")
     if sf.fill_pdf_path is not None:

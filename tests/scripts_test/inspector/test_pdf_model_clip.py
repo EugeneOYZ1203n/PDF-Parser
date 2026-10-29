@@ -26,9 +26,7 @@ def _png(gray: bool) -> bytes:
 def clipped_page():
     # Clip to a 100x50 rect (PDF y-up at y=10 -> page-space y 240..290),
     # then stroke a diagonal line through it.
-    doc, page = _page_with_content(
-        b"q 10 10 100 50 re W n 0 0 1 RG 0 0 m 200 200 l S Q"
-    )
+    doc, page = _page_with_content(b"q 10 10 100 50 re W n 0 0 1 RG 0 0 m 200 200 l S Q")
     yield page
     doc.close()
 
@@ -79,9 +77,7 @@ def test_plain_page_has_no_clip_masks():
 def test_mask_source_filter():
     doc = fitz.open()
     page = doc.new_page(width=300, height=300)
-    page.insert_image(
-        fitz.Rect(20, 30, 120, 130), stream=_png(gray=False), mask=_png(gray=True)
-    )
+    page.insert_image(fitz.Rect(20, 30, 120, 130), stream=_png(gray=False), mask=_png(gray=True))
     items = pdf_model.extract_clip_mask_items(page)
 
     assert len(filter_items(items, {"mask_source": {"soft_mask"}})) == 1

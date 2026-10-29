@@ -320,7 +320,9 @@ def colour_masks_exclusive(
     chunk_rows: int = 512,
 ) -> dict[int, np.ndarray]:
     """Exclusive bool masks keyed by ``ColourGroup.label`` (−1 background omitted)."""
-    lab = _label_map(bgr, groups, dist_thresh=dist_thresh, bg_thresh=bg_thresh, chunk_rows=chunk_rows)
+    lab = _label_map(
+        bgr, groups, dist_thresh=dist_thresh, bg_thresh=bg_thresh, chunk_rows=chunk_rows
+    )
     # Build one mask at a time so peak RAM stays ~1 page of bools, not N pages.
     out: dict[int, np.ndarray] = {}
     for i, g in enumerate(groups):
@@ -346,7 +348,7 @@ def save_palette_preview(groups: list[ColourGroup], out: Path, *, swatch: int = 
         img = np.full((swatch, swatch * len(groups), 3), 255, dtype=np.uint8)
         for i, g in enumerate(groups):
             r, gv, b = _stamp_rgb(g)
-            img[:, i * swatch:(i + 1) * swatch] = (b, gv, r)
+            img[:, i * swatch : (i + 1) * swatch] = (b, gv, r)
     cv2.imwrite(str(out), img)
     return out
 
@@ -380,17 +382,21 @@ def _is_white_fill(v: Vector, *, thresh: float = 0.98) -> bool:
 
 
 def _covers_most_of_page(
-    v: Vector, page_w: float, page_h: float, *, cover: float = 0.95,
+    v: Vector,
+    page_w: float,
+    page_h: float,
+    *,
+    cover: float = 0.95,
 ) -> bool:
     x0, y0, x1, y1 = v.rect
     return max(0.0, x1 - x0) * max(0.0, y1 - y0) >= cover * page_w * page_h
 
 
 # Full-page wash vs border frame (tightened to keep side grids).
-_WASH_COVER = 0.95           # was 0.85 — tall side strips less often match
+_WASH_COVER = 0.95  # was 0.85 — tall side strips less often match
 _WASH_MAX_SIMPLE_ITEMS = 8
-_WASH_Q_MIN = 0.20           # compact solid
-_WASH_MIN_SOLIDITY = 0.35    # path_area / bbox_area; below → thin frame, keep
+_WASH_Q_MIN = 0.20  # compact solid
+_WASH_MIN_SOLIDITY = 0.35  # path_area / bbox_area; below → thin frame, keep
 _WASH_SOLID_SOLIDITY = 0.85  # very filled bbox → solid wash even if many items
 
 
@@ -463,17 +469,30 @@ def _stamp_group_vectors(
         seqno = seq_base + len(out)
         if _is_white_fill(v):
             # Hole cover: stay white so hollow shapes don't become solid black.
-            out.append(replace(
-                v, fill=(1.0, 1.0, 1.0), color=None, width=0.0,
-                fill_opacity=1.0, seqno=seqno, layer=layer,
-            ))
+            out.append(
+                replace(
+                    v,
+                    fill=(1.0, 1.0, 1.0),
+                    color=None,
+                    width=0.0,
+                    fill_opacity=1.0,
+                    seqno=seqno,
+                    layer=layer,
+                )
+            )
         else:
-            out.append(replace(
-                v,
-                type="f" if v.type in ("f", "fs") else v.type,
-                fill=fill, color=None, width=0.0,
-                fill_opacity=1.0, seqno=seqno, layer=layer,
-            ))
+            out.append(
+                replace(
+                    v,
+                    type="f" if v.type in ("f", "fs") else v.type,
+                    fill=fill,
+                    color=None,
+                    width=0.0,
+                    fill_opacity=1.0,
+                    seqno=seqno,
+                    layer=layer,
+                )
+            )
     return out
 
 
@@ -536,8 +555,10 @@ def colour_fill_autotrace(
     t0 = time.perf_counter()
     bgr = _load_bgr(src)
     h, w = bgr.shape[:2]
-    print(f"[colour] load {src.name} {w}x{h} ({time.perf_counter() - t0:.2f}s) -> {colour_dir}",
-          flush=True)
+    print(
+        f"[colour] load {src.name} {w}x{h} ({time.perf_counter() - t0:.2f}s) -> {colour_dir}",
+        flush=True,
+    )
 
     t0 = time.perf_counter()
     uniq, counts = unique_colours(bgr, bg_thresh=bg_thresh)
@@ -555,10 +576,14 @@ def colour_fill_autotrace(
     palette_path = save_palette_preview(groups, colour_dir / f"{out_stem}_colour_palette.png")
     t0 = time.perf_counter()
     lab = _label_map(bgr, groups, dist_thresh=group_dist, bg_thresh=bg_thresh)
-    stamps = np.array(
-        [(_stamp_rgb(g)[2], _stamp_rgb(g)[1], _stamp_rgb(g)[0]) for g in groups],
-        dtype=np.uint8,
-    ) if groups else np.zeros((0, 3), dtype=np.uint8)
+    stamps = (
+        np.array(
+            [(_stamp_rgb(g)[2], _stamp_rgb(g)[1], _stamp_rgb(g)[0]) for g in groups],
+            dtype=np.uint8,
+        )
+        if groups
+        else np.zeros((0, 3), dtype=np.uint8)
+    )
     centroid = np.full_like(bgr, 255)
     if groups:
         hit = lab >= 0
@@ -611,16 +636,26 @@ def colour_fill_autotrace(
         t_iso = time.perf_counter() - t0
         del mask
 
-        jobs.append({
-            "label": group.label, "tag": tag,
-            "mask_path": str(mask_path), "svg_path": str(svg_path),
-            "pdf_path": str(pdf_path), "scratch_dir": str(scratch / tag), "dpi": dpi,
-        })
+        jobs.append(
+            {
+                "label": group.label,
+                "tag": tag,
+                "mask_path": str(mask_path),
+                "svg_path": str(svg_path),
+                "pdf_path": str(pdf_path),
+                "scratch_dir": str(scratch / tag),
+                "dpi": dpi,
+            }
+        )
         prep_meta[group.label] = {
-            "tag": tag, "stamp_rgb": _stamp_rgb(group),
-            "mask_path": mask_path, "isolate_path": isolate_path,
-            "svg_path": svg_path, "pdf_path": pdf_path,
-            "t_iso": t_iso, "index": i,
+            "tag": tag,
+            "stamp_rgb": _stamp_rgb(group),
+            "mask_path": mask_path,
+            "isolate_path": isolate_path,
+            "svg_path": svg_path,
+            "pdf_path": pdf_path,
+            "t_iso": t_iso,
+            "index": i,
         }
 
     # Page rasters no longer needed after mask PNGs are on disk.
@@ -649,8 +684,11 @@ def colour_fill_autotrace(
                     flush=True,
                 )
     if jobs:
-        print(f"[colour] autotraces done in {time.perf_counter() - t_trace_all:.2f}s "
-              f"(workers={n_workers})", flush=True)
+        print(
+            f"[colour] autotraces done in {time.perf_counter() - t_trace_all:.2f}s "
+            f"(workers={n_workers})",
+            flush=True,
+        )
 
     seq_base = 0
     for group in groups:
@@ -658,17 +696,18 @@ def colour_fill_autotrace(
         if meta is None:
             continue
         trace = trace_by_label.pop(group.label)
-        vecs = [
-            deserialize_vector(VectorDTO.model_validate(row))
-            for row in trace["vectors"]
-        ]
+        vecs = [deserialize_vector(VectorDTO.model_validate(row)) for row in trace["vectors"]]
         n_raw = int(trace["n_raw"])
         t_trace = float(trace["t_trace"])
         del trace
         vecs.sort(key=lambda v: v.seqno)
         stamped = _stamp_group_vectors(
-            vecs, meta["stamp_rgb"], seq_base=seq_base, layer=meta["tag"],
-            page_w=page_w, page_h=page_h,
+            vecs,
+            meta["stamp_rgb"],
+            seq_base=seq_base,
+            layer=meta["tag"],
+            page_w=page_w,
+            page_h=page_h,
         )
         del vecs
         seq_base += len(stamped)
@@ -701,15 +740,24 @@ def colour_fill_autotrace(
             encoding="utf-8",
         )
         vectors_json_path = dump_colour_vectors_json(
-            combined, colour_dir / f"{out_stem}_colour_vectors.json",
-            page_width=page_w, page_height=page_h, source=src,
+            combined,
+            colour_dir / f"{out_stem}_colour_vectors.json",
+            page_width=page_w,
+            page_height=page_h,
+            source=src,
         )
-        print(f"[colour] combined {len(combined)} vectors -> {combined_pdf_path.name} "
-              f"({time.perf_counter() - t0:.2f}s)", flush=True)
+        print(
+            f"[colour] combined {len(combined)} vectors -> {combined_pdf_path.name} "
+            f"({time.perf_counter() - t0:.2f}s)",
+            flush=True,
+        )
 
     t_elapsed = time.perf_counter() - t_all
-    print(f"[colour] DONE {src.name}: {len(groups)} groups, {len(combined)} vectors, "
-          f"{t_elapsed:.2f}s", flush=True)
+    print(
+        f"[colour] DONE {src.name}: {len(groups)} groups, {len(combined)} vectors, "
+        f"{t_elapsed:.2f}s",
+        flush=True,
+    )
 
     summary_path = colour_dir / f"{out_stem}_colour_summary.txt"
     lines = [

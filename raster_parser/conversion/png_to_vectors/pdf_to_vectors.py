@@ -5,6 +5,7 @@ import pymupdf
 from raster_parser.transforms.scale_pdf_vector_items import _scale_vector
 from raster_parser.vectors.vector_items_processing import _vectors_from_drawing
 
+
 def pdf_to_vectors(
     pdf_path: Path,
     *,

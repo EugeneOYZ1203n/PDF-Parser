@@ -31,8 +31,7 @@ def stats_from_page(page: PageStats) -> tuple[list[Stats], list[tuple[int, str]]
     if page.out_results.is_file():
         return load_stats_from_out_results(page.out_results)
     raise ValueError(
-        f"No stats for {page.pdf_path} page {page.page_index} "
-        f"(expected {page.out_results})"
+        f"No stats for {page.pdf_path} page {page.page_index} (expected {page.out_results})"
     )
 
 
@@ -172,35 +171,39 @@ def glyph_positional_records(
                 ch = "?"
             correct = i < len(native) and i < len(ocr) and native[i] == ocr[i]
             w, h, side = _glyph_size(idx, native_mapping)
-            records.append({
-                "char": ch,
-                "category": char_category(ch),
-                "correct": correct,
-                "mode": "correct" if correct else "wrong",
-                "orientation": s.glyph_orientation.name,
-                "native_len": len(native),
-                "cer": s.CER,
-                "large_group": large,
-                "glyph_width": w,
-                "glyph_height": h,
-                "glyph_max_side": side,
-            })
+            records.append(
+                {
+                    "char": ch,
+                    "category": char_category(ch),
+                    "correct": correct,
+                    "mode": "correct" if correct else "wrong",
+                    "orientation": s.glyph_orientation.name,
+                    "native_len": len(native),
+                    "cer": s.CER,
+                    "large_group": large,
+                    "glyph_width": w,
+                    "glyph_height": h,
+                    "glyph_max_side": side,
+                }
+            )
 
     for idx, ch in not_ocred or []:
         w, h, side = _glyph_size(idx, native_mapping)
-        records.append({
-            "char": ch,
-            "category": char_category(ch),
-            "correct": False,
-            "mode": "failed_ocr",
-            "orientation": None,
-            "native_len": None,
-            "cer": None,
-            "large_group": None,
-            "glyph_width": w,
-            "glyph_height": h,
-            "glyph_max_side": side,
-        })
+        records.append(
+            {
+                "char": ch,
+                "category": char_category(ch),
+                "correct": False,
+                "mode": "failed_ocr",
+                "orientation": None,
+                "native_len": None,
+                "cer": None,
+                "large_group": None,
+                "glyph_width": w,
+                "glyph_height": h,
+                "glyph_max_side": side,
+            }
+        )
 
     return records
 
@@ -238,14 +241,16 @@ def row_records_from_stats(
     for s in stats:
         if not s.native_char:
             continue
-        rows.append({
-            "cer": s.CER,
-            "native_len": len(_text_for_compare(s.native_char)),
-            "orientation": s.glyph_orientation.name,
-            "match": s.match,
-            "large_group": _is_large_group(s.native_nums, native_mapping),
-            "glyph_count": len(s.native_nums),
-        })
+        rows.append(
+            {
+                "cer": s.CER,
+                "native_len": len(_text_for_compare(s.native_char)),
+                "orientation": s.glyph_orientation.name,
+                "match": s.match,
+                "large_group": _is_large_group(s.native_nums, native_mapping),
+                "glyph_count": len(s.native_nums),
+            }
+        )
     return rows
 
 
@@ -489,7 +494,9 @@ def plot_text_length_vs_cer(
         print("no data for text length vs CER")
         return
 
-    edges = bins if isinstance(bins, list) else _int_bin_edges([int(x) for x in lengths], max_bins=bins)
+    edges = (
+        bins if isinstance(bins, list) else _int_bin_edges([int(x) for x in lengths], max_bins=bins)
+    )
     print(
         f"Plotting text length vs CER "
         f"({len(lengths)} rows, len range {int(min(lengths))}–{int(max(lengths))})"
@@ -631,25 +638,17 @@ def plot_all(
 ) -> None:
     """Run the six requested histograms."""
     print("--- 1/6 character vs accuracy ---")
-    plot_character_vs_accuracy(
-        stats, not_ocred, native_mapping=native_mapping, run=run
-    )
+    plot_character_vs_accuracy(stats, not_ocred, native_mapping=native_mapping, run=run)
     print("--- 2/6 orientation vs CER ---")
     plot_orientation_vs_cer(stats)
     print("--- 3/6 size vs accuracy ---")
-    plot_size_vs_accuracy(
-        stats, not_ocred, native_mapping=native_mapping, run=run
-    )
+    plot_size_vs_accuracy(stats, not_ocred, native_mapping=native_mapping, run=run)
     print("--- 4/6 text length vs CER ---")
     plot_text_length_vs_cer(stats)
     print("--- 5/6 category vs accuracy ---")
-    plot_category_vs_accuracy(
-        stats, not_ocred, native_mapping=native_mapping, run=run
-    )
+    plot_category_vs_accuracy(stats, not_ocred, native_mapping=native_mapping, run=run)
     print("--- 6/6 failure modes ---")
-    plot_failure_modes(
-        stats, not_ocred, native_mapping=native_mapping, run=run
-    )
+    plot_failure_modes(stats, not_ocred, native_mapping=native_mapping, run=run)
     print("--- done plotting ---")
 
 
