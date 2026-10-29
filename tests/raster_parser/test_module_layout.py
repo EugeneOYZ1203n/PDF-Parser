@@ -13,13 +13,14 @@ import raster_parser
 PKG = Path(raster_parser.__file__).parent
 
 # Packages that follow the layout rules; upstream's older modules are moved into them over time.
-LAYOUT_PACKAGES = ("commons", "models", "phase_native_read")
+LAYOUT_PACKAGES = ("commons", "models", "phase_native_read", "phase_vector_classify")
 
 
 @pytest.mark.parametrize(
     "module",
     [
         "raster_parser.phase_native_read.native_read",
+        "raster_parser.phase_vector_classify.v1_vector_class.parse",
     ],
 )
 def test_phase_modules_import(module):
