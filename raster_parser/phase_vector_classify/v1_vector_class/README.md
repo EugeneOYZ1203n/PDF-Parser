@@ -41,3 +41,19 @@ word orientation, the new `p2` / `p3` parameters) are listed in `docs/model_migr
 
 Only code this module reaches was copied; the logic is unchanged. Crop normalisation and the
 OCR word -> `Text` conversion are shared with `v1_raster_to_vec` in `commons/v1_commons/`.
+
+## Debug output
+
+When `RunSettings.on_debug_layer` / `on_debug_image` are set (the pipeline report does this;
+`extract()` never does), `parse` also renders each step's result. Nothing is rendered or kept
+otherwise, and the output is the same either way, so this is **not** a behaviour change.
+
+| Stage | Layer | What it shows |
+|---|---|---|
+| `fill_filter` | `glyph candidates`, `drawing` | step 1's split, as recoloured strokes |
+| `word_grouping` | `word groups` | one box per step-2 group, green horizontal / orange vertical / purple other |
+| `ocr` | `read`, `blank`, `text` | groups step 4 read a word from / got nothing from, and the words placed in their boxes |
+| `orientation` | `direction` | an arrow per word along its final direction (step 5) |
+
+Debug images: `v1_ocr_input/` holds each group's normalised crop, the array step 4 hands to
+PaddleOCR first (`s4_word_ocr.ocr_word_groups(on_crop=...)`).

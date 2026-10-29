@@ -10,6 +10,9 @@
 5. Every vector that isn't a glyph candidate -- and every candidate in a group OCR could not read --
    is returned as drawing, unchanged.
 
+With `settings.on_debug_layer` / `on_debug_image` set, each step's result is also rendered as a
+debug layer (`debug_layers.py`); that never changes the output.
+
 The steps run on the shared `Vector`; each word read becomes a shared `Text` here
 (`commons.v1_commons.ocr.ocr_text`) with its group's box and the group index as `block_no`.
 """
@@ -30,6 +33,10 @@ def parse(
     import pymupdf
 
     from raster_parser.commons.v1_commons.ocr import ocr_text
+    from raster_parser.phase_vector_classify.v1_vector_class.debug_layers import (
+        crop_sink,
+        emit_layers,
+    )
     from raster_parser.phase_vector_classify.v1_vector_class.s1_fill_filter import (
         filter_text_vectors,
     )
@@ -54,6 +61,7 @@ def parse(
             [wg.bbox for wg in word_groups],
             dpi=settings.ocr_dpi,
             use_angle_cls=settings.use_angle_cls,
+            on_crop=crop_sink(settings),
         )
 
     read = {index for index, _, _ in words}
@@ -77,4 +85,13 @@ def parse(
             )
         )
     texts.sort(key=lambda t: t.block_no)
+    emit_layers(
+        settings,
+        page.meta,
+        candidates=candidates,
+        drawings=drawings,
+        word_groups=word_groups,
+        read_groups=read,
+        texts=texts,
+    )
     return drawings, texts

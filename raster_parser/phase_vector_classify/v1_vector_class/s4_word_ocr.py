@@ -44,8 +44,13 @@ def ocr_word_groups(
     min_confidence: float = 0.0,
     lang: str = "en",
     use_angle_cls: bool,
+    on_crop=None,
 ) -> List[Tuple[int, str, float]]:
-    """OCR pre-grouped vector crops; one `(group index, word, confidence)` per group that read as a word."""
+    """OCR pre-grouped vector crops; one `(group index, word, confidence)` per group that read as a word.
+
+    `on_crop(index, crop)`, when given, is shown each group\'s normalised crop (what PaddleOCR
+    reads first); it is a debug hook and changes nothing.
+    """
     if not vector_groups:
         return []
     if len(vector_groups) != len(group_boxes):
@@ -61,7 +66,10 @@ def ocr_word_groups(
         crop = np.array(renderer.render_word_group(vectors))
         if crop.size == 0:
             continue
-        reading = _read_word(paddle_ocr, crop, len(vectors), min_confidence, use_angle_cls)
+        norm = normalise_crop_for_ocr(crop)
+        if on_crop is not None:
+            on_crop(i, norm)
+        reading = _read_word(paddle_ocr, crop, norm, len(vectors), min_confidence, use_angle_cls)
         if reading is not None:
             out.append((i, *reading))
     return out
@@ -70,6 +78,7 @@ def ocr_word_groups(
 def _read_word(
     paddle_ocr: PaddleOcr,
     crop: np.ndarray,
+    norm: np.ndarray,
     n_glyphs: int,
     min_confidence: float,
     use_angle_cls: bool,
@@ -77,9 +86,7 @@ def _read_word(
     """`(word, confidence)` of the most confident word in `crop`; a long group is read scaled and
     unscaled."""
     h, w = crop.shape[:2]
-    hits = paddle_ocr.ocr_image(
-        normalise_crop_for_ocr(crop), min_confidence=min_confidence, cls=use_angle_cls
-    )
+    hits = paddle_ocr.ocr_image(norm, min_confidence=min_confidence, cls=use_angle_cls)
     best = max(hits, key=lambda hit: hit[2]) if hits else None
     if w > h and (w / max(h, 1) >= LARGE_GROUP_MIN_ASPECT or n_glyphs >= LARGE_GROUP_MIN_VECTORS):
         hits_raw = paddle_ocr.ocr_image(crop, min_confidence=min_confidence, cls=use_angle_cls)

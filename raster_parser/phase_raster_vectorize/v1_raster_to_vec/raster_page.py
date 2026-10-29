@@ -66,6 +66,7 @@ def extract_raster_page(
     output_dump_dir: str | Path | None = None,
     use_angle_cls: bool = True,
     keep_intermediates: bool = True,
+    debug=None,
 ) -> tuple[list, list]:
     """Run Type-4 on one page; return ``(texts, drawing_vectors)``.
 
@@ -73,6 +74,8 @@ def extract_raster_page(
     ``output_dump_dir`` (default: ``./tmp``) and leaves them on disk. With
     ``keep_intermediates=False`` only the returned texts and vectors remain: the debug images,
     dumps and every file the steps spill are removed before returning.
+    ``debug`` (a ``debug_layers.RasterDebugLayers``, or ``None``) is shown the intermediate rasters
+    and boxes; it changes nothing.
     """
     from raster_parser.phase_raster_vectorize.v1_raster_to_vec.s1_clear_page import (
         DEFAULT_OUTPUT_DUMP_DIR,
@@ -89,6 +92,8 @@ def extract_raster_page(
     )
 
     bgr, to_points = page_to_bgr(pdf_path, page_index, dpi)
+    if debug is not None:
+        debug.rendered(bgr, to_points)
     ocr = make_ocr(lang, min_conf, use_angle_cls=use_angle_cls)
     parser = OcrTextDrawingParser(
         min_conf=min_conf,
@@ -165,6 +170,9 @@ def extract_raster_page(
         erase = (recov.kept_mask == 255) & (result.lines != 255)
         drawing_final_bgr[erase] = (255, 255, 255)
         rec.texts.extend(recov.texts)
+
+    if debug is not None:
+        debug.split(text_final_gray, drawing_final_bgr, result.boxes, clean_boxes)
 
     drawing_final_path = dump / "drawing_final.png"
     text_final_path = dump / "text_final.png"

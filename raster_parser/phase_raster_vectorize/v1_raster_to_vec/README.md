@@ -42,3 +42,22 @@ word orientation, the new `p2` / `p3` parameters) are listed in `docs/model_migr
 Copied files hold only the code this module reaches; the logic is unchanged. The single-mask
 autotrace (`conversion/png_to_vectors/`, `transforms/`, `vectors/`), the reconstructor's replay
 and `normalise_crop_for_ocr` are shared with `v1_vector_class` in `commons/v1_commons/`.
+
+## Debug output
+
+When `RunSettings.on_debug_layer` / `on_debug_image` are set (the pipeline report does this;
+`extract()` never does), the raster pass also renders its intermediate results as page-space
+layers (pixels mapped through the render's own `to_points`). Nothing is rendered otherwise, the
+files written under `dump_dir` are unchanged, and the output is the same either way, so this is
+**not** a behaviour change.
+
+| Stage | Layer | What it shows |
+|---|---|---|
+| `render` | `residual page` | the cleared page as rendered (step 2) |
+| `split` | `text layer`, `drawing layer` | the final text and drawing rasters (inputs to recognition and to autotrace) |
+| `detect` | `initial boxes`, `refined boxes` | step 3's detection on the whole page, and step 4's boxes on the text layer |
+| `ocr` | `text` | the recognised words in their boxes and directions |
+| `trace` | `vectors` | the autotraced vectors in their own colours |
+
+Debug images: `v1_raster_boxes/` holds each refined box cut from the text layer (5 px padding,
+before step 4 splits it into words).

@@ -9,6 +9,9 @@
 It works on the whole page (from `page.doc_path`), so it ignores native_read's `images`. The steps
 return shared `Text` / `Vector`s for the one-page cleared copy (page index 0); they get the real
 page index here. Intermediates go under `settings.dump_dir`.
+
+With `settings.on_debug_layer` / `on_debug_image` set, the intermediate rasters, boxes and the
+output are also rendered as debug layers (`debug_layers.py`); that never changes the output.
 """
 
 from __future__ import annotations
@@ -24,6 +27,9 @@ from raster_parser.models.settings import RunSettings
 def extract(
     images: list[Image], page: Page, settings: RunSettings
 ) -> tuple[list[Vector], list[Text]]:
+    from raster_parser.phase_raster_vectorize.v1_raster_to_vec.debug_layers import (
+        RasterDebugLayers,
+    )
     from raster_parser.phase_raster_vectorize.v1_raster_to_vec.raster_page import (
         extract_raster_page,
     )
@@ -35,6 +41,7 @@ def extract(
     work_dir, cleared = clear_page(page.doc_path, page.meta.index, dump_dir=settings.dump_dir)
     if not page_is_nonempty(cleared, 0):
         return [], []
+    debug = RasterDebugLayers.for_settings(settings, page.meta)
     words, traced = extract_raster_page(
         cleared,
         0,
@@ -43,8 +50,11 @@ def extract(
         output_dump_dir=work_dir,
         use_angle_cls=settings.use_angle_cls,
         keep_intermediates=settings.debug,
+        debug=debug,
     )
     index = page.meta.index
-    return [v.model_copy(update=dict(page_index=index)) for v in traced], [
-        t.model_copy(update=dict(page_index=index)) for t in words
-    ]
+    vectors = [v.model_copy(update=dict(page_index=index)) for v in traced]
+    texts = [t.model_copy(update=dict(page_index=index)) for t in words]
+    if debug is not None:
+        debug.output(texts, vectors)
+    return vectors, texts
