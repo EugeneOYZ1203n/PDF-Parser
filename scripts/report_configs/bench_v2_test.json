@@ -1,0 +1,9 @@
+{
+  "p2": "Stub",
+  "p3": "v2VectorClass",
+  "benchmark": true,
+  "input_files": ["outputs/labels/P2118-Thomson-PRECOMP-24Oct2023_label"],
+  "pages": {"*": [0, 1]},
+  "debug_images": false,
+  "workers": 2
+}
