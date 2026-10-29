@@ -22,6 +22,7 @@ from raster_parser.models.page import Page
 from raster_parser.models.text import Text
 from raster_parser.models.vector import Vector
 from raster_parser.models.settings import RunSettings
+from raster_parser.commons.progress import note, stage
 
 
 def extract(
@@ -38,8 +39,10 @@ def extract(
         page_is_nonempty,
     )
 
-    work_dir, cleared = clear_page(page.doc_path, page.meta.index, dump_dir=settings.dump_dir)
+    with stage("p2 v1_raster_to_vec › s1 clear page (LibreOffice)"):
+        work_dir, cleared = clear_page(page.doc_path, page.meta.index, dump_dir=settings.dump_dir)
     if not page_is_nonempty(cleared, 0):
+        note("- p2 v1_raster_to_vec › cleared page is empty, nothing to trace")
         return [], []
     debug = RasterDebugLayers.for_settings(settings, page.meta)
     words, traced = extract_raster_page(

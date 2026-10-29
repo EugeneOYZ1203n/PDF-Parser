@@ -21,6 +21,7 @@ from pathlib import Path
 
 from raster_parser.commons.logging_setup import get_logger
 from raster_parser.models.result import ExtractResult
+from raster_parser.commons.progress import note, stage
 from raster_parser.core.registry import (
     DEFAULT_VECTORIZE,
     DEFAULT_CLASSIFY,
@@ -54,31 +55,40 @@ def run_pipeline(
     last = STEP_NAMES.index(stop_after) if stop_after else len(STEP_NAMES) - 1
     durations: dict[str, float] = {}
 
+    tag = f"{Path(pdf_path).name} p{page_index}"
     start = time.perf_counter()
-    native = read_and_extract(str(pdf_path), page_index)
+    with stage(f"{tag} › native_read"):
+        native = read_and_extract(str(pdf_path), page_index)
     durations["native_read"] = time.perf_counter() - start
 
     vectors_p2, texts_p2 = [], []
     if last >= 1:
         start = time.perf_counter()
-        vectors_p2, texts_p2 = vectorize(native.images, native.page, settings)
+        with stage(f"{tag} › raster_vectorize {p2} ({len(native.images)} images)"):
+            vectors_p2, texts_p2 = vectorize(native.images, native.page, settings)
         durations["raster_vectorize"] = time.perf_counter() - start
+    else:
+        note(f"- {tag} › raster_vectorize {p2} skipped (stop_after={stop_after})")
 
     vectors_p3, texts_p3 = native.vectors, []
     if last >= 2:
         start = time.perf_counter()
-        vectors_p3, texts_p3 = classify(native.vectors, native.page, settings)
+        with stage(f"{tag} › vector_classify {p3} ({len(native.vectors)} vectors)"):
+            vectors_p3, texts_p3 = classify(native.vectors, native.page, settings)
         durations["vector_classify"] = time.perf_counter() - start
+    else:
+        note(f"- {tag} › vector_classify {p3} skipped (stop_after={stop_after})")
 
     start = time.perf_counter()
-    texts, vectors = organize_outputs(
-        native.texts,
-        texts_p2,
-        texts_p3,
-        vectors_p2,
-        vectors_p3,
-        native.page,
-    )
+    with stage(f"{tag} › output_assemble"):
+        texts, vectors = organize_outputs(
+            native.texts,
+            texts_p2,
+            texts_p3,
+            vectors_p2,
+            vectors_p3,
+            native.page,
+        )
     durations["output_assemble"] = time.perf_counter() - start
 
     _LOG.info(

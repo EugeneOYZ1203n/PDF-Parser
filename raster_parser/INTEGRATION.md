@@ -76,6 +76,11 @@ No native-vs-OCR comparison. The original native page is not rasterized for vect
   calls are safe; set `debug=True` to keep it (its path is logged).
   `delete_drawings_from_pdf(..., dump_dir=...)` still defaults to `./tmp`.
 - **Lazy heavy imports** — Paddle / PyMuPDF / OpenCV load on first `extract()` call.
+- **Progress output** — `extract()` writes a timestamped line as each stage starts and ends,
+  plus tqdm bars over its long loops (OCR tiles / batches, autotrace colours), to stderr. It is
+  on by default: the `raster_parser` logger starts at DEBUG (`commons/logging_setup.py`).
+  Silence it with `logging.getLogger("raster_parser").setLevel(logging.INFO)`; a level set
+  before the import is kept. The returned values are the same either way.
 - **First call** may download PaddleOCR model weights to the local cache.
 
 ### Errors

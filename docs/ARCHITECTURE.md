@@ -121,6 +121,7 @@ module listed for only one family is a candidate to move into that family's own 
 | `commons/v1_commons/render.py` | The original reconstructor's replay (its own `finish()` defaults) | `v1_raster_to_vec`, `v1_vector_class`, `extract_vectors_from_png` |
 | `commons/workers.py` | Spawned process pools and per-worker BLAS thread pinning | `v1_raster_to_vec`, `extract_vectors_from_png` |
 | `commons/logging_setup.py` | The `raster_parser` logger and `configure_logging` | core, `phase_native_read`, `phase_output_assemble`, `v1_raster_to_vec`, `evaluation`, `scripts` |
+| `commons/progress.py` | Stage lines and tqdm bars on stderr at DEBUG log level | core, `phase_native_read`, `v1_raster_to_vec`, `v1_vector_class`, `extract_vectors_from_png`, `scripts` |
 | `commons/paths.py` | Repo-relative output folders for the scripts | `scripts` (rasterise, report, benchmark) |
 | `core/interfaces.py` | The backend protocols | `core/registry.py` |
 | `core/registry.py` | Backend names -> functions, resolvers, defaults | `core/pipeline.py`, `main_pipeline_extract`, `evaluation/report` |
@@ -174,6 +175,27 @@ Rules for a backend:
   so one layer keeps one file.
 - Document the layers in the backend's `README.md` ("Debug output"). The v1 backends keep theirs
   in `debug_layers.py`.
+
+## Progress output
+
+`commons/progress.py` shows which stage is running, and when, on stderr:
+
+- `stage(name)` -- a context manager writing `HH:MM:SS  ▶ name` before the block and
+  `HH:MM:SS  ✔ name  1.23s` after it (`✖` when it raises);
+- `bar(iterable, desc=..., total=...)` -- a tqdm bar over a long loop (tiles, batches, pages),
+  including `as_completed` over a process pool;
+- `note(line)` -- one timestamped line, e.g. a skipped stage.
+
+All three are active while the `raster_parser.progress` logger is enabled for DEBUG. The
+`raster_parser` logger starts at DEBUG (`commons/logging_setup.py`, unless a level was already
+set), so progress shows by default; `setLevel(logging.INFO)` on it turns progress off.
+`configure_logging()` defaults to DEBUG and writes log records through `tqdm.write`, so they
+don't break an open bar. Only the calling process shows progress: spawn workers configure no
+logging.
+
+`run_pipeline` writes a stage per phase. A backend wraps each of its steps in `stage(...)`, named
+`"p2 <Name> › <step>"` / `"p3 <Name> › <step>"`, and its long loops in `bar(...)`. Progress is
+like the debug callbacks: it must never change the output.
 
 `run_pipeline(..., stop_after="native_read" | "raster_vectorize" | "vector_classify")` stops after that phase: later
 backends are not called. output_assemble still runs on what ran (with vector_classify skipped, native_read's raw

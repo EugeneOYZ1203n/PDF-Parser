@@ -33,6 +33,7 @@ from raster_parser.models.source import Source
 from raster_parser.commons.helpers.geometry import PDF_POINTS_PER_INCH
 from raster_parser.commons.logging_setup import get_logger
 from raster_parser.models.text import Text
+from raster_parser.commons.progress import bar
 from raster_parser.commons.v1_commons.ocr import normalise_crop_for_ocr, ocr_text
 from raster_parser.commons.workers import pin_blas_threads, spawn_pool
 from raster_parser.models.raster_vectorize import GlyphCc, RegionOcrResult
@@ -579,7 +580,7 @@ def recognize_boxes(
 
     raw_hits: list[dict] = []
     if n_workers == 1 or len(prepared) <= 1:
-        for p in prepared:
+        for p in bar(prepared, desc="recognise boxes", unit="box"):
             word, conf, rotate = _recognize_oriented(ocr, p, p["vertical"])
             raw_hits.append(
                 {
@@ -629,7 +630,9 @@ def recognize_boxes(
                 n_workers, _rec_worker_init, (lang, float(min_conf), angle_cls_of(ocr))
             ) as pool:
                 futures = [pool.submit(_box_rec_job, job) for job in jobs]
-                for fut in as_completed(futures):
+                for fut in bar(
+                    as_completed(futures), desc="recognise boxes", total=len(futures), unit="box"
+                ):
                     raw_hits.append(fut.result())
             raw_hits.sort(key=lambda h: h["job_id"])
         finally:

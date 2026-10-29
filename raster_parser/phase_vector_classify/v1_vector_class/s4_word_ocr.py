@@ -17,6 +17,7 @@ import numpy as np
 import pymupdf
 
 from raster_parser.models.vector import Vector
+from raster_parser.commons.progress import bar
 from raster_parser.commons.v1_commons.ocr import normalise_crop_for_ocr
 from raster_parser.phase_vector_classify.v1_vector_class.s3_glyph_render import PngRenderer
 from raster_parser.phase_vector_classify.v1_vector_class.s4_paddle_ocr import PaddleOcr
@@ -60,7 +61,7 @@ def ocr_word_groups(
 
     renderer = PngRenderer(dpi=dpi, page=page)
     out: List[Tuple[int, str, float]] = []
-    for i, vectors in enumerate(vector_groups):
+    for i, vectors in enumerate(bar(vector_groups, desc="word groups", unit="group")):
         if not vectors:
             continue
         crop = np.array(renderer.render_word_group(vectors))

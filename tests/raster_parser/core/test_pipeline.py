@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pymupdf
 import pytest
 
@@ -129,3 +131,29 @@ def test_bad_stop_after_fails_before_reading():
 def test_debug_hooks_default_to_off():
     settings = RunSettings()
     assert settings.on_debug_layer is None and settings.on_debug_image is None
+
+
+@pytest.mark.parametrize(
+    "stop_after, skipped", [(None, []), ("native_read", ["raster_vectorize", "vector_classify"])]
+)
+def test_progress_lines_per_phase_and_same_result(tmp_pdf_path, capsys, stop_after, skipped):
+    import logging
+
+    root = logging.getLogger("raster_parser")
+    before = root.level
+    pdf = _pdf(tmp_pdf_path)
+    try:
+        root.setLevel(logging.INFO)
+        quiet = run_pipeline(pdf, 0, p2="stub", p3="stub", stop_after=stop_after)
+        assert capsys.readouterr().err == ""
+        root.setLevel(logging.DEBUG)
+        loud = run_pipeline(pdf, 0, p2="stub", p3="stub", stop_after=stop_after)
+    finally:
+        root.setLevel(before)
+    err = capsys.readouterr().err
+    for phase in ("native_read", "output_assemble"):
+        assert f"▶ {Path(pdf).name} p0 › {phase}" in err
+        assert f"✔ {Path(pdf).name} p0 › {phase}" in err
+    for phase in skipped:
+        assert f"› {phase} stub skipped" in err
+    assert (loud.texts, loud.vectors) == (quiet.texts, quiet.vectors)

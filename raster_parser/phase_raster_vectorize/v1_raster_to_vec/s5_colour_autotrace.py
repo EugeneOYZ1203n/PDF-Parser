@@ -27,6 +27,7 @@ import numpy as np
 from raster_parser.commons.helpers.geometry import PDF_POINTS_PER_INCH, item_points
 from raster_parser.commons.logging_setup import get_logger
 from raster_parser.models.vector import Vector
+from raster_parser.commons.progress import bar
 from raster_parser.commons.v1_commons.autotrace import autotrace_drawing, traced_vector
 from raster_parser.commons.v1_commons.render import draw_vectors
 from raster_parser.commons.workers import pin_blas_threads, spawn_pool
@@ -725,12 +726,14 @@ def colour_fill_autotrace(
     trace_by_label: dict[int, dict] = {}
     t_trace_all = time.perf_counter()
     if jobs and (n_workers == 1 or len(jobs) == 1):
-        for job in jobs:
+        for job in bar(jobs, desc="autotrace colours", unit="colour"):
             trace_by_label[int(job["label"])] = _colour_trace_job(job)
     elif jobs:
         with spawn_pool(min(n_workers, len(jobs)), pin_blas_threads) as pool:
             futs = {pool.submit(_colour_trace_job, j): int(j["label"]) for j in jobs}
-            for fut in as_completed(futs):
+            for fut in bar(
+                as_completed(futs), desc="autotrace colours", total=len(futs), unit="colour"
+            ):
                 label = futs[fut]
                 trace_by_label[label] = fut.result()
                 _LOG.debug(

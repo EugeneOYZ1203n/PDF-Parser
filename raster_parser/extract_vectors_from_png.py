@@ -10,6 +10,7 @@ from pathlib import Path
 from raster_parser.commons.helpers.geometry import PDF_POINTS_PER_INCH
 from raster_parser.commons.helpers.pixmap import pixmap_to_array, zoom_matrix
 from raster_parser.models.vector import Vector
+from raster_parser.commons.progress import bar, stage
 from raster_parser.commons.v1_commons.autotrace import autotrace_drawing, traced_vector
 from raster_parser.commons.v1_commons.render import draw_vectors
 from raster_parser.commons.workers import spawn_pool
@@ -153,7 +154,8 @@ def extract_vectors_from_png(
     The returned vectors are in the coordinate system of the generated
     vector PDF and are not transformed to any external bounding box.
     """
-    return _trace_png(png_path, tmp_dir, dpi)
+    with stage(f"extract_vectors_from_png › autotrace {Path(png_path).name}"):
+        return _trace_png(png_path, tmp_dir, dpi)
 
 
 def _trace_png(png_path: Path, tmp_dir: Path | None, dpi: int) -> list[Vector]:
@@ -299,7 +301,9 @@ def get_image_polys(
     if workers == 1:
         results = (_extract_image_vectors_worker(job) for job in jobs)
 
-        for imgxref, vectors, image_size in results:
+        for imgxref, vectors, image_size in bar(
+            results, desc="autotrace images", total=len(jobs), unit="image"
+        ):
             extracted[imgxref] = (
                 vectors,
                 image_size,
@@ -312,7 +316,9 @@ def get_image_polys(
                 jobs,
             )
 
-            for imgxref, vectors, image_size in results:
+            for imgxref, vectors, image_size in bar(
+                results, desc="autotrace images", total=len(jobs), unit="image"
+            ):
                 extracted[imgxref] = (
                     vectors,
                     image_size,

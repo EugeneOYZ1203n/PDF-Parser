@@ -20,7 +20,9 @@ import pymupdf
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from raster_parser.commons.helpers.pixmap import zoom_matrix
+from raster_parser.commons.logging_setup import configure_logging
 from raster_parser.commons.paths import output_dir
+from raster_parser.commons.progress import bar
 
 
 def rasterize_pdf(src_path: str, dst_path: str, dpi: int = 300) -> None:
@@ -28,7 +30,7 @@ def rasterize_pdf(src_path: str, dst_path: str, dpi: int = 300) -> None:
     out = pymupdf.open()
     matrix = zoom_matrix(dpi)
 
-    for page in doc:
+    for page in bar(doc, desc="rasterise", total=doc.page_count, unit="page"):
         # Rotated display space, matching the visible page -- correct
         # since the output is meant to be a flat raster of what's seen.
         pix = page.get_pixmap(matrix=matrix)
@@ -56,6 +58,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    configure_logging()
     dst = args.dst or str(output_dir("rasterize") / f"{Path(args.src).stem}_raster.pdf")
     rasterize_pdf(args.src, dst, dpi=args.dpi)
     print(f"wrote {dst}")

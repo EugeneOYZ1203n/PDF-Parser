@@ -13,6 +13,7 @@ dependencies = [
     "paddlepaddle>=2.6,<3",
     "setuptools",  # paddleocr 2.x imports it at runtime; py3.12 venvs don't ship it
     "pyautotrace",
+    "tqdm",  # stage progress bars (commons/progress.py)
 ]
 
 [dependency-groups]

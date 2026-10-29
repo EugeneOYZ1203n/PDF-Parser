@@ -18,6 +18,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from raster_parser.commons.progress import bar
 from raster_parser.commons.helpers.geometry import bbox_iou
 from raster_parser.commons.v1_commons.ocr import paddle_lines
 from raster_parser.commons.workers import pin_blas_threads, spawn_pool
@@ -255,7 +256,7 @@ def ocr_boxes(
 
     if n_workers == 1 or len(coords) <= 1:
         boxes: list = []
-        for oy, ox in coords:
+        for oy, ox in bar(coords, desc="det tiles", unit="tile"):
             crop = np.ascontiguousarray(rgb[oy : min(oy + tile, H), ox : min(ox + tile, W)])
             if crop.size == 0:
                 continue
@@ -294,7 +295,9 @@ def ocr_boxes(
             n_workers, _det_worker_init, (lang, float(min_conf), angle_cls_of(ocr))
         ) as pool:
             futures = [pool.submit(_det_tile_job, job) for job in jobs]
-            for fut in as_completed(futures):
+            for fut in bar(
+                as_completed(futures), desc="det tiles", total=len(futures), unit="tile"
+            ):
                 boxes.extend(fut.result())
         return merge_boxes(boxes)
     finally:

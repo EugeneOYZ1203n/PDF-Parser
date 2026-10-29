@@ -13,6 +13,10 @@ hooks switched on (see [Debug output](ARCHITECTURE.md#debug-output)).
 The benchmark needs matplotlib: `uv sync --group report`. The viewer needs Tk (`python3-tk` on
 Ubuntu).
 
+The batch scripts (the report, the benchmark and `rasterize_pdf.py`) show on stderr which stage
+is running and when, with tqdm bars over inputs, pages and the pipeline's long loops ([Progress
+output](ARCHITECTURE.md#progress-output)).
+
 ## Typical workflow
 
 1. **Label** (optional). A label JSON (`outputs/labels/<stem>.json`, format in

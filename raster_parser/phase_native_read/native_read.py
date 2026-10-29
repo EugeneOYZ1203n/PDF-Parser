@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from raster_parser.models.page import Page
 from raster_parser.models.native_read import NativeReadResult
+from raster_parser.commons.progress import stage
 from raster_parser.phase_native_read.image_extract import extract_images
 from raster_parser.phase_native_read.native_text import extract_native_text
 from raster_parser.phase_native_read.reader import Reader
@@ -28,7 +29,10 @@ def read_and_extract(pdf_path: str, page_index: int) -> NativeReadResult:
 
 
 def _extract(page: Page) -> NativeReadResult:
-    texts = extract_native_text(page)
-    vectors = extract_vectors(page)
-    images = extract_images(page)
+    with stage("native_read › native text"):
+        texts = extract_native_text(page)
+    with stage("native_read › vectors"):
+        vectors = extract_vectors(page)
+    with stage("native_read › images"):
+        images = extract_images(page)
     return NativeReadResult(page=page, texts=texts, images=images, vectors=vectors)

@@ -25,6 +25,7 @@ from raster_parser.models.text import Text
 from raster_parser.models.vector import Vector
 from raster_parser.models.settings import RunSettings
 from raster_parser.models.vector_classify import Orientation
+from raster_parser.commons.progress import stage
 
 
 def parse(
@@ -48,43 +49,47 @@ def parse(
         ocr_rotate_for_target,
     )
 
-    candidates = filter_text_vectors(vectors)
-    candidate_ids = {id(v) for v in candidates}
+    with stage("p3 v1_vector_class › s1 fill filter"):
+        candidates = filter_text_vectors(vectors)
+        candidate_ids = {id(v) for v in candidates}
 
     page_rotation = int(page.meta.rotation or 0)
-    word_groups = cluster_by_seqno(candidates, page_rotation)
+    with stage(f"p3 v1_vector_class › s2 word grouping ({len(candidates)} candidates)"):
+        word_groups = cluster_by_seqno(candidates, page_rotation)
 
-    with pymupdf.open(str(page.doc_path)) as doc:
-        words = ocr_word_groups(
-            doc[page.meta.index],
-            [wg.vectors for wg in word_groups],
-            [wg.bbox for wg in word_groups],
-            dpi=settings.ocr_dpi,
-            use_angle_cls=settings.use_angle_cls,
-            on_crop=crop_sink(settings),
-        )
+    with stage(f"p3 v1_vector_class › s3+s4 render + OCR {len(word_groups)} word groups"):
+        with pymupdf.open(str(page.doc_path)) as doc:
+            words = ocr_word_groups(
+                doc[page.meta.index],
+                [wg.vectors for wg in word_groups],
+                [wg.bbox for wg in word_groups],
+                dpi=settings.ocr_dpi,
+                use_angle_cls=settings.use_angle_cls,
+                on_crop=crop_sink(settings),
+            )
 
     read = {index for index, _, _ in words}
     unread_ids = {id(v) for i, wg in enumerate(word_groups) if i not in read for v in wg.vectors}
     drawings = [v for v in vectors if id(v) not in candidate_ids or id(v) in unread_ids]
 
     texts: list[Text] = []
-    for index, word, confidence in words:
-        wg = word_groups[index]
-        target = 90 if wg.orientation == Orientation.VERTICAL else 0
-        rotate = ocr_rotate_for_target(target, page_rotation)
-        texts.append(
-            ocr_text(
-                word,
-                wg.bbox,
-                rotate,
-                page_index=page.meta.index,
-                block_no=index,
-                confidence=confidence,
-                source=Source.NATIVE_VECTOR,
+    with stage("p3 v1_vector_class › s5 orientation"):
+        for index, word, confidence in words:
+            wg = word_groups[index]
+            target = 90 if wg.orientation == Orientation.VERTICAL else 0
+            rotate = ocr_rotate_for_target(target, page_rotation)
+            texts.append(
+                ocr_text(
+                    word,
+                    wg.bbox,
+                    rotate,
+                    page_index=page.meta.index,
+                    block_no=index,
+                    confidence=confidence,
+                    source=Source.NATIVE_VECTOR,
+                )
             )
-        )
-    texts.sort(key=lambda t: t.block_no)
+        texts.sort(key=lambda t: t.block_no)
     emit_layers(
         settings,
         page.meta,
