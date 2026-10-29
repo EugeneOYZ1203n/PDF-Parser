@@ -37,10 +37,15 @@ Coordinates are unchanged: unrotated page space, relative to the CropBox's top-l
 Getting the old values back:
 
 ```python
-from raster_parser.commons.helpers.text_orientation import direction_to_rotate, glyph_orientation_for
+from raster_parser.commons.helpers.text_orientation import (
+    direction_to_rotate,
+    glyph_orientation_for,
+)
 
-rotate = direction_to_rotate(t.direction)                               # 0 / 90 / 180 / 270
-orientation = glyph_orientation_for(t.direction, result.page.rotation)  # "horizontal" / "vertical" / "other"
+rotate = direction_to_rotate(t.direction)  # 0 / 90 / 180 / 270
+orientation = glyph_orientation_for(
+    t.direction, result.page.rotation
+)  # "horizontal" / "vertical" / "other"
 ```
 
 `rotate` is PyMuPDF's `insert_text(rotate=…)` angle in unrotated page space (counter-clockwise, y
@@ -109,4 +114,4 @@ only on filled ones (`v1_commons.autotrace.traced_vector`).
 Removed with the old classes, because they were built on them: `evaluation/native_vs_ocr/`,
 `evaluation/native_vs_raster/`, `native_vs_ocr/`, the `scripts/type2_*`, `type4_pipeline.py`,
 `dto_reconstruct_pipeline.py` and `raster_drawing_*` scripts, and their tests. The pipeline
-report tools that come next replace them on the shared models.
+report and benchmark (`docs/SCRIPTS.md`) replace them on the shared models.

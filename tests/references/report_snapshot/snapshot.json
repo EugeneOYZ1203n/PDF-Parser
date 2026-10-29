@@ -1,0 +1,225 @@
+{
+ "benchmark_txt": [
+  "",
+  "all inputs -- text",
+  "[<ts>__config]",
+  "  [native_to_vector]",
+  "    labels: 6 | chars: 36 | words: 6",
+  "    char overlap: 34/36 matched | 0 extra unmatched (FP) | 2 missing (FN) | precision 34/34 (1.000) | recall 34/36 (0.944)",
+  "    word overlap: 4/6 matched | 0 extra unmatched (FP) | 2 missing (FN) | precision 4/4 (1.000) | recall 4/6 (0.667)",
+  "    bbox mean IoU: 3.494/6 (0.582) (n_gt=6, n_localized=6)",
+  "    rotation: correct=3 off_90=0 off_180=3 (n=6) | mean_err=90.0deg | rmse=127.3deg",
+  "  [original_vector]",
+  "    labels: 3 | chars: 18 | words: 3",
+  "    char overlap: 17/18 matched | 17 extra unmatched (FP) | 1 missing (FN) | precision 17/34 (0.500) | recall 17/18 (0.944)",
+  "    word overlap: 2/3 matched | 4 extra unmatched (FP) | 1 missing (FN) | precision 2/6 (0.333) | recall 2/3 (0.667)",
+  "    bbox mean IoU: 1.659/3 (0.553) (n_gt=3, n_localized=3)",
+  "    rotation: correct=2 off_90=0 off_180=1 (n=3) | mean_err=60.0deg | rmse=103.9deg",
+  "  [unclassified] spurious preds: 0 (area frac 0.0)",
+  "",
+  "labels:test_pdfs_1_v1_format -- text",
+  "[<ts>__config]",
+  "  [native_to_vector]",
+  "    labels: 3 | chars: 18 | words: 3",
+  "    char overlap: 17/18 matched | 0 extra unmatched (FP) | 1 missing (FN) | precision 17/17 (1.000) | recall 17/18 (0.944)",
+  "    word overlap: 2/3 matched | 0 extra unmatched (FP) | 1 missing (FN) | precision 2/2 (1.000) | recall 2/3 (0.667)",
+  "    bbox mean IoU: 1.659/3 (0.553) (n_gt=3, n_localized=3)",
+  "    rotation: correct=2 off_90=0 off_180=1 (n=3) | mean_err=60.0deg | rmse=103.9deg",
+  "  [original_vector]",
+  "    labels: 3 | chars: 18 | words: 3",
+  "    char overlap: 17/18 matched | 0 extra unmatched (FP) | 1 missing (FN) | precision 17/17 (1.000) | recall 17/18 (0.944)",
+  "    word overlap: 2/3 matched | 0 extra unmatched (FP) | 1 missing (FN) | precision 2/2 (1.000) | recall 2/3 (0.667)",
+  "    bbox mean IoU: 1.659/3 (0.553) (n_gt=3, n_localized=3)",
+  "    rotation: correct=2 off_90=0 off_180=1 (n=3) | mean_err=60.0deg | rmse=103.9deg",
+  "  [unclassified] spurious preds: 0 (area frac 0.0)",
+  "",
+  "[labels:test_pdfs_1_v1_format / <ts>__config] OCR confusion characters (top 5 replacements per gt char):",
+  "  [native_to_vector]",
+  "    'A': (none): 1 (100%)",
+  "    'L': (none): 1 (100%)",
+  "  [original_vector]",
+  "    'A': (none): 1 (100%)",
+  "    'L': (none): 1 (100%)",
+  "",
+  "pdf:test_pdfs_2 -- text",
+  "[<ts>__config]",
+  "  [native_to_vector]",
+  "    labels: 3 | chars: 18 | words: 3",
+  "    char overlap: 17/18 matched | 0 extra unmatched (FP) | 1 missing (FN) | precision 17/17 (1.000) | recall 17/18 (0.944)",
+  "    word overlap: 2/3 matched | 0 extra unmatched (FP) | 1 missing (FN) | precision 2/2 (1.000) | recall 2/3 (0.667)",
+  "    bbox mean IoU: 1.835/3 (0.612) (n_gt=3, n_localized=3)",
+  "    rotation: correct=1 off_90=0 off_180=2 (n=3) | mean_err=120.0deg | rmse=147.0deg",
+  "  [original_vector]",
+  "    labels: 0 | chars: 0 | words: 0",
+  "    char overlap: 0/0 matched | 17 extra unmatched (FP) | 0 missing (FN) | precision 0/17 (0.000) | recall 0/nan (n/a)",
+  "    word overlap: 0/0 matched | 4 extra unmatched (FP) | 0 missing (FN) | precision 0/4 (0.000) | recall 0/nan (n/a)",
+  "    bbox mean IoU: 0/nan (n/a) (n_gt=0, n_localized=0)",
+  "    rotation: correct=0 off_90=0 off_180=0 (n=0) | mean_err=nandeg | rmse=nandeg",
+  "  [unclassified] spurious preds: 0 (area frac 0.0)",
+  "",
+  "[pdf:test_pdfs_2 / <ts>__config] OCR confusion characters (top 5 replacements per gt char):",
+  "  [native_to_vector]",
+  "    'A': (none): 1 (100%)",
+  "    'L': (none): 1 (100%)",
+  ""
+ ],
+ "report_headings": [
+  "Pipeline benchmark (<ts>)",
+  "Inputs",
+  "Runs",
+  "Files scored",
+  "Summary (all inputs)",
+  "Aggregate",
+  "Text",
+  "Labels",
+  "Char overlap",
+  "Word overlap",
+  "Bbox accuracy",
+  "Rotation accuracy",
+  "Per-character OCR accuracy (confusion) -- native_to_vector",
+  "Per-character OCR accuracy (confusion) -- original_vector",
+  "Extra predicted characters (no label overlap at all)",
+  "Timing",
+  "Wall-clock per page (total = pipeline; debug \u203a * = report generation)",
+  "Report generation per document (label overlays, saving layer PDFs)",
+  "labels:test_pdfs_1_v1_format",
+  "Text",
+  "Labels",
+  "Char overlap",
+  "Word overlap",
+  "Bbox accuracy",
+  "Rotation accuracy",
+  "Per-character OCR accuracy (confusion) -- native_to_vector",
+  "Per-character OCR accuracy (confusion) -- original_vector",
+  "Extra predicted characters (no label overlap at all)",
+  "Timing",
+  "Wall-clock per page (total = pipeline; debug \u203a * = report generation)",
+  "Report generation per document (label overlays, saving layer PDFs)",
+  "Viewer command -- labels:test_pdfs_1_v1_format",
+  "pdf:test_pdfs_2",
+  "Text",
+  "Labels",
+  "Char overlap",
+  "Word overlap",
+  "Bbox accuracy",
+  "Rotation accuracy",
+  "Per-character OCR accuracy (confusion) -- native_to_vector",
+  "Per-character OCR accuracy (confusion) -- original_vector",
+  "Extra predicted characters (no label overlap at all)",
+  "Timing",
+  "Wall-clock per page (total = pipeline; debug \u203a * = report generation)",
+  "Report generation per document (label overlays, saving layer PDFs)",
+  "Viewer command -- pdf:test_pdfs_2"
+ ],
+ "ground_truth": {
+  "test_pdfs_1_v1_format": {
+   "ground_truth_native_to_vector": [
+    [
+     0,
+     "Alpha",
+     [
+      91.54,
+      257.98,
+      134.21,
+      289.91
+     ],
+     0
+    ],
+    [
+     0,
+     "Beta12",
+     [
+      306.34,
+      169.15,
+      323.74,
+      209.28
+     ],
+     90
+    ],
+    [
+     0,
+     "Gamma-X",
+     [
+      284.51,
+      207.79,
+      359.66,
+      230.46
+     ],
+     0
+    ]
+   ],
+   "ground_truth_original_vector": [
+    [
+     0,
+     "Alpha",
+     [
+      91.54,
+      257.98,
+      134.21,
+      289.91
+     ],
+     0
+    ],
+    [
+     0,
+     "Beta12",
+     [
+      306.34,
+      169.15,
+      323.74,
+      209.28
+     ],
+     90
+    ],
+    [
+     0,
+     "Gamma-X",
+     [
+      284.51,
+      207.79,
+      359.66,
+      230.46
+     ],
+     0
+    ]
+   ]
+  },
+  "test_pdfs_2": {
+   "ground_truth_native_to_vector": [
+    [
+     0,
+     "Alpha",
+     [
+      78.96,
+      293.94,
+      101.03,
+      335.0
+     ],
+     90
+    ],
+    [
+     0,
+     "Beta12",
+     [
+      224.89,
+      218.55,
+      260.3,
+      277.09
+     ],
+     90
+    ],
+    [
+     0,
+     "Gamma-X",
+     [
+      338.55,
+      314.69,
+      385.75,
+      328.93
+     ],
+     0
+    ]
+   ]
+  }
+ }
+}

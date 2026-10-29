@@ -61,10 +61,15 @@ Every backend is a plain function matching a protocol in `core/interfaces.py`:
 
 ```python
 # raster_vectorize
-def extract(images: list[Image], page: Page, settings: RunSettings) -> tuple[list[Vector], list[Text]]: ...
+def extract(
+    images: list[Image], page: Page, settings: RunSettings
+) -> tuple[list[Vector], list[Text]]: ...
+
 
 # vector_classify
-def parse(vectors: list[Vector], page: Page, settings: RunSettings) -> tuple[list[Vector], list[Text]]: ...
+def parse(
+    vectors: list[Vector], page: Page, settings: RunSettings
+) -> tuple[list[Vector], list[Text]]: ...
 ```
 
 - The protocols are structural (`typing.Protocol`); nothing checks them at runtime.

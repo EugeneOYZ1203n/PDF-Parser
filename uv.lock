@@ -854,6 +854,9 @@ notebook = [
     { name = "matplotlib" },
     { name = "scikit-learn" },
 ]
+report = [
+    { name = "matplotlib" },
+]
 test = [
     { name = "pytest" },
 ]
@@ -877,6 +880,7 @@ notebook = [
     { name = "matplotlib" },
     { name = "scikit-learn" },
 ]
+report = [{ name = "matplotlib" }]
 test = [{ name = "pytest" }]
 
 [[package]]

@@ -21,9 +21,9 @@ LibreOffice).
 from raster_parser import extract, ExtractResult
 
 result = extract("/path/to/drawing.pdf", page_index=0)
-result.page      # PageMeta: size, /Rotate, MediaBox, CropBox
-result.texts     # list[Text] -- native words + vector_classify OCR + raster_vectorize (raster) OCR
-result.vectors   # list[Vector] -- non-glyph drawings + raster_vectorize colour-fill autotrace
+result.page  # PageMeta: size, /Rotate, MediaBox, CropBox
+result.texts  # list[Text] -- native words + vector_classify OCR + raster_vectorize (raster) OCR
+result.vectors  # list[Vector] -- non-glyph drawings + raster_vectorize colour-fill autotrace
 json_str = result.to_json()
 again = ExtractResult.from_json(json_str)
 ```
@@ -125,6 +125,10 @@ uv sync --group dev --group notebook --group test
 |--------|------|
 | `scripts/inspector/` | PDF layer inspector GUI (`python -m scripts.inspector.inspector [pdf]`) — see its `README.md` |
 | `scripts/golden_snapshot.py` | Write / compare the golden `extract()` snapshots in `tests/references/golden/` |
+| `scripts/generate_pipeline_report.py` | Config-driven pipeline report: debug layers, debug images, `dump.json`; benchmark mode adds ground truth — see `docs/SCRIPTS.md` |
+| `scripts/pipeline_report_viewer.py` | Tk viewer over 1–2 report folders, a checkbox per layer — see `docs/SCRIPTS.md` |
+| `scripts/pipeline_report_benchmark.py` | Scores 1–2 benchmark report folders, writes `report.html` (needs `uv sync --group report`) — see `docs/SCRIPTS.md` |
+| `scripts/rasterize_pdf.py` | Flatten a PDF to pure raster: `python scripts/rasterize_pdf.py SRC [DST] --dpi 300` (default DST `outputs/rasterize/<stem>_raster.pdf`) |
 
 The Type-2 / Type-4 scripts, the native-vs-OCR / native-vs-raster evaluation helpers and the
 DTO-replay script were written against the removed `models` / `parsing` / `rendering` modules
