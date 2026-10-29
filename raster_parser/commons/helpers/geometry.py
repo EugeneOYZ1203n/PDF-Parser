@@ -46,6 +46,37 @@ def union_bbox(boxes: list[BBox]) -> BBox:
     return (x0, y0, x1, y1)
 
 
+def bbox_area(b: BBox) -> float:
+    """Area of an axis-aligned (x0, y0, x1, y1) box; 0.0 for a degenerate
+    (zero- or negative-extent) box."""
+    return max(b[2] - b[0], 0.0) * max(b[3] - b[1], 0.0)
+
+
+def bbox_intersection_area(a: BBox, b: BBox) -> float:
+    """Overlap area of two axis-aligned (x0, y0, x1, y1) boxes; 0.0 if they
+    don't overlap. Single source of truth for the overlap term in bbox_iou
+    and bbox_coverage (Evaluation/Evaluate's metrics.py)."""
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    if ix1 <= ix0 or iy1 <= iy0:
+        return 0.0
+    return (ix1 - ix0) * (iy1 - iy0)
+
+
+def bbox_iou(a: BBox, b: BBox) -> float:
+    """Intersection-over-union of two axis-aligned (x0, y0, x1, y1) boxes,
+    0.0 if they don't overlap. Used to match a predicted cluster bbox
+    against a ground-truth text bbox (Evaluation/Labelling's auto_label.py,
+    Evaluation/Evaluate's metrics.py)."""
+    intersection = bbox_intersection_area(a, b)
+    if intersection <= 0.0:
+        return 0.0
+    union = bbox_area(a) + bbox_area(b) - intersection
+    return intersection / union if union > 0 else 0.0
+
+
 def make_oriented_quad(bbox: BBox, dx: float, dy: float) -> Quad:
     """Build a quad around `bbox`, oriented along the text direction
     `(dx, dy)`, returned as ``(ul, ur, lr, ll)`` `(x, y)` tuples.

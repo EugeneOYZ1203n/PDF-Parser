@@ -100,3 +100,44 @@ def test_item_bbox_line():
 
 def test_item_bbox_empty_for_unknown_kind():
     assert geometry.item_bbox(("x",)) == (0.0, 0.0, 0.0, 0.0)
+
+
+def test_bbox_iou_identical_boxes_is_one():
+    box = (0, 0, 10, 10)
+    assert geometry.bbox_iou(box, box) == pytest.approx(1.0)
+
+
+def test_bbox_iou_disjoint_boxes_is_zero():
+    assert geometry.bbox_iou((0, 0, 10, 10), (20, 20, 30, 30)) == 0.0
+
+
+def test_bbox_iou_partial_overlap():
+    # (0,0,10,10) and (5,5,15,15): intersection 5x5=25, union 100+100-25=175
+    assert geometry.bbox_iou((0, 0, 10, 10), (5, 5, 15, 15)) == pytest.approx(25 / 175)
+
+
+def test_bbox_area_basic():
+    assert geometry.bbox_area((0, 0, 10, 4)) == pytest.approx(40.0)
+
+
+def test_bbox_area_degenerate_is_zero():
+    assert geometry.bbox_area((5, 5, 5, 20)) == 0.0
+    assert geometry.bbox_area((10, 0, 0, 10)) == 0.0  # inverted extent
+
+
+def test_bbox_intersection_area_partial():
+    assert geometry.bbox_intersection_area((0, 0, 10, 10), (5, 5, 15, 15)) == pytest.approx(25.0)
+
+
+def test_bbox_intersection_area_disjoint_is_zero():
+    assert geometry.bbox_intersection_area((0, 0, 10, 10), (20, 20, 30, 30)) == 0.0
+
+
+def test_bbox_intersection_area_touching_is_zero():
+    assert geometry.bbox_intersection_area((0, 0, 10, 10), (10, 0, 20, 10)) == 0.0
+
+
+def test_bbox_iou_regression_via_intersection_area():
+    # bbox_iou now delegates to bbox_intersection_area; values must be unchanged
+    assert geometry.bbox_iou((0, 0, 10, 10), (5, 5, 15, 15)) == pytest.approx(25 / 175)
+    assert geometry.bbox_iou((0, 0, 4, 4), (2, 0, 6, 4)) == pytest.approx(8 / 24)

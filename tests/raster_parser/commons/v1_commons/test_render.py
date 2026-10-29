@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pymupdf
 
-from raster_parser.commons.v1_commons.render import finish_kwargs
+from raster_parser.commons.v1_commons.render import draw_vectors, finish_kwargs
 
 
 def test_finish_kwargs_defaults_for_unset_fields(vector) -> None:
@@ -41,3 +41,24 @@ def test_replay_items_rejects_unknown_ops() -> None:
     with pymupdf.open() as doc:
         with pytest.raises(ValueError, match="unhandled drawing op"):
             replay_items(doc.new_page().new_shape(), [("zz", (0, 0))])
+
+
+def test_draw_vectors_replays_every_item(vector, tmp_path) -> None:
+    v = vector(
+        type="s",
+        items=[
+            ("l", (10.0, 10.0), (90.0, 10.0)),
+            ("re", (20.0, 20.0, 40.0, 40.0)),
+            ("qu", ((50.0, 20.0), (70.0, 20.0), (70.0, 40.0), (50.0, 40.0))),
+            ("c", (10.0, 60.0), (30.0, 80.0), (50.0, 40.0), (70.0, 60.0)),
+        ],
+        bbox=(10.0, 10.0, 90.0, 80.0),
+        width=1.0,
+    )
+    out = draw_vectors([v], tmp_path / "out.pdf", page_width=100, page_height=100)
+    with pymupdf.open(out) as doc:
+        (d,) = doc[0].get_drawings()
+        assert [it[0] for it in d["items"]] == ["l", "re", "qu", "c"]
+        assert pymupdf.Rect(d["items"][2][1].rect) == pymupdf.Rect(
+            50, 20, 70, 40
+        )  # a box, not a bow-tie
