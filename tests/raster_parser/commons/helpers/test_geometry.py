@@ -141,3 +141,90 @@ def test_bbox_iou_regression_via_intersection_area():
     # bbox_iou now delegates to bbox_intersection_area; values must be unchanged
     assert geometry.bbox_iou((0, 0, 10, 10), (5, 5, 15, 15)) == pytest.approx(25 / 175)
     assert geometry.bbox_iou((0, 0, 4, 4), (2, 0, 6, 4)) == pytest.approx(8 / 24)
+
+
+def test_axial_angle_helpers():
+    import pytest
+
+    from raster_parser.commons.helpers.geometry import axial_distance, wrap_axial
+
+    assert [wrap_axial(a) for a in (90.0, 179.0, -91.0, 0.0, -90.0, 270.5)] == [
+        -90.0,
+        -1.0,
+        89.0,
+        0.0,
+        -90.0,
+        -89.5,
+    ]
+    assert axial_distance(179.8, 0.1) == pytest.approx(0.3)
+    assert axial_distance(10.0, 100.0) == 90.0 and axial_distance(45.0, 45.0) == 0.0
+
+
+def test_v2_uses_the_shared_axial_helpers():
+    from raster_parser.commons.helpers import geometry
+    from raster_parser.phase_vector_classify.v2_vector_class import line_geometry, paddle_engine
+
+    assert paddle_engine.normalize_rotation is geometry.wrap_axial
+    assert line_geometry.axial_distance is geometry.axial_distance
+
+
+def test_rect_gap_overlapping_is_zero():
+    assert geometry.rect_gap((0, 0, 10, 10), (5, 5, 15, 15)) == 0.0
+
+
+def test_rect_gap_touching_is_zero():
+    assert geometry.rect_gap((0, 0, 10, 10), (10, 0, 20, 10)) == 0.0
+
+
+def test_rect_gap_horizontal_separation():
+    assert geometry.rect_gap((0, 0, 10, 10), (13, 0, 20, 10)) == pytest.approx(3.0)
+
+
+def test_rect_gap_diagonal_separation():
+    # boxes offset by (3, 4) with no overlap on either axis -> gap = 5 (3-4-5 triangle)
+    assert geometry.rect_gap((0, 0, 10, 10), (13, 14, 20, 20)) == pytest.approx(5.0)
+
+
+def test_bboxes_intersect():
+    assert geometry.bboxes_intersect((0, 0, 10, 10), (5, 5, 15, 15))
+    assert geometry.bboxes_intersect((0, 0, 10, 10), (10, 0, 20, 10))  # touching
+    assert not geometry.bboxes_intersect((0, 0, 10, 10), (11, 0, 20, 10))
+
+
+# --------------------------------------------------------------------------
+# transform_point / transform_direction
+# --------------------------------------------------------------------------
+def test_transform_point_translation_only():
+    assert geometry.transform_point(
+        (1.0, 2.0), offset=(10.0, 20.0), rotation_deg=0.0
+    ) == pytest.approx((11.0, 22.0))
+
+
+def test_transform_point_rotation_90():
+    x, y = geometry.transform_point((1.0, 0.0), offset=(0.0, 0.0), rotation_deg=90.0)
+    assert x == pytest.approx(0.0, abs=1e-9)
+    assert y == pytest.approx(1.0, abs=1e-9)
+
+
+def test_transform_point_rotation_then_translation_order():
+    # rotate (1, 0) by 90 -> (0, 1), then translate by (5, 5) -> (5, 6).
+    x, y = geometry.transform_point((1.0, 0.0), offset=(5.0, 5.0), rotation_deg=90.0)
+    assert x == pytest.approx(5.0, abs=1e-9)
+    assert y == pytest.approx(6.0, abs=1e-9)
+
+
+def test_transform_direction_rotates_without_translating():
+    direction = geometry.transform_direction((1.0, 0.0), rotation_deg=90.0)
+    assert direction == pytest.approx((0.0, 1.0), abs=1e-9)
+
+
+def test_transform_direction_is_unaffected_by_position():
+    # transform_direction never takes an offset -- confirm rotating a
+    # direction gives the same result regardless of any notional position.
+    a = geometry.transform_direction((1.0, 0.0), rotation_deg=45.0)
+    b = geometry.transform_direction((1.0, 0.0), rotation_deg=45.0)
+    assert a == b
+
+
+def test_dims():
+    assert geometry.dims((1, 2, 4, 10)) == (3, 8)

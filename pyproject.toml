@@ -13,6 +13,8 @@ dependencies = [
     "paddlepaddle>=2.6,<3",
     "setuptools",  # paddleocr 2.x imports it at runtime; py3.12 venvs don't ship it
     "pyautotrace",
+    "scipy",  # v2_vector_class: cKDTree in the pattern-lattice step
+    "pyenchant",  # v2_vector_class: English-word scoring; Linux also needs libenchant-2-2 + hunspell-en-us
     "tqdm",  # stage progress bars (commons/progress.py)
 ]
 

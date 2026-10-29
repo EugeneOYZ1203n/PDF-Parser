@@ -136,3 +136,12 @@ def rasterize_pdf(pdf_bytes: bytes, *, zoom: float = 1.0) -> "Image.Image":
         return image
     finally:
         doc.close()
+
+
+def layer_slug(label: str, fallback: str = "layer") -> str:
+    """A debug layer's label as a file-safe name: lower case, runs of other characters as one
+    `_`, `fallback` if nothing is left."""
+    keep = "".join(c if c.isalnum() else "_" for c in label.lower())
+    while "__" in keep:
+        keep = keep.replace("__", "_")
+    return keep.strip("_") or fallback

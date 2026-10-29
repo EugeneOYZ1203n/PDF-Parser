@@ -20,7 +20,10 @@ sys.path.insert(0, str(REPO / "scripts"))
 from golden_snapshot import diff, snapshot  # noqa: E402
 
 # golden folder -> (p2, p3) backend names
-COMBOS = {"v1_v1": ("v1_raster_to_vec", "v1_vector_class")}
+COMBOS = {
+    "v1_v1": ("v1_raster_to_vec", "v1_vector_class"),
+    "v1_v2": ("v1_raster_to_vec", "v2_vector_class"),
+}
 
 CASES = [(combo, path) for combo in COMBOS for path in sorted((GOLDEN / combo).glob("*_p*.json"))]
 

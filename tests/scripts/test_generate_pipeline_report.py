@@ -15,7 +15,8 @@ from raster_parser.models.page import PageMeta
 from raster_parser.commons.renderer.pdf import render_boxes_pdf
 from raster_parser.evaluation import dump_io
 from raster_parser.evaluation.report import report_artifacts as ra
-from raster_parser.evaluation.report.report_config import ReportConfig, layer_slug
+from raster_parser.commons.renderer.pdf import layer_slug
+from raster_parser.evaluation.report.report_config import ReportConfig
 from raster_parser.phase_vector_classify.v1_vector_class import s4_word_ocr
 
 _MOD_PATH = Path(__file__).resolve().parents[2] / "scripts" / "generate_pipeline_report.py"
@@ -35,7 +36,7 @@ def _pm(rotation: int = 0) -> PageMeta:
 # ---------------------------------------------------------------------------
 def test_defaults_and_pages():
     cfg = ReportConfig(input_files=["a.pdf"])
-    assert (cfg.p2, cfg.p3) == ("v1_raster_to_vec", "v1_vector_class")
+    assert (cfg.p2, cfg.p3) == ("v1_raster_to_vec", "v2_vector_class")
     assert cfg.final_stage is None
     assert cfg.pages_for("a") == [0]
     assert ReportConfig(pages={"a": [1, 2], "*": [0]}).pages_for("b") == [0]
@@ -302,3 +303,12 @@ def test_benchmark_without_layers_images_or_converted_pdfs_writes_no_pdfs(
     assert (run_dir / "A" / "dump.json").is_file()
     assert list(run_dir.rglob("*.pdf")) == []
     assert list(run_dir.rglob("*.png")) == []
+
+
+def test_step_time_sink_sums_per_phase_and_name():
+    sub: dict = {}
+    sink = gpr._step_time_sink(sub)
+    sink("vector_classify", "ocr_detect", 1.0)
+    sink("vector_classify", "ocr_detect", 0.5)
+    sink("vector_classify", "drawing", 0.25)
+    assert sub == {"vector_classify": {"ocr_detect": 1.5, "drawing": 0.25}}

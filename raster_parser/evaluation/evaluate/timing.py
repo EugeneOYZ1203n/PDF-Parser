@@ -1,14 +1,16 @@
 """Wall-clock timing summaries for `scripts/pipeline_report_benchmark.py`.
 
 Pure -- no pipeline import. Input is what `dump.json` records per page (`evaluation/dump_io.
-PageDump`): the pipeline's phase seconds (`step_durations`, keyed by `core.pipeline.PHASE_NAMES`) and the report
-generator's own per-page `debug_durations` (input conversion, the reconstructed layer,
-extra-prediction layers).
+PageDump`): the pipeline's phase seconds (`step_durations`, keyed by `core.pipeline.PHASE_NAMES`), the backend
+sub-step seconds within them (`sub_durations`, `{phase: {name: s}}`) and the report generator's
+own per-page `debug_durations` (input conversion, the reconstructed layer, extra-prediction
+layers).
 
 `flatten_page_timing` turns one page into one flat `{row: seconds}` dict: every phase as-is,
-`total` = their sum (pipeline only), then report-generation cost as `debug.<name>`,
-`debug.total` and `total_incl_debug`. Backend debug layers are rendered inside their phase, so
-a report run's phase times include that rendering.
+each sub-step as `<phase>.<name>`, `total` = the sum of the phases (pipeline only, sub-steps not
+counted again), then report-generation cost as `debug.<name>`, `debug.total` and
+`total_incl_debug`. Backend debug layers are rendered inside their phase, so a report run's
+phase times include that rendering (v2_vector_class reports it as `vector_classify.debug_render`).
 
 `flatten_doc_timing` does the same for a dump's document-level `doc_durations` (GT overlays,
 saving the layer PDFs), summarised in its own `DOC_KIND` table. `summarize_timings` reduces a
@@ -63,13 +65,29 @@ def _is_debug(key: str) -> bool:
     return key.startswith(DEBUG_PARENT + ".") or key == TOTAL_INCL_DEBUG
 
 
-def flatten_page_timing(step_durations: dict, debug_durations: "dict | None" = None) -> dict:
+def sub_row(phase: str, name: str) -> str:
+    return f"{phase}.{name}"
+
+
+def _sub_phase(key: str) -> "str | None":
+    """The phase a `<phase>.<name>` sub-step row belongs to, else `None`."""
+    phase, dot, _name = key.partition(".")
+    return phase if dot and phase in PHASE_ORDER else None
+
+
+def flatten_page_timing(
+    step_durations: dict, debug_durations: "dict | None" = None, sub_durations: "dict | None" = None
+) -> dict:
     """One page's `{row: seconds}` -- see the module docstring. `{}` if the page recorded no
     phase timings."""
     if not step_durations:
         return {}
     row = {k: float(v) for k, v in step_durations.items()}
-    row[TOTAL] = sum(row.values())
+    total = sum(row.values())
+    for phase, steps in (sub_durations or {}).items():
+        for name, secs in steps.items():
+            row[sub_row(phase, name)] = float(secs)
+    row[TOTAL] = total
     debug = {k: float(v) for k, v in (debug_durations or {}).items()}
     if debug:
         for name, secs in debug.items():
@@ -90,15 +108,19 @@ def flatten_doc_timing(doc_durations: "dict | None") -> dict:
 
 
 def row_order(rows: "Sequence[dict]") -> list[str]:
-    """Display order over every key present in `rows`: phases in `PHASE_ORDER`, then any other
-    pipeline key, then `total`, then the `debug.*` group (`DEBUG_ORDER` first), `debug.total`
-    and `total_incl_debug`."""
+    """Display order over every key present in `rows`: phases in `PHASE_ORDER`, each followed by
+    its `<phase>.<name>` sub-steps, then any other pipeline key, then `total`, then the `debug.*`
+    group (`DEBUG_ORDER` first), `debug.total` and `total_incl_debug`."""
     seen: list[str] = []
     for r in rows:
         for k in r:
             if k not in seen:
                 seen.append(k)
-    ordered = [p for p in PHASE_ORDER if p in seen]
+    ordered: list[str] = []
+    for p in PHASE_ORDER:
+        if p in seen:
+            ordered.append(p)
+        ordered += [k for k in seen if _sub_phase(k) == p]
     ordered += [k for k in seen if k not in ordered and k != TOTAL and not _is_debug(k)]
     if TOTAL in seen:
         ordered.append(TOTAL)
@@ -127,8 +149,9 @@ def summarize_timings(rows: "Sequence[dict]") -> dict:
 
 
 def leaf_rows(summary: dict) -> list[str]:
-    """Rows that partition a page's pipeline total without overlap (for a stacked chart)."""
-    return [k for k in summary if k != TOTAL and not _is_debug(k)]
+    """Rows that partition a page's pipeline total without overlap (for a stacked chart): the
+    phases, not their sub-steps."""
+    return [k for k in summary if k != TOTAL and not _is_debug(k) and _sub_phase(k) is None]
 
 
 def fmt_seconds(value: float) -> str:
@@ -145,7 +168,7 @@ def format_timing_table(summary: dict, *, title: str) -> str:
     header = f"  {'step':<{name_w}}" + "".join(f"{c:>10}" for c in _STAT_COLUMNS)
     lines = [title, header, "  " + "-" * (len(header) - 2)]
     for key, stats in summary.items():
-        label = f"debug {key.split('.', 1)[1]}" if key.startswith(DEBUG_PARENT + ".") else key
+        label = f"{key.split('.', 1)[0]} {key.split('.', 1)[1]}" if "." in key else key
         cells = "".join(
             f"{int(stats.get(c, 0)):>10}" if c == "n" else f"{stats.get(c, math.nan):>10.3f}"
             for c in _STAT_COLUMNS

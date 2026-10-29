@@ -1,0 +1,6 @@
+{
+  "p2": "stub",
+  "p3": "v2_vector_class",
+  "input_files": ["references/example.pdf"],
+  "pages": [0]
+}

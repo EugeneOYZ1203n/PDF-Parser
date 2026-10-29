@@ -34,6 +34,7 @@ from raster_parser.commons.helpers.geometry import PDF_POINTS_PER_INCH
 from raster_parser.commons.logging_setup import get_logger
 from raster_parser.models.text import Text
 from raster_parser.commons.progress import bar
+from raster_parser.commons.helpers.clustering import UnionFind
 from raster_parser.commons.v1_commons.ocr import normalise_crop_for_ocr, ocr_text
 from raster_parser.commons.workers import pin_blas_threads, spawn_pool
 from raster_parser.models.raster_vectorize import GlyphCc, RegionOcrResult
@@ -358,29 +359,17 @@ def _cluster_glyph_ccs(
     n = len(ccs)
     if n == 0:
         return []
-    parent = list(range(n))
-
-    def find(x: int) -> int:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a: int, b: int) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[ra] = rb
-
+    uf = UnionFind(n)
     for i in range(n):
         for j in range(i + 1, n):
             if _cc_size_similar(
                 ccs[i], ccs[j], height_ratio=height_ratio, area_ratio=area_ratio
             ) and _cc_close(ccs[i], ccs[j], gap_factor=gap_factor, align_factor=align_factor):
-                union(i, j)
+                uf.union(i, j)
 
     buckets: dict[int, list[GlyphCc]] = {}
     for i, cc in enumerate(ccs):
-        buckets.setdefault(find(i), []).append(cc)
+        buckets.setdefault(uf.find(i), []).append(cc)
 
     clusters: list[list[GlyphCc]] = []
     for grp in buckets.values():

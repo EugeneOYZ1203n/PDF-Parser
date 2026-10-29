@@ -9,7 +9,7 @@ that need `pymupdf.Point`/`Quad`/`Rect`/`Matrix` objects live in
 
 from __future__ import annotations
 
-from math import hypot
+from math import cos, hypot, radians, sin
 
 # Axis-aligned bounding box: (x0, y0, x1, y1) in PDF page space.
 BBox = tuple[float, float, float, float]
@@ -30,6 +30,17 @@ def round_color(
     return tuple(round(c, 3) for c in color)
 
 
+def wrap_axial(angle_deg: float) -> float:
+    """An axial angle (a line direction: 0 and 180 are the same) wrapped to `[-90, 90)`."""
+    return ((angle_deg + 90.0) % 180.0) - 90.0
+
+
+def axial_distance(a: float, b: float) -> float:
+    """Smallest separation of two axial angles (period 180)."""
+    d = abs(a - b) % 180.0
+    return min(d, 180.0 - d)
+
+
 def rgb01_to_hex(color: tuple[float, ...]) -> str:
     """An RGB colour with components in [0, 1] as `#rrggbb`; out-of-range components clamp."""
     return "#%02x%02x%02x" % tuple(min(255, max(0, round(c * 255))) for c in color)
@@ -44,6 +55,26 @@ def union_bbox(boxes: list[BBox]) -> BBox:
     x1 = max(b[2] for b in boxes)
     y1 = max(b[3] for b in boxes)
     return (x0, y0, x1, y1)
+
+
+def rect_gap(a: BBox, b: BBox) -> float:
+    """Euclidean gap between two axis-aligned (x0, y0, x1, y1) boxes.
+
+    0.0 if they overlap or touch. Used for spatial clustering, where the
+    gap between shapes (not the distance between their centers) is what
+    determines whether they're "close."
+    """
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    dx = max(bx0 - ax1, ax0 - bx1, 0.0)
+    dy = max(by0 - ay1, ay0 - by1, 0.0)
+    return hypot(dx, dy)
+
+
+def dims(bbox: BBox) -> tuple[float, float]:
+    """(width, height) of an axis-aligned box."""
+    x0, y0, x1, y1 = bbox
+    return (x1 - x0, y1 - y0)
 
 
 def bbox_area(b: BBox) -> float:
@@ -75,6 +106,13 @@ def bbox_iou(a: BBox, b: BBox) -> float:
         return 0.0
     union = bbox_area(a) + bbox_area(b) - intersection
     return intersection / union if union > 0 else 0.0
+
+
+def bboxes_intersect(a: BBox, b: BBox) -> bool:
+    """True if two axis-aligned boxes overlap or touch (shared edge counts)."""
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    return ax0 <= bx1 and bx0 <= ax1 and ay0 <= by1 and by0 <= ay1
 
 
 def make_oriented_quad(bbox: BBox, dx: float, dy: float) -> Quad:
@@ -197,3 +235,19 @@ def item_bbox(item: tuple) -> BBox:
     xs = [p[0] for p in points]
     ys = [p[1] for p in points]
     return (min(xs), min(ys), max(xs), max(ys))
+
+
+def transform_point(p: Point, offset: Point, rotation_deg: float) -> Point:
+    """Rotate `p` about (0, 0) by `rotation_deg` (degrees, counter-clockwise
+    in PDF's y-down... actually y-up-agnostic -- just the standard 2-D
+    rotation matrix), then translate by `offset`."""
+    theta = radians(rotation_deg)
+    cos_t, sin_t = cos(theta), sin(theta)
+    x, y = p
+    return (x * cos_t - y * sin_t + offset[0], x * sin_t + y * cos_t + offset[1])
+
+
+def transform_direction(direction: Point, rotation_deg: float) -> Point:
+    """Rotate a direction unit vector by `rotation_deg` about the origin
+    -- no translation, since a direction is a vector, not a point."""
+    return transform_point(direction, offset=(0.0, 0.0), rotation_deg=rotation_deg)

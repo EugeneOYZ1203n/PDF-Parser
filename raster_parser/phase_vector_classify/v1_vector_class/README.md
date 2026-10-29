@@ -1,7 +1,7 @@
 # v1_vector_class (vector_classify)
 
-The original raster_parser "Type-2" vector parsing as a vector_classify backend (`p3="v1_vector_class"`,
-the default). It finds text drawn as filled vector glyphs and reads it with OCR:
+The original raster_parser "Type-2" vector parsing as a vector_classify backend (`p3="v1_vector_class"`;
+the default is now `v2_vector_class`). It finds text drawn as filled vector glyphs and reads it with OCR:
 
 1. **Fill-glyph candidates** — filled (`"f"`) vectors that aren't white and aren't layout boxes
    or rules.

@@ -40,6 +40,7 @@ def test_write_load_dump(tmp_path, text, vector, page_meta):
         p2="stub",
         p3="v1_vector_class",
         debug_durations={"conversion": 0.1},
+        sub_durations={"vector_classify": {"ocr_detect": 1.5}},
     )
     path = tmp_path / "dump.json"
     dump_io.write_dump(path, "doc.pdf", [pd], {"layer_save": 0.2})
@@ -65,6 +66,7 @@ def test_page_json_layout_is_unchanged(tmp_path, page_meta):
         "p2",
         "p3",
         "step_durations",
+        "sub_durations",
         "debug_durations",
     ]
     assert page["step_durations"] == {"native_read": 0.5}
@@ -75,11 +77,12 @@ def test_missing_optional_fields_default(tmp_path, page_meta):
     path = tmp_path / "dump.json"
     dump_io.write_dump(path, "doc.pdf", [pd])
     payload = json.loads(path.read_text(encoding="utf-8"))
-    for key in ("p2", "p3", "step_durations", "debug_durations"):
+    for key in ("p2", "p3", "step_durations", "sub_durations", "debug_durations"):
         payload["pages"][0].pop(key)
     payload.pop("doc_durations")
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     dump = dump_io.load_dump(path)
     assert dump.pages[0].result.step_durations == {} and dump.pages[0].p2 == ""
+    assert dump.pages[0].sub_durations == {}
     assert dump.doc_durations == {}

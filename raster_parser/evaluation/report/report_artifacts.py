@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from raster_parser.models.source import Source
 from raster_parser.commons.renderer.draw import hex_to_rgb01
+from raster_parser.commons.renderer.pdf import layer_slug
 
 import json
 import random
@@ -31,7 +32,6 @@ from raster_parser.commons.renderer.pdf import render_boxes_pdf, render_text_pdf
 from raster_parser.evaluation import dump_io
 from raster_parser.evaluation.evaluate import adapters, label_overlays, metrics
 from raster_parser.evaluation.labelling.label_schema import LabelSet, path_signature
-from raster_parser.evaluation.report.report_config import layer_slug
 from raster_parser.phase_output_assemble import render_output_pdf
 
 if TYPE_CHECKING:
@@ -279,7 +279,7 @@ def debug_image_sink(reservoirs: ImageReservoirs, page_index: int):
 def write_hyperparams(
     path: Path, config: "ReportConfig", settings: "RunSettings", config_path: Path
 ) -> None:
-    run_settings = {k: str(v) for k, v in vars(settings).items() if not k.startswith("on_debug_")}
+    run_settings = {k: str(v) for k, v in vars(settings).items() if not k.startswith("on_")}
     path.write_text(
         "# Source config\n"
         + str(config_path.resolve())

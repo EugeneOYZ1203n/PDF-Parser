@@ -36,14 +36,17 @@ again = ExtractResult.from_json(json_str)
 |-----------|---------|-------------|
 | `pdf_path` | (required) | PDF file path |
 | `page_index` | `0` | Page to process (0-based) |
-| `ocr_dpi` | `300` | Type-2 crop DPI and Type-4 render DPI |
-| `use_angle_cls` | `True` | PaddleOCR angle classification (Type-2 and Type-4) |
+| `ocr_dpi` | `300` | Type-4 render DPI, and the crop DPI of `p3="v1_vector_class"` (v2_vector_class picks a DPI per cluster) |
+| `use_angle_cls` | `True` | PaddleOCR angle classification for `p3="v1_vector_class"` (v2_vector_class always runs it) |
 | `enable_raster_pass` | `True` | After Type-2: LibreOffice clear → Type-4 if residual page |
-| `workers` | `1` | Process pool size for Type-4 tile det / recog / colour autotrace |
+| `workers` | `1` | Process pool size for Type-4 tile det / recog / colour autotrace, and for `p3="v2_vector_class"`'s OCR detect / recognise |
 | `dump_dir` | system temp dir | Parent for this call's LO + Type-4 dumps; each call works in its own new sub-folder |
 | `debug` | `False` | Keep this call's dump sub-folder (its path is logged) and write the raster pass's debug images / QA files into it; otherwise only what the result needs is written and the sub-folder is removed after `extract()` |
 | `p2` | `"v1_raster_to_vec"` | raster_vectorize (raster pass) backend — `raster_parser.core.registry.VECTORIZE_BACKENDS` |
-| `p3` | `"v1_vector_class"` | vector_classify (vector parsing) backend — `raster_parser.core.registry.CLASSIFY_BACKENDS` |
+| `p3` | `"v2_vector_class"` | vector_classify (vector parsing) backend — `raster_parser.core.registry.CLASSIFY_BACKENDS` |
+
+With `workers > 1` the pools start their processes with `spawn`, which re-imports the calling
+script: call `extract()` from under `if __name__ == "__main__":`.
 
 An unknown `p2` / `p3` name raises `ValueError` listing the valid ones. `enable_raster_pass=False`
 skips raster_vectorize whatever `p2` is (same as `p2="stub"`).
@@ -58,14 +61,22 @@ skips raster_vectorize whatever `p2` is (same as `p2="stub"`).
    via `clear_page(..., dump_dir=...)` on a one-page copy (native text / vector shapes removed,
    embedded images kept); if anything is left, `extract_raster_page` runs on it — text/drawing
    split, tiled OCR detection + recognition, then **colour-fill autotrace** of the drawing layer.
-3. **vector_classify** (`p3`, default `v1_vector_class`) — fill-glyph OCR on native_read's vectors: filled,
-   non-white, non-box paths are grouped into words by content-stream order and read with
-   PaddleOCR; every other vector is kept as drawing. vector_classify never sees raster_vectorize's output.
+3. **vector_classify** (`p3`, default `v2_vector_class`) — vector-text OCR on native_read's vectors, stroked
+   or filled: drawing is removed by geometry per layer / colour / width bucket (oversize,
+   dashed lines, repeated patterns, length outliers, crossed grids), the remaining clusters are
+   rendered and read with PaddleOCR (detection, rotation from the detected quad, retries at
+   90 / 180 / 270), and each read takes the vectors its quad owns; every other vector is kept as
+   drawing (`docs/PIPELINE.md`). `p3="v1_vector_class"` is the original fill-glyph OCR: filled,
+   non-white, non-box paths grouped into words by content-stream order and read with
+   PaddleOCR. vector_classify never sees raster_vectorize's output.
 4. **output_assemble** (`phase_output_assemble`) — native words, then vector_classify text, then raster_vectorize text,
    with `block_no` renumbered per phase; vector_classify vectors, then raster_vectorize vectors with seqnos moved
    past vector_classify's (raster traces paint on top). Out-of-page items are logged.
 
 No native-vs-OCR comparison. The original native page is not rasterized for vector_classify.
+
+How the phases and backends fit together, and how to add a backend: `docs/ARCHITECTURE.md`.
+How `p3="v2_vector_class"` works step by step: `docs/PIPELINE.md` (terms: `docs/Glossary.md`).
 
 ### Guarantees
 
@@ -77,10 +88,11 @@ No native-vs-OCR comparison. The original native page is not rasterized for vect
   `delete_drawings_from_pdf(..., dump_dir=...)` still defaults to `./tmp`.
 - **Lazy heavy imports** — Paddle / PyMuPDF / OpenCV load on first `extract()` call.
 - **Progress output** — `extract()` writes a timestamped line as each stage starts and ends,
-  plus tqdm bars over its long loops (OCR tiles / batches, autotrace colours), to stderr. It is
-  on by default: the `raster_parser` logger starts at DEBUG (`commons/logging_setup.py`).
-  Silence it with `logging.getLogger("raster_parser").setLevel(logging.INFO)`; a level set
-  before the import is kept. The returned values are the same either way.
+  plus tqdm bars over its long loops (OCR tiles / batches, buckets, autotrace colours), to
+  stderr. It is on by default: the `raster_parser` logger starts at DEBUG
+  (`commons/logging_setup.py`). Silence it with
+  `logging.getLogger("raster_parser").setLevel(logging.INFO)`; a level set before the import is
+  kept. The returned values are the same either way.
 - **First call** may download PaddleOCR model weights to the local cache.
 
 ### Errors
@@ -118,6 +130,13 @@ pip install -e .
 
 Also needs LibreOffice on the host when `enable_raster_pass=True`.
 
+`p3="v2_vector_class"` scores OCR reads with pyenchant's `en_US` dictionary. The Windows and macOS
+wheels bundle Enchant; on Linux install it and the dictionary:
+
+```bash
+sudo apt install libenchant-2-2 hunspell-en-us
+```
+
 **Notebooks / stats / batch analysis** (not required for `extract()`):
 
 ```bash
@@ -147,6 +166,7 @@ uv run pytest tests/ -m "not slow"
 uv run pytest tests/raster_parser/ -m "not slow"  # library logic (mirrors raster_parser/)
 uv run pytest tests/scripts/                      # scripts/ helpers (mirrors scripts/)
 uv run pytest tests/raster_parser/test_main_pipeline_extract.py -m slow
+RASTER_PARSER_RUN_OCR_TESTS=1 uv run pytest tests/raster_parser/phase_vector_classify/v2_vector_class  # + real PaddleOCR tests
 ```
 
 `tests/references/test_pdfs_*.pdf` are committed fixture PDFs.

@@ -77,3 +77,27 @@ def test_format_timing_table():
     assert text.splitlines()[0] == "T"
     assert "debug conversion" in text
     assert timing.format_timing_table({}, title="T") == "T\n  (no timing data)"
+
+
+def test_sub_steps_follow_their_phase_and_are_not_counted_twice():
+    row = timing.flatten_page_timing(
+        {"native_read": 0.5, "vector_classify": 3.0},
+        {"conversion": 0.2},
+        {"vector_classify": {"ocr_detect": 2.0, "classify_pattern": 0.5}},
+    )
+    assert row["total"] == pytest.approx(3.5)
+    assert row["vector_classify.ocr_detect"] == 2.0
+    assert timing.row_order([row]) == [
+        "native_read",
+        "vector_classify",
+        "vector_classify.ocr_detect",
+        "vector_classify.classify_pattern",
+        "total",
+        "debug.conversion",
+        "debug.total",
+        "total_incl_debug",
+    ]
+    assert timing.leaf_rows(timing.summarize_timings([row])) == ["native_read", "vector_classify"]
+    assert "vector_classify ocr_detect" in timing.format_timing_table(
+        timing.summarize_timings([row]), title="T"
+    )

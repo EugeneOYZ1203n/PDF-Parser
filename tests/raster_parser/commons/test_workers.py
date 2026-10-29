@@ -33,3 +33,15 @@ def test_spawn_pool_runs_jobs_in_spawned_processes():
     with workers.spawn_pool(2) as pool:
         assert pool._mp_context.get_start_method() == "spawn"
         assert sorted(pool.map(_square, [1, 2, 3])) == [1, 4, 9]
+
+
+def test_v2_ocr_pool_uses_the_shared_spawn_pool(tmp_path, monkeypatch):
+    from raster_parser.phase_vector_classify.v2_vector_class import ocr_pool
+
+    calls = []
+    monkeypatch.setattr(ocr_pool, "spawn_pool", lambda *a: calls.append(a) or "pool")
+    pool = ocr_pool.OcrPool(3, tmp_path)
+    pool._start()
+    assert calls == [(3, ocr_pool._worker_init, (pool.ocr_version, pool.lang))]
+    pool._executor = None
+    pool.close()

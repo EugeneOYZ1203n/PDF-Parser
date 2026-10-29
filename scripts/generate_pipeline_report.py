@@ -99,12 +99,23 @@ def bench_doc_name(bench: BenchInput) -> str:
     return "".join(c if c not in '<>:"/\\|?*' else "_" for c in name) or "input"
 
 
+def _step_time_sink(sub_durations: dict):
+    """`RunSettings.on_step_time` that sums each `(phase, name)` into `sub_durations`."""
+
+    def sink(phase: str, name: str, seconds: float) -> None:
+        per_phase = sub_durations.setdefault(phase, {})
+        per_phase[name] = per_phase.get(name, 0.0) + seconds
+
+    return sink
+
+
 def _settings(
     config: ReportConfig,
     run_dir: Path,
     writer: LayerWriter | None,
     reservoirs: ImageReservoirs | None,
     page_index: int,
+    sub_durations: "dict | None" = None,
 ) -> RunSettings:
     return RunSettings(
         ocr_dpi=config.ocr_dpi,
@@ -115,6 +126,7 @@ def _settings(
         if writer is not None and config.debug_layers
         else None,
         on_debug_image=debug_image_sink(reservoirs, page_index) if reservoirs is not None else None,
+        on_step_time=_step_time_sink(sub_durations) if sub_durations is not None else None,
     )
 
 
@@ -129,24 +141,33 @@ def _run_page(
     debug_durations: dict,
 ):
     """One pipeline run of `run_input` page `run_page` (report page `page_index`) with the
-    report's callbacks, plus the reconstructed layer."""
+    report's callbacks, plus the reconstructed layer. Returns `(result, sub_durations)`."""
+    sub_durations: dict = {}
     res = run_pipeline(
         run_input,
         run_page,
         p2=config.p2,
         p3=config.p3,
         stop_after=config.final_stage,
-        settings=_settings(config, run_dir, writer, reservoirs, page_index),
+        settings=_settings(config, run_dir, writer, reservoirs, page_index, sub_durations),
     )
     if config.debug_layers:
         start = time.perf_counter()
         reconstructed_layer(writer, res)
         debug_durations["reconstructed"] = time.perf_counter() - start
-    return res
+    return res, sub_durations
 
 
-def _new_page_dump(res, config: ReportConfig, debug_durations: dict) -> dump_io.PageDump:
-    return dump_io.PageDump(result=res, p2=config.p2, p3=config.p3, debug_durations=debug_durations)
+def _new_page_dump(
+    res, config: ReportConfig, debug_durations: dict, sub_durations: "dict | None" = None
+) -> dump_io.PageDump:
+    return dump_io.PageDump(
+        result=res,
+        p2=config.p2,
+        p3=config.p3,
+        debug_durations=debug_durations,
+        sub_durations=dict(sub_durations or {}),
+    )
 
 
 def process_pdf(pdf_path: Path, config: ReportConfig, run_dir: Path) -> None:
@@ -172,11 +193,11 @@ def process_pdf(pdf_path: Path, config: ReportConfig, run_dir: Path) -> None:
         _LOG.info(
             "running %s page %d (p2=%s, p3=%s)", pdf_path.name, page_index, config.p2, config.p3
         )
-        res = _run_page(
+        res, sub_durations = _run_page(
             config, run_dir, run_input, run_page, page_index, writer, reservoirs, debug_durations
         )
         restamp_page(res, page_index)
-        dumps.append(_new_page_dump(res, config, debug_durations))
+        dumps.append(_new_page_dump(res, config, debug_durations, sub_durations))
         if config.vectorise and not config.keep_converted_pdfs:
             conv_path.unlink(missing_ok=True)
         del res
@@ -241,7 +262,9 @@ def process_pdf_benchmark(bench: BenchInput, config: ReportConfig, run_dir: Path
         writer.begin_page(pos, *page_geometry(conv_path, 0))
 
         _LOG.info("benchmark %s page %d (p2=%s, p3=%s)", bench.key, p, config.p2, config.p3)
-        res = _run_page(config, run_dir, str(conv_path), 0, p, writer, reservoirs, debug_durations)
+        res, sub_durations = _run_page(
+            config, run_dir, str(conv_path), 0, p, writer, reservoirs, debug_durations
+        )
         if has_manual and config.debug_layers:
             start = time.perf_counter()
             with stage(f"report › extra-prediction layers {doc_name} p{p}"):
@@ -267,7 +290,7 @@ def process_pdf_benchmark(bench: BenchInput, config: ReportConfig, run_dir: Path
                 )
             debug_durations["extra_predictions"] = time.perf_counter() - start
         restamp_page(res, p)
-        dumps.append(_new_page_dump(res, config, debug_durations))
+        dumps.append(_new_page_dump(res, config, debug_durations, sub_durations))
         if not config.keep_converted_pdfs:
             conv_path.unlink(missing_ok=True)
         del res

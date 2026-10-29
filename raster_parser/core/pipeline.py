@@ -16,12 +16,12 @@ skipped native_read's raw vectors are the output. It is for tools (the pipeline 
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
 from raster_parser.commons.logging_setup import get_logger
 from raster_parser.models.result import ExtractResult
 from raster_parser.commons.progress import note, stage
+from raster_parser.commons.step_timing import StepClock
 from raster_parser.core.registry import (
     DEFAULT_VECTORIZE,
     DEFAULT_CLASSIFY,
@@ -54,33 +54,33 @@ def run_pipeline(
         raise ValueError(f"stop_after must be one of {STEP_NAMES} or None, got {stop_after!r}")
     last = STEP_NAMES.index(stop_after) if stop_after else len(STEP_NAMES) - 1
     durations: dict[str, float] = {}
+    clock = StepClock(durations)
 
     tag = f"{Path(pdf_path).name} p{page_index}"
-    start = time.perf_counter()
-    with stage(f"{tag} › native_read"):
+    with stage(f"{tag} › native_read"), clock("native_read"):
         native = read_and_extract(str(pdf_path), page_index)
-    durations["native_read"] = time.perf_counter() - start
 
     vectors_p2, texts_p2 = [], []
     if last >= 1:
-        start = time.perf_counter()
-        with stage(f"{tag} › raster_vectorize {p2} ({len(native.images)} images)"):
+        with (
+            stage(f"{tag} › raster_vectorize {p2} ({len(native.images)} images)"),
+            clock("raster_vectorize"),
+        ):
             vectors_p2, texts_p2 = vectorize(native.images, native.page, settings)
-        durations["raster_vectorize"] = time.perf_counter() - start
     else:
         note(f"- {tag} › raster_vectorize {p2} skipped (stop_after={stop_after})")
 
     vectors_p3, texts_p3 = native.vectors, []
     if last >= 2:
-        start = time.perf_counter()
-        with stage(f"{tag} › vector_classify {p3} ({len(native.vectors)} vectors)"):
+        with (
+            stage(f"{tag} › vector_classify {p3} ({len(native.vectors)} vectors)"),
+            clock("vector_classify"),
+        ):
             vectors_p3, texts_p3 = classify(native.vectors, native.page, settings)
-        durations["vector_classify"] = time.perf_counter() - start
     else:
         note(f"- {tag} › vector_classify {p3} skipped (stop_after={stop_after})")
 
-    start = time.perf_counter()
-    with stage(f"{tag} › output_assemble"):
+    with stage(f"{tag} › output_assemble"), clock("output_assemble"):
         texts, vectors = organize_outputs(
             native.texts,
             texts_p2,
@@ -89,7 +89,6 @@ def run_pipeline(
             vectors_p3,
             native.page,
         )
-    durations["output_assemble"] = time.perf_counter() - start
 
     _LOG.info(
         "page %d: p2=%s p3=%s -> %d texts, %d vectors (%s)",

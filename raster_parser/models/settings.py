@@ -4,6 +4,10 @@ backend it is. A backend reads the fields it needs and ignores the rest.
 `on_debug_layer` / `on_debug_image` are debug hooks for tools (the pipeline report). They never
 change a backend's output: with both left `None` (as `extract()` does) a backend renders and
 keeps nothing extra. See `docs/ARCHITECTURE.md`, "Debug output".
+
+`on_step_time` receives a backend's own sub-step timings, `(phase, name, seconds)`, once per
+name when the backend finishes (seconds summed over that page). Only backends that time their
+sub-steps call it (v2_vector_class); the phase totals are `ExtractResult.step_durations`.
 """
 
 from __future__ import annotations
@@ -20,6 +24,8 @@ if TYPE_CHECKING:
 DebugLayerSink = Callable[[str, str, str, bytes], None]
 # (folder, name, make_image) -- one debug image; `make_image()` is only called if the tool keeps it.
 DebugImageSink = Callable[[str, str, "Callable[[], Image.Image]"], None]
+# (phase, sub-step name, seconds) -- one backend sub-step's time on the current page.
+StepTimeSink = Callable[[str, str, float], None]
 
 
 @dataclass(frozen=True)
@@ -31,3 +37,4 @@ class RunSettings:
     debug: bool = False  # also write debug images / dumps (else only what the result needs)
     on_debug_layer: DebugLayerSink | None = None  # debug only, see the module docstring
     on_debug_image: DebugImageSink | None = None  # debug only, see the module docstring
+    on_step_time: StepTimeSink | None = None  # timing only, see the module docstring

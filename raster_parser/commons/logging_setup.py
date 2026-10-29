@@ -46,5 +46,11 @@ def configure_logging(level: int | str = logging.DEBUG, *, stream=None) -> None:
             handler.setLevel(level)
 
 
-def get_logger(stage: str) -> logging.Logger:
-    return logging.getLogger(f"{_ROOT_NAME}.{stage}")
+def get_logger(stage: str, *, default_level: int | None = None) -> logging.Logger:
+    """`raster_parser.<stage>`. `default_level` sets its level unless one is already set -- e.g.
+    INFO for a logger whose DEBUG lines fire once per bucket, so they are opt-in
+    (`logging.getLogger("raster_parser.<stage>").setLevel(logging.DEBUG)`)."""
+    logger = logging.getLogger(f"{_ROOT_NAME}.{stage}")
+    if default_level is not None and logger.level == logging.NOTSET:
+        logger.setLevel(default_level)
+    return logger

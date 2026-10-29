@@ -7,7 +7,12 @@ OCR text against ground truth without re-running the pipeline.
 
     {"schema": 1, "pdf_path": ..., "doc_durations": {...},
      "pages": [{"page": PageMeta, "texts": [...], "vectors": [...],
-                "p2": ..., "p3": ..., "step_durations": {...}, "debug_durations": {...}}, ...]}
+                "p2": ..., "p3": ..., "step_durations": {...}, "sub_durations": {...},
+                "debug_durations": {...}}, ...]}
+
+`sub_durations` (`{phase: {sub-step: seconds}}`) holds the sub-step times a backend reported
+through `RunSettings.on_step_time`; they are already inside their phase's `step_durations`.
+
 """
 
 from __future__ import annotations
@@ -30,6 +35,9 @@ class PageDump:
     # Report-generation seconds spent on this page outside the pipeline itself: input
     # conversion, the fixed layers, extra-prediction layers.
     debug_durations: dict = dataclasses.field(default_factory=dict)
+    # Backend sub-step seconds per phase (`RunSettings.on_step_time`), part of their phase's
+    # `result.step_durations`.
+    sub_durations: dict = dataclasses.field(default_factory=dict)
 
     def __eq__(self, other: object) -> bool:
         # `ExtractResult` equality leaves out `step_durations`; a dump compares them too.
@@ -39,7 +47,15 @@ class PageDump:
             self.p2,
             self.p3,
             self.debug_durations,
-        ) == (other.result, other.result.step_durations, other.p2, other.p3, other.debug_durations)
+            self.sub_durations,
+        ) == (
+            other.result,
+            other.result.step_durations,
+            other.p2,
+            other.p3,
+            other.debug_durations,
+            other.sub_durations,
+        )
 
 
 @dataclasses.dataclass
@@ -56,6 +72,7 @@ def _page_to_json(pd: PageDump) -> dict:
         "p2": pd.p2,
         "p3": pd.p3,
         "step_durations": pd.result.step_durations,
+        "sub_durations": pd.sub_durations,
         "debug_durations": pd.debug_durations,
     }
 
@@ -68,6 +85,7 @@ def _page_from_json(d: dict) -> PageDump:
         p2=d.get("p2", ""),
         p3=d.get("p3", ""),
         debug_durations=d.get("debug_durations", {}),
+        sub_durations=dict(d.get("sub_durations", {})),
     )
 
 

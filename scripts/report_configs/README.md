@@ -10,7 +10,7 @@ python scripts/generate_pipeline_report.py --config scripts/report_configs/examp
 
 | Field | Default | Meaning |
 |---|---|---|
-| `p2`, `p3` | `v1_raster_to_vec`, `v1_vector_class` | Backends by registry name (`core/registry.py`). An unknown name is rejected. |
+| `p2`, `p3` | `v1_raster_to_vec`, `v2_vector_class` | Backends by registry name (`core/registry.py`). An unknown name is rejected. |
 | `final_stage` | `null` | Stop after `native_read`, `raster_vectorize` or `vector_classify` (`run_pipeline(stop_after=...)`). Later backends don't run and emit no layers. output_assemble still runs. |
 | `input_dir` | `null` | Every `*.pdf` in this folder. |
 | `input_files` | `[]` | PDFs. In benchmark mode also label JSON files (`raster_parser/evaluation/labelling/label_schema.py`). |
@@ -25,7 +25,7 @@ python scripts/generate_pipeline_report.py --config scripts/report_configs/examp
 | `debug_image_cap` | `100` | At most this many images per folder per document (uniform random across pages, same picks on a rerun). `null` = all. |
 | `debug_layers` | `true` | Write the layer PDFs. Off: `dump.json`, ground truth and debug images are still written, which is all the benchmark needs. |
 | `keep_converted_pdfs` | `true` | Keep each page's converted input (`converted_p<N>.pdf`). |
-| `ocr_dpi`, `use_angle_cls`, `workers` | `300`, `true`, `1` | Passed to the backends in `RunSettings`. |
+| `ocr_dpi`, `use_angle_cls`, `workers` | `300`, `true`, `1` | Passed to the backends in `RunSettings`. `workers > 1` runs v1_raster_to_vec's and v2_vector_class's OCR on a process pool (same output, faster). v2_vector_class doesn't use `ocr_dpi` / `use_angle_cls`. |
 
 ## Inputs
 
@@ -41,7 +41,38 @@ The benchmark matches two runs on the inputs they share, by key (`labels:<JSON n
 `pdf:<stem>` for a bare PDF without `label_files`), so run both configs on the same
 `input_files`.
 
-## Examples
+## Worked examples
 
-`example.json` reports one page with the default backends. `benchmark_example.json` scores
-`v1_vector_class` (no raster pass) on two pages of a label JSON.
+**Look at one backend's steps.** `example.json` (v1_raster_to_vec + v1_vector_class) and `example_v2.json`
+(`p3: "v2_vector_class"`, no raster pass) report one page each; open a result in the viewer:
+
+```
+python scripts/generate_pipeline_report.py --config scripts/report_configs/example_v2.json
+python scripts/pipeline_report_viewer.py outputs/pipeline_report/<ts>__example_v2/example
+```
+
+**Compare two backends: v1_vector_class vs v2_vector_class.** `bench_v1.json` and `bench_v2.json`
+differ only in `p3` (and `workers: 2` for v2). Both use `p2: "stub"` so only vector_classify is
+measured, skip debug images (the benchmark doesn't need them), and score pages 0 and 1 of the
+same three inputs:
+
+```
+python scripts/generate_pipeline_report.py --config scripts/report_configs/bench_v1.json
+python scripts/generate_pipeline_report.py --config scripts/report_configs/bench_v2.json
+python scripts/pipeline_report_benchmark.py \
+    --run outputs/pipeline_report/<ts>__bench_v1 --run outputs/pipeline_report/<ts>__bench_v2
+python scripts/pipeline_report_viewer.py \
+    outputs/pipeline_report/<ts>__bench_v1/example outputs/pipeline_report/<ts>__bench_v2/example
+```
+
+`outputs/pipeline_report_benchmark/<ts>/report.html` then has one column per run: char / word
+F1, bbox IoU and rotation per ground-truth type, candidate precision, and seconds per page.
+v2_vector_class also reports its own sub-steps (`classify_*`, `ocr_detect`, `ocr_recognize`, ...)
+as `vector_classify › <name>` rows under `vector_classify` in the timing table; they are part of `vector_classify`, not
+added to `total`.
+
+**Benchmark a backend pair faster.** Set `"debug_layers": false` as well: only `dump.json` and
+the ground truth are written. Leave it on when you want to inspect errors in the viewer
+(including the `benchmark__extra_*` layers).
+
+`benchmark_example.json` scores `v1_vector_class` (no raster pass) on two pages of a label JSON.

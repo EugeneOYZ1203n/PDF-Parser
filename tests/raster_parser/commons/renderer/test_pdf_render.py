@@ -494,3 +494,11 @@ def test_extract_render_reextract_round_trip(pdf_path):
         assert len(reextracted_drawings) == len(vectors)
     finally:
         doc.close()
+
+
+def test_layer_slug_makes_file_safe_names():
+    from raster_parser.commons.renderer.pdf import layer_slug
+
+    assert layer_slug("kept (off-grid)") == "kept_off_grid"
+    assert layer_slug("!!!") == "layer"
+    assert layer_slug("!!!", fallback="step") == "step"

@@ -1,0 +1,8 @@
+{
+  "p2": "stub",
+  "p3": "v1_vector_class",
+  "benchmark": true,
+  "input_files": ["outputs/labels/example_label", "outputs/labels/example.json", "outputs/labels/plain.pdf"],
+  "pages": {"*": [0, 1]},
+  "debug_images": false
+}

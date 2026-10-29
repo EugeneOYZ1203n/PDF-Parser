@@ -1,10 +1,10 @@
 """`extract()` -- the library's entry point: one PDF page through the phase pipeline.
 
-    native_read       native text, vectors and embedded images                (always)
-    raster_vectorize  raster pass, `p2` (default v1_raster_to_vec)              (skipped when
-                                                                                enable_raster_pass=False)
-    vector_classify   vector parsing, `p3` (default v1_vector_class)            (always)
-    output_assemble   combine everything                                        (always)
+    native_read       native text, vectors and embedded images      (always)
+    raster_vectorize  raster pass, `p2` (default v1_raster_to_vec)  (skipped when
+                                                                    enable_raster_pass=False)
+    vector_classify   vector parsing, `p3` (default v2_vector_class)  (always)
+    output_assemble   combine everything                            (always)
 
 See `raster_parser.core` for the pipeline and the backend registry.
 """
@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 from raster_parser.commons.logging_setup import get_logger
-from raster_parser.models import ExtractResult
+from raster_parser.models.result import ExtractResult
 from raster_parser.core.registry import DEFAULT_VECTORIZE, DEFAULT_CLASSIFY
 
 _LOG = get_logger("extract")

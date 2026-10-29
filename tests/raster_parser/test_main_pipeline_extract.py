@@ -9,7 +9,8 @@ import pytest
 
 from raster_parser import extract
 from raster_parser.models.source import Source
-from raster_parser.models import ExtractResult, Vector
+from raster_parser.models.result import ExtractResult
+from raster_parser.models.vector import Vector
 from raster_parser.commons.v1_commons.ocr import ocr_text
 
 pytest.importorskip("paddleocr")
@@ -23,6 +24,7 @@ def test_extract_raises_when_pdf_missing(tmp_path: Path) -> None:
 def test_extract_stroke_pdf_returns_native_text(synthetic_pdf: Path) -> None:
     result = extract(
         synthetic_pdf,
+        p3="v1_vector_class",
         page_index=0,
         ocr_dpi=150,
         use_angle_cls=False,
@@ -38,7 +40,12 @@ def test_extract_stroke_pdf_returns_native_text(synthetic_pdf: Path) -> None:
 @patch("raster_parser.phase_vector_classify.v1_vector_class.s4_word_ocr.ocr_word_groups")
 def test_extract_merges_mock_ocr_with_strokes(mock_ocr, synthetic_pdf_with_fills: Path) -> None:
     mock_ocr.return_value = [(0, "glyph", 0.9)]
-    result = extract(synthetic_pdf_with_fills, use_angle_cls=False, enable_raster_pass=False)
+    result = extract(
+        synthetic_pdf_with_fills,
+        use_angle_cls=False,
+        enable_raster_pass=False,
+        p3="v1_vector_class",
+    )
     assert len(result.vectors) == 1
     assert result.vectors[0].type == "s"
     assert any(t.text == "glyph" for t in result.texts)
@@ -52,7 +59,12 @@ def test_extract_merges_mock_ocr_with_strokes(mock_ocr, synthetic_pdf_with_fills
 def test_extract_without_ocr_hits_keeps_unread_glyphs_as_drawings(
     mock_ocr, synthetic_pdf_with_fills: Path
 ) -> None:
-    result = extract(synthetic_pdf_with_fills, use_angle_cls=False, enable_raster_pass=False)
+    result = extract(
+        synthetic_pdf_with_fills,
+        use_angle_cls=False,
+        enable_raster_pass=False,
+        p3="v1_vector_class",
+    )
     assert len(result.vectors) == 4  # the stroke and the three glyphs OCR could not read
     assert result.texts == []
     mock_ocr.assert_called_once()
@@ -62,6 +74,7 @@ def test_extract_without_ocr_hits_keeps_unread_glyphs_as_drawings(
 def test_extract_runs_paddle_on_fill_groups(synthetic_pdf_with_fills: Path) -> None:
     result = extract(
         synthetic_pdf_with_fills,
+        p3="v1_vector_class",
         page_index=0,
         ocr_dpi=150,
         use_angle_cls=False,
@@ -132,6 +145,7 @@ def test_extract_merges_type4_when_raster_pass(
     ):
         result = extract(
             synthetic_pdf,
+            p3="v1_vector_class",
             page_index=0,
             ocr_dpi=150,
             use_angle_cls=False,
@@ -172,6 +186,7 @@ def test_extract_removes_only_its_own_run_dir_when_debug_false(
     ):
         extract(
             synthetic_pdf,
+            p3="v1_vector_class",
             page_index=0,
             enable_raster_pass=True,
             dump_dir=dump_dir,
@@ -211,6 +226,7 @@ def test_extract_keeps_its_run_dir_when_debug_true(
     ):
         extract(
             synthetic_pdf,
+            p3="v1_vector_class",
             page_index=0,
             enable_raster_pass=True,
             dump_dir=dump_dir,
@@ -249,7 +265,7 @@ def test_extract_without_raster_pass_never_clears_the_page(mock_ocr, synthetic_p
     with patch(
         "raster_parser.phase_raster_vectorize.v1_raster_to_vec.s1_clear_page.clear_page"
     ) as clear_page:
-        extract(synthetic_pdf, enable_raster_pass=False)
+        extract(synthetic_pdf, enable_raster_pass=False, p3="v1_vector_class")
     clear_page.assert_not_called()
 
 

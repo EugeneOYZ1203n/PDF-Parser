@@ -14,7 +14,7 @@ and how to add a backend. For the public API (parameters, errors, wiring into a 
 | `core/` | The orchestrator and the backend contract: `interfaces.py` (the backend protocols), `registry.py` (backend names → functions), `pipeline.py` (`run_pipeline`, `PHASE_NAMES`). |
 | `phase_native_read/` | native_read, always the same. |
 | `phase_raster_vectorize/<Name>/` | raster_vectorize backends: `stub`, `v1_raster_to_vec`. |
-| `phase_vector_classify/<Name>/` | vector_classify backends: `stub`, `v1_vector_class`. |
+| `phase_vector_classify/<Name>/` | vector_classify backends: `stub`, `v1_vector_class`, `v2_vector_class` (walked through in `docs/PIPELINE.md`, terms in `docs/Glossary.md`). |
 | `phase_output_assemble/` | output_assemble, always the same. |
 | `evaluation/` | Ground-truth labels, input conversion and the scoring behind the report tools (`docs/SCRIPTS.md`); `extract()` never uses it. |
 
@@ -35,7 +35,7 @@ native_read ───┤                                                        
    raw vector paths (clip and group info folded into each path) and embedded images.
 2. **raster_vectorize** (`p2`, default `v1_raster_to_vec`) gets **native_read's images only** and turns raster
    content into vectors and OCR text. `extract(enable_raster_pass=False)` runs `stub` instead.
-3. **vector_classify** (`p3`, default `v1_vector_class`) gets **native_read's vectors only** and splits them
+3. **vector_classify** (`p3`, default `v2_vector_class`) gets **native_read's vectors only** and splits them
    into text (read with OCR) and drawing. raster_vectorize and vector_classify are independent branches: vector_classify
    never sees raster_vectorize's output, and raster_vectorize's vectors never go through vector_classify.
 4. **output_assemble** (`phase_output_assemble/organize.py::organize_outputs`) combines everything into
@@ -109,19 +109,24 @@ module listed for only one family is a candidate to move into that family's own 
 
 | Module | What it is for | Used by |
 |---|---|---|
-| `commons/helpers/geometry.py` | Tuple geometry: bboxes, item points, quads, `bbox_iou`, `union_bbox`, colour rounding, `rgb01_to_hex`, `PDF_POINTS_PER_INCH` | models, `v1_commons`, `phase_native_read`, `v1_raster_to_vec`, `v1_vector_class`, `extract_vectors_from_png`, `scripts/inspector` |
+| `commons/helpers/geometry.py` | Tuple geometry: bboxes, item points, quads, `bbox_iou`, `union_bbox`, axial angles (`wrap_axial`, `axial_distance`), colour rounding, `rgb01_to_hex`, `PDF_POINTS_PER_INCH` | models, `v1_commons`, `phase_native_read`, `v1_raster_to_vec`, `v1_vector_class`, `extract_vectors_from_png`, `v2_vector_class`, `scripts/inspector` |
+| `commons/helpers/clustering.py` | `cluster_spatial` (bbox-gap single linkage on a hash grid), `UnionFind` | `v2_vector_class` |
+| `commons/helpers/layer_separation.py` | Layer / colour / width buckets | `v2_vector_class` |
 | `commons/helpers/pymupdf_geometry.py` | Live PyMuPDF objects <-> plain item tuples; hover metadata (angles, lengths, matrices) | models, `phase_native_read`, `scripts/inspector` |
 | `commons/helpers/pixmap.py` | `pixmap_to_array`, `zoom_matrix(dpi)` | `phase_native_read`, `v1_raster_to_vec`, `extract_vectors_from_png` |
 | `commons/helpers/text_orientation.py` | Reading direction <-> the old `rotate` / glyph orientation | `v1_commons`; migration helpers for callers (`docs/model_migration.md`) |
-| `commons/renderer/_shapes.py` | Exact `Vector` replay onto a page (`replay_drawing_paths`, `replay_item`), `path_color_hex` | `v1_commons`, `commons/renderer/draw.py`, `scripts/inspector` (tests) |
+| `commons/renderer/_shapes.py` | Exact `Vector` replay onto a page (`replay_drawing_paths`, `replay_item`), `path_color_hex` | `v1_commons`, `commons/renderer/draw.py`, `v2_vector_class`, `scripts/inspector` (tests) |
 | `commons/renderer/draw.py` | The spec -> draw layer every PDF is built from; `hex_to_rgb01` | `phase_output_assemble`, `v1_raster_to_vec`, `v1_vector_class`, `evaluation/report` |
-| `commons/renderer/pdf.py` | One-layer debug PDFs (boxes, quads, text, vectors) over `draw.py`; `rasterize_pdf` | `phase_output_assemble`, `v1_raster_to_vec`, `v1_vector_class`, `evaluation/report` |
+| `commons/renderer/pdf.py` | One-layer debug PDFs (boxes, quads, text, vectors) over `draw.py`; `rasterize_pdf`, `layer_slug` | `phase_output_assemble`, `v1_raster_to_vec`, `v1_vector_class`, `evaluation/report` |
+| `commons/renderer/png.py` | Monochrome cluster renders for OCR | `v2_vector_class` |
+| `commons/renderer/ocr_prep.py` | Crop / pad / scale a render for PaddleOCR | `v2_vector_class` |
 | `commons/v1_commons/autotrace.py` | pyautotrace PNG -> SVG -> PDF -> `Vector`s | `v1_raster_to_vec`, `extract_vectors_from_png` |
 | `commons/v1_commons/ocr.py` | OCR crop normalisation, PaddleOCR 2.x result walking, OCR word -> `Text` | `v1_raster_to_vec`, `v1_vector_class` |
 | `commons/v1_commons/render.py` | The original reconstructor's replay (its own `finish()` defaults) | `v1_raster_to_vec`, `v1_vector_class`, `extract_vectors_from_png` |
-| `commons/workers.py` | Spawned process pools and per-worker BLAS thread pinning | `v1_raster_to_vec`, `extract_vectors_from_png` |
+| `commons/workers.py` | Spawned process pools and per-worker BLAS thread pinning | `v1_raster_to_vec`, `v2_vector_class`, `extract_vectors_from_png` |
 | `commons/logging_setup.py` | The `raster_parser` logger and `configure_logging` | core, `phase_native_read`, `phase_output_assemble`, `v1_raster_to_vec`, `evaluation`, `scripts` |
 | `commons/progress.py` | Stage lines and tqdm bars on stderr at DEBUG log level | core, `phase_native_read`, `v1_raster_to_vec`, `v1_vector_class`, `extract_vectors_from_png`, `scripts` |
+| `commons/step_timing.py` | `StepClock`: named step durations | `core/pipeline.py`, `v2_vector_class` |
 | `commons/paths.py` | Repo-relative output folders for the scripts | `scripts` (rasterise, report, benchmark) |
 | `core/interfaces.py` | The backend protocols | `core/registry.py` |
 | `core/registry.py` | Backend names -> functions, resolvers, defaults | `core/pipeline.py`, `main_pipeline_extract`, `evaluation/report` |
@@ -136,6 +141,9 @@ module listed for only one family is a candidate to move into that family's own 
 2. **Register it**: one line in `core/registry.py`'s `VECTORIZE_BACKENDS` or `CLASSIFY_BACKENDS`. It can then
    be selected with `extract(..., p2="<Name>")` / `p3="<Name>"`. Change `DEFAULT_VECTORIZE` /
    `DEFAULT_CLASSIFY` only if it should become the default, since that changes `extract()`'s output.
+   `import raster_parser` imports the registry, so a backend whose modules load heavy libraries
+   at import time (OpenCV, SciPy, PaddleOCR, ...) is registered through a small function that
+   imports it on first call, as `_v2_vector_class` is.
 3. **Write a `README.md`** in the folder, like the v1 ones: what it does step by step, its entry
    point, and what it needs installed. A backend that replaces or derives from an existing one
    lists every difference in output as a behaviour-change table.
@@ -151,13 +159,14 @@ module listed for only one family is a candidate to move into that family's own 
 
 ## Debug output
 
-`RunSettings` carries two optional callbacks for tools that want to see inside a run (the
+`RunSettings` carries three optional callbacks for tools that want to see inside a run (the
 pipeline report). `extract()` never sets them.
 
 | Field | Called as | Meaning |
 |---|---|---|
 | `on_debug_layer` | `(stage, label, "#rrggbb", pdf_bytes)` | one rendered debug layer: a one-page PDF of the page, in unrotated page space |
-| `on_debug_image` | `(folder, name, make_image)` | one debug image; `make_image()` builds the PIL image and is only called if the tool keeps it |
+| `on_debug_image` | `(folder, name, make_image)` | one debug image; `make_image()` builds the PIL image and is only called if the tool keeps it; `folder` may contain `/` |
+| `on_step_time` | `(phase, name, seconds)` | one of the backend's own sub-steps, once per name when the page is done; the time is part of that phase's total (v2_vector_class uses `commons/step_timing.StepClock`) |
 
 Rules for a backend:
 
@@ -182,8 +191,8 @@ Rules for a backend:
 
 - `stage(name)` -- a context manager writing `HH:MM:SS  ▶ name` before the block and
   `HH:MM:SS  ✔ name  1.23s` after it (`✖` when it raises);
-- `bar(iterable, desc=..., total=...)` -- a tqdm bar over a long loop (tiles, batches, pages),
-  including `as_completed` over a process pool;
+- `bar(iterable, desc=..., total=...)` -- a tqdm bar over a long loop (tiles, batches, buckets,
+  pages), including `as_completed` over a process pool;
 - `note(line)` -- one timestamped line, e.g. a skipped stage.
 
 All three are active while the `raster_parser.progress` logger is enabled for DEBUG. The

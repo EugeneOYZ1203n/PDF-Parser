@@ -25,6 +25,14 @@ def _v1_vector_class(vectors, page, settings):
     return parse(vectors, page, settings)
 
 
+def _v2_vector_class(vectors, page, settings):
+    """`v2_vector_class.parse`, imported on first use: its modules load OpenCV, SciPy and
+    pyenchant at import time, and `import raster_parser` must stay light."""
+    from raster_parser.phase_vector_classify.v2_vector_class.parse import parse
+
+    return parse(vectors, page, settings)
+
+
 VECTORIZE_BACKENDS: dict[str, RasterVectorizer] = {
     "stub": _p2_stub,
     "v1_raster_to_vec": _v1_raster_to_vec,
@@ -33,10 +41,11 @@ VECTORIZE_BACKENDS: dict[str, RasterVectorizer] = {
 CLASSIFY_BACKENDS: dict[str, VectorClassifier] = {
     "stub": _p3_stub,
     "v1_vector_class": _v1_vector_class,
+    "v2_vector_class": _v2_vector_class,
 }
 
 DEFAULT_VECTORIZE = "v1_raster_to_vec"
-DEFAULT_CLASSIFY = "v1_vector_class"
+DEFAULT_CLASSIFY = "v2_vector_class"
 
 
 def _resolve(registry: dict, name: str, phase: str):

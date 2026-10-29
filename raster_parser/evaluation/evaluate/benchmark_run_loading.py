@@ -139,7 +139,9 @@ def load_timings(entry: RunEntry) -> "dict[str, list[dict]]":
     dump = dump_io.load_dump(entry.dump_path)
     out: "dict[str, list[dict]]" = {timing.RUN_KIND: [], timing.DOC_KIND: []}
     for page in dump.pages:
-        row = timing.flatten_page_timing(page.result.step_durations, page.debug_durations)
+        row = timing.flatten_page_timing(
+            page.result.step_durations, page.debug_durations, page.sub_durations
+        )
         if row:
             out[timing.RUN_KIND].append(row)
     doc_row = timing.flatten_doc_timing(dump.doc_durations)

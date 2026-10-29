@@ -28,13 +28,6 @@ CONVERT = {
 }
 
 
-def layer_slug(label: str) -> str:
-    keep = "".join(c if c.isalnum() else "_" for c in label.lower())
-    while "__" in keep:
-        keep = keep.replace("__", "_")
-    return keep.strip("_") or "layer"
-
-
 class ReportConfig(BaseModel):
     # Backends, by registry name.
     p2: str = DEFAULT_VECTORIZE
