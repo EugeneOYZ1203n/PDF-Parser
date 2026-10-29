@@ -1,51 +1,52 @@
-from concurrent.futures import ProcessPoolExecutor
-from copy import deepcopy
-import io
-from pathlib import Path
-import tempfile
-from contextlib import nullcontext
+"""Autotrace PNGs (and a page's embedded images) into shared `Vector`s.
 
-from raster_parser.conversion.png_to_vectors.png_to_svg import png_to_svg
-from raster_parser.conversion.png_to_vectors.svg_to_pdf import svg_to_pdf
-from raster_parser.rendering.pdf_render.dto_reconstruct_pipeline import draw_vectors
-from raster_parser.helpers.geometry import PDF_POINTS_PER_INCH
-from raster_parser.models import Vector
-from raster_parser.serialisation.deserialization import deserialize_vector
-from raster_parser.autotrace.drawing_autotrace import (
-    pdf_to_vectors,
-)
-from raster_parser.models import VectorDTO
+The tracing is `commons.v1_commons.autotrace`. An image's vectors are placed on the page through
+the image's placement matrix (`page.get_image_rects(xref, transform=True)`).
+"""
+
+import tempfile
+from dataclasses import replace
+from pathlib import Path
+
+from raster_parser.commons.helpers.geometry import PDF_POINTS_PER_INCH
+from raster_parser.commons.helpers.pixmap import pixmap_to_array, zoom_matrix
+from raster_parser.models.vector import Vector
+from raster_parser.commons.v1_commons.autotrace import autotrace_drawing, traced_vector
+from raster_parser.commons.v1_commons.render import draw_vectors
+from raster_parser.commons.workers import spawn_pool
 
 import pymupdf
+
 from PIL import Image
 
 import statistics as st
 import numpy as np
 
-TRANSPARENCY_THRESHOLD = 0.8
-# A vector rendered black-on-white covers a pixel when its gray value is below mid-gray.
-COVERED_GRAY_MAX = 128
-
 
 def _calculate_vector_transparency(
-    vectors: list[VectorDTO],
+    vectors: list[Vector],
     alpha: np.ndarray,
     tmp_dir: Path | None = None,
     dpi: int = 300,
-) -> list[VectorDTO]:
+) -> list[Vector]:
     """
-    Calculate fill opacity for each vector using the image alpha channel.
+    Set each vector's fill opacity from the image alpha channel: the most common alpha under the
+    pixels the vector fills, as a fraction of 255.
 
-    Vectors with less than 5% average opacity are dropped.
-    Vectors without filled pixels are kept unchanged.
+    `vectors` must be in the generated PDF's own space traced at `dpi` (as `autotrace_drawing`
+    returns them), and `alpha` is the image's alpha channel at that same resolution. Vectors
+    that fill no pixel are kept unchanged; none is dropped. Each vector is rendered alone to a
+    PDF under `tmp_dir` (a throwaway folder when None).
     """
+    if tmp_dir is None:
+        with tempfile.TemporaryDirectory(prefix="vector_alpha_") as scratch:
+            return _calculate_vector_transparency(vectors, alpha, Path(scratch), dpi)
+
     height, width = alpha.shape
 
-    result: list[VectorDTO] = []
+    result: list[Vector] = []
 
-    for i, vector_dto in enumerate(vectors):
-        vector = deserialize_vector(vector_dto)
-
+    for i, vector in enumerate(vectors):
         pdf_path = tmp_dir / f"vector{i}.pdf"
 
         draw_vectors(
@@ -55,208 +56,121 @@ def _calculate_vector_transparency(
             page_height=height * PDF_POINTS_PER_INCH / dpi,
         )
 
-        doc = pymupdf.open(pdf_path)
-        page = doc[0]
-
-        pix = page.get_pixmap(
-            matrix=pymupdf.Matrix(dpi / PDF_POINTS_PER_INCH, dpi / PDF_POINTS_PER_INCH),
-            colorspace=pymupdf.csGRAY,
-            alpha=False,
-        )
-
-        fill_mask = np.frombuffer(
-            pix.samples,
-            dtype=np.uint8,
-        ).reshape(
-            pix.height,
-            pix.width,
-        )
-
-        doc.close()
+        with pymupdf.open(pdf_path) as doc:
+            pix = doc[0].get_pixmap(
+                matrix=zoom_matrix(dpi),
+                colorspace=pymupdf.csGRAY,
+                alpha=False,
+            )
+            fill_mask = pixmap_to_array(pix)[:, :, 0]
 
         # PDF background is white, vector is black.
-        fill_mask = fill_mask < COVERED_GRAY_MAX
+        fill_mask = fill_mask < 128
 
         if not np.any(fill_mask):
-            result.append(vector_dto)
+            result.append(vector)
             continue
 
         vector_alpha = alpha[fill_mask]
 
         opaque_fraction = st.mode(vector_alpha) / 255.0
 
-        vector_dto.fill_opacity = opaque_fraction
-        result.append(vector_dto)
+        result.append(traced_vector(replace(vector, fill_opacity=opaque_fraction)))
 
     return result
 
 
 def _transform_vectors_to_matrix(
-    vectors: list[VectorDTO],
+    vectors: list[Vector],
     matrix: pymupdf.Matrix,
     image_size: tuple[int, int],
     dpi: int,
-) -> None:
-    """Transform image vectors into page coordinates using a PyMuPDF matrix.
+) -> list[Vector]:
+    """Image vectors mapped into page coordinates through one placement's matrix.
 
-    ``matrix`` is the image's placement transform from ``page.get_image_rects(xref,
-    transform=True)``: it maps the image's unit square (0..1 on both axes) onto the page.
-    Item ops: ``"l"`` line, ``"c"`` cubic Bezier, ``"re"`` rectangle, ``"qu"`` quad.
+    Points (lines, curves, quad corners) are mapped exactly. A rectangle (`"re"`) stays a
+    rectangle while the placement keeps the axes (scale, flip, 90-degree turns); under any other
+    rotation or skew it becomes the quad (`"qu"`) of its four mapped corners. `rect` and
+    `scissor` become the axis-aligned bounds of their mapped corners.
     """
 
     image_width, image_height = image_size
 
-    # VectorDTO coordinates are in PDF points, not PNG pixels.
+    # Vector coordinates are in PDF points, not PNG pixels.
     image_width_pt = image_width * PDF_POINTS_PER_INCH / dpi
     image_height_pt = image_height * PDF_POINTS_PER_INCH / dpi
+    keeps_axes = (matrix.b == 0 and matrix.c == 0) or (matrix.a == 0 and matrix.d == 0)
 
-    def transform_point(point: list[float]) -> list[float]:
-        # Convert generated-PDF coordinates into the unit image square.
-        p = pymupdf.Point(
-            point[0] / image_width_pt,
-            point[1] / image_height_pt,
+    def transform_point(point) -> tuple[float, float]:
+        # Generated-PDF coordinates -> the unit image square -> page coordinates.
+        p = pymupdf.Point(point[0] / image_width_pt, point[1] / image_height_pt) * matrix
+        return (p.x, p.y)
+
+    def corners(r) -> list[tuple[float, float]]:
+        x0, y0, x1, y1 = r
+        return [transform_point(c) for c in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]  # ul ur lr ll
+
+    def transform_rect(r) -> tuple[float, float, float, float]:
+        pts = corners(r)
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    def transform_item(item: tuple) -> tuple:
+        op = item[0]
+        if op == "l":
+            return (op, transform_point(item[1]), transform_point(item[2]))
+        if op == "c":
+            return (op, *[transform_point(pt) for pt in item[1:5]], *item[5:])
+        if op == "re":
+            if keeps_axes:
+                return (op, transform_rect(item[1]), *item[2:])
+            return ("qu", tuple(corners(item[1])))
+        if op == "qu":
+            return (op, tuple(transform_point(pt) for pt in item[1]))
+        return item
+
+    return [
+        replace(
+            vector,
+            rect=transform_rect(vector.rect),
+            scissor=transform_rect(vector.scissor) if vector.scissor is not None else None,
+            items=[transform_item(item) for item in vector.items],
         )
-
-        # Map unit-image coordinates to page coordinates.
-        p *= matrix
-
-        return [p.x, p.y]
-
-    def transform_rect(
-        r: list[float],
-    ) -> list[float]:
-        # Transform all four corners because the image may be rotated.
-        points = [
-            transform_point([r[0], r[1]]),
-            transform_point([r[2], r[1]]),
-            transform_point([r[0], r[3]]),
-            transform_point([r[2], r[3]]),
-        ]
-
-        xs = [p[0] for p in points]
-        ys = [p[1] for p in points]
-
-        return [
-            min(xs),
-            min(ys),
-            max(xs),
-            max(ys),
-        ]
-
-    for vector in vectors:
-        vector.x0, vector.y0, vector.x1, vector.y1 = transform_rect(
-            [
-                vector.x0,
-                vector.y0,
-                vector.x1,
-                vector.y1,
-            ]
-        )
-
-        transformed_items = []
-
-        for item in vector.items:
-            op = item["op"]
-            args = item["args"]
-
-            if op == "l":
-                transformed_items.append(
-                    {
-                        "op": op,
-                        "args": [
-                            transform_point(args[0]),
-                            transform_point(args[1]),
-                        ],
-                    }
-                )
-
-            elif op == "c":
-                transformed_items.append(
-                    {
-                        "op": op,
-                        "args": [transform_point(point) for point in args],
-                    }
-                )
-
-            elif op == "re":
-                transformed_items.append(
-                    {
-                        "op": op,
-                        "args": [
-                            transform_rect(args[0]),
-                            *args[1:],
-                        ],
-                    }
-                )
-
-            elif op == "qu":
-                quad = args[0]
-
-                transformed_items.append(
-                    {
-                        "op": op,
-                        "args": [
-                            [transform_point(point) for point in quad],
-                            *args[1:],
-                        ],
-                    }
-                )
-
-            else:
-                transformed_items.append(item)
-
-        vector.items = transformed_items
+        for vector in vectors
+    ]
 
 
 def extract_vectors_from_png(
     png_path: Path,
     tmp_dir: Path | None = None,
     dpi: int = 300,
-) -> list[VectorDTO]:
-    """Autotrace a PNG and return its non-black vectors.
+) -> list[Vector]:
+    """Autotrace a PNG and return its vectors.
 
     Pipeline:
-        PNG -> SVG -> PDF -> MuPDF drawings -> Vector -> VectorDTO
+        PNG -> SVG -> PDF -> MuPDF drawings -> Vector
 
     The returned vectors are in the coordinate system of the generated
     vector PDF and are not transformed to any external bounding box.
     """
-    png_path = Path(png_path)
+    return _trace_png(png_path, tmp_dir, dpi)
 
+
+def _trace_png(png_path: Path, tmp_dir: Path | None, dpi: int) -> list[Vector]:
+    """Autotrace `png_path`; with `tmp_dir` the SVG / PDF intermediates are kept there."""
+    png_path = Path(png_path)
     if not png_path.is_file():
         raise FileNotFoundError(f"image not found: {png_path}")
-
-    if tmp_dir is not None:
-        work_dir_context = nullcontext(Path(tmp_dir))
-    else:
-        work_dir_context = tempfile.TemporaryDirectory()
-
-    with work_dir_context as work_dir:
-        work_dir = Path(work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-
-        svg_path = work_dir / f"{png_path.stem}.svg"
-        pdf_path = work_dir / f"{png_path.stem}.pdf"
-
-        png_to_svg(
-            png_path,
-            svg_path,
-            color_count=2,
-        )
-
-        svg_to_pdf(
-            svg_path,
-            pdf_path,
-        )
-
-        vectors = pdf_to_vectors(
-            pdf_path,
-            page_index=0,
-            dpi=dpi,
-            split_strokes=True,
-        )
-
-    return [VectorDTO.from_vector(vector) for vector in vectors]
+    if tmp_dir is None:
+        return autotrace_drawing(png_path, dpi=dpi)
+    work_dir = Path(tmp_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    return autotrace_drawing(
+        png_path,
+        dpi=dpi,
+        svg_out=work_dir / f"{png_path.stem}.svg",
+        pdf_out=work_dir / f"{png_path.stem}.pdf",
+    )
 
 
 def _extract_image_vectors_worker(
@@ -266,7 +180,7 @@ def _extract_image_vectors_worker(
         Path,
         int,
     ],
-) -> tuple[int, list[VectorDTO], tuple[int, int]]:
+) -> tuple[int, list[Vector], tuple[int, int]]:
     """
     Extract vectors from one unique image xref.
 
@@ -280,11 +194,7 @@ def _extract_image_vectors_worker(
 
     imgxref, png_path, tmp_dir, dpi = job
 
-    vectors = extract_vectors_from_png(
-        png_path=png_path,
-        tmp_dir=tmp_dir,
-        dpi=dpi,
-    )
+    vectors = _trace_png(png_path, tmp_dir, dpi)
 
     with Image.open(png_path) as image:
         image_size = image.size
@@ -296,6 +206,7 @@ def _extract_image_vectors_worker(
                 vectors,
                 alpha,
                 tmp_dir=tmp_dir,
+                dpi=dpi,
             )
 
     return imgxref, vectors, image_size
@@ -304,10 +215,19 @@ def _extract_image_vectors_worker(
 def get_image_polys(
     doc: pymupdf.Document,
     page: pymupdf.Page,
-    tmp_dir: str | Path = "experiments/tmp_vectors/imgs",
+    tmp_dir: str | Path | None = None,
     dpi: int = 300,
     workers: int = 1,
-) -> dict[int, dict[tuple[float, float, float, float], list[VectorDTO]]]:
+) -> dict[int, dict[tuple[float, float, float, float], list[Vector]]]:
+    """Vectors of every embedded image on `page`, per image xref and placement rectangle.
+
+    `tmp_dir` keeps the per-image PNG / SVG / PDF intermediates there; by default they live in a
+    throwaway folder. `workers > 1` traces the images in spawned worker processes.
+    """
+    if tmp_dir is None:
+        with tempfile.TemporaryDirectory(prefix="image_polys_") as scratch:
+            return get_image_polys(doc, page, scratch, dpi, workers)
+
     tmp_dir = Path(tmp_dir)
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -318,14 +238,9 @@ def get_image_polys(
     # Collect unique image xrefs.
     # ---------------------------------------------------------
 
-    # An xref is a PDF object's number in the file's cross-reference table; images are
-    # identified by it. An image's smask (soft mask) is a second grayscale image holding its
-    # alpha channel, stored as its own xref; masks are merged into their image below, never
-    # traced on their own.
     image_xrefs = set()
     smask_xrefs = set()
 
-    # page.get_images() rows start (xref, smask_xref, width, height, ...).
     for imgobj in page.get_images():
         imgxref = imgobj[0]
         smask = imgobj[1]
@@ -376,7 +291,7 @@ def get_image_polys(
     extracted: dict[
         int,
         tuple[
-            list[VectorDTO],
+            list[Vector],
             tuple[int, int],
         ],
     ] = {}
@@ -391,9 +306,7 @@ def get_image_polys(
             )
 
     else:
-        with ProcessPoolExecutor(
-            max_workers=workers,
-        ) as executor:
+        with spawn_pool(workers) as executor:
             results = executor.map(
                 _extract_image_vectors_worker,
                 jobs,
@@ -407,7 +320,7 @@ def get_image_polys(
 
     vector_dict: dict[
         int,
-        dict[tuple[float, float, float, float], list[VectorDTO]],
+        dict[tuple[float, float, float, float], list[Vector]],
     ] = {}
 
     for imgxref in image_xrefs:
@@ -415,7 +328,7 @@ def get_image_polys(
 
         vectors_by_rect: dict[
             tuple[float, float, float, float],
-            list[VectorDTO],
+            list[Vector],
         ] = {}
 
         image_placements = page.get_image_rects(
@@ -424,10 +337,8 @@ def get_image_polys(
         )
 
         for rect, matrix in image_placements:
-            rect_vectors = deepcopy(vectors)
-
-            _transform_vectors_to_matrix(
-                rect_vectors,
+            rect_vectors = _transform_vectors_to_matrix(
+                vectors,
                 matrix,
                 image_size,
                 dpi,

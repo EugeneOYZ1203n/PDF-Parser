@@ -1,7 +1,7 @@
 # Main application integration
 
-How a host app calls the raster-parser library. Results serialize as
-`NativePDFElements` (`TextDTO` / `VectorDTO`).
+How a host app calls the raster-parser library. `extract()` returns an `ExtractResult` of the
+shared `Text` / `Vector` models (it used to return `NativePDFElements`: see `docs/model_migration.md`).
 
 ## Setup
 
@@ -11,19 +11,24 @@ pip install -e .
 ```
 
 **System dependency (Type-4 / `enable_raster_pass=True`):** LibreOffice with the
-`DeleteDrawings` macro registered (installed on package import via
-`raster_parser/libreoffice_setup/`).
+`DeleteDrawings` macro registered (installed on the first LibreOffice call, via
+`raster_parser/phase_raster_vectorize/v1_raster_to_vec/s1_libreoffice_macro.py`; importing the package does not need
+LibreOffice).
 
 ## API
 
 ```python
-from raster_parser import extract, NativePDFElements
+from raster_parser import extract, ExtractResult
 
 result = extract("/path/to/drawing.pdf", page_index=0)
-json_str = result.model_dump_json()
-result.words  # list[TextDTO] — native + Type-2 OCR + Type-4 OCR
-result.vectors  # list[VectorDTO] — non-fill drawings + Type-4 colour-fill autotrace
+result.page      # PageMeta: size, /Rotate, MediaBox, CropBox
+result.texts     # list[Text] -- native words + vector_classify OCR + raster_vectorize (raster) OCR
+result.vectors   # list[Vector] -- non-glyph drawings + raster_vectorize colour-fill autotrace
+json_str = result.to_json()
+again = ExtractResult.from_json(json_str)
 ```
+
+`docs/model_migration.md` maps every old `TextDTO` / `VectorDTO` field to the new models.
 
 ### Parameters
 
@@ -32,30 +37,44 @@ result.vectors  # list[VectorDTO] — non-fill drawings + Type-4 colour-fill aut
 | `pdf_path` | (required) | PDF file path |
 | `page_index` | `0` | Page to process (0-based) |
 | `ocr_dpi` | `300` | Type-2 crop DPI and Type-4 render DPI |
-| `use_angle_cls` | `True` | PaddleOCR angle classification (Type-2) |
+| `use_angle_cls` | `True` | PaddleOCR angle classification (Type-2 and Type-4) |
 | `enable_raster_pass` | `True` | After Type-2: LibreOffice clear → Type-4 if residual page |
 | `workers` | `1` | Process pool size for Type-4 tile det / recog / colour autotrace |
-| `dump_dir` | `./tmp` | LO + Type-4 dump root (passed to `clear_page`) |
-| `debug` | `False` | Keep dumps on disk; otherwise removed after `extract()` |
+| `dump_dir` | system temp dir | Parent for this call's LO + Type-4 dumps; each call works in its own new sub-folder |
+| `debug` | `False` | Keep this call's dump sub-folder (its path is logged) and write the raster pass's debug images / QA files into it; otherwise only what the result needs is written and the sub-folder is removed after `extract()` |
+| `p2` | `"v1_raster_to_vec"` | raster_vectorize (raster pass) backend — `raster_parser.core.registry.VECTORIZE_BACKENDS` |
+| `p3` | `"v1_vector_class"` | vector_classify (vector parsing) backend — `raster_parser.core.registry.CLASSIFY_BACKENDS` |
+
+An unknown `p2` / `p3` name raises `ValueError` listing the valid ones. `enable_raster_pass=False`
+skips raster_vectorize whatever `p2` is (same as `p2="stub"`).
 
 ### Flow
 
-1. Native `get_text` + `get_drawings`; Type-2 OCR on fill glyphs; keep non-fill vectors.
-2. If `enable_raster_pass`: LibreOffice `DeleteDrawings` via `clear_page(..., dump_dir=...)`
-   on a temp single-page copy (native text/vector shapes removed; embedded images remain).
-3. If the cleared page is non-empty: Type-4 via
-   `raster_parser.type4_methods.extract_raster_page` — text/drawing split, clean-raster
-   re-detection, recognition, then **colour-fill autotrace** on `drawing_final`
-   (no soft/adaptive preprocess; masks are already binary). Merge words/vectors.
-4. No native-vs-OCR comparison. The original native page is not rasterized for Type-2.
+`extract()` runs one page through four phases (`raster_parser.core.pipeline.run_pipeline`):
+
+1. **native_read** (`phase_native_read`) — native words (`get_text`), vector paths
+   (`get_drawings(extended=True)`, clip / group info folded into each path) and embedded images.
+2. **raster_vectorize** (`p2`, default `v1_raster_to_vec`) — the raster pass: LibreOffice `DeleteDrawings`
+   via `clear_page(..., dump_dir=...)` on a one-page copy (native text / vector shapes removed,
+   embedded images kept); if anything is left, `extract_raster_page` runs on it — text/drawing
+   split, tiled OCR detection + recognition, then **colour-fill autotrace** of the drawing layer.
+3. **vector_classify** (`p3`, default `v1_vector_class`) — fill-glyph OCR on native_read's vectors: filled,
+   non-white, non-box paths are grouped into words by content-stream order and read with
+   PaddleOCR; every other vector is kept as drawing. vector_classify never sees raster_vectorize's output.
+4. **output_assemble** (`phase_output_assemble`) — native words, then vector_classify text, then raster_vectorize text,
+   with `block_no` renumbered per phase; vector_classify vectors, then raster_vectorize vectors with seqnos moved
+   past vector_classify's (raster traces paint on top). Out-of-page items are logged.
+
+No native-vs-OCR comparison. The original native page is not rasterized for vector_classify.
 
 ### Guarantees
 
-- **Intermediates** — LO + Type-4 dumps under `dump_dir` (default: `./tmp`).
-  `extract` passes that into `clear_page`; `delete_drawings_from_pdf(..., dump_dir=...)`
-  uses the same default. Macro exports beside each opened per-page PDF. With
-  `debug=False` (default), `extract()` removes its dump root after finishing; set
-  `debug=True` to keep them.
+- **Intermediates** — LO + Type-4 dumps go in a new sub-folder of `dump_dir` (default: the
+  system temp dir) that `extract()` creates for that call and passes into `clear_page`; macro
+  exports land beside each opened per-page PDF. With `debug=False` (default), `extract()`
+  removes only that sub-folder after finishing, so files already in `dump_dir` and concurrent
+  calls are safe; set `debug=True` to keep it (its path is logged).
+  `delete_drawings_from_pdf(..., dump_dir=...)` still defaults to `./tmp`.
 - **Lazy heavy imports** — Paddle / PyMuPDF / OpenCV load on first `extract()` call.
 - **First call** may download PaddleOCR model weights to the local cache.
 
@@ -104,27 +123,21 @@ uv sync --group dev --group notebook --group test
 
 | Script | Role |
 |--------|------|
-| `scripts/type4_pipeline.py` | Type-4 CLI: text/drawing split + colour-fill + native-vs-OCR stats |
-| `scripts/type2_nativetext_to_vector_pipeline.py` | Native text → vector PDF / SVG dump |
-| `scripts/type2_dump_extraction_pipeline.py` | Type-2 dump + optional OCR |
-| `scripts/type2_full_native_to_ocr_pipeline.py` | Native → vector → OCR → compare |
-| `scripts/type2_native_wordgroup_png_pipeline.py` | Paddle-prep word-group PNGs from native text |
-| `scripts/raster_drawing_autotrace.py` | Standalone PNG → autotrace (no soft/adaptive preprocess) |
-| `scripts/raster_drawing_colour_fill_autotrace.py` | Standalone colour-fill autotrace on a PNG |
-| `scripts/dto_reconstruct_pipeline.py` | Replay `NativePDFElements` JSON / PDF → drawings |
-| `scripts/debug/ocr_test_script.py` | Staged Type-2 native-vs-OCR (single page) |
-| `scripts/debug/batch_test_script.py` | Staged Type-2 batch eval |
+| `scripts/inspector/` | PDF layer inspector GUI (`python -m scripts.inspector.inspector [pdf]`) — see its `README.md` |
+| `scripts/golden_snapshot.py` | Write / compare the golden `extract()` snapshots in `tests/references/golden/` |
 
-Helpers for batch eval live in `raster_parser.native_vs_ocr` (e.g. `text_to_vector`,
-`page_stats`). That path writes `onlyfill.pdf`, `ocr.pdf`, `out_results.txt`, etc.,
-and is separate from `extract()`.
+The Type-2 / Type-4 scripts, the native-vs-OCR / native-vs-raster evaluation helpers and the
+DTO-replay script were written against the removed `models` / `parsing` / `rendering` modules
+and are removed with them (see `docs/model_migration.md`).
 
 ## Tests
 
 ```bash
 uv sync --group test && uv pip install -e .
 uv run pytest tests/ -m "not slow"
-uv run pytest tests/logic_test/ -m "not slow"    # library logic
-uv run pytest tests/scripts_test/                # scripts/ CLI helpers
-uv run pytest tests/logic_test/test_main_pipeline_extract.py -m slow
+uv run pytest tests/raster_parser/ -m "not slow"  # library logic (mirrors raster_parser/)
+uv run pytest tests/scripts/                      # scripts/ helpers (mirrors scripts/)
+uv run pytest tests/raster_parser/test_main_pipeline_extract.py -m slow
 ```
+
+`tests/references/test_pdfs_*.pdf` are committed fixture PDFs.

@@ -1,30 +1,18 @@
 from raster_parser.main_pipeline_extract import extract
-from raster_parser.serialisation.deserialization import (
-    deserialize,
-    deserialize_output,
-    deserialize_text,
-    deserialize_vector,
+from raster_parser.models import ExtractResult, Text, Vector
+from raster_parser.phase_raster_vectorize.v1_raster_to_vec.s1_clear_page import (
+    delete_drawings_from_pdf,
 )
-from raster_parser.models import TextDTO, NativePDFElements, VectorDTO
-from raster_parser.delete_natives.delete_native import delete_drawings_from_pdf
 
-# FIXME find a way to not modify path
-import sys
-
-sys.path.append(".")
-# The LibreOffice DeleteDrawings macro is registered lazily, on the first LibreOffice call
-# (``libreoffice_macro.ensure_macro_registered``), so importing the package doesn't need
-# LibreOffice installed.
+# The LibreOffice DeleteDrawings macro is registered lazily, on the first
+# LibreOffice call (``s1_libreoffice_macro.ensure_macro_registered``), so importing
+# the package doesn't need LibreOffice installed.
 
 
 __all__ = [
     "extract",
-    "TextDTO",
-    "NativePDFElements",
-    "VectorDTO",
-    "deserialize",
-    "deserialize_output",
-    "deserialize_text",
-    "deserialize_vector",
+    "ExtractResult",
+    "Text",
+    "Vector",
     "delete_drawings_from_pdf",
 ]

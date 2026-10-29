@@ -1,7 +1,7 @@
 # v1_vector_class (vector_classify)
 
-The original raster_parser "Type-2" vector parsing as a vector_classify backend. It finds text
-drawn as filled vector glyphs and reads it with OCR:
+The original raster_parser "Type-2" vector parsing as a vector_classify backend (`p3="v1_vector_class"`,
+the default). It finds text drawn as filled vector glyphs and reads it with OCR:
 
 1. **Fill-glyph candidates** — filled (`"f"`) vectors that aren't white and aren't layout boxes
    or rules.
@@ -23,6 +23,9 @@ reviewed and approved during the migration.
 | Clip / group entries | `get_drawings(extended=True)`'s `"clip"` and `"group"` entries were passed through as vectors of their own (no items). | Not emitted. Each path carries its enclosing clip rectangle in `scissor`, non-rectangular clips in `clips`, and the group's blend mode / opacity in `blendmode` / `opacity`. | `phase_native_read` folds them into the paths they apply to. They were never glyph candidates, so OCR results are unaffected. |
 | Colours seen by the fill filter | PyMuPDF's raw floats. | Rounded to 3 decimals (as `phase_native_read` extracts them). | Shared `Vector` model. A colour within 0.0005 of white or of a listed text colour can now match the filter's exact-colour checks, so very rarely a different path becomes a glyph candidate. |
 | OCR text model | Old `Text` (`rotate`, `glyph_orientation`). | Shared `Text` with `direction`, `source=Source.NATIVE_VECTOR`. | Shared model; `direction` is the old `rotate` as a unit vector. |
+
+Pipeline-wide changes to `extract()`'s output (word order, `block_no` / `seqno` ranges, native
+word orientation, the new `p2` / `p3` parameters) are listed in `docs/model_migration.md`.
 
 ## Files
 

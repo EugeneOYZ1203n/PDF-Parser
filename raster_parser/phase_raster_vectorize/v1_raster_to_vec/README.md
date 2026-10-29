@@ -1,7 +1,7 @@
 # v1_raster_to_vec (raster_vectorize)
 
-The original raster_parser "Type-4" raster pass as a raster_vectorize backend. It handles whatever
-is left on a page once native text and vectors are removed — typically embedded scans or images:
+The original raster_parser "Type-4" raster pass as a raster_vectorize backend (`p2="v1_raster_to_vec"`,
+the default). It handles whatever is left on a page once native text and vectors are removed — typically embedded scans or images:
 
 1. **Clear** — LibreOffice's `DeleteDrawings` macro removes native text and vector shapes from a
    one-page copy; embedded images stay.
@@ -12,7 +12,7 @@ is left on a page once native text and vectors are removed — typically embedde
      traced with autotrace into filled vector paths.
 
 Entry point: `adapter.extract(images, page, settings)`. It works from the whole page
-(`page.doc_path`), so native_read's `images` are not used.
+(`page.doc_path`), so native_read's `images` are not used. `extract(enable_raster_pass=False)` skips it.
 Needs LibreOffice installed.
 
 ## Behaviour changes vs the original raster_parser
@@ -22,6 +22,9 @@ Needs LibreOffice installed.
 | Macro path | Registered from `raster_parser/libreoffice_setup/` (doesn't exist), so the macro was never installed and every raster pass raised `FileNotFoundError`. | The `.xba` next to `s1_libreoffice_macro.py`. | Bug fix: the raster pass runs. |
 | Output model | Old `Text` / `Vector`. | Shared `Text` (`source=Source.FROM_IMAGE`) / `Vector`. | Shared model; `direction` is the old `rotate` as a unit vector. |
 | Traced vectors | Raw `get_drawings()` fields. | One rule (`commons/v1_commons/autotrace.traced_vector`): colours rounded to 3 decimals, stroke fields only on stroked paths, fill opacity only on filled ones. | Shared `Vector` model. |
+
+Pipeline-wide changes to `extract()`'s output (word order, `block_no` / `seqno` ranges, native
+word orientation, the new `p2` / `p3` parameters) are listed in `docs/model_migration.md`.
 
 ## Files
 

@@ -8,6 +8,7 @@ from typing import Callable
 import pymupdf
 import pytest
 
+from raster_parser.models.text import Text
 from raster_parser.models.vector import Vector
 
 
@@ -181,6 +182,65 @@ def vector() -> Callable[..., Vector]:
             knockout=knockout,
             opacity=opacity,
             page_index=page_index,
+        )
+
+    return _build
+
+
+@pytest.fixture
+def text() -> Callable[..., Text]:
+    """Returns a builder: text(**overrides) -> Text, every field
+    defaulted. `origin` is derived from `bbox`/`direction` unless passed
+    explicitly."""
+
+    def _build(
+        *,
+        text: str = "Hi",
+        bbox: tuple[float, float, float, float] = (10.0, 10.0, 20.0, 20.0),
+        direction: tuple[float, float] = (1.0, 0.0),
+        origin: tuple[float, float] | None = None,
+        font: str = "helv",
+        font_size: float = 10.0,
+        color: int | None = None,
+        flags: int = 0,
+        ascender: float | None = None,
+        descender: float | None = None,
+        wmode: int = 0,
+        block_no: int = 0,
+        line_no: int = 0,
+        word_no: int = 0,
+        page_index: int = 0,
+        seqno: int = 0,
+        confidence: float = 0.0,
+        source: str = "native",
+        raw_word: tuple | None = None,
+        raw_span: dict | None = None,
+        quad_points: tuple | None = None,
+    ) -> Text:
+        from raster_parser.commons.helpers.geometry import compute_origin
+
+        return Text(
+            text=text,
+            bbox=bbox,
+            direction=direction,
+            origin=origin if origin is not None else compute_origin(bbox, direction),
+            font=font,
+            font_size=font_size,
+            color=color,
+            flags=flags,
+            ascender=ascender,
+            descender=descender,
+            wmode=wmode,
+            block_no=block_no,
+            line_no=line_no,
+            word_no=word_no,
+            page_index=page_index,
+            seqno=seqno,
+            confidence=confidence,
+            source=source,
+            raw_word=raw_word,
+            raw_span=raw_span,
+            quad_points=quad_points,
         )
 
     return _build
