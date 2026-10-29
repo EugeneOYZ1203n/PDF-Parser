@@ -1,12 +1,22 @@
 """`PdfDocument` (the thin pymupdf-document wrapper) plus the geometry/matrix/
 color helpers shared by every extractor in `pdf_model_text.py`,
-`pdf_model_image.py`, and `pdf_model_drawing.py`."""
+`pdf_model_image.py`, and `pdf_model_drawing.py` (re-exported from
+`commons.helpers.pymupdf_geometry` / `geometry` under their old private names)."""
 
 from __future__ import annotations
 
-from math import degrees, atan2, hypot, sqrt
-
 import pymupdf
+from raster_parser.commons.helpers.pymupdf_geometry import (  # noqa: F401
+    format_matrix as _format_matrix,
+    line_length as _line_length,
+    matrix_rotation as _matrix_rotation,
+    matrix_scale as _matrix_scale,
+    point_angle as _point_angle,
+    quad_angle as _quad_angle,
+    quad_metadata as _quad_metadata,
+    rect_metadata as _rect_metadata,
+)
+from raster_parser.commons.helpers.geometry import round_color as _round_color  # noqa: F401
 
 
 class PdfDocument:
@@ -47,136 +57,3 @@ class PdfDocument:
 
     def close(self) -> None:
         self.doc.close()
-
-
-def _round_color(color):
-    if not color:
-        return None
-
-    return tuple(round(c, 3) for c in color)
-
-
-def _point_angle(
-    p1: pymupdf.Point,
-    p2: pymupdf.Point,
-) -> float:
-    dx = p2.x - p1.x
-    dy = p2.y - p1.y
-
-    if abs(dx) < 1e-9 and abs(dy) < 1e-9:
-        return 0.0
-
-    return degrees(atan2(dy, dx))
-
-
-def _line_length(
-    p1: pymupdf.Point,
-    p2: pymupdf.Point,
-) -> float:
-    return hypot(
-        p2.x - p1.x,
-        p2.y - p1.y,
-    )
-
-
-def _quad_angle(
-    quad: pymupdf.Quad,
-) -> float:
-    return _point_angle(
-        quad.ul,
-        quad.ur,
-    )
-
-
-def _quad_metadata(
-    quad: pymupdf.Quad,
-) -> dict:
-    width = _line_length(
-        quad.ul,
-        quad.ur,
-    )
-
-    height = _line_length(
-        quad.ul,
-        quad.ll,
-    )
-
-    return {
-        "angle": round(
-            _quad_angle(quad),
-            3,
-        ),
-        "width": round(
-            width,
-            3,
-        ),
-        "height": round(
-            height,
-            3,
-        ),
-    }
-
-
-def _rect_metadata(
-    rect: pymupdf.Rect,
-) -> dict:
-    return {
-        "x": round(rect.x0, 3),
-        "y": round(rect.y0, 3),
-        "width": round(rect.width, 3),
-        "height": round(rect.height, 3),
-        "area": round(rect.get_area(), 3),
-        "aspect_ratio": round(
-            rect.width / rect.height,
-            4,
-        )
-        if abs(rect.height) > 1e-9
-        else None,
-    }
-
-
-def _format_matrix(matrix) -> tuple:
-    """
-    Convert a PyMuPDF Matrix to a compact tuple.
-
-    Matrix values are:
-
-        a b c d e f
-    """
-
-    return (
-        round(matrix.a, 5),
-        round(matrix.b, 5),
-        round(matrix.c, 5),
-        round(matrix.d, 5),
-        round(matrix.e, 5),
-        round(matrix.f, 5),
-    )
-
-
-def _matrix_rotation(matrix) -> float:
-    """
-    Estimate visual rotation from the matrix's x-axis.
-    """
-
-    return degrees(
-        atan2(
-            matrix.b,
-            matrix.a,
-        )
-    )
-
-
-def _matrix_scale(matrix) -> tuple[float, float]:
-    """
-    Estimate X/Y scale from a transformation matrix.
-    """
-
-    sx = sqrt(matrix.a * matrix.a + matrix.b * matrix.b)
-
-    sy = sqrt(matrix.c * matrix.c + matrix.d * matrix.d)
-
-    return (
-        sx,
-        sy,
-    )

@@ -6,25 +6,13 @@ from __future__ import annotations
 import colorsys
 from typing import Callable
 
+from raster_parser.commons.helpers.geometry import rgb01_to_hex
 from scripts.inspector.layer_types import OverlayItem
 
 
 def rgb_to_hex(color) -> str:
-    """Convert an RGB tuple in [0, 1] to a Tkinter hex colour."""
-
-    if not color:
-        return "#000000"
-
-    return "#%02x%02x%02x" % tuple(
-        round(
-            max(
-                0.0,
-                min(1.0, c),
-            )
-            * 255
-        )
-        for c in color
-    )
+    """Convert an RGB tuple in [0, 1] to a Tkinter hex colour (black when missing)."""
+    return rgb01_to_hex(color) if color else "#000000"
 
 
 def seqno_rainbow_color_map(items: list[OverlayItem]) -> dict[int, str]:

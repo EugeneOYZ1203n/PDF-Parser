@@ -4,9 +4,10 @@ plus its own `_find_best_span`/`_make_oriented_quad` helpers."""
 from __future__ import annotations
 
 from itertools import groupby
-from math import degrees, atan2, hypot
+from math import degrees, atan2
 
 import pymupdf
+from raster_parser.commons.helpers.geometry import make_oriented_quad
 from scripts.inspector.layers import OverlayItem
 from scripts.inspector.pdf_model_core import _rect_metadata
 
@@ -256,86 +257,6 @@ def _make_oriented_quad(
     dx: float,
     dy: float,
 ) -> pymupdf.Quad:
-    """Build a quad around bbox, oriented along the text direction (dx, dy).
-
-    bbox.width/height are the *axis-aligned* extents, which only match the
-    text's along-direction/normal-direction extents when the text is
-    horizontal. For rotated text they can be swapped or otherwise wrong, so
-    the bbox corners are projected onto the (dx, dy) / normal axes instead
-    to recover the correct along/normal extents regardless of orientation.
-    """
-
-    length = hypot(
-        dx,
-        dy,
-    )
-
-    if length < 1e-9:
-        dx = 1.0
-        dy = 0.0
-        length = 1.0
-
-    dx /= length
-    dy /= length
-
-    nx = -dy
-    ny = dx
-
-    corners = [
-        (bbox.x0, bbox.y0),
-        (bbox.x1, bbox.y0),
-        (bbox.x1, bbox.y1),
-        (bbox.x0, bbox.y1),
-    ]
-
-    along_vals = [x * dx + y * dy for x, y in corners]
-    normal_vals = [x * nx + y * ny for x, y in corners]
-
-    along_min, along_max = min(along_vals), max(along_vals)
-    normal_min, normal_max = min(normal_vals), max(normal_vals)
-
-    half_along = (along_max - along_min) / 2.0
-    half_normal = (normal_max - normal_min) / 2.0
-
-    along_center = (along_max + along_min) / 2.0
-    normal_center = (normal_max + normal_min) / 2.0
-
-    cx = along_center * dx + normal_center * nx
-    cy = along_center * dy + normal_center * ny
-
-    def point(
-        along: float,
-        normal: float,
-    ) -> pymupdf.Point:
-
-        return pymupdf.Point(
-            cx + dx * along + nx * normal,
-            cy + dy * along + ny * normal,
-        )
-
-    ul = point(
-        -half_along,
-        -half_normal,
-    )
-
-    ur = point(
-        half_along,
-        -half_normal,
-    )
-
-    ll = point(
-        -half_along,
-        half_normal,
-    )
-
-    lr = point(
-        half_along,
-        half_normal,
-    )
-
-    return pymupdf.Quad(
-        ul,
-        ur,
-        ll,
-        lr,
-    )
+    """`commons.helpers.geometry.make_oriented_quad` as a `pymupdf.Quad`."""
+    ul, ur, lr, ll = make_oriented_quad(tuple(bbox), dx, dy)
+    return pymupdf.Quad(ul, ur, ll, lr)
