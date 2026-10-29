@@ -68,8 +68,10 @@ def parse(vectors: list[Vector], page: Page, settings: RunSettings) -> tuple[lis
 
 - The protocols are structural (`typing.Protocol`); nothing checks them at runtime.
 - `settings` (`models/settings.py`, `RunSettings`) carries the run options every backend receives, whichever
-  backend it is: `ocr_dpi`, `use_angle_cls`, `workers`, `dump_dir`. A backend reads the fields it
-  needs and ignores the rest. A new option goes on `RunSettings`, not on one backend's signature.
+  backend it is: `ocr_dpi`, `use_angle_cls`, `workers`, `dump_dir`, `debug`, plus the debug
+  callbacks `on_debug_layer` / `on_debug_image` ([Debug output](#debug-output)). A backend reads
+  the fields it needs and ignores the rest. A new option goes on `RunSettings`, not on one
+  backend's signature.
 - Both return `(vectors, texts)` in unrotated page space. A vector_classify backend returns the vectors
   it keeps as drawing; the ones it classified as text are left out.
 - `core/registry.py` maps names to functions (`VECTORIZE_BACKENDS`, `CLASSIFY_BACKENDS`, with `DEFAULT_VECTORIZE` /
@@ -105,7 +107,9 @@ module listed for only one family is a candidate to move into that family's own 
 | `commons/helpers/pymupdf_geometry.py` | Live PyMuPDF objects <-> plain item tuples; hover metadata (angles, lengths, matrices) | models, `phase_native_read`, `scripts/inspector` |
 | `commons/helpers/pixmap.py` | `pixmap_to_array`, `zoom_matrix(dpi)` | `phase_native_read`, `v1_raster_to_vec`, `extract_vectors_from_png` |
 | `commons/helpers/text_orientation.py` | Reading direction <-> the old `rotate` / glyph orientation | `v1_commons`; migration helpers for callers (`docs/model_migration.md`) |
-| `commons/renderer/_shapes.py` | `replay_item`: one `Vector` item drawn onto a PyMuPDF shape | `v1_commons` |
+| `commons/renderer/_shapes.py` | Exact `Vector` replay onto a page (`replay_drawing_paths`, `replay_item`), `path_color_hex` | `v1_commons`, `commons/renderer/draw.py`, `scripts/inspector` (tests) |
+| `commons/renderer/draw.py` | The spec -> draw layer every PDF is built from; `hex_to_rgb01` | `phase_output_assemble`, `v1_raster_to_vec`, `v1_vector_class` |
+| `commons/renderer/pdf.py` | One-layer debug PDFs (boxes, quads, text, vectors) over `draw.py`; `rasterize_pdf` | `phase_output_assemble`, `v1_raster_to_vec`, `v1_vector_class` |
 | `commons/v1_commons/autotrace.py` | pyautotrace PNG -> SVG -> PDF -> `Vector`s | `v1_raster_to_vec`, `extract_vectors_from_png` |
 | `commons/v1_commons/ocr.py` | OCR crop normalisation, PaddleOCR 2.x result walking, OCR word -> `Text` | `v1_raster_to_vec`, `v1_vector_class` |
 | `commons/v1_commons/render.py` | The original reconstructor's replay (its own `finish()` defaults) | `v1_raster_to_vec`, `v1_vector_class`, `extract_vectors_from_png` |
@@ -113,7 +117,7 @@ module listed for only one family is a candidate to move into that family's own 
 | `commons/logging_setup.py` | The `raster_parser` logger and `configure_logging` | core, `phase_native_read`, `phase_output_assemble`, `v1_raster_to_vec` |
 | `core/interfaces.py` | The backend protocols | `core/registry.py` |
 | `core/registry.py` | Backend names -> functions, resolvers, defaults | `core/pipeline.py`, `main_pipeline_extract` |
-| `core/pipeline.py` | `run_pipeline`, `PHASE_NAMES` | `main_pipeline_extract` |
+| `core/pipeline.py` | `run_pipeline`, `PHASE_NAMES`, `STEP_NAMES` (`stop_after`) | `main_pipeline_extract` |
 
 ## Adding a backend
 
@@ -133,6 +137,44 @@ module listed for only one family is a candidate to move into that family's own 
    are not in the repository and give no exact values to assert against.
 5. **Dependencies**: add new third-party packages to `pyproject.toml` only in the change that
    adds the backend that needs them.
+
+6. **Debug output** (optional): render each step through the debug callbacks so the pipeline
+   report can show it ([Debug output](#debug-output)).
+
+## Debug output
+
+`RunSettings` carries two optional callbacks for tools that want to see inside a run (the
+pipeline report). `extract()` never sets them.
+
+| Field | Called as | Meaning |
+|---|---|---|
+| `on_debug_layer` | `(stage, label, "#rrggbb", pdf_bytes)` | one rendered debug layer: a one-page PDF of the page, in unrotated page space |
+| `on_debug_image` | `(folder, name, make_image)` | one debug image; `make_image()` builds the PIL image and is only called if the tool keeps it |
+
+Rules for a backend:
+
+- **Only when set.** Render and keep nothing extra when the callbacks are `None`. The output
+  must be identical either way, so adding debug output is never a behaviour change.
+- **Stream.** Emit each step's layer as soon as that step is done, instead of collecting debug
+  data until the end. The tool writes it to disk straight away.
+- **Use the standard renderer.** Build layers from `commons/renderer/draw.py` (a spec builder +
+  a drawer per primitive, `render_specs_pdf`) or its one-layer wrappers in `pdf.py`
+  (`render_boxes_pdf`, `render_quads_pdf`, `render_text_pdf`, `render_vectors_pdf`). Text is
+  rotated to its angle, then scaled to fit its box, never sheared. Don't place geometry with
+  PyMuPDF calls directly.
+- **Name layers by step.** `stage` is the step (`ocr`, `word_grouping`, ...), `label` what the
+  layer shows. A trailing per-page count such as `"word groups (25)"` is stripped by the report,
+  so one layer keeps one file.
+- Document the layers in the backend's `README.md` ("Debug output"). The v1 backends keep theirs
+  in `debug_layers.py`.
+
+`run_pipeline(..., stop_after="native_read" | "raster_vectorize" | "vector_classify")` stops after that phase: later
+backends are not called. output_assemble still runs on what ran (with vector_classify skipped, native_read's raw
+vectors are the output). `extract()` always runs every phase.
+
+output_assemble's `render_output_pdf(page_meta, texts, vectors)` draws a run's final output as a page
+(vectors in their real paint, text in its box); the report uses it for its `reconstructed`
+layer. `extract()` does not call it.
 
 ## Coordinate spaces
 

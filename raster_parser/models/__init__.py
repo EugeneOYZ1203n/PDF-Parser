@@ -20,7 +20,8 @@ Where everything lives
 Every data type the package defines is in this folder, so nothing else declares a dataclass or enum:
   - `page`, `text`, `vector`, `image`, `result`: the shared models above;
   - `source`: `Source`, where a `Text` / `Vector` came from;
-  - `settings`: `RunSettings`, the options every backend receives;
+  - `settings`: `RunSettings`, the options every backend receives (and its debug hooks);
+  - `render`: the draw specs `commons/renderer/draw.py` builds and draws;
   - `native_read`: `NativeReadResult` and the `NativeSpan` words are matched to;
   - `raster_vectorize`: the v1_raster_to_vec step results (`OcrParseResult`, `RegionOcrResult`,
     `GlyphCc`, `ColourGroup`, `ColourFillTraceResult`);

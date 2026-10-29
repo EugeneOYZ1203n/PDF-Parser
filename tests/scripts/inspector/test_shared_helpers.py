@@ -9,6 +9,7 @@ import pytest
 
 from raster_parser.commons.helpers import pymupdf_geometry
 from raster_parser.commons.helpers.geometry import make_oriented_quad, rgb01_to_hex, round_color
+from raster_parser.commons.renderer._shapes import path_color_hex
 from scripts.inspector import pdf_model_core
 from scripts.inspector.layer_colors import rgb_to_hex
 from scripts.inspector.pdf_model_text import _make_oriented_quad
@@ -62,8 +63,9 @@ def test_oriented_quad_matches_commons(bbox, dx, dy):
         (0.002, 0.998, 0.5019),
     ],
 )
-def test_hex_colour_helpers_agree(color):
+def test_hex_colour_helpers_agree(color, vector):
     assert rgb_to_hex(color) == rgb01_to_hex(color)
+    assert path_color_hex(vector(color=color)) == rgb01_to_hex(color)
 
 
 def test_rgb_to_hex_keeps_black_for_missing_colour():

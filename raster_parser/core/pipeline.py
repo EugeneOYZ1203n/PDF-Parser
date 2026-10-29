@@ -7,6 +7,11 @@
 
 raster_vectorize and vector_classify are independent branches: vector_classify never sees
 raster_vectorize's output. `PHASE_NAMES` are also the `step_durations` keys.
+
+`stop_after` (one of `STEP_NAMES`) stops after that phase: later backends are not called and get
+no `step_durations` entry. output_assemble still runs on whatever ran, so with vector_classify
+skipped native_read's raw vectors are the output. It is for tools (the pipeline report);
+`extract()` always runs everything.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from raster_parser.phase_output_assemble.organize import organize_outputs
 _LOG = get_logger("pipeline")
 
 PHASE_NAMES = ("native_read", "raster_vectorize", "vector_classify", "output_assemble")
+STEP_NAMES = PHASE_NAMES[:-1]  # the phases `stop_after` can name
 
 
 def run_pipeline(
@@ -38,23 +44,31 @@ def run_pipeline(
     p2: str = DEFAULT_VECTORIZE,
     p3: str = DEFAULT_CLASSIFY,
     settings: RunSettings | None = None,
+    stop_after: str | None = None,
 ) -> ExtractResult:
     settings = settings or RunSettings()
     vectorize = resolve_vectorize(p2)  # fail on a bad name before any work
     classify = resolve_classify(p3)
+    if stop_after is not None and stop_after not in STEP_NAMES:
+        raise ValueError(f"stop_after must be one of {STEP_NAMES} or None, got {stop_after!r}")
+    last = STEP_NAMES.index(stop_after) if stop_after else len(STEP_NAMES) - 1
     durations: dict[str, float] = {}
 
     start = time.perf_counter()
     native = read_and_extract(str(pdf_path), page_index)
     durations["native_read"] = time.perf_counter() - start
 
-    start = time.perf_counter()
-    vectors_p2, texts_p2 = vectorize(native.images, native.page, settings)
-    durations["raster_vectorize"] = time.perf_counter() - start
+    vectors_p2, texts_p2 = [], []
+    if last >= 1:
+        start = time.perf_counter()
+        vectors_p2, texts_p2 = vectorize(native.images, native.page, settings)
+        durations["raster_vectorize"] = time.perf_counter() - start
 
-    start = time.perf_counter()
-    vectors_p3, texts_p3 = classify(native.vectors, native.page, settings)
-    durations["vector_classify"] = time.perf_counter() - start
+    vectors_p3, texts_p3 = native.vectors, []
+    if last >= 2:
+        start = time.perf_counter()
+        vectors_p3, texts_p3 = classify(native.vectors, native.page, settings)
+        durations["vector_classify"] = time.perf_counter() - start
 
     start = time.perf_counter()
     texts, vectors = organize_outputs(

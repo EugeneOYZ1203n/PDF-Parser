@@ -22,6 +22,7 @@ PKG = Path(raster_parser.__file__).parent
         "raster_parser.phase_vector_classify.stub.stub",
         "raster_parser.phase_vector_classify.v1_vector_class.parse",
         "raster_parser.phase_output_assemble.organize",
+        "raster_parser.phase_output_assemble.render",
     ],
 )
 def test_phase_modules_import(module):
