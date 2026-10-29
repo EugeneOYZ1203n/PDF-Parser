@@ -18,6 +18,15 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+# Hough accumulator resolution: 1 px in distance, 1 degree in angle.
+HOUGH_RHO_PX = 1
+HOUGH_THETA_RAD = np.pi / 180
+# The line mask is grown by this square kernel (px) before inpainting, so the inpainter samples
+# clean paper/glyph pixels beside the line rather than the line's anti-aliased edge.
+INPAINT_MASK_DILATE_PX = 3
+# Neighbourhood radius (px) cv2.inpaint fills each erased pixel from.
+INPAINT_RADIUS_PX = 3
+
 # Per-process OCR for ProcessPoolExecutor workers (spawn).
 _DET_WORKER_OCR = None
 
@@ -61,7 +70,7 @@ def line_mask(bw: np.ndarray, line_min: int, grow: int, threshold: int, max_gap:
         cv2.morphologyEx(bw, cv2.MORPH_OPEN, v_kernel),
     )
     segs = cv2.HoughLinesP(
-        bw, 1, np.pi / 180, threshold, minLineLength=line_min, maxLineGap=max_gap
+        bw, HOUGH_RHO_PX, HOUGH_THETA_RAD, threshold, minLineLength=line_min, maxLineGap=max_gap
     )
     if segs is not None:
         # OpenCV may return (N, 1, 4) or (N, 4) depending on build/version.
@@ -86,8 +95,11 @@ def remove_lines_for_ocr(rgb: np.ndarray, lines: np.ndarray, mode: str) -> np.nd
         return rgb
     if mode == "inpaint":
         # dilate the mask a touch so the inpainter has clean borders to sample from
-        m = cv2.dilate(lines, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
-        return cv2.inpaint(rgb, m, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT, (INPAINT_MASK_DILATE_PX, INPAINT_MASK_DILATE_PX)
+        )
+        m = cv2.dilate(lines, kernel)
+        return cv2.inpaint(rgb, m, inpaintRadius=INPAINT_RADIUS_PX, flags=cv2.INPAINT_TELEA)
     raise ValueError(f"unknown ocr-line-removal mode: {mode}")
 
 
@@ -190,8 +202,15 @@ def make_ocr(lang: str, min_conf: float, *, use_gpu: bool = True):
         lang=lang,
         show_log=False,
         use_gpu=use_gpu,
+        # DB = PaddleOCR's Differentiable Binarization text detector. It predicts a per-pixel
+        # text probability map; pixels above det_db_thresh form candidate regions, and a
+        # region is kept as a box when its mean probability is above det_db_box_thresh.
         det_db_box_thresh=0.6,
+        # With det_limit_type="max" the detector downscales any image whose longer side
+        # exceeds det_limit_side_len; 9000 px keeps typical rendered pages at full resolution.
         det_limit_side_len=9000,
+        # How far each detected region is grown outward (1.0 = no growth; PaddleOCR's
+        # default is 1.5).
         det_db_unclip_ratio=1.0,
         det_db_thresh=0.3,
         det_limit_type="max",

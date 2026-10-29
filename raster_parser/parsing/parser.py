@@ -20,6 +20,23 @@ from raster_parser.ocr.paddle_ocr import PaddleOcr
 from raster_parser.rendering.png_render.png_renderer import PngRenderer
 import cv2
 
+# A word group this many times wider than tall, or built from this many vectors, is a long
+# line of text. It is also recognised from its raw crop, since normalising squeezes it into
+# OCR_TARGET_WIDTH_PX, and the more confident of the two readings wins.
+LARGE_GROUP_MIN_ASPECT = 8
+LARGE_GROUP_MIN_VECTORS = 20
+# PaddleOCR's PP-OCR recognisers take 48 px tall line images.
+OCR_TARGET_HEIGHT_PX = 48
+# Widest normalised crop handed to the recogniser; longer lines are squeezed to fit.
+OCR_TARGET_WIDTH_PX = 1024
+# Padding added around a crop before normalising: tight above/below so the glyphs fill the
+# 48 px height, generous left/right so the first/last glyph is not clipped. Fractions are of
+# the crop height, with a floor in pixels for tiny crops.
+OCR_PAD_V_FRAC = 0.05
+OCR_PAD_V_MIN_PX = 2
+OCR_PAD_H_FRAC = 0.30
+OCR_PAD_H_MIN_PX = 40
+
 
 @dataclass(frozen=True)
 class _PreparedPaddleGroup:
@@ -101,6 +118,9 @@ class PdfRasterParser:
 
         Each tuple from PyMuPDF has the form
         (x0, y0, x1, y1, word, block_no, line_no, word_no)
+        where (x0, y0, x1, y1) is the word's bbox in unrotated page points, and block_no /
+        line_no / word_no number the text block, the line within that block and the word
+        within that line, in PyMuPDF's reading order.
         """
         raw_words = self.page.get_text("words")
         self.text = [Text(*w) for w in raw_words]
@@ -129,6 +149,7 @@ class PdfRasterParser:
         if not self.vectors_extracted:
             self.extract_vectors()
 
+        # text_as_path=False keeps text as SVG <text> elements instead of glyph outline paths.
         self.svg = self.page.get_svg_image(text_as_path=False)
         self.svg_extracted = True
         return self.svg
@@ -153,7 +174,9 @@ class PdfRasterParser:
             return None, []
         h, w = crop.shape[:2]
         norm = self.normalise_crop_for_ocr(crop)
-        large_group = w > h and (w / max(h, 1) >= 8 or len(vectors) >= 20)
+        large_group = w > h and (
+            w / max(h, 1) >= LARGE_GROUP_MIN_ASPECT or len(vectors) >= LARGE_GROUP_MIN_VECTORS
+        )
         return _PreparedPaddleGroup(
             index=index,
             box=(x0, y0, x1, y1),
@@ -249,7 +272,9 @@ class PdfRasterParser:
 
     @staticmethod
     def normalise_crop_for_ocr(
-        crop: np.ndarray, target_height: int = 48, target_width: int = 1024
+        crop: np.ndarray,
+        target_height: int = OCR_TARGET_HEIGHT_PX,
+        target_width: int = OCR_TARGET_WIDTH_PX,
     ) -> np.ndarray:
         if crop.size == 0:
             return crop
@@ -261,8 +286,8 @@ class PdfRasterParser:
         # 1. FIX THE IMBALANCE:
         # We want VERY tight vertical padding so the letters fill the height,
         # but GENEROUS horizontal padding so the edges don't clip.
-        pad_h = max(2, int(h * 0.05))  # Only 5% vertical padding (keeps text tall)
-        pad_w = max(40, int(h * 0.30))  # 30% horizontal padding cushion based on font height
+        pad_h = max(OCR_PAD_V_MIN_PX, int(h * OCR_PAD_V_FRAC))  # keeps text tall
+        pad_w = max(OCR_PAD_H_MIN_PX, int(h * OCR_PAD_H_FRAC))  # cushion based on font height
 
         padded_crop = cv2.copyMakeBorder(
             crop,

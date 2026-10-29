@@ -45,7 +45,11 @@ def _coords_to_fitz(value: list | tuple | str) -> fitz.Point | fitz.Rect | fitz.
 
 
 def drawing_item_from_dict(item: dict[str, Any]) -> tuple:
-    """Rebuild one ``get_drawings()`` path segment from a serialized dict."""
+    """Rebuild one ``get_drawings()`` path segment from a serialized dict.
+
+    Ops: ``"re"`` rectangle (one Rect), ``"l"`` line (two Points), ``"c"`` cubic Bezier
+    (start, two control points, end), ``"qu"`` quadrilateral (one Quad, or its four corners).
+    """
     op = item["op"]
     args = item.get("args", [])
     if op == "re":

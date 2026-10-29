@@ -4,6 +4,11 @@ import math
 from typing import Any
 from raster_parser.models import Vector
 
+# PDF user space has 72 points per inch, so a render at `dpi` maps 1 pt to `dpi / 72` px.
+PDF_POINTS_PER_INCH = 72.0
+
+# Two path ends closer than this (in PDF points) count as the same point: the path continues
+# instead of starting a new loop. Well below anything visible, above float round-off.
 _JOIN_EPS = 1e-3
 
 
@@ -16,7 +21,12 @@ def _pt(p: Any) -> tuple[float, float]:
 
 
 def _item_points(item: Any) -> list[tuple[float, float]]:
-    """Sample points along one drawing op (chord approx for beziers)."""
+    """Sample points along one drawing op (chord approx for beziers).
+
+    ``item`` is one entry of a PyMuPDF ``get_drawings()`` path's ``items`` list; its first
+    element is the op code: ``"l"`` line (p1, p2), ``"c"`` cubic Bezier curve (start, two
+    control points, end), ``"re"`` rectangle (a Rect), ``"qu"`` quad (four corner Points).
+    """
     op = item[0]
     if op == "l":
         return [_pt(item[1]), _pt(item[2])]

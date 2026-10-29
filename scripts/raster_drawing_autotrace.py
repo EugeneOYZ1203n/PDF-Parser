@@ -14,6 +14,8 @@ import argparse
 from pathlib import Path
 
 from raster_parser.autotrace.drawing_autotrace import (
+    _DEFAULT_CORNER_ALWAYS_THRESHOLD_DEG,
+    _DEFAULT_CORNER_SURROUND_PX,
     _DEFAULT_ERROR_THRESHOLD,
     _DEFAULT_FILTER_ITERATIONS,
     _DEFAULT_NOISE_REMOVAL,
@@ -51,8 +53,18 @@ def main() -> None:
         default=_DEFAULT_ERROR_THRESHOLD,
         help="curve fit tolerance in px; lower = more detail",
     )
-    p.add_argument("--corner-always-threshold", type=float, default=80.0)
-    p.add_argument("--corner-surround", type=int, default=4)
+    p.add_argument(
+        "--corner-always-threshold",
+        type=float,
+        default=_DEFAULT_CORNER_ALWAYS_THRESHOLD_DEG,
+        help="bends sharper than this many degrees are always corners",
+    )
+    p.add_argument(
+        "--corner-surround",
+        type=int,
+        default=_DEFAULT_CORNER_SURROUND_PX,
+        help="outline pixels examined on each side of a point when finding corners",
+    )
     p.add_argument(
         "--noise-removal",
         type=float,

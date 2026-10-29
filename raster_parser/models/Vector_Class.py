@@ -35,6 +35,26 @@ class Vector:
     ``level``, ``scissor``, ``blendmode``, ``isolated``, ``knockout``, ``opacity``.
     Also maps stroke extras that appear in the base dict: ``lineCap``, ``lineJoin``.
     ``rect`` is a plain 4-tuple ``(x0, y0, x1, y1)``.
+
+    PyMuPDF field meanings (see the ``get_drawings()`` docs):
+
+    - ``items``: the path's drawing ops, each a tuple whose first element is the op code --
+      ``"l"`` line, ``"c"`` cubic Bezier curve, ``"re"`` rectangle, ``"qu"`` quadrilateral.
+    - ``type``: how the path is painted -- ``"s"`` stroked only, ``"f"`` filled only,
+      ``"fs"`` filled and stroked (``"clip"``/``"group"`` entries only appear with
+      ``extended=True``).
+    - ``fill`` / ``color``: fill and stroke colour, RGB components in [0, 1].
+    - ``even_odd``: fill rule; True = even-odd (overlapping areas alternate filled/empty),
+      False = non-zero winding.
+    - ``closePath``: the path ends with a close-path operator (joins back to its start).
+    - ``dashes``: the PDF dash pattern string, e.g. ``"[3 2] 0"`` = 3 on, 2 off, phase 0;
+      ``"[] 0"`` is a solid line.
+    - ``seqno``: the path's position in the page's paint order (later paints on top).
+    - ``lineCap``: cap style per (start, dash ends, end): 0 butt, 1 round, 2 square.
+    - ``lineJoin``: corner style: 0 miter, 1 round, 2 bevel.
+    - ``level``: clip/group nesting depth; ``scissor``: the clip rectangle in force.
+    - ``blendmode``, ``isolated``, ``knockout``, ``opacity``: the enclosing transparency
+      group's PDF blend mode and group flags.
     """
 
     items: List[Any]

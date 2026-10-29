@@ -9,7 +9,11 @@ def _scale_point(p: pymupdf.Point, scale: float) -> pymupdf.Point:
 
 
 def _scale_item(item: tuple, scale: float) -> tuple:
-    """Scale one get_drawings() path segment into PDF-point space."""
+    """Scale one get_drawings() path segment into PDF-point space.
+
+    Op codes: ``"l"`` line, ``"c"`` cubic Bezier curve, ``"re"`` rectangle, ``"qu"``
+    quadrilateral (corners ul/ur/ll/lr = upper-left, upper-right, lower-left, lower-right).
+    """
     op = item[0]
     if op == "l":
         return ("l", _scale_point(item[1], scale), _scale_point(item[2], scale))
@@ -39,7 +43,10 @@ def _scale_item(item: tuple, scale: float) -> tuple:
 
 
 def _scale_vector(v: Vector, scale: float) -> Vector:
-    """Map a Vector from SVG-PDF pixel-as-point space into PDF points (``72/dpi``)."""
+    """Map a Vector from SVG-PDF pixel-as-point space into PDF points (``72/dpi``).
+
+    ``scissor`` is the clip rectangle PyMuPDF reports for the path (``extended=True``).
+    """
     if scale == 1.0:
         return v
     x0, y0, x1, y1 = v.rect

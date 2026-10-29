@@ -5,10 +5,17 @@ from raster_parser.models import Vector
 
 # Join tolerance (SVG/PDF units before dpi scale; ~pixels from autotrace).
 _STROKE_JOIN_EPS = 0.05
+# A drawing split into several strokes keeps its seqno on the first stroke; stroke i > 0
+# gets seqno * stride + i, which stays unique and keeps the drawing's paint order.
+_SUBSTROKE_SEQNO_STRIDE = 1_000_000
 
 
 def _item_points(item: tuple) -> list[pymupdf.Point]:
-    """give me every coordinate point involved in this segment" (used to compute bounding boxes)."""
+    """give me every coordinate point involved in this segment" (used to compute bounding boxes).
+
+    Op codes: ``"l"`` line, ``"c"`` cubic Bezier curve, ``"re"`` rectangle, ``"qu"``
+    quadrilateral (corners ul/ur/ll/lr = upper-left, upper-right, lower-left, lower-right).
+    """
     op = item[0]
     if op == "l":
         return [item[1], item[2]]
@@ -117,7 +124,7 @@ def _vectors_from_drawing(d: dict) -> list[Vector]:
                 fill_opacity=base.fill_opacity,
                 stroke_opacity=base.stroke_opacity,
                 # Preserve drawing seqno; sub-index via local offset so they're distinct.
-                seqno=base.seqno if i == 0 else base.seqno * 1_000_000 + i,
+                seqno=base.seqno if i == 0 else base.seqno * _SUBSTROKE_SEQNO_STRIDE + i,
                 layer=base.layer,
                 line_cap=base.line_cap,
                 line_join=base.line_join,

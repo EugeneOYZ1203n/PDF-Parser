@@ -28,17 +28,29 @@ from raster_parser.serialisation.deserialization import deserialize_vector
 from raster_parser.models import VectorDTO
 from raster_parser.autotrace.drawing_autotrace import autotrace_drawing
 from raster_parser.helpers.geometry import (
+    PDF_POINTS_PER_INCH,
     _area,
     _split_loops,
     isoperimetric_quotient,
 )
 
+# A pixel with every RGB channel at or above this (0-255) is paper background, not ink.
 _DEFAULT_BG_THRESH = 250
+# Two colours join one group when their distance in the `rgb_to_hsv` embedding is at most this.
 _DEFAULT_GROUP_DIST = 150.0
+# Colour groups covering fewer pixels than this are anti-aliasing / noise and are dropped.
 _DEFAULT_MIN_GROUP_PIXELS = 5000
+# A colour whose max - min RGB channel spread (0-255) is at most this is grey (achromatic);
+# `rgb_to_hsv` also zeroes OpenCV saturations below it, so greys don't carry a hue.
 _ACHROMA_S_MAX = 40
+# Saturation is weighted up against value in the HSV embedding, so two inks of different hue
+# separate more than two shades of one ink.
+_SATURATION_WEIGHT = 1.5
+# OpenCV stores 8-bit hue as 0-180 (half degrees); this turns it into radians.
+_OPENCV_HUE_TO_RAD = 2.0 * np.pi / 180.0
 _BLACK_RGB = (0, 0, 0)
 _WHITE_RGB = (255, 255, 255)
+# Grey pixels with mean RGB at or below this are black ink.
 _BLACK_MEAN_MAX = 80
 _WHITE_MEAN_MIN = 220  # below bg_thresh so page BG stays out of inventory
 
@@ -53,10 +65,10 @@ def rgb_to_hsv(rgb: np.ndarray) -> np.ndarray:
         arr = arr.reshape(1, -1, 3)
     u8 = np.clip(np.rint(arr), 0, 255).astype(np.uint8)
     hsv = cv2.cvtColor(u8, cv2.COLOR_RGB2HSV).astype(np.float32)
-    ang = hsv[..., 0] * (2.0 * np.pi / 180.0)
+    ang = hsv[..., 0] * _OPENCV_HUE_TO_RAD
     s_raw = hsv[..., 1]
     v = hsv[..., 2]
-    s = np.where(s_raw < _ACHROMA_S_MAX, 0.0, s_raw * 1.5)
+    s = np.where(s_raw < _ACHROMA_S_MAX, 0.0, s_raw * _SATURATION_WEIGHT)
     out = np.stack([s * np.cos(ang), s * np.sin(ang), v], axis=-1)
     if single:
         return out.reshape(3)
@@ -431,7 +443,7 @@ def _is_page_wash(
     r, g, b = stamp_rgb
     chroma = max(r, g, b) - min(r, g, b)
     lum = (r + g + b) / 3.0
-    if chroma > 40 or lum > 250:
+    if chroma > _ACHROMA_S_MAX or lum > _DEFAULT_BG_THRESH:
         return False
 
     x0, y0, x1, y1 = v.rect
@@ -484,6 +496,8 @@ def _stamp_group_vectors(
             out.append(
                 replace(
                     v,
+                    # PyMuPDF path type: "f" fill only, "s" stroke only, "fs" both. A
+                    # stamped fill keeps no stroke.
                     type="f" if v.type in ("f", "fs") else v.type,
                     fill=fill,
                     color=None,
@@ -504,6 +518,8 @@ def _colour_trace_worker_init() -> None:
 
 def _colour_trace_job(job: dict) -> dict:
     t0 = time.perf_counter()
+    # Each mask is already a clean two-colour (ink / paper) image, so autotrace traces outlines
+    # with 2 colours and none of its own noise removal or despeckling.
     vecs = autotrace_drawing(
         job["mask_path"],
         centerline=False,
@@ -594,8 +610,8 @@ def colour_fill_autotrace(
     del centroid, stamps
     print(f"[colour] masks+centroid map {time.perf_counter() - t0:.2f}s", flush=True)
 
-    page_w = w * 72.0 / float(dpi) if dpi and dpi > 0 else float(w)
-    page_h = h * 72.0 / float(dpi) if dpi and dpi > 0 else float(h)
+    page_w = w * PDF_POINTS_PER_INCH / float(dpi) if dpi and dpi > 0 else float(w)
+    page_h = h * PDF_POINTS_PER_INCH / float(dpi) if dpi and dpi > 0 else float(h)
 
     group_vectors: dict[int, list[Vector]] = {g.label: [] for g in groups}
     mask_paths: dict[int, Path] = {}

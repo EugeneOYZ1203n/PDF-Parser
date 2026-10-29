@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import tkinter as tk
 
+# The tooltip opens this far (px) right of and below the cursor, so it never sits under it.
+TOOLTIP_CURSOR_OFFSET_PX = 15
+
 
 class Tooltip:
     """Simple mouse-following tooltip for the canvas."""
@@ -53,7 +56,8 @@ class Tooltip:
 
             self.label.config(text=text)
 
-        self.window.geometry(f"+{x + 15}+{y + 15}")
+        offset = TOOLTIP_CURSOR_OFFSET_PX
+        self.window.geometry(f"+{x + offset}+{y + offset}")
 
         self.window.deiconify()
 

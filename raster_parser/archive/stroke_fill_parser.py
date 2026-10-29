@@ -25,6 +25,8 @@ from raster_parser.models import Vector
 
 # Q below this -> stroke (elongated); at/above -> fill (compact).
 _DEFAULT_Q_THRESH = 0.25
+# A fill with every RGB channel (0-1) at or above this is white.
+_WHITE_FILL_MIN = 0.98
 _JOIN_EPS = 1e-3
 
 
@@ -42,7 +44,7 @@ class StrokeFillResult:
 def is_stroke_like(v: Vector, *, q_thresh: float = _DEFAULT_Q_THRESH) -> bool:
     """True if the path is elongated (stroke-like) by isoperimetric Q."""
     # White hole covers belong with fills (topology), not stroke ink.
-    if v.fill is not None and all(c >= 0.98 for c in v.fill):
+    if v.fill is not None and all(c >= _WHITE_FILL_MIN for c in v.fill):
         return False
     return isoperimetric_quotient(v) < q_thresh
 

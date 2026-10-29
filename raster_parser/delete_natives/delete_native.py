@@ -88,7 +88,12 @@ def page_is_nonempty(
     ink_frac: float = 0.001,
     ink_thresh: int = 250,
 ) -> bool:
-    """True if the page still has images, drawings, or meaningful non-white ink."""
+    """True if the page still has images, drawings, or meaningful non-white ink.
+
+    The ink check renders a coarse ``probe_dpi`` preview and counts samples darker than
+    ``ink_thresh`` (0-255); the page has content when they are more than ``ink_frac`` of all
+    samples.
+    """
     with fitz.open(str(pdf_path)) as doc:
         page = doc[page_index]
         if page.get_images():

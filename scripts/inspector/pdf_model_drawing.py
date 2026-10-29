@@ -23,6 +23,7 @@ def extract_annot_items(
     items = []
 
     for annot in page.annots() or []:
+        # annot.type is (type number, type name), e.g. (8, "Highlight").
         annot_type = annot.type[1] if annot.type else ""
 
         rect = fitz.Rect(annot.rect)
@@ -98,6 +99,14 @@ def _drawing_common_metadata(
     drawing: dict,
     seqno: int,
 ) -> dict:
+    """Hover metadata shared by every op of one ``get_drawings()`` path.
+
+    PyMuPDF keys: "type" is how the path is painted ("s" stroke, "f" fill, "fs" both);
+    "lineCap" 0 butt / 1 round / 2 square; "lineJoin" 0 miter / 1 round / 2 bevel;
+    "closePath" whether the path closes back to its start; "even_odd" the fill rule
+    (True even-odd, False non-zero winding); "dashes" the PDF dash pattern, e.g.
+    "[3 2] 0" ("[] 0" = solid).
+    """
 
     stroke = _round_color(drawing.get("color"))
 

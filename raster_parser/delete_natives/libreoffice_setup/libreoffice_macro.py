@@ -79,6 +79,7 @@ def register_libreoffice_macro(config_dir_path: str, script_fp: str | Path):
             xcu_content = f.read()
 
         # The exact string LibreOffice expects to enable Medium/Low macro security (Level 1)
+        # MacroSecurityLevel: 0 low, 1 medium, 2 high, 3 very high.
         security_item = '<oor:item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="MacroSecurityLevel" oor:op="fuse"><value>1</value></prop></oor:item>'
 
         # Regex pattern to find the scripting security item if LibreOffice already generated it

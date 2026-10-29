@@ -27,6 +27,8 @@ class PaddleOcr:
             lang=lang,
             use_gpu=self.use_gpu,
             show_log=False,
+            # Detection downscales any crop whose longer side exceeds this (px); word-group
+            # crops are far smaller, so they are detected at full resolution.
             det_limit_side_len=4096,
             det_limit_type="max",
             drop_score=drop_score,

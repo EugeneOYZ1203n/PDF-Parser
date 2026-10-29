@@ -220,6 +220,9 @@ class TextToVector:
             r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?",
             d,
         )
+        # SVG path commands and how many numbers each takes: M/L/T x y, H x, V y,
+        # C x1 y1 x2 y2 x y, S/Q two points, A rx ry rotation large-arc sweep x y, Z none.
+        # Uppercase is absolute, lowercase relative to the current point.
         counts = {
             "M": 2,
             "m": 2,

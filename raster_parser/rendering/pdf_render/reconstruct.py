@@ -9,6 +9,44 @@ from raster_parser.models import Vector
 
 WHITE_FILL = (1.0, 1.0, 1.0)
 
+# Box/rule test for 4-line filled paths (sizes in PDF points). A path smaller than this on both
+# sides is glyph-sized, so it is never a box.
+BOX_MIN_SIDE_PT = 10
+# Longer side over shorter side: above RULE_MIN_ASPECT it is a rule (a long thin bar); below
+# BOX_MAX_ASPECT it is a square-ish panel. Glyph strokes fall in between.
+RULE_MIN_ASPECT = 10
+BOX_MAX_ASPECT = 3
+# Vector text is drawn in black, white or a pure primary; any other fill/stroke colour marks a
+# layout box.
+TEXT_COLOURS = (
+    (0.0, 0.0, 0.0),
+    (1.0, 1.0, 1.0),
+    (1.0, 0.0, 0.0),
+    (0.0, 1.0, 0.0),
+    (0.0, 0.0, 1.0),
+)
+
+# Text re-rendering (sizes in PDF points). Font size is capped at the larger of
+# MAX_FONT_SIZE_FACTOR * font_size and MAX_FONT_SIZE_FLOOR_PT.
+MAX_FONT_SIZE_FACTOR = 4.0
+MAX_FONT_SIZE_FLOOR_PT = 96.0
+# Word boxes thinner than this on either side are skipped.
+MIN_TEXT_BOX_SIDE_PT = 0.25
+# A native word is vertical when its box is this many times taller than wide per glyph
+# (and at least TALL_RATIO overall); see `render_text_objects_to_page`.
+VERTICAL_HEIGHT_PER_GLYPH = 0.9
+TALL_RATIO = 1.25
+# The first font size tried is this fraction of the box height (box width when sideways);
+# each refit step multiplies the size by it again.
+FONT_FILL_FRAC = 0.88
+# Starting font size floor, and the size below which shrinking stops.
+MIN_START_FONT_SIZE_PT = 4.0
+MIN_FONT_SIZE_PT = 3.0
+# The rendered word may run this much (fraction) past its box before it is shrunk.
+TEXT_LENGTH_SLACK = 1.02
+# Upper bound on shrink steps per word.
+MAX_FONT_FIT_STEPS = 12
+
 
 def _finish_kwargs_reconstruct(path: dict) -> dict:
     kwargs: dict = {
@@ -35,6 +73,8 @@ def _finish_kwargs_reconstruct(path: dict) -> dict:
 
 
 def _replay_items(shape: fitz.Shape, items: list) -> None:
+    """Draw one path's ``get_drawings()`` items: ``"l"`` line, ``"re"`` rectangle,
+    ``"qu"`` quadrilateral, ``"c"`` cubic Bezier (start, two control points, end)."""
     for item in items:
         op = item[0]
         if op == "l":
@@ -53,6 +93,7 @@ def filter_out_white_vectors(vectors: list[Vector]) -> list[Vector]:
     return [v for v in vectors if v.fill != WHITE_FILL]
 
 
+# PyMuPDF path ``type``: "f" filled only, "s" stroked only, "fs" filled and stroked.
 def filter_fill_vectors(vectors: list[Vector]) -> list[Vector]:
     return [v for v in vectors if v.type == "f"]
 
@@ -67,25 +108,13 @@ def is_box_or_rule(vec: Vector) -> bool:
     h = y1 - y0
     if w == 0 or h == 0:
         return False
-    if w < 10 and h < 10:
+    if w < BOX_MIN_SIDE_PT and h < BOX_MIN_SIDE_PT:
         return False
     ratio = max(w, h) / min(w, h)
-    is_rule = ratio > 10
-    is_square_ish = ratio < 3
-    is_not_text_fill = vec.fill is not None and vec.fill not in (
-        (0.0, 0.0, 0.0),
-        (1.0, 1.0, 1.0),
-        (1.0, 0.0, 0.0),
-        (0.0, 1.0, 0.0),
-        (0.0, 0.0, 1.0),
-    )
-    is_not_text_color = vec.color is not None and vec.color not in (
-        (0.0, 0.0, 0.0),
-        (1.0, 1.0, 1.0),
-        (1.0, 0.0, 0.0),
-        (0.0, 1.0, 0.0),
-        (0.0, 0.0, 1.0),
-    )
+    is_rule = ratio > RULE_MIN_ASPECT
+    is_square_ish = ratio < BOX_MAX_ASPECT
+    is_not_text_fill = vec.fill is not None and vec.fill not in TEXT_COLOURS
+    is_not_text_color = vec.color is not None and vec.color not in TEXT_COLOURS
     return is_rule or is_square_ish or is_not_text_fill or is_not_text_color
 
 
@@ -148,6 +177,8 @@ def ocr_rotate_for_target(target_rotate: int, page_rotation: int) -> int:
 
 
 def _text_anchor(rect: fitz.Rect, rotate: int) -> fitz.Point:
+    """The text origin corner for ``rotate``: ``bl``/``br``/``tr`` are a Rect's bottom-left,
+    bottom-right and top-right points."""
     r = int(rotate) % 360
     if r == 90:
         return rect.bl
@@ -318,9 +349,9 @@ def render_text_objects_to_page(
         outpage.set_rotation(rotation)
 
     clip = fitz.Rect(0, 0, w, h)
-    max_glyph = max(font_size * 4.0, 96.0)
+    max_glyph = max(font_size * MAX_FONT_SIZE_FACTOR, MAX_FONT_SIZE_FLOOR_PT)
+    # "helv" is PyMuPDF's name for the built-in (base-14) Helvetica font.
     font = fitz.Font("helv")
-    tall_ratio = 1.25
 
     for t in texts:
         word = (t.word or "").strip()
@@ -328,7 +359,7 @@ def render_text_objects_to_page(
             continue
 
         r = fitz.Rect(float(t.x0), float(t.y0), float(t.x1), float(t.y1)) & clip
-        if r.is_empty or r.width < 0.25 or r.height < 0.25:
+        if r.is_empty or r.width < MIN_TEXT_BOX_SIDE_PT or r.height < MIN_TEXT_BOX_SIDE_PT:
             continue
 
         page_rot = rotation % 360
@@ -343,23 +374,25 @@ def render_text_objects_to_page(
             # in proportion to its length (height ~ n glyphs, width ~ one glyph), so gate on a
             # length-scaled ratio and never rotate 1-char words.
             n = len(word)
-            vertical = n >= 2 and rd.height > rd.width * max(tall_ratio, 0.9 * n)
+            vertical = n >= 2 and rd.height > rd.width * max(
+                TALL_RATIO, VERTICAL_HEIGHT_PER_GLYPH * n
+            )
             ocr_rot = 90 if vertical else 0
             text_rotate = _glyph_pdf_rotate(ocr_rot, page_rot)
 
         sideways = text_rotate in (90, 270)
         if sideways:
-            fs = min(max(r.width * 0.88, 4.0), max_glyph)
-            limit = r.height * 1.02
+            fs = min(max(r.width * FONT_FILL_FRAC, MIN_START_FONT_SIZE_PT), max_glyph)
+            limit = r.height * TEXT_LENGTH_SLACK
         else:
-            fs = min(max(r.height * 0.88, 4.0), max_glyph)
-            limit = r.width * 1.02
+            fs = min(max(r.height * FONT_FILL_FRAC, MIN_START_FONT_SIZE_PT), max_glyph)
+            limit = r.width * TEXT_LENGTH_SLACK
 
-        for _ in range(12):
+        for _ in range(MAX_FONT_FIT_STEPS):
             if font.text_length(word, fontsize=fs) <= limit:
                 break
-            fs *= 0.88
-            if fs < 3.0:
+            fs *= FONT_FILL_FRAC
+            if fs < MIN_FONT_SIZE_PT:
                 break
 
         outpage.insert_text(

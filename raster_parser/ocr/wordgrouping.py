@@ -5,6 +5,15 @@ from typing import List
 import pymupdf as fitz
 from raster_parser.models import GlyphOrientation as Orientation
 
+# Two glyphs side by side join when the gap along the reading direction is under the mean
+# of their widths (half the summed widths), and the cross-direction offset is under half the
+# taller glyph.
+GLYPH_GAP_FRAC = 0.5
+# Centre offsets whose longer axis is less than this many times the shorter one are diagonal
+# (neither side by side nor stacked); such glyphs join only when their top-left corners are
+# within one glyph width + height of each other.
+DIAGONAL_MAX_AXIS_RATIO = 1.35
+
 
 @dataclass
 class Glyph:
@@ -67,7 +76,11 @@ def convert_vectors_to_glyphs(vectors: List[Vector]) -> List[Glyph]:
 
 
 def cluster_by_seqno(glyphs: List[Glyph], page_rotation: int = 0) -> List[WordGroup]:
-    """Cluster glyphs by seqno."""
+    """Cluster glyphs by seqno.
+
+    ``seqno`` is PyMuPDF's paint-order index of a drawing on the page, so glyphs of one word,
+    drawn one after another, are consecutive in it.
+    """
 
     sorted_list = sorted(glyphs, key=lambda g: g.vector.seqno)
     list_of_clusters: List[List[Glyph]] = []
@@ -95,14 +108,14 @@ def is_close_to_glyph(g1: Glyph, g2: Glyph) -> bool:
     tol_w = max(g1.w, g2.w)
 
     if dx >= dy:
-        if gap_x < (g1.w + g2.w) * 0.5 and gap_y < tol_h * 0.5:
+        if gap_x < (g1.w + g2.w) * GLYPH_GAP_FRAC and gap_y < tol_h * GLYPH_GAP_FRAC:
             return True
-    elif gap_y < (g1.h + g2.h) * 0.5 and gap_x < tol_w * 0.5:
+    elif gap_y < (g1.h + g2.h) * GLYPH_GAP_FRAC and gap_x < tol_w * GLYPH_GAP_FRAC:
         return True
 
     if dx > 0.0 and dy > 0.0:
         axis_ratio = max(dx, dy) / min(dx, dy)
-        if axis_ratio < 1.35:
+        if axis_ratio < DIAGONAL_MAX_AXIS_RATIO:
             dist = np.sqrt((g1.x0 - g2.x0) ** 2 + (g1.y0 - g2.y0) ** 2)
             return dist < min(g1.w, g2.w) + min(g1.h, g2.h)
 

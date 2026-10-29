@@ -30,10 +30,17 @@ import cv2
 import numpy as np
 import pymupdf as fitz
 
+from raster_parser.helpers.geometry import PDF_POINTS_PER_INCH
 from raster_parser.models import GlyphOrientation
 from raster_parser.models import Text
 from raster_parser.parsing.parser import PdfRasterParser
 from raster_parser.parsing.text_drawing_parser import ocr_boxes, paddle_ocr_call
+
+# A pixel darker than this (0-255 gray) is glyph ink; paper renders at 255 and anti-aliased
+# paper noise stays above it.
+INK_GRAY_MAX = 250
+# Smallest gap (px) that can separate two words, however tight the letter spacing is.
+MIN_WORD_GAP_PX = 2.0
 
 # Per-process OCR for ProcessPoolExecutor box-recog workers (spawn).
 _REC_WORKER_OCR = None
@@ -121,7 +128,7 @@ def _bbox_to_points(x0, y0, x1, y1, to_points, scale) -> tuple[float, float, flo
 
     With a ``to_points`` matrix (the inverse of the page render transform) all four corners
     are mapped so 90/180/270 rotations -- which swap width/height -- come out correct.
-    Without it, fall back to a plain pixel*72/dpi scale.
+    Without it, fall back to a plain pixel * PDF_POINTS_PER_INCH / dpi scale.
     """
     if to_points is None:
         return (x0 * scale, y0 * scale, x1 * scale, y1 * scale)
@@ -166,7 +173,7 @@ def split_words(
     if crop.size == 0:
         return [(x0, y0, x1, y1)]
 
-    col_has_ink = (crop < 250).any(axis=0)  # columns that contain dark glyph ink
+    col_has_ink = (crop < INK_GRAY_MAX).any(axis=0)  # columns that contain dark glyph ink
     cols = np.where(col_has_ink)[0]
     if cols.size == 0:
         return [(x0, y0, x1, y1)]
@@ -185,7 +192,9 @@ def split_words(
         return [(x0, y0, x1, y1)]
 
     gaps = [runs[i + 1][0] - runs[i][1] - 1 for i in range(len(runs) - 1)]
-    thresh = max(2.0, gap_factor * float(np.median(gaps)))  # a bigger-than-usual gap = new word
+    thresh = max(
+        MIN_WORD_GAP_PX, gap_factor * float(np.median(gaps))
+    )  # a bigger-than-usual gap = new word
 
     words: list[list[tuple[int, int]]] = [[runs[0]]]
     for gap, run in zip(gaps, runs[1:]):
@@ -430,7 +439,7 @@ def recover_missed_glyphs(
     and recognizes each cluster as one candidate.
     """
     H, W = gray.shape[:2]
-    scale = 72.0 / dpi
+    scale = PDF_POINTS_PER_INCH / dpi
     cov = np.zeros((H, W), np.uint8)
     for x0, y0, x1, y1 in boxes:
         cv2.rectangle(
@@ -528,7 +537,7 @@ def recognize_boxes(
     with the provided ``ocr`` handle.
     """
     H, W = text_gray.shape[:2]
-    scale = 72.0 / dpi
+    scale = PDF_POINTS_PER_INCH / dpi
     kept = np.zeros((H, W), np.uint8)
 
     # Expand horizontal boxes into per-word sub-boxes (verticals stay whole).

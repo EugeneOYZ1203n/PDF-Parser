@@ -26,6 +26,12 @@ def extract_text_items(
 
     spans = []
 
+    # get_text("dict") nests blocks -> lines -> spans. A block's "type" is 0 for text, 1 for
+    # an image. A line's "dir" is its unit writing direction (cos, sin) in unrotated page
+    # space. A span is a run of characters sharing one font, size, colour and "flags" (a
+    # bit field: 1 superscript, 2 italic, 4 serif, 8 monospaced, 16 bold); its "origin" is
+    # the baseline start point, and "ascender"/"descender" are the font's extent above/below
+    # the baseline as fractions of the font size.
     text_dict = page.get_text(
         "dict",
         sort=False,

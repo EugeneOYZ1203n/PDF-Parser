@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import pymupdf as fitz
 
+# PDF user space has 72 points per inch.
+PDF_POINTS_PER_INCH = 72.0
+BYTES_PER_KB = 1024
+
 from scripts.inspector.layers import OverlayItem
 from scripts.inspector.pdf_model_core import (
     _format_matrix,
@@ -21,6 +25,12 @@ def extract_image_items(
     get_image_info(xrefs=True) is preferable to get_images() here
     because it provides placement information, transformation data,
     resolution and mask information.
+
+    Keys used: "xref" is the image's PDF object number (0 for inline images), "smask" its
+    soft-mask (alpha) image's xref, "bpc" bits per colour component, "xres"/"yres" the
+    resolution stored in the image, "digest" a hash of the image data (equal digests =
+    the same image), and "transform" the matrix mapping the image's unit square onto the
+    page.
     """
 
     items = []
@@ -143,12 +153,12 @@ def extract_image_items(
         # --------------------------------------------------------------
 
         if bbox.width > 0 and width_px:
-            dpi_x = width_px / bbox.width * 72.0
+            dpi_x = width_px / bbox.width * PDF_POINTS_PER_INCH
         else:
             dpi_x = None
 
         if bbox.height > 0 and height_px:
-            dpi_y = height_px / bbox.height * 72.0
+            dpi_y = height_px / bbox.height * PDF_POINTS_PER_INCH
         else:
             dpi_y = None
 
@@ -171,7 +181,7 @@ def extract_image_items(
                             "size",
                             0,
                         )
-                        / 1024,
+                        / BYTES_PER_KB,
                         2,
                     )
 

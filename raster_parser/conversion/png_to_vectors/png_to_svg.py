@@ -7,9 +7,16 @@ from autotrace import Bitmap, VectorFormat
 
 # Defaults tuned to keep small / thin linework (autotrace's own defaults are aggressive:
 # noise-removal=0.99 and filter-iterations=4 erase fine AEC detail).
+# error_threshold: how far (px) a fitted curve may stray from the traced outline before
+# autotrace splits it into more pieces.
 _DEFAULT_ERROR_THRESHOLD = 0.5
 _DEFAULT_NOISE_REMOVAL = 0.2
 _DEFAULT_FILTER_ITERATIONS = 1
+# A bend sharper than this many degrees is always a corner (autotrace's own default).
+_DEFAULT_CORNER_ALWAYS_THRESHOLD_DEG = 80.0
+# How many outline pixels on each side of a point autotrace looks at to decide whether it
+# is a corner (autotrace's own default).
+_DEFAULT_CORNER_SURROUND_PX = 4
 
 
 def png_to_svg(
@@ -18,8 +25,8 @@ def png_to_svg(
     centerline: bool = False,
     color_count: int = 16,
     error_threshold: float = _DEFAULT_ERROR_THRESHOLD,
-    corner_always_threshold: float = 80.0,
-    corner_surround: int = 4,
+    corner_always_threshold: float = _DEFAULT_CORNER_ALWAYS_THRESHOLD_DEG,
+    corner_surround: int = _DEFAULT_CORNER_SURROUND_PX,
     noise_removal: float = _DEFAULT_NOISE_REMOVAL,
     filter_iterations: int = _DEFAULT_FILTER_ITERATIONS,
     despeckle_level: int = 0,

@@ -9,13 +9,20 @@ import numpy as np
 import pymupdf as fitz
 from PIL import Image
 
+from raster_parser.helpers.geometry import PDF_POINTS_PER_INCH
 from raster_parser.models import Vector
 from raster_parser.rendering.pdf_render.reconstruct import (
     _finish_kwargs_reconstruct,
     drawing_from_vector,
 )
 
+# Renders smaller than this (px) on either side are upscaled to it, so the recogniser gets
+# enough pixels per glyph.
 MIN_RENDER_PX = 64
+# Blank margin (PDF points) left around a word group's bbox when it is rendered.
+DEFAULT_PADDING_PT = 5.0
+# Word groups thinner than this (PDF points) on either side render as a blank pixel.
+MIN_GROUP_SIDE_PT = 0.25
 
 
 def save_rgb(arr: np.ndarray, path: Path) -> None:
@@ -32,6 +39,8 @@ def _pt(p, dx: float, dy: float) -> fitz.Point:
 
 
 def _replay_items_offset(shape: fitz.Shape, items: list, dx: float, dy: float) -> None:
+    """Draw ``get_drawings()`` items shifted by (-dx, -dy): ``"l"`` line, ``"re"`` rectangle,
+    ``"qu"`` quadrilateral (corners ul/ur/ll/lr), ``"c"`` cubic Bezier."""
     for item in items:
         op = item[0]
         if op == "l":
@@ -67,7 +76,7 @@ class PngRenderer:
         self,
         *,
         dpi: int = 300,
-        padding: float = 5.0,
+        padding: float = DEFAULT_PADDING_PT,
         page: fitz.Page,
         min_render_px: int = MIN_RENDER_PX,
     ):
@@ -85,7 +94,7 @@ class PngRenderer:
         x1 = max(v.rect[2] for v in vectors)
         y1 = max(v.rect[3] for v in vectors)
         box = fitz.Rect(x0, y0, x1, y1)
-        if box.is_empty or box.width < 0.25 or box.height < 0.25:
+        if box.is_empty or box.width < MIN_GROUP_SIDE_PT or box.height < MIN_GROUP_SIDE_PT:
             return Image.new("RGB", (1, 1), (255, 255, 255))
 
         doc = fitz.open()
@@ -105,7 +114,7 @@ class PngRenderer:
                 shape.finish(**_finish_kwargs_reconstruct(path))
                 shape.commit()
             pix = page.get_pixmap(
-                matrix=fitz.Matrix(self.dpi / 72, self.dpi / 72),
+                matrix=fitz.Matrix(self.dpi / PDF_POINTS_PER_INCH, self.dpi / PDF_POINTS_PER_INCH),
                 alpha=False,
             )
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)

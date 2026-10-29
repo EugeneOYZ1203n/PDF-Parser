@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from raster_parser.helpers.geometry import PDF_POINTS_PER_INCH
 from raster_parser.models.Vector_Class import Vector
 import pymupdf
 from raster_parser.transforms.scale_pdf_vector_items import _scale_vector
@@ -35,6 +36,6 @@ def pdf_to_vectors(
         else:
             vectors.append(Vector.from_drawing(d))
     if dpi is not None and dpi > 0:
-        scale = 72.0 / float(dpi)
+        scale = PDF_POINTS_PER_INCH / float(dpi)
         vectors = [_scale_vector(v, scale) for v in vectors]
     return vectors

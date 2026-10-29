@@ -17,6 +17,8 @@ from raster_parser.delete_natives.libreoffice_setup.libreoffice_macro import (
     register_libreoffice_macro,
 )
 
+# LibreOffice keeps its user profile under a profile-format version folder ("4" since
+# LibreOffice 4.0).
 lo_config_dir = "~/.config/libreoffice/4"
 raster_parser_dir = Path(__file__).parent.parent
 register_libreoffice_macro(

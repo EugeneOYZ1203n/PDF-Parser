@@ -8,6 +8,7 @@ from collections import Counter, defaultdict
 import matplotlib.pyplot as plt
 import numpy as np
 
+from raster_parser.parsing.parser import LARGE_GROUP_MIN_ASPECT, LARGE_GROUP_MIN_VECTORS
 from raster_parser.evaluation.native_vs_ocr import (
     Stats,
     _char_outcomes,
@@ -123,8 +124,10 @@ def _is_large_group(
             return None
         x0, y0, x1, y1 = _union_rect(rects)
         w, h = max(0.0, x1 - x0), max(0.0, y1 - y0)
-        return w > h and (w / max(h, 1) >= 8 or len(native_nums) >= 20)
-    return len(native_nums) >= 20
+        return w > h and (
+            w / max(h, 1) >= LARGE_GROUP_MIN_ASPECT or len(native_nums) >= LARGE_GROUP_MIN_VECTORS
+        )
+    return len(native_nums) >= LARGE_GROUP_MIN_VECTORS
 
 
 def char_category(ch: str) -> str:

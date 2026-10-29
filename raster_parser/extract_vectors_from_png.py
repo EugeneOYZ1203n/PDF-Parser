@@ -8,6 +8,7 @@ from contextlib import nullcontext
 from raster_parser.conversion.png_to_vectors.png_to_svg import png_to_svg
 from raster_parser.conversion.png_to_vectors.svg_to_pdf import svg_to_pdf
 from raster_parser.rendering.pdf_render.dto_reconstruct_pipeline import draw_vectors
+from raster_parser.helpers.geometry import PDF_POINTS_PER_INCH
 from raster_parser.models import Vector
 from raster_parser.serialisation.deserialization import deserialize_vector
 from raster_parser.autotrace.drawing_autotrace import (
@@ -23,6 +24,8 @@ import statistics as st
 import numpy as np
 
 TRANSPARENCY_THRESHOLD = 0.8
+# A vector rendered black-on-white covers a pixel when its gray value is below mid-gray.
+COVERED_GRAY_MAX = 128
 
 
 def _calculate_vector_transparency(
@@ -49,15 +52,15 @@ def _calculate_vector_transparency(
         draw_vectors(
             [vector],
             pdf_path,
-            page_width=width * 72 / dpi,
-            page_height=height * 72 / dpi,
+            page_width=width * PDF_POINTS_PER_INCH / dpi,
+            page_height=height * PDF_POINTS_PER_INCH / dpi,
         )
 
         doc = fitz.open(pdf_path)
         page = doc[0]
 
         pix = page.get_pixmap(
-            matrix=fitz.Matrix(dpi / 72, dpi / 72),
+            matrix=fitz.Matrix(dpi / PDF_POINTS_PER_INCH, dpi / PDF_POINTS_PER_INCH),
             colorspace=fitz.csGRAY,
             alpha=False,
         )
@@ -73,7 +76,7 @@ def _calculate_vector_transparency(
         doc.close()
 
         # PDF background is white, vector is black.
-        fill_mask = fill_mask < 128
+        fill_mask = fill_mask < COVERED_GRAY_MAX
 
         if not np.any(fill_mask):
             result.append(vector_dto)
@@ -95,13 +98,18 @@ def _transform_vectors_to_matrix(
     image_size: tuple[int, int],
     dpi: int,
 ) -> None:
-    """Transform image vectors into page coordinates using a PyMuPDF matrix."""
+    """Transform image vectors into page coordinates using a PyMuPDF matrix.
+
+    ``matrix`` is the image's placement transform from ``page.get_image_rects(xref,
+    transform=True)``: it maps the image's unit square (0..1 on both axes) onto the page.
+    Item ops: ``"l"`` line, ``"c"`` cubic Bezier, ``"re"`` rectangle, ``"qu"`` quad.
+    """
 
     image_width, image_height = image_size
 
     # VectorDTO coordinates are in PDF points, not PNG pixels.
-    image_width_pt = image_width * 72 / dpi
-    image_height_pt = image_height * 72 / dpi
+    image_width_pt = image_width * PDF_POINTS_PER_INCH / dpi
+    image_height_pt = image_height * PDF_POINTS_PER_INCH / dpi
 
     def transform_point(point: list[float]) -> list[float]:
         # Convert generated-PDF coordinates into the unit image square.
@@ -311,9 +319,14 @@ def get_image_polys(
     # Collect unique image xrefs.
     # ---------------------------------------------------------
 
+    # An xref is a PDF object's number in the file's cross-reference table; images are
+    # identified by it. An image's smask (soft mask) is a second grayscale image holding its
+    # alpha channel, stored as its own xref; masks are merged into their image below, never
+    # traced on their own.
     image_xrefs = set()
     smask_xrefs = set()
 
+    # page.get_images() rows start (xref, smask_xref, width, height, ...).
     for imgobj in page.get_images():
         imgxref = imgobj[0]
         smask = imgobj[1]

@@ -15,6 +15,7 @@ import numpy as np
 import pymupdf as fitz
 
 from raster_parser.autotrace.drawing_colour_fill_autotrace import colour_fill_autotrace
+from raster_parser.helpers.geometry import PDF_POINTS_PER_INCH
 from raster_parser.ocr.region_ocr import (
     recognize_boxes,
     recover_missed_glyphs,
@@ -28,16 +29,31 @@ from raster_parser.parsing.text_drawing_parser import (
     ocr_boxes_rotated,
 )
 
+# Detection boxes overlapping a larger box by more than this IoU are duplicates (e.g. the
+# upright and the rotated pass finding the same label) and are dropped.
+DUPLICATE_BOX_IOU = 0.6
+# Recovered glyphs have no detection box backing them, so only near-certain reads are kept.
+RECOVERED_GLYPH_MIN_CONF = 0.9
+# Debug image styling: box outline thickness (px) and how far recovered-glyph outlines are
+# drawn outside the glyph (px); colours are BGR.
+DEBUG_BOX_THICKNESS_PX = 2
+DEBUG_GLYPH_OUTLINE_PAD_PX = 3
+DEBUG_DET_BOX_BGR = (0, 0, 255)
+DEBUG_RECOVERED_GLYPH_BGR = (0, 170, 0)
+
 
 def page_to_bgr(pdf_path: str | Path, page_index: int, dpi: int):
     """Render one PDF page to BGR and the pixel->PDF-point transform."""
     doc = fitz.open(str(pdf_path))
     try:
         page = doc[page_index]
-        to_points = ~(page.rotation_matrix * fitz.Matrix(dpi / 72.0, dpi / 72.0))
+        zoom = dpi / PDF_POINTS_PER_INCH
+        to_points = ~(page.rotation_matrix * fitz.Matrix(zoom, zoom))
         pix = page.get_pixmap(dpi=dpi)
     finally:
         doc.close()
+    # pix.samples is the raw pixel buffer; pix.n is the number of channels per pixel
+    # (1 gray, 3 RGB, 4 RGBA).
     img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
     if pix.n == 4:
         return cv2.cvtColor(img, cv2.COLOR_RGBA2BGR), to_points
@@ -132,7 +148,7 @@ def extract_raster_page(
         lang=parser.lang,
         min_conf=parser.min_conf,
     )
-    clean_boxes = nms_boxes(clean_boxes, iou_thresh=0.6)
+    clean_boxes = nms_boxes(clean_boxes, iou_thresh=DUPLICATE_BOX_IOU)
     clean_boxes = filter_boxes_by_min_area(clean_boxes, parser.min_box_area)
 
     rec_scratch = dump / "rec_boxes"
@@ -154,7 +170,7 @@ def extract_raster_page(
         ocr=parser.ocr,
         to_points=to_points,
         dpi=dpi,
-        min_conf=0.9,
+        min_conf=RECOVERED_GLYPH_MIN_CONF,
     )
     if recov.n_text:
         text_final_gray[recov.kept_mask == 255] = gray[recov.kept_mask == 255]
@@ -169,17 +185,36 @@ def extract_raster_page(
 
     initial_det_vis = bgr.copy()
     for x0, y0, x1, y1 in result.boxes:
-        cv2.rectangle(initial_det_vis, (int(x0), int(y0)), (int(x1), int(y1)), (0, 0, 255), 2)
+        cv2.rectangle(
+            initial_det_vis,
+            (int(x0), int(y0)),
+            (int(x1), int(y1)),
+            DEBUG_DET_BOX_BGR,
+            DEBUG_BOX_THICKNESS_PX,
+        )
     cv2.imwrite(str(dump / "initial_det.png"), initial_det_vis)
 
     det_vis = cv2.cvtColor(text_final_gray, cv2.COLOR_GRAY2BGR)
     for x0, y0, x1, y1 in clean_boxes:
-        cv2.rectangle(det_vis, (int(x0), int(y0)), (int(x1), int(y1)), (0, 0, 255), 2)
+        cv2.rectangle(
+            det_vis,
+            (int(x0), int(y0)),
+            (int(x1), int(y1)),
+            DEBUG_DET_BOX_BGR,
+            DEBUG_BOX_THICKNESS_PX,
+        )
     if recov.n_text:
         cnts, _ = cv2.findContours(recov.kept_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for c in cnts:
             x, y, w, h = cv2.boundingRect(c)
-            cv2.rectangle(det_vis, (x - 3, y - 3), (x + w + 3, y + h + 3), (0, 170, 0), 2)
+            p = DEBUG_GLYPH_OUTLINE_PAD_PX
+            cv2.rectangle(
+                det_vis,
+                (x - p, y - p),
+                (x + w + p, y + h + p),
+                DEBUG_RECOVERED_GLYPH_BGR,
+                DEBUG_BOX_THICKNESS_PX,
+            )
     cv2.imwrite(str(dump / "det_boxes.png"), det_vis)
 
     colour = colour_fill_autotrace(

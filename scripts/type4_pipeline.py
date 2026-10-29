@@ -59,7 +59,30 @@ from raster_parser.parsing.text_drawing_parser import (
     nms_boxes,
     ocr_boxes_rotated,
 )
-from raster_parser.parsing.extract_raster_page import page_to_bgr
+from raster_parser.parsing.extract_raster_page import (
+    DEBUG_BOX_THICKNESS_PX,
+    DEBUG_DET_BOX_BGR,
+    DEBUG_GLYPH_OUTLINE_PAD_PX,
+    DEBUG_RECOVERED_GLYPH_BGR,
+    DUPLICATE_BOX_IOU,
+    RECOVERED_GLYPH_MIN_CONF,
+    page_to_bgr,
+)
+
+# Page labels in progress/log lines are cut to this many characters.
+JOB_LABEL_MAX_CHARS = 40
+# QA adaptive threshold: each pixel is compared with the Gaussian-weighted mean of its
+# 51 x 51 px neighbourhood minus 10 gray levels.
+ADAPTIVE_BLOCK_SIZE_PX = 51
+ADAPTIVE_OFFSET = 10
+# OCR word <-> native word linking: a pair links when bbox IoU >= MATCH_IOU, when the
+# smaller box lies >= MATCH_CONTAIN inside the other, or when the boxes overlap and their
+# centres are within MATCH_CENTER_TOL_PT.
+MATCH_IOU = 0.2
+MATCH_CONTAIN = 0.5
+MATCH_CENTER_TOL_PT = 5.0
+# CPU count assumed when os.cpu_count() cannot tell.
+FALLBACK_CPU_COUNT = 4
 
 # Per-process OCR for page ProcessPool workers (loaded once in initializer).
 _PAGE_WORKER_OCR = None
@@ -282,7 +305,7 @@ def collect_page_jobs(
         else:
             pages = list(range(pdf_page_count(str(src))))
         for page_index in pages:
-            label = f"{src.name} p{page_index}"[:40]
+            label = f"{src.name} p{page_index}"[:JOB_LABEL_MAX_CHARS]
             jobs.append(
                 {
                     "src": str(src.resolve()),
@@ -392,7 +415,7 @@ def process_pdf(
     t0 = time.perf_counter()
     # Drop near-duplicate boxes (upright+rotated overlaps, refine sub-boxes landing on a
     # neighbour) by IoU, without growing survivors the way merge_boxes would.
-    clean_boxes = nms_boxes(clean_boxes, iou_thresh=0.6)
+    clean_boxes = nms_boxes(clean_boxes, iou_thresh=DUPLICATE_BOX_IOU)
     clean_boxes = filter_boxes_by_min_area(clean_boxes, parser.min_box_area)
     print(f"Removing duplicate boxes took {time.perf_counter() - t0:.2f} seconds")
     t0 = time.perf_counter()
@@ -415,7 +438,12 @@ def process_pdf(
 
     # Recovery: lone glyphs + grouped same-size nearby CCs the detector missed.
     recov = recover_missed_glyphs(
-        gray, clean_boxes, ocr=parser.ocr, to_points=to_points, dpi=dpi, min_conf=0.9
+        gray,
+        clean_boxes,
+        ocr=parser.ocr,
+        to_points=to_points,
+        dpi=dpi,
+        min_conf=RECOVERED_GLYPH_MIN_CONF,
     )
     print(
         f"Recovering missed glyphs took {time.perf_counter() - t0:.2f} seconds  "
@@ -454,8 +482,8 @@ def process_pdf(
         255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY_INV,
-        blockSize=51,
-        C=10,
+        blockSize=ADAPTIVE_BLOCK_SIZE_PX,
+        C=ADAPTIVE_OFFSET,
     )
     adaptive_bw = np.where(adaptive_ink > 0, 0, 255).astype(np.uint8)
     cv2.imwrite(str(page_adaptive_bw_path), adaptive_bw)
@@ -497,18 +525,37 @@ def process_pdf(
     # Interim: PaddleOCR's first-pass detection boxes over the original page.
     initial_det_vis = bgr.copy()
     for x0, y0, x1, y1 in page_det_boxes:
-        cv2.rectangle(initial_det_vis, (int(x0), int(y0)), (int(x1), int(y1)), (0, 0, 255), 2)
+        cv2.rectangle(
+            initial_det_vis,
+            (int(x0), int(y0)),
+            (int(x1), int(y1)),
+            DEBUG_DET_BOX_BGR,
+            DEBUG_BOX_THICKNESS_PX,
+        )
     cv2.imwrite(str(initial_det_path), initial_det_vis)
     del initial_det_vis, bgr, page_det_boxes
     # Visualize the clean-raster detection boxes (the word/line grouping) over the text.
     det_vis = cv2.cvtColor(text_final_gray, cv2.COLOR_GRAY2BGR)
     for x0, y0, x1, y1 in clean_boxes:
-        cv2.rectangle(det_vis, (int(x0), int(y0)), (int(x1), int(y1)), (0, 0, 255), 2)
+        cv2.rectangle(
+            det_vis,
+            (int(x0), int(y0)),
+            (int(x1), int(y1)),
+            DEBUG_DET_BOX_BGR,
+            DEBUG_BOX_THICKNESS_PX,
+        )
     if recov.n_text:
         cnts, _ = cv2.findContours(recov.kept_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for c in cnts:
             x, y, w, h = cv2.boundingRect(c)
-            cv2.rectangle(det_vis, (x - 3, y - 3), (x + w + 3, y + h + 3), (0, 170, 0), 2)
+            p = DEBUG_GLYPH_OUTLINE_PAD_PX
+            cv2.rectangle(
+                det_vis,
+                (x - p, y - p),
+                (x + w + p, y + h + p),
+                DEBUG_RECOVERED_GLYPH_BGR,
+                DEBUG_BOX_THICKNESS_PX,
+            )
     cv2.imwrite(str(det_boxes_path), det_vis)
     del det_vis, text_final_gray, gray
 
@@ -541,7 +588,7 @@ def process_pdf(
     # Stats: match OCR words to native words by bbox, then compare the strings. Containment
     # linking lets small native words link to the wide OCR line/word-group box containing them.
     comparison = NativeVsRasterText(native, rec.texts).compare(
-        iou_thresh=0.2, contain_thresh=0.5, center_tol=5.0
+        iou_thresh=MATCH_IOU, contain_thresh=MATCH_CONTAIN, center_tol=MATCH_CENTER_TOL_PT
     )
     stats = comparison.summary()
     print(f"Matching OCR words to native words took {time.perf_counter() - t0:.2f} seconds")
@@ -702,10 +749,24 @@ def main() -> None:
         help="delete per-colour mask / isolate PNGs after tracing",
     )
     # global line mask
-    p.add_argument("--line-min", type=int, default=70)
-    p.add_argument("--line-grow", type=int, default=3)
-    p.add_argument("--hough-threshold", type=int, default=50)
-    p.add_argument("--hough-max-gap", type=int, default=3)
+    p.add_argument(
+        "--line-min", type=int, default=70, help="shortest straight run (px) that counts as a line"
+    )
+    p.add_argument(
+        "--line-grow", type=int, default=3, help="line mask dilation / Hough line thickness (px)"
+    )
+    p.add_argument(
+        "--hough-threshold",
+        type=int,
+        default=50,
+        help="Hough accumulator votes a segment needs",
+    )
+    p.add_argument(
+        "--hough-max-gap",
+        type=int,
+        default=3,
+        help="largest gap (px) bridged inside one Hough segment",
+    )
     args = p.parse_args()
 
     pdfs = collect_pdfs(args.pdf)
@@ -792,7 +853,7 @@ def main() -> None:
     else:
         # Each page worker loads its own PaddleOCR (~1–2GB+). Cap aggressively.
         # Chunk + tear down pool between chunks so Paddle native RAM can release.
-        max_pw = min(page_workers, len(jobs), max(1, (os.cpu_count() or 4)))
+        max_pw = min(page_workers, len(jobs), max(1, (os.cpu_count() or FALLBACK_CPU_COUNT)))
         if max_pw < page_workers:
             print(
                 f"warning: capping page-workers {page_workers} -> {max_pw} (cpu_count / job count)",

@@ -67,6 +67,11 @@ if __name__ == "__main__" and __package__ is None:
 
 REFERENCES_DIR = os.path.join(_REPO_ROOT, "references")
 
+# Page zoom the inspector opens at (1.0 = 72 px per inch).
+DEFAULT_ZOOM = 1.5
+# Initial and minimum main-window size (px).
+WINDOW_SIZE = "1400x900"
+MIN_WINDOW_SIZE = (900, 600)
 MIN_ZOOM = 0.25
 MAX_ZOOM = 6.0
 ZOOM_STEP = 1.25
@@ -77,7 +82,7 @@ class AppState:
 
     def __init__(self) -> None:
         self.page_index: int = 0
-        self.zoom: float = 1.5
+        self.zoom: float = DEFAULT_ZOOM
 
         # page_index -> {layer_key: [OverlayItem, ...]}
         self.items_cache: dict[int, dict[str, list]] = {}
@@ -126,12 +131,9 @@ class InspectorApp:
 
         self.root.title(f"PDF Layer Inspector — {filename}")
 
-        self.root.geometry("1400x900")
+        self.root.geometry(WINDOW_SIZE)
 
-        self.root.minsize(
-            900,
-            600,
-        )
+        self.root.minsize(*MIN_WINDOW_SIZE)
 
     def _build_menu(self) -> None:
         """Build the application menu."""

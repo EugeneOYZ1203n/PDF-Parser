@@ -102,12 +102,18 @@ def reconstruct_from_output(
     )
 
 
+# With no page size given, the page is the vectors' extent plus this margin (PDF points), and
+# at least this big.
+DEFAULT_PAGE_MARGIN_PT = 20.0
+MIN_PAGE_SIDE_PT = 400.0
+
+
 def _page_size_from_vectors(
     vectors: list[Vector],
     *,
     page_width: float | None = None,
     page_height: float | None = None,
-    margin: float = 20.0,
+    margin: float = DEFAULT_PAGE_MARGIN_PT,
 ) -> tuple[float, float]:
     if page_width is not None and page_height is not None:
         return page_width, page_height
@@ -118,8 +124,8 @@ def _page_size_from_vectors(
         max_x = max(max_x, float(vector.rect[2]))
         max_y = max(max_y, float(vector.rect[3]))
 
-    width = page_width if page_width is not None else max(max_x + margin, 400.0)
-    height = page_height if page_height is not None else max(max_y + margin, 400.0)
+    width = page_width if page_width is not None else max(max_x + margin, MIN_PAGE_SIDE_PT)
+    height = page_height if page_height is not None else max(max_y + margin, MIN_PAGE_SIDE_PT)
     return width, height
 
 

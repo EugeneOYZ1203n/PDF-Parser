@@ -22,6 +22,7 @@ from autotrace import Bitmap, VectorFormat
 
 from raster_parser.conversion.png_to_vectors.png_to_svg import png_to_svg
 from raster_parser.conversion.png_to_vectors.svg_to_pdf import svg_to_pdf
+from raster_parser.helpers.geometry import PDF_POINTS_PER_INCH
 from raster_parser.models import Vector
 
 # Join tolerance (SVG/PDF units before dpi scale; ~pixels from autotrace).
@@ -29,9 +30,19 @@ _STROKE_JOIN_EPS = 0.05
 
 # Defaults tuned to keep small / thin linework (autotrace's own defaults are aggressive:
 # noise-removal=0.99 and filter-iterations=4 erase fine AEC detail).
+# error_threshold: how far (px) a fitted curve may stray from the traced outline before
+# autotrace splits it into more pieces.
 _DEFAULT_ERROR_THRESHOLD = 0.5
 _DEFAULT_NOISE_REMOVAL = 0.2
 _DEFAULT_FILTER_ITERATIONS = 1
+# A bend sharper than this many degrees is always a corner (autotrace's own default).
+_DEFAULT_CORNER_ALWAYS_THRESHOLD_DEG = 80.0
+# How many outline pixels on each side of a point autotrace looks at to decide whether it
+# is a corner (autotrace's own default).
+_DEFAULT_CORNER_SURROUND_PX = 4
+# A drawing split into several strokes keeps its seqno on the first stroke; stroke i > 0
+# gets seqno * stride + i, which stays unique and keeps the drawing's paint order.
+_SUBSTROKE_SEQNO_STRIDE = 1_000_000
 
 
 def _scale_point(p: fitz.Point, scale: float) -> fitz.Point:
@@ -39,7 +50,11 @@ def _scale_point(p: fitz.Point, scale: float) -> fitz.Point:
 
 
 def _scale_item(item: tuple, scale: float) -> tuple:
-    """Scale one get_drawings() path segment into PDF-point space."""
+    """Scale one get_drawings() path segment into PDF-point space.
+
+    Op codes: ``"l"`` line, ``"c"`` cubic Bezier curve, ``"re"`` rectangle, ``"qu"``
+    quadrilateral (corners ul/ur/ll/lr = upper-left, upper-right, lower-left, lower-right).
+    """
     op = item[0]
     if op == "l":
         return ("l", _scale_point(item[1], scale), _scale_point(item[2], scale))
@@ -69,7 +84,10 @@ def _scale_item(item: tuple, scale: float) -> tuple:
 
 
 def _scale_vector(v: Vector, scale: float) -> Vector:
-    """Map a Vector from SVG-PDF pixel-as-point space into PDF points (``72/dpi``)."""
+    """Map a Vector from SVG-PDF pixel-as-point space into PDF points (``72/dpi``).
+
+    ``scissor`` is the clip rectangle PyMuPDF reports for the path (``extended=True``).
+    """
     if scale == 1.0:
         return v
     x0, y0, x1, y1 = v.rect
@@ -212,7 +230,7 @@ def _vectors_from_drawing(d: dict) -> list[Vector]:
                 fill_opacity=base.fill_opacity,
                 stroke_opacity=base.stroke_opacity,
                 # Preserve drawing seqno; sub-index via local offset so they're distinct.
-                seqno=base.seqno if i == 0 else base.seqno * 1_000_000 + i,
+                seqno=base.seqno if i == 0 else base.seqno * _SUBSTROKE_SEQNO_STRIDE + i,
                 layer=base.layer,
                 line_cap=base.line_cap,
                 line_join=base.line_join,
@@ -256,7 +274,7 @@ def pdf_to_vectors(
         else:
             vectors.append(Vector.from_drawing(d))
     if dpi is not None and dpi > 0:
-        scale = 72.0 / float(dpi)
+        scale = PDF_POINTS_PER_INCH / float(dpi)
         vectors = [_scale_vector(v, scale) for v in vectors]
     return vectors
 
@@ -267,8 +285,8 @@ def autotrace_drawing(
     centerline: bool = False,
     color_count: int = 2,
     error_threshold: float = _DEFAULT_ERROR_THRESHOLD,
-    corner_always_threshold: float = 80.0,
-    corner_surround: int = 4,
+    corner_always_threshold: float = _DEFAULT_CORNER_ALWAYS_THRESHOLD_DEG,
+    corner_surround: int = _DEFAULT_CORNER_SURROUND_PX,
     noise_removal: float = _DEFAULT_NOISE_REMOVAL,
     filter_iterations: int = _DEFAULT_FILTER_ITERATIONS,
     despeckle_level: int = 0,
