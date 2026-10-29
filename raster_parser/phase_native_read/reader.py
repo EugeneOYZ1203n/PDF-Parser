@@ -1,0 +1,82 @@
+"""Reader stage: opens a PDF and hands out individual pages."""
+
+from __future__ import annotations
+
+from typing import Iterator
+
+import pymupdf
+from raster_parser.commons.logging_setup import get_logger
+from raster_parser.models.page import Page, PageMeta
+
+_LOG = get_logger("reader")
+
+
+def _page_meta(pymupdf_page: "pymupdf.Page", index: int) -> PageMeta:
+    """Build a PageMeta snapshot from a live pymupdf.Page.
+
+    PDF page boxes: the MediaBox is the full page canvas; the CropBox is the visible region
+    viewers show (often equal to the MediaBox). `/Rotate` (`page.rotation`) is the clockwise
+    quarter-turn viewers apply on display; extraction coordinates ignore it.
+
+    A free function (not a method) so it's testable directly against a
+    synthetic pymupdf.Page without needing a full Reader/open document.
+    `rotation` is normalised to [0, 360). `width`/`height` are the CropBox's
+    (unrotated): extraction coordinates are relative to the CropBox's
+    top-left, so a page whose CropBox is smaller than / offset within its
+    MediaBox would otherwise be reconstructed at the wrong size.
+    """
+    mediabox = pymupdf_page.mediabox
+    cropbox = pymupdf_page.cropbox
+    return PageMeta(
+        index=index,
+        number=index + 1,
+        mediabox=(mediabox.x0, mediabox.y0, mediabox.x1, mediabox.y1),
+        rotation=int(pymupdf_page.rotation) % 360,
+        width=cropbox.width,
+        height=cropbox.height,
+        cropbox=(cropbox.x0, cropbox.y0, cropbox.x1, cropbox.y1),
+    )
+
+
+class Reader:
+    """Opens a PDF and yields `Page` objects one at a time. `page.meta.index`
+    is always the source-PDF page index -- pass that same value back to
+    `get_page` and you get the same page."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        try:
+            self._doc = pymupdf.open(path)
+        except Exception as exc:  # noqa: BLE001 -- surface a clear message, not a raw pymupdf error
+            raise ValueError(f"could not open PDF {path!r}: {exc}") from exc
+        _LOG.info("opened %s (%d page(s))", path, self._doc.page_count)
+
+    def page_count(self) -> int:
+        return self._doc.page_count
+
+    def get_page(self, index: int) -> Page:
+        count = self.page_count()
+        if not (0 <= index < count):
+            raise IndexError(f"page index {index} out of range for document with {count} page(s)")
+        pymupdf_page = self._doc[index]
+        meta = _page_meta(pymupdf_page, index)
+        _LOG.debug(
+            "page %d: rotation=%d mediabox=%s",
+            index,
+            meta.rotation,
+            meta.mediabox,
+        )
+        return Page(doc_path=self.path, meta=meta, pymupdf_page=pymupdf_page)
+
+    def iter_pages(self, indices: list[int] | None = None) -> Iterator[Page]:
+        for index in range(self.page_count()) if indices is None else indices:
+            yield self.get_page(index)
+
+    def close(self) -> None:
+        self._doc.close()
+
+    def __enter__(self) -> "Reader":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
