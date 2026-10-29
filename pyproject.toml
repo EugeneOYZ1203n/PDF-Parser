@@ -18,6 +18,7 @@ dependencies = [
 [dependency-groups]
 test = ["pytest"]
 notebook = ["matplotlib", "scikit-learn"]
+lint = ["ruff==0.17.3"]
 
 [build-system]
 requires = ["hatchling"]
@@ -32,3 +33,7 @@ default-groups = ["test"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["slow: end-to-end runs (real OCR / LibreOffice)"]
+
+[tool.ruff]
+line-length = 100
+extend-exclude = ["**/_upstream/**"]
