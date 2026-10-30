@@ -1,0 +1,11 @@
+{
+  "p2": "stub",
+  "p3": "v2_vector_class",
+  "vectorise": true,
+  "vectorise_mode": "to_vector_text",
+  "benchmark": false,
+  "keep_converted_pdfs": false,
+  "debug_images": false,
+  "debug_layers": false,
+  "workers": 1
+}

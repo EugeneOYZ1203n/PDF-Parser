@@ -26,7 +26,7 @@ ml = ["torch", "networkx", "shapely", "matplotlib"]
 
 [dependency-groups]
 test = ["pytest"]
-notebook = ["matplotlib", "scikit-learn"]
+notebook = ["matplotlib", "scikit-learn", "nbconvert", "ipykernel"]  # notebooks/ (execute with nbconvert)
 report = ["matplotlib"]  # scripts/pipeline_report_benchmark.py charts
 lint = ["ruff==0.17.3"]
 

@@ -237,6 +237,12 @@ page's `/Rotate`.
 output_assemble is the backstop: an item whose bbox does not fit inside `width × height` is logged as a
 possible rotated-space leak from a raster_vectorize / vector_classify backend.
 
+## Outside the package: `notebooks/`
+
+`notebooks/` holds exploration notebooks and, in `notebooks/_helpers/`, the plain-Python helpers behind them
+(tested in `tests/notebooks/`). They import `raster_parser` like any user would and nothing imports them. See
+`notebooks/README.md`.
+
 ## Outside the phases: `extract_vectors_from_png`
 
 `raster_parser/extract_vectors_from_png.py` (`extract_vectors_from_png`, `get_image_polys`) is a
