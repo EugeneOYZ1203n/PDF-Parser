@@ -29,6 +29,7 @@ import cv2
 import numpy as np
 import pymupdf
 
+from raster_parser.models.source import Source
 from raster_parser.commons.helpers.geometry import PDF_POINTS_PER_INCH
 from raster_parser.commons.logging_setup import get_logger
 from raster_parser.models.text import Text
@@ -469,7 +470,15 @@ def recover_missed_glyphs(
             kept[cc.y0 : cc.y1, cc.x0 : cc.x1][sub < ink_thresh] = 255
         bx0, by0, bx1, by1 = _bbox_to_points(x0, y0, x1, y1, to_points, scale)
         texts.append(
-            ocr_text(word, (bx0, by0, bx1, by1), 0, page_index=0, block_no=-1, confidence=conf)
+            ocr_text(
+                word,
+                (bx0, by0, bx1, by1),
+                0,
+                page_index=0,
+                block_no=-1,
+                confidence=conf,
+                source=Source.FROM_IMAGE,
+            )
         )
     return RegionOcrResult(texts=texts, kept_mask=kept, n_boxes=len(cand), n_text=n_text)
 
@@ -641,7 +650,13 @@ def recognize_boxes(
         x0, y0, x1, y1 = h["x0"], h["y0"], h["x1"], h["y1"]
         bbox = _bbox_to_points(x0, y0, x1, y1, to_points, scale)
         text = ocr_text(
-            word, bbox, h["rotate"], page_index=0, block_no=h["bidx"], confidence=h["conf"]
+            word,
+            bbox,
+            h["rotate"],
+            page_index=0,
+            block_no=h["bidx"],
+            confidence=h["conf"],
+            source=Source.FROM_IMAGE,
         )
         hits.append((x0, y0, x1, y1, text))
 

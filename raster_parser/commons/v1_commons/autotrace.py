@@ -18,6 +18,7 @@ from pathlib import Path
 import cv2
 import pymupdf
 
+from raster_parser.models.source import Source
 from raster_parser.commons.helpers.geometry import (
     PDF_POINTS_PER_INCH,
     item_bbox,
@@ -67,6 +68,7 @@ def traced_vector(v: Vector) -> Vector:
         else None,
         fill_opacity=float(1.0 if v.fill_opacity is None else v.fill_opacity) if filled else None,
         seqno=int(v.seqno or 0),
+        source=Source.FROM_IMAGE,
     )
 
 

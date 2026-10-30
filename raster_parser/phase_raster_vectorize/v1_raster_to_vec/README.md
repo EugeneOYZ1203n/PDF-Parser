@@ -20,7 +20,7 @@ Needs LibreOffice installed.
 | Change | Before | Now | Why |
 |---|---|---|---|
 | Macro path | Registered from `raster_parser/libreoffice_setup/` (doesn't exist), so the macro was never installed and every raster pass raised `FileNotFoundError`. | The `.xba` next to `s1_libreoffice_macro.py`. | Bug fix: the raster pass runs. |
-| Output model | Old `Text` / `Vector`. | Shared `Text` (`source="ocr"`) / `Vector`. | Shared model; `direction` is the old `rotate` as a unit vector. |
+| Output model | Old `Text` / `Vector`. | Shared `Text` (`source=Source.FROM_IMAGE`) / `Vector`. | Shared model; `direction` is the old `rotate` as a unit vector. |
 | Traced vectors | Raw `get_drawings()` fields. | One rule (`commons/v1_commons/autotrace.traced_vector`): colours rounded to 3 decimals, stroke fields only on stroked paths, fill opacity only on filled ones. | Shared `Vector` model. |
 
 ## Files

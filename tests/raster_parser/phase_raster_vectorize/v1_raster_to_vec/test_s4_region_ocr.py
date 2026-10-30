@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from raster_parser.models.source import Source
 from raster_parser.phase_raster_vectorize.v1_raster_to_vec.s4_region_ocr import (
     recognize_boxes,
     recover_missed_glyphs,
@@ -26,7 +27,7 @@ def test_recognize_boxes_keeps_the_recognition_confidence() -> None:
     gray[20:40, 20:40] = 0
     result = recognize_boxes(gray, [(15, 15, 45, 45)], ocr=_Ocr())
     assert [(t.text, t.source, t.orientation_source) for t in result.texts] == [
-        ("AB", "ocr", "ocr")
+        ("AB", Source.FROM_IMAGE, "ocr")
     ]
     assert result.texts[0].confidence == pytest.approx(0.9)
 
