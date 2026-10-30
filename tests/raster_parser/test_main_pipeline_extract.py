@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from raster_parser import extract
+from raster_parser.models.source import Source
 from raster_parser.models import ExtractResult, Vector
 from raster_parser.commons.v1_commons.ocr import ocr_text
 
@@ -68,7 +69,7 @@ def test_extract_runs_paddle_on_fill_groups(synthetic_pdf_with_fills: Path) -> N
     )
     # The three glyph stubs are one word group: read by OCR they become text, otherwise (the stubs
     # are plain rectangles, so a real reader may well not) they stay as drawings next to the stroke.
-    read = [t for t in result.texts if t.source == "ocr"]
+    read = [t for t in result.texts if t.source != Source.NATIVE_TEXT]
     assert len(result.vectors) == (1 if read else 4)
     assert all(isinstance(v, Vector) for v in result.vectors)
     assert ExtractResult.from_json(result.to_json()) == result
@@ -90,7 +91,7 @@ def test_extract_merges_type4_when_raster_pass(
     doc.save(cleared)
     doc.close()
 
-    t4_word = ocr_text("raster", (1, 1, 10, 10), 0, page_index=0)
+    t4_word = ocr_text("raster", (1, 1, 10, 10), 0, page_index=0, source=Source.FROM_IMAGE)
     t4_vec = Vector(
         type="s",
         items=[],

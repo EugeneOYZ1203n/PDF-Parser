@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from raster_parser.models.source import Source
 from raster_parser.models import Page, PageMeta
 from raster_parser.phase_output_assemble.organize import organize_outputs
 
@@ -17,8 +18,11 @@ def _page(width=200.0, height=100.0) -> Page:
 
 def test_phase_order_and_disjoint_block_numbers(text):
     native = [text(text="n0", block_no=0), text(text="n1", block_no=3)]
-    p3 = [text(text="o0", block_no=0, source="ocr"), text(text="o1", block_no=1, source="ocr")]
-    p2 = [text(text="r0", block_no=5, source="ocr")]
+    p3 = [
+        text(text="o0", block_no=0, source=Source.NATIVE_VECTOR),
+        text(text="o1", block_no=1, source=Source.NATIVE_VECTOR),
+    ]
+    p2 = [text(text="r0", block_no=5, source=Source.FROM_IMAGE)]
     texts, _ = organize_outputs(native, p2, p3, [], [], _page())
     assert [t.text for t in texts] == ["n0", "n1", "o0", "o1", "r0"]
     assert [t.block_no for t in texts] == [0, 3, 4, 5, 6]

@@ -18,6 +18,7 @@ Where everything lives
 ----------------------
 Every data type the package defines is in this folder, so nothing else declares a dataclass or enum:
   - `page`, `text`, `vector`, `image`, `result`: the shared models above;
+  - `source`: `Source`, where a `Text` / `Vector` came from;
   - `settings`: `RunSettings`, the options every backend receives;
   - `native_read`: `NativeReadResult` and the `NativeSpan` words are matched to;
   - `raster_vectorize`: the v1_raster_to_vec step results (`OcrParseResult`, `RegionOcrResult`,
@@ -31,12 +32,14 @@ from __future__ import annotations
 from raster_parser.models.image import Image
 from raster_parser.models.page import Page, PageMeta
 from raster_parser.models.result import ExtractResult
+from raster_parser.models.source import Source
 from raster_parser.models.text import Text
 from raster_parser.models.vector import Vector
 
 __all__ = [
     "Page",
     "PageMeta",
+    "Source",
     "Vector",
     "Text",
     "Image",

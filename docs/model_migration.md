@@ -31,7 +31,7 @@ Coordinates are unchanged: unrotated page space, relative to the CropBox's top-l
 | `block_no`, `line_no`, `word_no` | same names | |
 | `rotate` | `direction` | The unit vector the text runs along. |
 | `glyph_orientation` | derived from `direction` + page rotation | See below. |
-| — | `origin`, `font`, `font_size`, `color`, `flags`, `ascender`, `descender`, `wmode`, `source` (`"native"` / `"ocr"`), `confidence`, `quad_points`, … | New information. OCR words have no font or colour (`""`, `0.0`, `None`). |
+| — | `origin`, `font`, `font_size`, `color`, `flags`, `ascender`, `descender`, `wmode`, `source` (`Source.NATIVE_TEXT` / `NATIVE_VECTOR` for text read from drawn glyphs / `FROM_IMAGE` for text read from an image), `confidence`, `quad_points`, … | New information. OCR words have no font or colour (`""`, `0.0`, `None`). |
 
 Getting the old values back:
 
@@ -69,6 +69,7 @@ page: `vertical` at 90°/270°, `horizontal` at 0°/180°, and `other` when the 
 | `even_odd`, `seqno`, `layer`, `level`, `scissor`, `blendmode`, `opacity` | same | |
 | `isolated`, `knockout` | same, `bool` | The DTO used `None` for "not a group". |
 | — | `page_index`, `clips` | New: the page, and exact non-rectangular clip shapes. |
+| — | `source` | New: `Source.NATIVE_VECTOR` for a PDF drawing, `FROM_IMAGE` for a vector traced from an image. |
 
 > **Warning: quad corner order.** A `"qu"` item's corners were `ul, ur, ll, lr` in the DTO; in
 > `Vector.items` they are `ul, ur, lr, ll` (polygon order, so the corners can be drawn in
