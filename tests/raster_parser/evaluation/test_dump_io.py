@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import json
 
 from raster_parser.models.source import Source
@@ -21,8 +20,8 @@ def test_write_load_dump(tmp_path, text, vector, page_meta):
         ("c", (0.0, 0.0), (1.0, 2.0), (3.0, 2.0), (4.0, 0.0)),
         ("l", (4.0, 0.0), (0.0, 0.0)),
     )
-    v = dataclasses.replace(
-        vector(kind="l", bbox=(0.0, 0.0, 10.0, 5.0)), clips=((clip_items, True),)
+    v = vector(kind="l", bbox=(0.0, 0.0, 10.0, 5.0)).model_copy(
+        update=dict(clips=((clip_items, True),))
     )
     pd = dump_io.PageDump(
         result=_page(
