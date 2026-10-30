@@ -14,7 +14,7 @@ on `sys.path`, so `scripts/label/` needs no `__init__.py`.
 | Module | Role |
 |---|---|
 | `raster_parser.evaluation.labelling.label_schema` | The JSON format. `LabelSet` (`schema_version`, `pdf_path`, `entries`) of `LabelEntry` (`page_index`, `label_id`, `text`, `bbox`, `expected_rotation`, `vector_signatures`, `source`). `LabelEntry.from_text` / `to_text` convert to and from a `Text`. `path_signature` matches a label's vectors across fresh extractions. `load_labels` also reads version 1 files. |
-| `raster_parser.evaluation.labelling.seed_labels` | Draft labels from `v2_vector_class`: `seed_page`, `seed_entries`. |
+| `raster_parser.evaluation.labelling.seed_labels` | Draft labels from `v2_vector_class`: `seed_page`, `seed_entries`; `prepare_page` (a page's vectors + drafts) is what the tool's worker runs. |
 | `raster_parser.evaluation.labelling.native_label` | `native_label_pdf`: one native-text label per line, made by the benchmark and never saved. |
 
 All label coordinates are in unrotated, CropBox-relative page space. The tool builds the overlay
@@ -34,19 +34,38 @@ uv run python scripts/label/manual_vector_text_label.py "references/<stem>.pdf" 
 | `--out PATH` | label JSON to load and save (default `outputs/labels/<stem>.json`) |
 | `--no-seed` | don't pre-fill unlabelled pages |
 
-**Draft labels.** The first time a page with no labels is opened, `v2_vector_class` reads the
-page. Each text it reads becomes a draft label, tied to the vectors it was read from. Fix the
-text and rotation, delete wrong drafts, and add labels for the text it missed. Drafts are saved
-like any other label, so review a page before moving on.
+**Background processing.** The page you open shows at once. One worker process then prepares
+every page (`seed_labels.prepare_page`: its vectors and, unless `--no-seed`, its draft labels),
+the open page first and then outwards. `<` / `>`, PageUp / PageDown and the page box only go to a
+page that is ready; the bar counts the pages ready.
 
-**Labelling.**
-- Every raw `Vector` on the page is shown and can be clicked; nothing is clustered.
-- Click, ctrl-click or drag over unlabelled vectors, type the text, set the rotation, then Apply.
-- Click a labelled vector to select its whole label and edit it in place. Delete removes it.
-- One checkbox per `(layer, color, width)` bucket (`_common.separate_by_layer_color_width`)
-  filters what is shown, and "Hide labelled" hides vectors that already belong to a label.
-- The rotation slider snaps to 2.5° and draws a direction arrow on the page.
-- `<` / `>` (or PageUp / PageDown) change page. Labels are saved on every page change and on close.
+**Draft labels.** The first time a page with no labels is shown, it gets the draft labels
+`v2_vector_class` read from it, each tied to the vectors it was read from. Fix the text and
+rotation, delete wrong drafts, and add labels for the text it missed. Drafts are saved like any
+other label, so review a page before moving on.
+
+**Label list.** The side panel lists every label in the file: page, text, rotation and number of
+vectors. Select a row (or click one of a label's vectors) to select that label:
+- its vectors turn orange and the label bar shows its text and rotation;
+- only the `(layer, color, width)` buckets its vectors are in stay visible ("Show all" or
+  Escape brings the others back);
+- clicking an unlabelled vector adds it to the label, clicking one of its own vectors removes it,
+  and a drag adds (or, over only its own vectors, removes) many at once -- the list updates
+  straight away. A label always keeps at least one vector; Delete removes the label;
+- Apply (or Enter) saves the text and rotation.
+
+A row on another page takes you there once that page is ready. Ctrl- or shift-click rows to
+select several labels at once; Delete (the button, or the Delete key in the list) removes them all
+after asking to confirm.
+
+**New labels.** With no label selected, click, ctrl-click or drag over unlabelled vectors, type
+the text, set the rotation, then Apply.
+
+**Display.** Every raw `Vector` on the page is shown and can be clicked; nothing is clustered.
+One checkbox per `(layer, color, width)` bucket (`_common.separate_by_layer_color_width`)
+filters what is shown, and "Hide labelled" hides vectors that belong to another label. The
+rotation slider snaps to 2.5° and draws a direction arrow on the page. Labels are saved on every
+page change and on close.
 
 ## Using the labels
 

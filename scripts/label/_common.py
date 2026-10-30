@@ -93,6 +93,47 @@ def separate_by_layer_color_width(vectors: list[Vector]) -> list[list[Vector]]:
     return buckets
 
 
+def prefetch_order(page_index: int, page_count: int) -> list[int]:
+    """Pages to process in the background: `page_index` first, then outwards (next, previous,
+    next-but-one, ...), so the neighbours the labeller reaches first are ready first."""
+    order = [page_index]
+    for step in range(1, page_count):
+        order += [p for p in (page_index + step, page_index - step) if 0 <= p < page_count]
+    return order
+
+
+def label_rows(entries) -> list[tuple[str, tuple]]:
+    """One `(label_id, (page, text, rotation, n vectors))` row per label entry for the side list,
+    by page then reading position (top to bottom, left to right). Pages are shown 1-based."""
+    ordered = sorted(entries, key=lambda e: (e.page_index, round(e.bbox[1]), e.bbox[0]))
+    return [
+        (
+            e.label_id,
+            (e.page_index + 1, e.text, f"{e.expected_rotation}°", len(e.vector_signatures)),
+        )
+        for e in ordered
+    ]
+
+
+def focus_buckets(bucket_sigs: list[set[str]], label_sigs: set[str]) -> list[bool]:
+    """Bucket visibility that shows only the buckets holding one of the label's vectors -- or every
+    bucket when none does (a label whose vectors are no longer on the page)."""
+    shown = [bool(sigs & label_sigs) for sigs in bucket_sigs]
+    return shown if any(shown) else [True] * len(bucket_sigs)
+
+
+def edit_label_vectors(label_sigs: list[str], hit_sigs: list[str]) -> list[str] | None:
+    """A label's vector signatures after clicking / dragging over `hit_sigs` while it is
+    selected: when every hit already belongs to the label they are removed, otherwise the hits
+    not in it are added. `None` when the edit would leave the label with no vectors."""
+    hits = list(dict.fromkeys(hit_sigs))
+    current = set(label_sigs)
+    if set(hits) <= current:
+        kept = [s for s in label_sigs if s not in set(hits)]
+        return kept or None
+    return list(label_sigs) + [s for s in hits if s not in current]
+
+
 def draw_vector(
     canvas: "tk.Canvas", matrix: "pymupdf.Matrix", vector: Vector, color: str, width: int
 ) -> None:

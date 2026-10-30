@@ -46,7 +46,22 @@ def seed_page(
 ) -> list[LabelEntry]:
     """Draft labels for one page: native_read, then `classify` (default `v2_vector_class`) on the
     page's vectors."""
-    classify = classify or resolve_classify(DEFAULT_SEED_BACKEND)
+    return prepare_page(pdf_path, page_index, classify=classify, settings=settings)[1]
+
+
+def prepare_page(
+    pdf_path: str,
+    page_index: int,
+    *,
+    seed: bool = True,
+    classify: VectorClassifier | None = None,
+    settings: RunSettings | None = None,
+) -> tuple[list[Vector], list[LabelEntry]]:
+    """What the label tool needs for one page: its vectors and, with `seed`, the draft labels
+    (`seed_page`). Top-level and picklable: the tool runs it in a worker process per page."""
     native = read_and_extract(pdf_path, page_index)
+    if not seed:
+        return native.vectors, []
+    classify = classify or resolve_classify(DEFAULT_SEED_BACKEND)
     kept, texts = classify(native.vectors, native.page, settings or RunSettings())
-    return seed_entries(native.vectors, kept, texts)
+    return native.vectors, seed_entries(native.vectors, kept, texts)

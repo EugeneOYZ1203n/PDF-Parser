@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from raster_parser.evaluation.labelling.label_schema import vector_signatures_for
-from raster_parser.evaluation.labelling.seed_labels import seed_entries, seed_page
+from raster_parser.evaluation.labelling.seed_labels import prepare_page, seed_entries, seed_page
 
 PDF = Path(__file__).resolve().parents[3] / "references" / "test_pdfs_1.pdf"
 
@@ -42,3 +42,13 @@ def test_seed_page_runs_the_classifier_on_the_page_vectors(text):
     entries = seed_page(str(PDF), 0, classify=fake_classify)
     assert calls and calls[0] > 0
     assert [e.text for e in entries] == ["X"] and len(entries[0].vector_signatures) >= 1
+
+
+def test_prepare_page_returns_the_vectors_and_drafts_only_when_seeding(text):
+    def fake_classify(vectors, page, settings):
+        return vectors[1:], [text(text="X", bbox=tuple(vectors[0].rect))]
+
+    vectors, drafts = prepare_page(str(PDF), 0, classify=fake_classify)
+    assert vectors and [e.text for e in drafts] == ["X"]
+    vectors_only, none = prepare_page(str(PDF), 0, seed=False, classify=fake_classify)
+    assert none == [] and [v.seqno for v in vectors_only] == [v.seqno for v in vectors]

@@ -93,3 +93,40 @@ def test_separate_by_layer_color_width_splits_on_all_three_axes(vector):
 
     assert sorted(len(bk) for bk in buckets) == [1, 1, 1, 2]
     assert [a, b] in buckets
+
+
+def test_prefetch_order_starts_at_the_open_page_and_works_outwards():
+    assert _mod.prefetch_order(2, 6) == [2, 3, 1, 4, 0, 5]
+    assert _mod.prefetch_order(0, 3) == [0, 1, 2]
+    assert _mod.prefetch_order(0, 1) == [0]
+
+
+def test_label_rows_list_every_label_by_page_then_reading_position():
+    from raster_parser.evaluation.labelling.label_schema import LabelEntry
+
+    def entry(label_id, page, bbox, text, sigs=("s",)):
+        return LabelEntry(
+            page_index=page, bbox=bbox, label_id=label_id, text=text, vector_signatures=list(sigs)
+        )
+
+    rows = _mod.label_rows(
+        [
+            entry("c", 1, (0, 0, 5, 5), "C"),
+            entry("b", 0, (50, 10, 60, 20), "B", ("s1", "s2")),
+            entry("a", 0, (10, 10, 20, 20), "A"),
+        ]
+    )
+    assert [r[0] for r in rows] == ["a", "b", "c"]
+    assert rows[1][1] == (1, "B", "0°", 2)
+
+
+def test_focus_buckets_shows_only_the_labels_buckets():
+    buckets = [{"a", "b"}, {"c"}, {"d"}]
+    assert _mod.focus_buckets(buckets, {"b", "d"}) == [True, False, True]
+    assert _mod.focus_buckets(buckets, {"gone"}) == [True, True, True]  # stale label: show all
+
+
+def test_edit_label_vectors_adds_new_and_removes_own_vectors():
+    assert _mod.edit_label_vectors(["a", "b"], ["c", "a"]) == ["a", "b", "c"]  # a new one: add
+    assert _mod.edit_label_vectors(["a", "b", "c"], ["b"]) == ["a", "c"]  # all its own: remove
+    assert _mod.edit_label_vectors(["a"], ["a"]) is None  # never empty a label
