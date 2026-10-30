@@ -1,5 +1,5 @@
 """The draw specs `commons/renderer/draw.py` builds and draws: frozen, PyMuPDF-free descriptions of
-one mark each (text, path, dot, vector, raster image), exactly the numbers PyMuPDF needs."""
+one mark each (text, path, dot, vector, raster image) or a batch of polylines, exactly the numbers PyMuPDF needs."""
 
 from __future__ import annotations
 
@@ -69,3 +69,13 @@ class ImageSpec:
     samples: bytes
     n: int  # colour channels: 1 (gray) or 3 (RGB)
     alpha: bool
+
+
+@dataclass(frozen=True, eq=False)
+class StrokeBatchSpec:
+    """Many open polylines in one colour/width, round caps + joins; a
+    one-point polyline draws as a round dot `width` across."""
+
+    polylines: tuple[tuple[Point, ...], ...]
+    color: Rgb
+    width: float = 1.0

@@ -47,6 +47,10 @@ class ReportConfig(BaseModel):
     # Score-ready output for `pipeline_report_benchmark.py` (runs on `to_vector_text` copies).
     benchmark: bool = False
     iou_edge_min: float = MetricConfig().iou_edge_min
+    # Benchmark mode: also rasterise each page, run the raster pass on it and write the raster
+    # ground truth (`evaluation/report/raster_report.py`), scored with Liu & Dori.
+    raster_benchmark: bool = False
+    raster_dpi: int = 300
     # Run folder root; None = `outputs/pipeline_report/`.
     output_root: Path | None = None
     # Debug images offered by the backends (`RunSettings.on_debug_image`), capped per folder
@@ -95,6 +99,8 @@ class ReportConfig(BaseModel):
             raise ValueError(
                 "benchmark mode runs its own to_vector_text conversion; set vectorise=false"
             )
+        if self.raster_benchmark and not self.benchmark:
+            raise ValueError("raster_benchmark needs benchmark=true")
         return self
 
     def resolved_pdfs(self) -> list[Path]:

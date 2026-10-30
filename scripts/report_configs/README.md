@@ -20,6 +20,8 @@ python scripts/generate_pipeline_report.py --config scripts/report_configs/examp
 | `vectorise_mode` | `to_vector_text` | `text_only`, `drawings_only` or `to_vector_text` (`evaluation/conversion.py`). |
 | `benchmark` | `false` | Write score-ready output for `pipeline_report_benchmark.py` (ground truth + overlays + `benchmark.json`). Runs on `to_vector_text` copies; can't be combined with `vectorise`. |
 | `iou_edge_min` | `0.1` | Benchmark overlays: the IoU a prediction needs to count as reaching a label. |
+| `raster_benchmark` | `false` | Benchmark mode: also rasterise each page, run `p2` on the image and score its vectors against the page's own vectors (Liu & Dori; `docs/RasterToVectorEvaluation.md`). |
+| `raster_dpi` | `300` | The rasterised page's resolution. |
 | `output_root` | `null` | Run folder root; default `outputs/pipeline_report/`. |
 | `debug_images` | `true` | Save the debug images the backends offer. |
 | `debug_image_cap` | `100` | At most this many images per folder per document (uniform random across pages, same picks on a rerun). `null` = all. |

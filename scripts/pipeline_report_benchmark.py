@@ -65,6 +65,12 @@ from raster_parser.evaluation.evaluate.benchmark_run_loading import (
 )  # noqa: E402
 from raster_parser.evaluation.evaluate.html_report import ReportBuilder  # noqa: E402
 from raster_parser.evaluation.evaluate.metrics import MetricConfig, aggregate_text_metrics  # noqa: E402
+from raster_parser.evaluation.evaluate.raster_benchmark import aggregate as aggregate_raster  # noqa: E402
+from raster_parser.evaluation.report.raster_report import (  # noqa: E402
+    add_raster_sections,
+    format_raster_table,
+    score_raster_doc,
+)
 
 _LOG = get_logger("pipeline_report_benchmark")
 
@@ -180,6 +186,11 @@ def main(argv: list[str] | None = None) -> int:
         timings = {
             key: {r[key].run_name: load_timings(r[key]) for r in runs} for key in shared_keys
         }
+        raster = {
+            key: {r[key].run_name: score_raster_doc(r[key].doc_dir) for r in runs}
+            for key in shared_keys
+        }
+    has_raster = any(res is not None for by_run in raster.values() for res in by_run.values())
     run_names = [m.name for m in metas]
     with stage("benchmark › aggregate, charts + report.html"):
         grand_agg = {
@@ -226,6 +237,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         add_timing_sections(builder, grand_timing, grand_chart)
         blocks.append(format_aggregate_comparison(grand_agg, title="all inputs -- text"))
+        if has_raster:
+            grand_raster = {
+                name: aggregate_raster(
+                    [raster[k][name] for k in shared_keys if raster[k][name] is not None]
+                )
+                for name in run_names
+            }
+            add_raster_sections(builder, grand_raster)
+            blocks.append(
+                format_raster_table(grand_raster, title="all inputs -- raster vectorization")
+            )
 
         viewer_lines = ["# Open each benchmarked input in the viewer (runs side by side):"]
         for key in shared_keys:
@@ -242,6 +264,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             key_timing, key_chart = _timing(timings[key], key, kslug, charts_dir, out_dir, blocks)
             add_timing_sections(builder, key_timing, key_chart)
+            if any(res is not None for res in raster[key].values()):
+                add_raster_sections(builder, raster[key])
+                blocks.append(
+                    format_raster_table(raster[key], title=f"{key} -- raster vectorization")
+                )
             if not any(r[key].pages for r in runs):
                 viewer_lines.append(f"# {key}: no page in range in any run, nothing to view")
                 continue

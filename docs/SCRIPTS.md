@@ -81,6 +81,12 @@ exactly. The run's OCR text is scored against two kinds of ground truth:
 | `native_to_vector` | the page's native text, one label per line | derived from the PDF (`native_label.native_label_pdf`) |
 | `original_vector` | hand-labelled vector text (text drawn as paths in the original PDF) | a label JSON (`scripts/label/manual_vector_text_label.py`) |
 
+With `"raster_benchmark": true` the benchmark also scores the raster pass: each page is
+rasterised, `p2` runs on the image, and its vectors are scored against the page's own vectors with
+the Liu & Dori line-detection protocol (`bench_raster_v1.json`; how to read the numbers:
+[RasterToVectorEvaluation.md](RasterToVectorEvaluation.md)). The text metrics below are
+unaffected.
+
 All metrics are reductions over one overlap graph between labels and OCR readings
 (`raster_parser/evaluation/evaluate/metrics*.py`), micro-averaged across pages and inputs (sum
 the numerators and denominators, then divide).

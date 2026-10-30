@@ -116,7 +116,7 @@ module listed for only one family is a candidate to move into that family's own 
 | `commons/helpers/pixmap.py` | `pixmap_to_array`, `zoom_matrix(dpi)` | `phase_native_read`, `v1_raster_to_vec`, `extract_vectors_from_png` |
 | `commons/helpers/text_orientation.py` | Reading direction <-> the old `rotate` / glyph orientation | `v1_commons`; migration helpers for callers (`docs/model_migration.md`) |
 | `commons/renderer/_shapes.py` | Exact `Vector` replay onto a page (`replay_drawing_paths`, `replay_item`), `path_color_hex` | `v1_commons`, `commons/renderer/draw.py`, `v2_vector_class`, `scripts/inspector` (tests) |
-| `commons/renderer/draw.py` | The spec -> draw layer every PDF is built from; `hex_to_rgb01` | `phase_output_assemble`, `v1_raster_to_vec`, `v1_vector_class`, `evaluation/report` |
+| `commons/renderer/draw.py` | The spec -> draw layer every PDF is built from (incl. bulk stroke batches); `hex_to_rgb01` | `phase_output_assemble`, `v1_raster_to_vec`, `v1_vector_class`, `evaluation/report`, `evaluation/evaluate` |
 | `commons/renderer/pdf.py` | One-layer debug PDFs (boxes, quads, text, vectors) over `draw.py`; `rasterize_pdf`, `layer_slug` | `phase_output_assemble`, `v1_raster_to_vec`, `v1_vector_class`, `evaluation/report` |
 | `commons/renderer/png.py` | Monochrome cluster renders for OCR | `v2_vector_class` |
 | `commons/renderer/ocr_prep.py` | Crop / pad / scale a render for PaddleOCR | `v2_vector_class` |

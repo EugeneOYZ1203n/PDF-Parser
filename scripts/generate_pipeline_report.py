@@ -67,6 +67,7 @@ from raster_parser.evaluation.report.report_artifacts import (  # noqa: E402
     write_hyperparams,
     write_label_overlays,
 )
+from raster_parser.evaluation.report.raster_report import write_raster_benchmark  # noqa: E402
 from raster_parser.evaluation.report.report_config import CONVERT, BenchInput, ReportConfig  # noqa: E402
 from raster_parser.phase_native_read.native_read import read_and_extract  # noqa: E402
 
@@ -332,6 +333,15 @@ def process_pdf_benchmark(bench: BenchInput, config: ReportConfig, run_dir: Path
             dumps,
             extra_layers=tuple(extra_layers),
             doc_durations=doc_durations,
+        )
+    if config.raster_benchmark:
+        write_raster_benchmark(
+            bench.pdf_path,
+            pages,
+            doc_dir,
+            config,
+            lambda p: _settings(config, run_dir, None, None, p),
+            gt_by_type,
         )
     return {
         "key": bench.key,

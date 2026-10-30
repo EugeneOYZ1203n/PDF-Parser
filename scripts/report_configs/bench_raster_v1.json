@@ -1,0 +1,11 @@
+{
+  "p2": "v1_raster_to_vec",
+  "p3": "stub",
+  "benchmark": true,
+  "raster_benchmark": true,
+  "raster_dpi": 300,
+  "input_files": ["outputs/labels/example.json", "outputs/labels/plain.pdf"],
+  "pages": {"*": [0, 1]},
+  "debug_images": false,
+  "debug_layers": false
+}

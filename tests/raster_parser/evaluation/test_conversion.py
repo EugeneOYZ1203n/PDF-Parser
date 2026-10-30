@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import pymupdf
+import pytest
+
 from raster_parser.evaluation.conversion import (
     convert_page_drawings_only,
     convert_page_text_only,
@@ -208,3 +210,32 @@ def test_convert_page_to_vector_text_writes_output_path(
     converted = pymupdf.open(out_path)
     assert converted[0].get_text().strip() == ""
     assert len(converted[0].get_drawings()) > 0
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_rasterise_page_is_one_full_page_image_in_the_source_space(
+    rotation, synthetic_pdf_factory, tmp_pdf_path, tmp_path
+):
+    from raster_parser.evaluation.conversion import rasterise_page
+
+    doc = synthetic_pdf_factory(
+        [
+            {
+                "width": 300,
+                "height": 200,
+                "texts": [{"point": (20, 40), "text": "Hi"}],
+                "lines": [((10, 10), (290, 10))],
+            }
+        ]
+    )
+    doc[0].set_rotation(rotation)
+    src = tmp_pdf_path(doc)
+    out = tmp_path / "r.pdf"
+    rasterise_page(src, 0, str(out), dpi=72)
+    with pymupdf.open(str(out)) as r:
+        page = r[0]
+        assert page.rotation == rotation
+        assert (page.cropbox.width, page.cropbox.height) == (300, 200)
+        assert page.get_text().strip() == "" and page.get_drawings() == []
+        (info,) = page.get_image_info()
+        assert (info["width"], info["height"]) == (300, 200)

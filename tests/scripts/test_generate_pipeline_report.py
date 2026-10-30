@@ -312,3 +312,9 @@ def test_step_time_sink_sums_per_phase_and_name():
     sink("vector_classify", "ocr_detect", 0.5)
     sink("vector_classify", "drawing", 0.25)
     assert sub == {"vector_classify": {"ocr_detect": 1.5, "drawing": 0.25}}
+
+
+def test_raster_benchmark_needs_benchmark_mode():
+    with pytest.raises(ValueError, match="raster_benchmark"):
+        ReportConfig(raster_benchmark=True)
+    assert ReportConfig(benchmark=True, raster_benchmark=True).raster_dpi == 300

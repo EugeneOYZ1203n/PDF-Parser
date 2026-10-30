@@ -56,6 +56,7 @@ from raster_parser.models.render import (
     PathSpec,
     Point,
     Rgb,
+    StrokeBatchSpec,
     TextBox,
     TextSpec,
     VectorSpec,
@@ -71,7 +72,13 @@ _SPAN = _ASC - _DESC
 _ENVELOPE_MIN_DET = 0.1
 
 
-Spec = Union[TextSpec, PathSpec, DotSpec, VectorSpec, ImageSpec]
+# PDF line cap / join style 1 = round; `_insert_contents(..., overlay=1)` appends the stream
+# after the page's existing content (drawn on top).
+_ROUND_CAP = 1
+_ROUND_JOIN = 1
+_OVERLAY = 1
+
+Spec = Union[TextSpec, PathSpec, DotSpec, StrokeBatchSpec, VectorSpec, ImageSpec]
 
 
 # ---------------------------------------------------------------------------
@@ -401,20 +408,56 @@ def draw_image(page: "pymupdf.Page", spec: ImageSpec) -> None:
     page.insert_image(pymupdf.Rect(*spec.rect), pixmap=pixmap, keep_proportion=False)
 
 
+def stroke_batch_spec(polylines, color: Rgb, *, width: float = 1.0) -> StrokeBatchSpec:
+    """`polylines`: iterables of (x, y) page-space points; empty ones are
+    dropped, single points become dots."""
+    return StrokeBatchSpec(
+        polylines=tuple(tuple((float(x), float(y)) for x, y in pl) for pl in polylines if len(pl)),
+        color=tuple(float(c) for c in color),
+        width=float(width),
+    )
+
+
+def draw_stroke_batch(page: "pymupdf.Page", spec: StrokeBatchSpec) -> None:
+    """One content stream for the whole batch, coordinates written in page
+    space under the page's own inverse transform (`cm`), one `S` per
+    polyline (MuPDF strokes one huge multi-subpath path far slower).
+
+    Operators: `q` / `Q` save / restore the graphics state, `a b c d e f cm` concatenate a matrix,
+    `r g b RG` stroke colour, `w` line width, `J` / `j` line cap / join style, `x y m` move to,
+    `x y l` line to, `S` stroke the path."""
+    if not spec.polylines:
+        return
+    a, b, c, d, e, f = tuple(~page.transformation_matrix)
+    r, g, bl = spec.color
+    ops = [
+        f"q {a:g} {b:g} {c:g} {d:g} {e:g} {f:g} cm {r:g} {g:g} {bl:g} RG {spec.width:g} w "
+        f"{_ROUND_CAP} J {_ROUND_JOIN} j"
+    ]
+    for pl in spec.polylines:
+        (x0, y0), rest = pl[0], pl[1:] or pl[:1]
+        ops.append(f"{x0:.3f} {y0:.3f} m " + " ".join(f"{x:.3f} {y:.3f} l" for x, y in rest) + " S")
+    ops.append("Q")
+    pymupdf.TOOLS._insert_contents(page, "\n".join(ops).encode(), _OVERLAY)
+
+
 # ---------------------------------------------------------------------------
 # Page level
 # ---------------------------------------------------------------------------
 def draw_specs(page: "pymupdf.Page", specs: "list[Spec]") -> None:
     """Draw `specs` onto an existing (unrotated) page, in layer order:
-    images, vectors, paths + dots, text."""
+    images, vectors, stroke batches, paths + dots, text."""
     images = [s for s in specs if isinstance(s, ImageSpec)]
     vectors = [s for s in specs if isinstance(s, VectorSpec)]
+    batches = [s for s in specs if isinstance(s, StrokeBatchSpec)]
     marks = [s for s in specs if isinstance(s, (PathSpec, DotSpec))]
     texts = [s for s in specs if isinstance(s, TextSpec)]
 
     for spec in images:
         draw_image(page, spec)
     draw_vectors(page, vectors)
+    for spec in batches:
+        draw_stroke_batch(page, spec)
     if marks:
         shape = page.new_shape()
         for spec in marks:
