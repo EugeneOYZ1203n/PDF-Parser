@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import pymupdf
+from raster_parser.models.source import Source
 from raster_parser.commons.helpers.geometry import PDF_POINTS_PER_INCH
 from raster_parser.commons.helpers.pixmap import zoom_matrix
 from raster_parser.models.image import Image
@@ -38,6 +39,7 @@ def traced_vector_kwargs(page_index: int, seqno: int, color) -> dict:
         opacity=1.0,
         page_index=page_index,
         seqno=seqno,
+        source=Source.FROM_IMAGE,
     )
 
 

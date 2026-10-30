@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from raster_parser.models.source import Source
 from raster_parser.models.image import Image
 from raster_parser.models.page import Page
 from raster_parser.commons.raster_text.color_layers import PAPER
@@ -62,7 +63,7 @@ def test_texts_through_a_quarter_turn_placement(page_meta):
 
     assert [t.text for t in prelude.texts] == ["HELLO"]
     t = prelude.texts[0]
-    assert t.source == "ocr" and t.seqno == 0
+    assert t.source == Source.FROM_IMAGE and t.seqno == 0
     # pixel box (20..120, 20..32) at 0.5 pt/px, rotated a quarter turn
     assert t.bbox == pytest.approx((75 - 16, 10, 75 - 10, 60), abs=1.0)
     assert t.direction == pytest.approx((0.0, 1.0), abs=1e-6)

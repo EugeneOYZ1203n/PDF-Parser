@@ -35,6 +35,7 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
+from raster_parser.models.source import Source
 from raster_parser.models.raster_text import Mapper, PreludeRaster, PreparedImage, RasterPrelude
 from raster_parser.commons.helpers.geometry import (
     PDF_POINTS_PER_INCH,
@@ -310,7 +311,7 @@ def _collect_ocr(
                 page_index=page_index,
                 seqno=len(prelude.texts),
                 confidence=hit.confidence,
-                source="ocr",
+                source=Source.FROM_IMAGE,
                 orientation_source="ocr",
                 quad_points=quad,
             )

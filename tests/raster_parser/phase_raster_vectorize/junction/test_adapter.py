@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from raster_parser.models.source import Source
 from raster_parser.models.image import Image
 from raster_parser.models.page import Page
 from raster_parser.phase_raster_vectorize.junction import adapter
@@ -116,7 +117,7 @@ def test_ocr_hits_become_texts_and_are_erased(page_meta):
     vectors, texts = adapter.extract([image], _page(page_meta), ocr_fns=fns)
     assert [t.text for t in texts] == ["HELLO"]
     t = texts[0]
-    assert t.source == "ocr"
+    assert t.source == Source.FROM_IMAGE
     r, g, b = (t.color >> 16) & 255, (t.color >> 8) & 255, t.color & 255
     assert max(r, g, b) < 20  # the ink layer's colour is black
     assert t.bbox == pytest.approx((20, 20, 120, 32), abs=1.5)
