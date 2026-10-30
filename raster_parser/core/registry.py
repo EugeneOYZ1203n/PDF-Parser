@@ -32,6 +32,27 @@ def _involution_stroke(images, page, settings):
     return extract(images, page, settings)
 
 
+def _deep_tech_vec(images, page, settings):
+    """`deep_tech_vec.adapter.extract`, imported on first use (torch: the `ml` extra)."""
+    from raster_parser.phase_raster_vectorize.deep_tech_vec.adapter import extract
+
+    return extract(images, page, settings)
+
+
+def _deep_vectoriser(images, page, settings):
+    """`deep_vectoriser.adapter.extract`, imported on first use (torch: the `ml` extra)."""
+    from raster_parser.phase_raster_vectorize.deep_vectoriser.adapter import extract
+
+    return extract(images, page, settings)
+
+
+def _implicit_sketch_vec(images, page, settings):
+    """`implicit_sketch_vec.adapter.extract`, imported on first use (torch: the `ml` extra)."""
+    from raster_parser.phase_raster_vectorize.implicit_sketch_vec.adapter import extract
+
+    return extract(images, page, settings)
+
+
 def _v1_vector_class(vectors, page, settings):
     """`v1_vector_class.parse.parse`, imported on first use (PaddleOCR, PIL)."""
     from raster_parser.phase_vector_classify.v1_vector_class.parse import parse
@@ -52,6 +73,10 @@ VECTORIZE_BACKENDS: dict[str, RasterVectorizer] = {
     "v1_raster_to_vec": _v1_raster_to_vec,
     "junction": _junction,
     "involution_stroke": _involution_stroke,
+    # optional deep backends (pr10b): need the `ml` extra and their own trained weights
+    "deep_tech_vec": _deep_tech_vec,
+    "deep_vectoriser": _deep_vectoriser,
+    "implicit_sketch_vec": _implicit_sketch_vec,
 }
 
 CLASSIFY_BACKENDS: dict[str, VectorClassifier] = {

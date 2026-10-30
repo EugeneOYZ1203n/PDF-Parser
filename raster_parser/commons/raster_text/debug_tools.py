@@ -8,14 +8,30 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pymupdf
 from raster_parser.models.source import Source
 from raster_parser.commons.helpers.geometry import PDF_POINTS_PER_INCH
 from raster_parser.commons.helpers.pixmap import zoom_matrix
 from raster_parser.models.image import Image
+from raster_parser.models.raster_text import RasterItem
+from raster_parser.commons.renderer.draw import (
+    dot_spec,
+    draw_image,
+    hex_to_rgb01,
+    image_spec,
+    new_page_doc,
+    polyline_spec,
+    render_specs_pdf,
+)
 
 HISTOGRAM_DIR = "color_layer_histograms"
+DebugLayer = "tuple[str, str, str, bytes]"
+
+
+def place_raster(page, array: np.ndarray, image: Image) -> None:
+    draw_image(page, image_spec(array, image.bbox, transform=image.transform))
 
 
 def traced_vector_kwargs(page_index: int, seqno: int, color) -> dict:
@@ -172,3 +188,97 @@ def finish_doc(doc_page, page_meta) -> bytes:
         return doc.tobytes(deflate=True)
     finally:
         doc.close()
+
+
+# diff-code canvas values
+BACKGROUND, MATCHED, MISSED, SPURIOUS = 0, 1, 2, 3
+
+
+def render_geometry(shape: tuple[int, int], polylines) -> np.ndarray:
+    """Polylines drawn at their own (rounded) width -- always 1.0 now -- onto a bool canvas."""
+    canvas = np.zeros(shape[:2], np.uint8)
+    for pl in polylines:
+        pts = np.round(np.asarray(pl.points, float)).astype(np.int32).reshape(-1, 1, 2)
+        cv2.polylines(canvas, [pts], False, 255, max(1, int(round(pl.width))))
+    return canvas > 0
+
+
+def diff_codes(ink: np.ndarray, polylines, tol_px: int) -> "tuple[np.ndarray, np.ndarray]":
+    """`(codes uint8, rendered bool)` in `ink`'s own pixel frame."""
+    ink = np.asarray(ink, dtype=bool)
+    rendered = render_geometry(ink.shape, polylines)
+    if tol_px > 0:
+        k = np.ones((2 * tol_px + 1, 2 * tol_px + 1), np.uint8)
+        rendered_near = cv2.dilate(rendered.astype(np.uint8), k) > 0
+        ink_near = cv2.dilate(ink.astype(np.uint8), k) > 0
+    else:
+        rendered_near, ink_near = rendered, ink
+    codes = np.zeros(ink.shape, dtype=np.uint8)
+    codes[ink & rendered_near] = MATCHED
+    codes[ink & ~rendered_near] = MISSED
+    codes[rendered & ~ink_near] = SPURIOUS
+    return codes, rendered
+
+
+class RasterSink:
+    """Receives full-resolution debug rasters. Streaming: PNG-encode into one open single-page PDF
+    per (stage, label) immediately, drop the array. Keep: retain
+    `RasterItem`s for `debug_out`. Neither: ignore (`active` tells the
+    caller not to build the array at all)."""
+
+    def __init__(self, *, stream: bool, keep: bool) -> None:
+        self.stream = stream
+        self.keep = keep
+        self.kept: list[RasterItem] = []
+        self._docs: dict[tuple[str, str], tuple[str, object]] = {}
+
+    @property
+    def active(self) -> bool:
+        return self.stream or self.keep
+
+    def add(
+        self, stage: str, label: str, hexcolor: str, array: np.ndarray, image: Image, page_meta
+    ) -> None:
+        if self.keep:
+            self.kept.append(RasterItem(stage, label, hexcolor, array, image, array.shape[:2]))
+        if self.stream:
+            key = (stage, label)
+            if key not in self._docs:
+                self._docs[key] = (hexcolor, new_page_doc(page_meta))
+            place_raster(self._docs[key][1][1], array, image)
+
+    def finish_stream(self, page_meta) -> "list[DebugLayer]":
+        out: "list[DebugLayer]" = []
+        for (stage, label), (hexcolor, doc) in self._docs.items():
+            out.append((stage, label, hexcolor, finish_doc(doc, page_meta)))
+        self._docs.clear()
+        return out
+
+
+def geometry_layer(
+    page_meta,
+    stage: str,
+    label: str,
+    hexcolor: str,
+    *,
+    polylines=(),
+    points=(),
+    width: float = 0.6,
+    radius: float = 0.8,
+) -> DebugLayer:
+    rgb = hex_to_rgb01(hexcolor)
+    specs = [polyline_spec(pl, rgb, width=width) for pl in polylines if len(pl) >= 2]
+    specs += [dot_spec(p, rgb, radius) for p in points]
+    return (stage, label, hexcolor, render_specs_pdf(page_meta, specs))
+
+
+def compose_raster_layers(page_meta, items: list[RasterItem]) -> "list[DebugLayer]":
+    docs: dict[tuple[str, str], tuple[str, object]] = {}
+    for it in items:
+        key = (it.stage, it.label)
+        if key not in docs:
+            docs[key] = (it.hexcolor, new_page_doc(page_meta))
+        place_raster(docs[key][1][1], it.array, it.image)
+    return [
+        (s, l, hexcolor, finish_doc(doc, page_meta)) for (s, l), (hexcolor, doc) in docs.items()
+    ]

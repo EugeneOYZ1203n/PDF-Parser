@@ -18,6 +18,8 @@ marks our choices.
 
 from __future__ import annotations
 
+from raster_parser.commons.raster_text.strokes import FLAT_TOL_PX, INFER_THREADS  # noqa: F401 -- shared
+
 # ======================================================================
 # Vector/ink diff debug (diff.py)
 # ======================================================================
@@ -55,7 +57,6 @@ PREPROCESS = False
 INFER_BATCH_TILES = 1
 # torch CPU threads, applied once per process when the models load; None
 # leaves torch's own choice.
-INFER_THREADS: "int | None" = None
 
 # ======================================================================
 # Graph extraction (upstream graph_extraction/build_linegraph.process)
@@ -89,7 +90,6 @@ CORNER_DEG = 35.0
 CORNER_EPS_PX = 2.0
 FIT_PRESMOOTH_PX = 1.0
 # A fitted cubic within this of its chord is emitted as an "l" item (px).
-FLAT_TOL_PX = 0.75
 
 # ======================================================================
 # Weights (download_weights.py) -- the authors' released checkpoints

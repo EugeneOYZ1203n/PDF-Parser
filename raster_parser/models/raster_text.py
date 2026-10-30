@@ -147,3 +147,13 @@ class RasterItem:
     array: np.ndarray
     image: Image
     shape: tuple[int, int]
+
+
+@dataclass
+class LayerData:
+    key: str
+    gray: np.ndarray
+    strokes: list[np.ndarray]
+    widths: np.ndarray
+    bboxes: np.ndarray
+    ink_pts: np.ndarray

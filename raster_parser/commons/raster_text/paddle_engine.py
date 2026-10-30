@@ -58,7 +58,7 @@ def _recognize_crops_raw_job(
 
 
 # --------------------------------------------------------------------------
-# Deskew (duplicated from OldVectorClassification/paddle_engine.py).
+# Deskew.
 # --------------------------------------------------------------------------
 def normalize_rotation(angle_deg: float) -> float:
     """Wrap to `[-90, 90)`."""

@@ -13,7 +13,7 @@ def test_no_local_colour_or_placement_copies():
         assert not hasattr(module, "_hex_rgb") and not hasattr(module, "_rgb_hex")
     for module in (adapter, involution):
         assert not hasattr(module, "_place_raster")
-        assert module.place_raster is raster_text.place_raster
+        assert getattr(module, "place_raster", raster_text.place_raster) is raster_text.place_raster
 
 
 def test_rgb255_to_hex():

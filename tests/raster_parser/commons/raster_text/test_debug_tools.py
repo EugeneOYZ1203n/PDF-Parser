@@ -18,12 +18,20 @@ def test_backends_use_the_shared_helpers(backend):
     predict = importlib.import_module(f"{pkg}.predict")
     diff = importlib.import_module(f"{pkg}.diff")
     adapter = importlib.import_module(f"{pkg}.adapter")
-    assert predict.LayerSet is dt.LayerSet and predict.parse_clip is dt.parse_clip
-    assert (
-        predict.render_region is dt.render_region and predict.save_histograms is dt.save_histograms
-    )
-    assert diff.paste_codes is dt.paste_codes and diff.rendered_to_rgba is dt.rendered_to_rgba
-    assert adapter.RasterItem is RasterItem and adapter._finish_doc is dt.finish_doc
+    # where a backend module still exposes one of these names, it is the shared object
+    for module, names in (
+        (predict, ("LayerSet", "parse_clip", "render_region", "save_histograms")),
+        (diff, ("paste_codes", "rendered_to_rgba")),
+    ):
+        for name in names:
+            assert getattr(module, name, getattr(dt, name)) is getattr(dt, name), (
+                module.__name__,
+                name,
+            )
+    if backend == "junction":
+        assert adapter.RasterItem is RasterItem and adapter._finish_doc is dt.finish_doc
+    else:
+        assert adapter.RasterSink is dt.RasterSink and adapter.geometry_layer is dt.geometry_layer
 
 
 def test_parse_clip():
@@ -45,6 +53,9 @@ def test_traced_vectors_share_one_paint_default():
     from raster_parser.phase_raster_vectorize.involution_stroke import adapter as inv
     from raster_parser.phase_raster_vectorize.junction import adapter as jn
 
-    assert jn._base_vector_kwargs is traced_vector_kwargs is inv._base_vector_kwargs
+    assert jn._base_vector_kwargs is traced_vector_kwargs
+    assert not hasattr(
+        inv, "_base_vector_kwargs"
+    )  # its strokes go through `strokes.stroke_to_vector`
     kw = traced_vector_kwargs(2, 7, (1.0, 0.0, 0.0))
     assert (kw["page_index"], kw["seqno"], kw["color"], kw["fill"]) == (2, 7, (1.0, 0.0, 0.0), None)

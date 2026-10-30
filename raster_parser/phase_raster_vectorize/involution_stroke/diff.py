@@ -17,14 +17,12 @@ the `vector_diff` debug layers; `rendered_to_rgba` does the plain
 
 from __future__ import annotations
 
-import cv2
 import numpy as np
-from raster_parser.commons.raster_text.debug_tools import (  # noqa: F401 -- shared with the other raster backends
-    paste_codes,
-    rendered_to_rgba,
-)
 
-BACKGROUND, MATCHED, MISSED, SPURIOUS = 0, 1, 2, 3
+from raster_parser.commons.raster_text.debug_tools import BACKGROUND, MATCHED, MISSED, SPURIOUS  # noqa: F401 -- shared
+from raster_parser.commons.raster_text.debug_tools import (  # noqa: F401 -- moved to commons; still reachable from this module
+    diff_codes,
+)
 
 _PALETTE = np.array(
     [
@@ -35,32 +33,6 @@ _PALETTE = np.array(
     ],
     dtype=np.uint8,
 )
-
-
-def render_geometry(shape: tuple[int, int], polylines) -> np.ndarray:
-    """Polylines drawn at their own (rounded) width -- always 1.0 now -- onto a bool canvas."""
-    canvas = np.zeros(shape[:2], np.uint8)
-    for pl in polylines:
-        pts = np.round(np.asarray(pl.points, float)).astype(np.int32).reshape(-1, 1, 2)
-        cv2.polylines(canvas, [pts], False, 255, max(1, int(round(pl.width))))
-    return canvas > 0
-
-
-def diff_codes(ink: np.ndarray, polylines, tol_px: int) -> "tuple[np.ndarray, np.ndarray]":
-    """`(codes uint8, rendered bool)` in `ink`'s own pixel frame."""
-    ink = np.asarray(ink, dtype=bool)
-    rendered = render_geometry(ink.shape, polylines)
-    if tol_px > 0:
-        k = np.ones((2 * tol_px + 1, 2 * tol_px + 1), np.uint8)
-        rendered_near = cv2.dilate(rendered.astype(np.uint8), k) > 0
-        ink_near = cv2.dilate(ink.astype(np.uint8), k) > 0
-    else:
-        rendered_near, ink_near = rendered, ink
-    codes = np.zeros(ink.shape, dtype=np.uint8)
-    codes[ink & rendered_near] = MATCHED
-    codes[ink & ~rendered_near] = MISSED
-    codes[rendered & ~ink_near] = SPURIOUS
-    return codes, rendered
 
 
 def codes_to_rgba(codes: np.ndarray) -> np.ndarray:

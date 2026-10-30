@@ -28,6 +28,9 @@ def test_registry_names_and_defaults():
         "v1_raster_to_vec",
         "junction",
         "involution_stroke",
+        "deep_tech_vec",
+        "deep_vectoriser",
+        "implicit_sketch_vec",
     }
     assert set(registry.CLASSIFY_BACKENDS) == {"stub", "v1_vector_class", "v2_vector_class"}
     assert (registry.DEFAULT_VECTORIZE, registry.DEFAULT_CLASSIFY) == (

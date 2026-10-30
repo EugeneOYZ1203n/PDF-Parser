@@ -44,6 +44,7 @@ from tqdm import tqdm
 
 from raster_parser.models.involution_stroke import TileResult, StrokePiece, LayerResult
 from raster_parser.commons.logging_setup import get_logger
+from raster_parser.commons.raster_text.strokes import for_cpu_inference
 
 from . import geometry as geo
 from .config import (
@@ -57,7 +58,6 @@ from .config import (
     GRAPH_DEG3,
     GRAPH_DEG4,
     GRAPH_SHARP,
-    INFER_THREADS,
     INK_GRAY_THRESHOLD,
     INTERSECTION_WEIGHTS_ENV_VAR,
     INTERSECTION_WEIGHTS_FILENAME,
@@ -108,16 +108,6 @@ def _missing(path: Path, env_var: str) -> FileNotFoundError:
     )
 
 
-def _for_cpu_inference(model):
-    import torch
-
-    if INFER_THREADS:
-        torch.set_num_threads(INFER_THREADS)
-    model.eval()
-    model.requires_grad_(False)
-    return model
-
-
 def load_centerline_model(path: "str | Path | None" = None):
     path = Path(path) if path is not None else default_centerline_path()
     key = f"centerline:{path}"
@@ -126,7 +116,7 @@ def load_centerline_model(path: "str | Path | None" = None):
             raise _missing(path, CENTERLINE_WEIGHTS_ENV_VAR)
         from .model.weights import load_centerline
 
-        _MODEL_CACHE[key] = _for_cpu_inference(load_centerline(path))
+        _MODEL_CACHE[key] = for_cpu_inference(load_centerline(path))
         _LOG.info("InvolutionStroke centerline model loaded from %s", path)
     return _MODEL_CACHE[key]
 
@@ -139,7 +129,7 @@ def load_intersection_model(path: "str | Path | None" = None):
             raise _missing(path, INTERSECTION_WEIGHTS_ENV_VAR)
         from .model.weights import load_intersection
 
-        _MODEL_CACHE[key] = _for_cpu_inference(load_intersection(path))
+        _MODEL_CACHE[key] = for_cpu_inference(load_intersection(path))
         _LOG.info("InvolutionStroke intersection model loaded from %s", path)
     return _MODEL_CACHE[key]
 

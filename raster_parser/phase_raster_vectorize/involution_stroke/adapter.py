@@ -16,8 +16,8 @@ hands over goes through, in order,
   5. diff (debug only)     the strokes rasterized and compared back against
                            their own layer's ink (`diff.py`)
 
-Steps 1-3 are the shared raster prelude (`commons/raster_text`); step 5's diff follows
-Junction's (`junction/diff.py`).
+Steps 1-3 are the shared raster prelude (`commons/raster_text`); step 5's diff uses the stroke backends' shared
+diff codes (`commons/raster_text/debug_tools.py`).
 
 Output: one `Vector` per stroke -- `"c"` items, `"l"` where a piece is flat
 (`FLAT_TOL_PX`) -- in its layer's color, width estimated from the ink's
@@ -38,7 +38,6 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
-from raster_parser.models.raster_text import RasterItem
 from raster_parser.models.involution_stroke import InvolutionPageState, DiffPolyline
 from raster_parser.commons.logging_setup import get_logger
 from raster_parser.models.image import Image
@@ -47,17 +46,13 @@ from raster_parser.models.text import Text
 from raster_parser.models.vector import Vector
 from raster_parser.commons.renderer.draw import (
     bbox_spec,
-    dot_spec,
     hex_to_rgb01,
-    new_page_doc,
-    polyline_spec,
     render_specs_pdf,
 )
 from raster_parser.phase_raster_vectorize.involution_stroke import diff as diff_mod
 from raster_parser.phase_raster_vectorize.involution_stroke import geometry as geo
 from raster_parser.phase_raster_vectorize.involution_stroke.config import (
     DIFF_TOLERANCE_PX,
-    FLAT_TOL_PX,
     INK_GRAY_THRESHOLD,
     TARGET_PX_PER_PT,
 )
@@ -68,13 +63,14 @@ from raster_parser.commons.raster_text.raster_text import (
     prelude_debug_layers,
     prepare_images,
 )
-from raster_parser.commons.raster_text.debug_tools import (  # noqa: F401 -- shared with the other raster backends
-    traced_vector_kwargs as _base_vector_kwargs,
-    finish_doc as _finish_doc,
-)
 from raster_parser.commons.helpers.geometry import points_bbox
 from raster_parser.commons.helpers.geometry import rgb255_to_hex
-from raster_parser.commons.raster_text.raster_text import place_raster
+from raster_parser.commons.raster_text.strokes import stroke_to_vector, stroke_width_px
+from raster_parser.commons.raster_text.debug_tools import (
+    RasterSink,
+    compose_raster_layers,
+    geometry_layer,
+)
 
 DebugLayer = "tuple[str, str, str, bytes]"
 OnDebugLayer = "Callable[[str, str, str, bytes], None]"
@@ -110,7 +106,7 @@ def extract(
         on_debug_layer = on_debug_layer or settings.on_debug_layer
         on_debug_image = on_debug_image or settings.on_debug_image
     state = InvolutionPageState()
-    sink = _RasterSink(
+    sink = RasterSink(
         stream=on_debug_layer is not None,
         keep=debug_out is not None and keep_debug_arrays,
     )
@@ -172,7 +168,7 @@ def render_debug(debug_out: "dict | None", page_meta) -> "list[DebugLayer]":
     rebuilt from `debug_out`'s kept raw arrays."""
     if not debug_out:
         return []
-    raster = _compose_raster_layers(page_meta, debug_out.get("raster_images") or [])
+    raster = compose_raster_layers(page_meta, debug_out.get("raster_images") or [])
     return prelude_debug_layers(page_meta, debug_out.get("raster_prelude")) + _page_layers(
         page_meta, raster, debug_out.get("state") or InvolutionPageState()
     )
@@ -183,54 +179,6 @@ def render_debug(debug_out: "dict | None", page_meta) -> "list[DebugLayer]":
 # ---------------------------------------------------------------------------
 
 
-class _RasterSink:
-    """Receives full-resolution debug rasters (as Junction's).
-    Streaming: PNG-encode into one open single-page PDF
-    per (stage, label) immediately, drop the array. Keep: retain
-    `RasterItem`s for `debug_out`. Neither: ignore (`active` tells the
-    caller not to build the array at all)."""
-
-    def __init__(self, *, stream: bool, keep: bool) -> None:
-        self.stream = stream
-        self.keep = keep
-        self.kept: list[RasterItem] = []
-        self._docs: dict[tuple[str, str], tuple[str, object]] = {}
-
-    @property
-    def active(self) -> bool:
-        return self.stream or self.keep
-
-    def add(
-        self, stage: str, label: str, hexcolor: str, array: np.ndarray, image: Image, page_meta
-    ) -> None:
-        if self.keep:
-            self.kept.append(RasterItem(stage, label, hexcolor, array, image, array.shape[:2]))
-        if self.stream:
-            key = (stage, label)
-            if key not in self._docs:
-                self._docs[key] = (hexcolor, new_page_doc(page_meta))
-            place_raster(self._docs[key][1][1], array, image)
-
-    def finish_stream(self, page_meta) -> "list[DebugLayer]":
-        out: "list[DebugLayer]" = []
-        for (stage, label), (hexcolor, doc) in self._docs.items():
-            out.append((stage, label, hexcolor, _finish_doc(doc, page_meta)))
-        self._docs.clear()
-        return out
-
-
-def _compose_raster_layers(page_meta, items: list[RasterItem]) -> "list[DebugLayer]":
-    docs: dict[tuple[str, str], tuple[str, object]] = {}
-    for it in items:
-        key = (it.stage, it.label)
-        if key not in docs:
-            docs[key] = (it.hexcolor, new_page_doc(page_meta))
-        place_raster(docs[key][1][1], it.array, it.image)
-    return [
-        (s, l, hexcolor, _finish_doc(doc, page_meta)) for (s, l), (hexcolor, doc) in docs.items()
-    ]
-
-
 # ---------------------------------------------------------------------------
 # Per-image flow
 # ---------------------------------------------------------------------------
@@ -239,7 +187,7 @@ def _process_image(
     page: Page,
     compute,
     state: InvolutionPageState,
-    sink: _RasterSink,
+    sink: RasterSink,
     model_fns: "dict | None",
 ) -> None:
     image = prepared.image
@@ -324,41 +272,6 @@ def _process_image(
         sink.add("vector_diff", "total", _C_DIFF, diff_mod.codes_to_rgba(total_codes), image, meta)
 
 
-def stroke_width_px(stroke: np.ndarray, dist: np.ndarray) -> float:
-    """2 x the median distance-to-background along the stroke (>= 1 px)."""
-    pts = np.round(geo.sample_stroke(stroke, _WIDTH_SAMPLES_PER_PIECE) - 0.5).astype(int)
-    h, w = dist.shape
-    ok = (pts[:, 0] >= 0) & (pts[:, 0] < w) & (pts[:, 1] >= 0) & (pts[:, 1] < h)
-    if not ok.any():
-        return 1.0
-    vals = dist[pts[ok, 1], pts[ok, 0]]
-    vals = vals[vals > 0]
-    return max(1.0, 2.0 * float(np.median(vals))) if len(vals) else 1.0
-
-
-def stroke_to_vector(
-    stroke: np.ndarray, to_page: Mapper, page_index: int, seqno: int, color, width_pt: float
-) -> Vector:
-    """One `Vector` per stroke: per Bezier piece an `"l"` (flat, judged in
-    canonical px) or a `"c"` item, mapped to page space."""
-    items = []
-    pts: list[tuple[float, float]] = []
-    for piece in stroke:
-        p = [to_page(q) for q in piece]
-        if geo.piece_is_flat(piece, FLAT_TOL_PX):
-            items.append(("l", p[0], p[3]))
-        else:
-            items.append(("c", p[0], p[1], p[2], p[3]))
-        pts.extend(p)
-    return Vector(
-        type="s",
-        items=items,
-        width=width_pt,
-        rect=points_bbox(pts),
-        **_base_vector_kwargs(page_index, seqno, color),
-    )
-
-
 def _accumulate_debug(state: InvolutionPageState, res, canon_to_page: Mapper) -> None:
     for key, boxes in (("vec_tile", res.tiles), ("vec_tile_failed", res.failed_tiles)):
         for x0, y0, tw, th in boxes:
@@ -385,9 +298,8 @@ _C_VEC_TILE = "#2563eb"
 _C_VEC_TILE_FAIL = "#e11d48"
 _C_CENTERLINE = "#db2777"
 _CENTERLINE_RGB = (219, 39, 119)
-# Points sampled per cubic piece: for the debug diff, and for the stroke-width estimate.
+# Points sampled per cubic piece for the debug diff.
 _DIFF_SAMPLES_PER_PIECE = 8
-_WIDTH_SAMPLES_PER_PIECE = 4
 _C_GRAPH = "#0891b2"
 _C_NODES = "#dc2626"
 _C_MATCHED = "#ca8a04"
@@ -401,23 +313,6 @@ def _boxes_layer(page_meta, stage: str, label: str, hexcolor: str, boxes) -> Deb
     return (stage, label, hexcolor, render_specs_pdf(page_meta, [bbox_spec(b, rgb) for b in boxes]))
 
 
-def _geometry_layer(
-    page_meta,
-    stage: str,
-    label: str,
-    hexcolor: str,
-    *,
-    polylines=(),
-    points=(),
-    width: float = 0.6,
-    radius: float = 0.8,
-) -> DebugLayer:
-    rgb = hex_to_rgb01(hexcolor)
-    specs = [polyline_spec(pl, rgb, width=width) for pl in polylines if len(pl) >= 2]
-    specs += [dot_spec(p, rgb, radius) for p in points]
-    return (stage, label, hexcolor, render_specs_pdf(page_meta, specs))
-
-
 def _page_layers(
     page_meta, raster_layers: "list[DebugLayer]", state: InvolutionPageState
 ) -> "list[DebugLayer]":
@@ -429,15 +324,15 @@ def _page_layers(
     out += [
         _boxes_layer(page_meta, "tiles", "tile grid", _C_VEC_TILE, bx["vec_tile"]),
         _boxes_layer(page_meta, "tiles", "failed tiles", _C_VEC_TILE_FAIL, bx["vec_tile_failed"]),
-        _geometry_layer(page_meta, "graph", "polylines", _C_GRAPH, polylines=geom["graph"]),
-        _geometry_layer(page_meta, "graph", "junction nodes", _C_NODES, points=geom["nodes"]),
-        _geometry_layer(
+        geometry_layer(page_meta, "graph", "polylines", _C_GRAPH, polylines=geom["graph"]),
+        geometry_layer(page_meta, "graph", "junction nodes", _C_NODES, points=geom["nodes"]),
+        geometry_layer(
             page_meta, "pairing", "matched strokes", _C_MATCHED, polylines=geom["matched"]
         ),
-        _geometry_layer(
+        geometry_layer(
             page_meta, "merge", "seam joins", _C_JOINS, points=geom["joins"], radius=1.5
         ),
-        _geometry_layer(page_meta, "fit", "stroke endpoints", _C_ENDPOINT, points=geom["ends"]),
+        geometry_layer(page_meta, "fit", "stroke endpoints", _C_ENDPOINT, points=geom["ends"]),
         (
             "fit",
             "fitted vectors",

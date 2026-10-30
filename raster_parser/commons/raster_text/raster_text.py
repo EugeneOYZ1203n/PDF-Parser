@@ -48,8 +48,6 @@ from raster_parser.models.page import Page
 from raster_parser.models.text import Text
 from raster_parser.commons.renderer.draw import (
     bbox_spec,
-    draw_image,
-    image_spec,
     new_page_doc,
     quad_spec,
     render_specs_pdf,
@@ -68,6 +66,7 @@ from raster_parser.commons.renderer.draw import hex_to_rgb01
 from raster_parser.commons.helpers.geometry import rgb255_to_hex
 from raster_parser.commons.raster_text.debug_tools import finish_doc
 from raster_parser.commons.helpers.geometry import points_bbox
+from raster_parser.commons.raster_text.debug_tools import place_raster
 
 DebugLayer = "tuple[str, str, str, bytes]"
 OnDebugLayer = "Callable[[str, str, str, bytes], None]"
@@ -438,10 +437,6 @@ class _RasterSink:
         ]
         self._docs.clear()
         return out
-
-
-def place_raster(page, array: np.ndarray, image: Image) -> None:
-    draw_image(page, image_spec(array, image.bbox, transform=image.transform))
 
 
 def _mask_rgba(mask: np.ndarray, rgb: tuple[int, int, int]) -> np.ndarray:
