@@ -12,7 +12,6 @@ filled ones, `closePath` a bool.
 from __future__ import annotations
 
 import tempfile
-from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -56,19 +55,22 @@ def traced_vector(v: Vector) -> Vector:
     """`v` with the traced-vector rule applied (see the module docstring); idempotent."""
     stroked = v.type in _STROKE_TYPES
     filled = v.type in _FILL_TYPES
-    return replace(
-        v,
-        color=round_color(v.color),
-        fill=round_color(v.fill),
-        width=float(v.width or 0.0) if stroked else None,
-        dashes=(v.dashes or None) if stroked else None,
-        closePath=bool(v.closePath),
-        stroke_opacity=float(1.0 if v.stroke_opacity is None else v.stroke_opacity)
-        if stroked
-        else None,
-        fill_opacity=float(1.0 if v.fill_opacity is None else v.fill_opacity) if filled else None,
-        seqno=int(v.seqno or 0),
-        source=Source.FROM_IMAGE,
+    return v.model_copy(
+        update=dict(
+            color=round_color(v.color),
+            fill=round_color(v.fill),
+            width=float(v.width or 0.0) if stroked else None,
+            dashes=(v.dashes or None) if stroked else None,
+            closePath=bool(v.closePath),
+            stroke_opacity=float(1.0 if v.stroke_opacity is None else v.stroke_opacity)
+            if stroked
+            else None,
+            fill_opacity=float(1.0 if v.fill_opacity is None else v.fill_opacity)
+            if filled
+            else None,
+            seqno=int(v.seqno or 0),
+            source=Source.FROM_IMAGE,
+        )
     )
 
 
@@ -124,11 +126,12 @@ def _vectors_from_drawing(base: Vector) -> list[Vector]:
     if len(parts) <= 1:
         return [base]
     return [
-        replace(
-            base,
-            items=items,
-            rect=_items_rect(items),
-            seqno=base.seqno if i == 0 else base.seqno * _SUBSTROKE_SEQNO_STRIDE + i,
+        base.model_copy(
+            update=dict(
+                items=items,
+                rect=_items_rect(items),
+                seqno=base.seqno if i == 0 else base.seqno * _SUBSTROKE_SEQNO_STRIDE + i,
+            )
         )
         for i, items in enumerate(parts)
     ]
@@ -154,12 +157,13 @@ def _scale_vector(v: Vector, s: float) -> Vector:
     if s == 1.0:
         return v
     x0, y0, x1, y1 = v.rect
-    return replace(
-        v,
-        items=[_scale_item(it, s) for it in v.items],
-        rect=(x0 * s, y0 * s, x1 * s, y1 * s),
-        scissor=tuple(c * s for c in v.scissor) if v.scissor is not None else None,
-        width=v.width * s if v.width is not None else None,
+    return v.model_copy(
+        update=dict(
+            items=[_scale_item(it, s) for it in v.items],
+            rect=(x0 * s, y0 * s, x1 * s, y1 * s),
+            scissor=tuple(c * s for c in v.scissor) if v.scissor is not None else None,
+            width=v.width * s if v.width is not None else None,
+        )
     )
 
 

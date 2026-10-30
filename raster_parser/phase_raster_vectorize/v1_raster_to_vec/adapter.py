@@ -13,7 +13,6 @@ page index here. Intermediates go under `settings.dump_dir`.
 
 from __future__ import annotations
 
-from dataclasses import replace
 
 from raster_parser.models.image import Image
 from raster_parser.models.page import Page
@@ -46,6 +45,6 @@ def extract(
         keep_intermediates=settings.debug,
     )
     index = page.meta.index
-    return [replace(v, page_index=index) for v in traced], [
-        replace(t, page_index=index) for t in words
+    return [v.model_copy(update=dict(page_index=index)) for v in traced], [
+        t.model_copy(update=dict(page_index=index)) for t in words
     ]

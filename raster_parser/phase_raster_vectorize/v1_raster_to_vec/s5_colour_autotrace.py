@@ -19,7 +19,6 @@ import shutil
 import tempfile
 import time
 from concurrent.futures import as_completed
-from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -527,31 +526,33 @@ def _stamp_group_vectors(
             # Hole cover: stay white so hollow shapes don't become solid black.
             out.append(
                 traced_vector(
-                    replace(
-                        v,
-                        fill=(1.0, 1.0, 1.0),
-                        color=None,
-                        width=0.0,
-                        fill_opacity=1.0,
-                        seqno=seqno,
-                        layer=layer,
+                    v.model_copy(
+                        update=dict(
+                            fill=(1.0, 1.0, 1.0),
+                            color=None,
+                            width=0.0,
+                            fill_opacity=1.0,
+                            seqno=seqno,
+                            layer=layer,
+                        )
                     )
                 )
             )
         else:
             out.append(
                 traced_vector(
-                    replace(
-                        v,
-                        # PyMuPDF path type: "f" fill only, "s" stroke only, "fs" both. A
-                        # stamped fill keeps no stroke.
-                        type="f" if v.type in ("f", "fs") else v.type,
-                        fill=fill,
-                        color=None,
-                        width=0.0,
-                        fill_opacity=1.0,
-                        seqno=seqno,
-                        layer=layer,
+                    v.model_copy(
+                        update=dict(
+                            # PyMuPDF path type: "f" fill only, "s" stroke only, "fs" both. A
+                            # stamped fill keeps no stroke.
+                            type="f" if v.type in ("f", "fs") else v.type,
+                            fill=fill,
+                            color=None,
+                            width=0.0,
+                            fill_opacity=1.0,
+                            seqno=seqno,
+                            layer=layer,
+                        )
                     )
                 )
             )
