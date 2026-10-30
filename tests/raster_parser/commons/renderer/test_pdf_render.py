@@ -10,6 +10,7 @@ import pymupdf
 import pytest
 from PIL import Image
 
+from raster_parser.models.source import Source
 from raster_parser.models.page import PageMeta
 from raster_parser.models.vector import Vector
 from raster_parser.phase_native_read.native_text import extract_native_text
@@ -67,7 +68,7 @@ def test_render_output_page_draws_drawing_vectors(vector):
 
 
 def test_render_output_page_draws_ocr_results(text):
-    result = text(text="Hello", bbox=(10, 10, 60, 30), source="ocr", confidence=0.9)
+    result = text(text="Hello", bbox=(10, 10, 60, 30), source=Source.NATIVE_VECTOR, confidence=0.9)
 
     image = render_output_page(_meta(), [result], [], zoom=2.0)
 
@@ -88,7 +89,7 @@ def test_long_text_in_narrow_box_is_squeezed_into_the_box(text):
     # Rotate-then-scale-to-fit: a long string in a narrow box is scaled
     # down along its own direction, so its ink stays inside the box.
     bbox = (10.0, 10.0, 60.0, 30.0)
-    result = text(text="A very long piece of OCR text", bbox=bbox, source="ocr")
+    result = text(text="A very long piece of OCR text", bbox=bbox, source=Source.NATIVE_VECTOR)
 
     image = render_output_page(_meta(), [result], [], zoom=4.0)
 
@@ -101,7 +102,7 @@ def test_ocr_text_sized_from_box_not_font_size(text):
     # OCR `Text` carries font_size=0.0 -- the box decides the size, the same
     # as for an equivalent ground-truth text box.
     bbox = (20.0, 20.0, 150.0, 55.0)
-    ocr_word = text(text="SCHEDULE", bbox=bbox, source="ocr", font_size=0.0)
+    ocr_word = text(text="SCHEDULE", bbox=bbox, source=Source.NATIVE_VECTOR, font_size=0.0)
 
     from_ocr = render_output_page(_meta(), [ocr_word], [], zoom=3.0)
     from_box = rasterize_pdf(render_text_pdf(_meta(), [("SCHEDULE", bbox, 0.0)]), zoom=3.0)
@@ -127,7 +128,7 @@ def test_multiword_text_fills_box_width_as_one_scaled_string(text):
     # A short multi-word string in a wide box is scaled along its own
     # direction (not word-gap-justified) so its ink spans the box width.
     bbox = (10.0, 40.0, 190.0, 60.0)
-    word = text(text="PANEL SCHEDULE", bbox=bbox, source="ocr", font_size=0.0)
+    word = text(text="PANEL SCHEDULE", bbox=bbox, source=Source.NATIVE_VECTOR, font_size=0.0)
 
     image = render_output_page(_meta(), [word], [], zoom=4.0)
 
@@ -137,7 +138,7 @@ def test_multiword_text_fills_box_width_as_one_scaled_string(text):
 
 
 def test_render_output_pdf_multiword_text_stays_word_searchable(text):
-    t = text(text="PANEL SCHEDULE NOTES", bbox=(10, 10, 390, 34), source="ocr")
+    t = text(text="PANEL SCHEDULE NOTES", bbox=(10, 10, 390, 34), source=Source.NATIVE_VECTOR)
     doc = pymupdf.open("pdf", render_output_pdf(_meta(width=400.0), [t], []))
     try:
         page_text = doc[0].get_text()
@@ -161,7 +162,7 @@ def _reconstructed_line_dirs(pdf_bytes: bytes) -> list[tuple[float, float]]:
 
 
 @pytest.mark.parametrize("direction", [(0.0, -1.0), (0.0, 1.0), (0.6, 0.8), (-0.6, 0.8)])
-@pytest.mark.parametrize("source", ["native", "ocr"])
+@pytest.mark.parametrize("source", [Source.NATIVE_TEXT, Source.NATIVE_VECTOR])
 def test_render_output_pdf_preserves_text_direction(text, direction, source):
     # A word whose direction has a non-zero y component must reconstruct
     # with that same direction -- not mirrored about the x-axis.
@@ -186,7 +187,7 @@ def test_rotated_text_ink_stays_inside_its_box(text):
     # text's own height), ink inside the box -- the old renderer sized it
     # from the axis-aligned height and spilled past the box.
     bbox = (90.0, 40.0, 110.0, 160.0)
-    word = text(text="UPWARD", bbox=bbox, direction=(0.0, -1.0), source="ocr")
+    word = text(text="UPWARD", bbox=bbox, direction=(0.0, -1.0), source=Source.NATIVE_VECTOR)
 
     image = render_output_page(_meta(width=200, height=200), [word], [], zoom=4.0)
 
@@ -327,7 +328,7 @@ def test_render_text_pdf_draws_text_boxes():
 
 def test_render_output_pdf_returns_openable_pdf_with_text_and_drawings(text, vector):
     v = vector(kind="l", bbox=(10, 40, 90, 40), color=(0, 0, 0), width=2)
-    t = text(text="HELLO", bbox=(10, 10, 90, 30), source="ocr")
+    t = text(text="HELLO", bbox=(10, 10, 90, 30), source=Source.NATIVE_VECTOR)
 
     doc = pymupdf.open("pdf", render_output_pdf(_meta(), [t], [v]))
     try:
