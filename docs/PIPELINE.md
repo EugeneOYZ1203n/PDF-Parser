@@ -17,14 +17,14 @@ native_read vectors
   ├─ 4. recognise             0/180 classifier + recognise; retries at 90/180/270   │
   ├─ 5. ownership             non-blank quads own the cluster's vectors ─ rest ─────┤
   │                                                                                 ▼
-  └─ texts (source="ocr")                                       drawing (sorted by seqno)
+  └─ texts (Native Vector)                                      drawing (sorted by seqno)
 ```
 
 ## What goes in and out
 
 - **In:** native_read's vectors only (one `Vector` per `get_drawings()` path, in unrotated page
   space) and the `RunSettings`. vector_classify never sees raster_vectorize's output.
-- **Out:** `(drawing, texts)`. `texts` are OCR `Text`s with `source="ocr"`, a `direction` from
+- **Out:** `(drawing, texts)`. `texts` are OCR `Text`s with `source=Source.NATIVE_VECTOR`, a `direction` from
   the final reading angle, `quad_points` (the detected quad, reordered so p0 → p1 runs along
   the reading direction), the envelope `bbox`, `confidence` and `seqno` (the cluster's lowest).
   `drawing` is every vector not owned by a read, in paint order (`seqno`). Vectors that became

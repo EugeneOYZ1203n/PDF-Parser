@@ -12,7 +12,7 @@
     0.2263,
     0.9741
    ],
-   "source": "native"
+   "source": "Native Text"
   },
   {
    "text": "Alpha",
@@ -26,7 +26,7 @@
     0.0,
     1.0
    ],
-   "source": "native"
+   "source": "Native Text"
   },
   {
    "text": "Gamma-X",
@@ -40,7 +40,7 @@
     1.0,
     0.0
    ],
-   "source": "native"
+   "source": "Native Text"
   },
   {
    "text": "/",
@@ -54,7 +54,7 @@
     0.0,
     1.0
    ],
-   "source": "ocr"
+   "source": "Native Vector"
   },
   {
    "text": "/",
@@ -68,7 +68,7 @@
     0.0,
     1.0
    ],
-   "source": "ocr"
+   "source": "Native Vector"
   }
  ],
  "vectors": [

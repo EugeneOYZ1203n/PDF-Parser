@@ -58,6 +58,7 @@ from typing import Callable
 
 import numpy as np
 
+from raster_parser.models.source import Source
 from raster_parser.commons.helpers.geometry import (
     PDF_POINTS_PER_INCH,
     bboxes_intersect,
@@ -649,7 +650,7 @@ def _parse(
                     page_index=page_meta.index,
                     seqno=pq["min_seqno"],
                     confidence=box.confidence,
-                    source="ocr",
+                    source=Source.NATIVE_VECTOR,
                     orientation_source="ocr",
                     quad_points=reorder_quad_reading(pq["quad_pts"], final_angle),
                 )
