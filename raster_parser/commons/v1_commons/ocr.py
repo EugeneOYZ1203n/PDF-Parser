@@ -9,6 +9,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from raster_parser.models.source import Source
 from raster_parser.commons.helpers.geometry import compute_origin
 from raster_parser.commons.helpers.text_orientation import rotate_to_direction
 from raster_parser.models.text import Text
@@ -69,9 +70,11 @@ def ocr_text(
     page_index: int,
     block_no: int = 0,
     confidence: float = 0.0,
+    source: Source,
 ) -> Text:
     """The shared `Text` for one OCR word: direction from `rotate`, no font or colour, and the
-    recogniser's `confidence` when it gave one."""
+    recogniser's `confidence` when it gave one. `source`: `NATIVE_VECTOR` for text read from
+    drawn glyphs, `FROM_IMAGE` for text read from an image."""
     bbox = tuple(float(c) for c in bbox)
     direction = rotate_to_direction(rotate)
     return Text(
@@ -92,7 +95,7 @@ def ocr_text(
         page_index=page_index,
         seqno=0,
         confidence=float(confidence),
-        source="ocr",
+        source=source,
         orientation_source="ocr",
     )
 

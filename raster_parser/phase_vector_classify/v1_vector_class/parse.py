@@ -16,6 +16,7 @@ The steps run on the shared `Vector`; each word read becomes a shared `Text` her
 
 from __future__ import annotations
 
+from raster_parser.models.source import Source
 from raster_parser.models.page import Page
 from raster_parser.models.text import Text
 from raster_parser.models.vector import Vector
@@ -72,6 +73,7 @@ def parse(
                 page_index=page.meta.index,
                 block_no=index,
                 confidence=confidence,
+                source=Source.NATIVE_VECTOR,
             )
         )
     texts.sort(key=lambda t: t.block_no)

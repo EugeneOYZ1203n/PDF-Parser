@@ -7,6 +7,7 @@ from pathlib import Path
 import pymupdf
 import pytest
 
+from raster_parser.models.source import Source
 from raster_parser.models.settings import RunSettings
 from raster_parser.phase_native_read.native_read import read_and_extract
 from raster_parser.phase_vector_classify.v1_vector_class import s4_word_ocr
@@ -64,5 +65,5 @@ def test_read_groups_become_text_and_leave_drawings(two_words_pdf: Path, monkeyp
 def test_text_carries_the_ocr_confidence(two_words_pdf: Path, monkeypatch) -> None:
     _, _, texts = _run(two_words_pdf, monkeypatch, read=[(0, "ABC", 0.87)])
     assert [(t.text, t.confidence, t.source, t.orientation_source) for t in texts] == [
-        ("ABC", 0.87, "ocr", "ocr")
+        ("ABC", 0.87, Source.NATIVE_VECTOR, "ocr")
     ]
