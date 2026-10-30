@@ -317,23 +317,22 @@ def vector_spec(
     the full geometry shows."""
     if recolor is None:
         return VectorSpec(vector)
-    import dataclasses
-
     return VectorSpec(
-        dataclasses.replace(
-            vector,
-            type="s",
-            color=tuple(recolor),
-            fill=None,
-            dashes=None,
-            width=max(vector.width or 0.0, min_width),
-            closePath=False,
-            blendmode="Normal",
-            opacity=1.0,
-            stroke_opacity=1.0,
-            fill_opacity=None,
-            scissor=None,
-            clips=(),
+        vector.model_copy(
+            update=dict(
+                type="s",
+                color=tuple(recolor),
+                fill=None,
+                dashes=None,
+                width=max(vector.width or 0.0, min_width),
+                closePath=False,
+                blendmode="Normal",
+                opacity=1.0,
+                stroke_opacity=1.0,
+                fill_opacity=None,
+                scissor=None,
+                clips=(),
+            )
         )
     )
 
