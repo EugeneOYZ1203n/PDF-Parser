@@ -71,4 +71,4 @@ Nothing in `inspector.py`, `overlay_canvas.py` or `control_panel.py` needs to ch
 
 ## Tests
 
-`tests/scripts_test/inspector/` (`uv run pytest tests/scripts_test/inspector`).
+`tests/scripts/inspector/` (`uv run pytest tests/scripts/inspector`).

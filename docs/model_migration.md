@@ -112,6 +112,6 @@ conversion rules: colours rounded to 3 decimals, stroke fields only on stroked p
 only on filled ones (`v1_commons.autotrace.traced_vector`).
 
 Removed with the old classes, because they were built on them: `evaluation/native_vs_ocr/`,
-`evaluation/native_vs_raster/`, `native_vs_ocr/`, the `scripts/type2_*`, `type4_pipeline.py`,
-`dto_reconstruct_pipeline.py` and `raster_drawing_*` scripts, and their tests. The pipeline
+`evaluation/native_vs_raster/`, `native_vs_ocr/`, the old `type2_*` / `type4_*` /
+`raster_drawing_*` pipeline scripts, and their tests. The pipeline
 report and benchmark (`docs/SCRIPTS.md`) replace them on the shared models.
