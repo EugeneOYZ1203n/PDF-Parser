@@ -4,7 +4,7 @@ Orientation is stored purely as `direction` (a unit vector) -- `angle()` and
 `quad()` are derived on demand (`quad()` reuses `helpers.geometry.make_oriented_quad`,
 which builds an oriented quad from an axis-aligned bbox + direction). There is
 no `rotation_used` field: an OCR result's final orientation is folded into
-`direction` once, before the `Text` is built. This dataclass has no dependency
+`direction` once, before the `Text` is built. This model has no dependency
 on any one backend's implementation.
 
 `origin` is a baseline leading-edge point for both native and OCR text
@@ -29,17 +29,16 @@ cleanly without needing the enclosing line as a separate argument).
 
 from __future__ import annotations
 
-import dataclasses
-from dataclasses import dataclass
 from math import atan2, degrees
+
+from pydantic import BaseModel
 
 from raster_parser.models.source import Source
 from raster_parser.commons.helpers.geometry import compute_origin, make_oriented_quad
 from raster_parser.models._convert import lists_to_tuples
 
 
-@dataclass
-class Text:
+class Text(BaseModel):
     text: str
     bbox: tuple[float, float, float, float]  # axis-aligned extent, local/page frame
     direction: tuple[float, float]  # unit vector; sole source of truth for orientation
@@ -86,7 +85,7 @@ class Text:
 
     def to_dict(self) -> dict:
         """JSON-safe dict of every field (tuples become lists); `from_dict` restores it."""
-        return dataclasses.asdict(self)
+        return self.model_dump()
 
     @staticmethod
     def from_dict(d: dict) -> "Text":
@@ -101,8 +100,7 @@ class Text:
             d["raw_span"] = lists_to_tuples(d["raw_span"])
         if d.get("source") is not None:
             d["source"] = Source(d["source"])
-        names = {f.name for f in dataclasses.fields(Text)}
-        return Text(**{k: v for k, v in d.items() if k in names})
+        return Text.model_validate(d)
 
     @staticmethod
     def from_pymupdf(

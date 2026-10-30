@@ -25,7 +25,6 @@ both. A path's own `rect` stays unclipped.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Iterator
 
 from raster_parser.commons.helpers.pymupdf_geometry import plain_item
@@ -150,12 +149,13 @@ def extract_vectors(page: Page) -> list[Vector]:
     ):
         vector = Vector.from_pymupdf(drawing, page_index=page_index, seq=seq)
         if blendmode is not None or opacity is not None or scissor is not None or clips:
-            vector = replace(
-                vector,
-                blendmode=blendmode if blendmode is not None else vector.blendmode,
-                opacity=opacity if opacity is not None else vector.opacity,
-                scissor=_intersect(vector.scissor, scissor),
-                clips=clips,
+            vector = vector.model_copy(
+                update=dict(
+                    blendmode=blendmode if blendmode is not None else vector.blendmode,
+                    opacity=opacity if opacity is not None else vector.opacity,
+                    scissor=_intersect(vector.scissor, scissor),
+                    clips=clips,
+                )
             )
         vectors.append(vector)
 

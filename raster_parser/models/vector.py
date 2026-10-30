@@ -16,8 +16,7 @@ pymupdf-free plain data.
 
 from __future__ import annotations
 
-import dataclasses
-from dataclasses import dataclass
+from pydantic import BaseModel, field_validator
 
 from raster_parser.models.source import Source
 from raster_parser.commons.helpers.pymupdf_geometry import pymupdf_item, plain_item
@@ -25,8 +24,7 @@ from raster_parser.commons.helpers.geometry import round_color
 from raster_parser.models._convert import lists_to_tuples
 
 
-@dataclass
-class Vector:
+class Vector(BaseModel):
     type: str  # "f" fill | "s" stroke | "fs" both (get_drawings()['type'])
     # Drawing ops: ("l", p1, p2) line, ("c", p1, c1, c2, p2) cubic Bezier, ("re", rect)
     # rectangle, ("qu", (ul, ur, lr, ll)) quadrilateral.
@@ -62,16 +60,15 @@ class Vector:
     # Where it came from: a native PDF drawing, or traced from an image (`models/source.py`).
     source: Source = Source.NATIVE_VECTOR
 
-    def __post_init__(self) -> None:
-        cap = self.lineCap
+    @field_validator("lineCap", mode="before")
+    @classmethod
+    def _widen_line_cap(cls, cap):
         if cap is None:
             cap = 0
         if isinstance(cap, (int, float)):
-            cap = (int(cap),) * 3
-        else:
-            cap = tuple(int(c) for c in cap) or (0, 0, 0)
-            cap = (cap + (cap[-1],) * 3)[:3]
-        self.lineCap = cap
+            return (int(cap),) * 3
+        cap = tuple(int(c) for c in cap) or (0, 0, 0)
+        return (cap + (cap[-1],) * 3)[:3]
 
     @property
     def line_cap(self) -> int:
@@ -84,7 +81,7 @@ class Vector:
 
     def to_dict(self) -> dict:
         """JSON-safe dict of every field (tuples become lists); `from_dict` restores it."""
-        return dataclasses.asdict(self)
+        return self.model_dump()
 
     @staticmethod
     def from_dict(d: dict) -> "Vector":
@@ -101,8 +98,7 @@ class Vector:
         )
         if d.get("source") is not None:
             d["source"] = Source(d["source"])
-        names = {f.name for f in dataclasses.fields(Vector)}
-        return Vector(**{k: v for k, v in d.items() if k in names})
+        return Vector.model_validate(d)
 
     @staticmethod
     def from_pymupdf(drawing: dict, *, page_index: int, seq: int) -> "Vector":
