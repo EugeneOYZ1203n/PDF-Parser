@@ -231,6 +231,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         key_timing, key_chart = _timing(timings[key], key, kslug, charts_dir, out_dir, blocks)
         add_timing_sections(builder, key_timing, key_chart)
+        if not any(r[key].pages for r in runs):
+            viewer_lines.append(f"# {key}: no page in range in any run, nothing to view")
+            continue
         dirs = " ".join(f'"{r[key].doc_dir.resolve()}"' for r in runs)
         command = f"python scripts/pipeline_report_viewer.py {dirs}"
         builder.add_viewer_command(key, command)

@@ -1,4 +1,4 @@
-"""pipeline_report_viewer: resolve_doc_dir (no Tk)."""
+"""pipeline_report_viewer: resolve_doc_dir and the page mapping (no Tk)."""
 
 from __future__ import annotations
 
@@ -31,3 +31,30 @@ def test_resolve_doc_dir_missing(tmp_path):
 def test_cli_rejects_three_dirs(tmp_path):
     with pytest.raises(SystemExit):
         prv.main([str(tmp_path), str(tmp_path), str(tmp_path)])
+
+
+def test_pages_are_the_union_of_every_folder():
+    assert prv.union_pages([[1, 2], [1, 2, 3]]) == [1, 2, 3]
+    assert prv.union_pages([[], [2, 0]]) == [0, 2]
+    assert prv.union_pages([[]]) == []
+
+
+def test_layer_pos_follows_each_folders_own_pages():
+    assert prv.layer_pos([1, 2, 3], 3) == 2
+    assert prv.layer_pos([2, 3], 3) == 1  # page 1 was out of range for this folder's PDF
+    assert prv.layer_pos([2, 3], 1) is None
+
+
+def test_a_folder_with_no_pages_exits_with_a_message(tmp_path):
+    """Every configured page was out of range for the input's PDF: the report wrote `pages: []`."""
+    import pymupdf
+
+    pdf = tmp_path / "one_page.pdf"
+    with pymupdf.open() as doc:
+        doc.new_page()
+        doc.save(str(pdf))
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"source_pdf": str(pdf), "pages": [], "layers": []})
+    )
+    with pytest.raises(SystemExit, match="no pages to show"):
+        prv.ViewerApp([tmp_path])

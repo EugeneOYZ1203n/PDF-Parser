@@ -52,6 +52,18 @@ def _page_image(
     return Image.frombytes("RGBA" if alpha else "RGB", (pix.width, pix.height), pix.samples)
 
 
+def union_pages(page_lists: list[list[int]]) -> list[int]:
+    """Every page any folder holds, ascending: a page a folder lacks (out of range for its PDF,
+    so the report skipped it) shows that folder's layers as blank."""
+    return sorted({p for pages in page_lists for p in pages})
+
+
+def layer_pos(panel_pages: list[int], page: int) -> "int | None":
+    """Position of `page` in one folder's layer PDFs (they hold only that folder's pages, in its
+    manifest order), or None when that folder has no such page."""
+    return panel_pages.index(page) if page in panel_pages else None
+
+
 class _Panel:
     def __init__(self, idx: int, doc_dir: Path) -> None:
         self.idx = idx
@@ -73,10 +85,15 @@ class ViewerApp:
     def __init__(self, doc_dirs: list[Path]) -> None:
         self.panels = [_Panel(i, d) for i, d in enumerate(doc_dirs)]
         self.source = pymupdf.open(self.panels[0].source_pdf)
-        self.pages = self.panels[0].pages
-        for p in self.panels[1:]:
+        self.pages = union_pages([p.pages for p in self.panels])
+        if not self.pages:
+            raise SystemExit(
+                "no pages to show: every page the report config asked for was out of range for "
+                + ", ".join(p.label for p in self.panels)
+            )
+        for p in self.panels:
             if p.pages != self.pages:
-                print(f"warning: {p.label} pages {p.pages} != {self.pages}; using the first")
+                print(f"note: {p.label} has pages {p.pages}; its layers are blank on the others")
 
         self.page_pos = 0
         self.zoom = _DEFAULT_ZOOM
@@ -203,13 +220,16 @@ class ViewerApp:
             else Image.new("RGBA", src.size, (255, 255, 255, 255))
         )
         for panel in self.panels:
+            pos = layer_pos(panel.pages, self.pages[self.page_pos])
+            if pos is None:
+                continue
             for entry in panel.layers:
                 if not self._vars[(panel.idx, entry["file"])].get():
                     continue
                 layer_doc = panel.layer_docs[entry["file"]]
-                if self.page_pos >= layer_doc.page_count:
+                if pos >= layer_doc.page_count:
                     continue  # never clamp: that would show another page's layer
-                layer = _page_image(layer_doc, self.page_pos, self.zoom, alpha=True)
+                layer = _page_image(layer_doc, pos, self.zoom, alpha=True)
                 if layer.size != base.size:
                     layer = layer.resize(base.size)
                 base = Image.alpha_composite(base, layer)
