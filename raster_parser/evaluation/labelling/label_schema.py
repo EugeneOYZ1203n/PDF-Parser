@@ -1,5 +1,5 @@
 """Label files: hand-labelled **original vector text** -- text drawn as vector paths in the source
-PDF, typed in by a human.
+PDF, typed in by a human with `scripts/label/manual_vector_text_label.py`.
 
 That is the only thing a label file holds. Every other kind of ground truth is derived when the
 benchmark runs: native text from the PDF itself (`native_label.native_label_pdf`, entries with
@@ -10,8 +10,7 @@ One `LabelEntry` per labelled word or line. It mirrors a `Text` (`from_text` / `
 `bbox` is the text's axis-aligned box in unrotated page space, `expected_rotation` its reading
 angle (`Text.angle()`, degrees, 0..359). It is tied to the `Vector`s that draw it by
 `vector_signatures` (`path_signature` of each), so a fresh extraction of the same PDF can match a
-label back to its exact paths. `label_id` is the entry's stable identity (edits replace it in
-place).
+label back to its exact paths. `label_id` is the stable identity the label tool edits by.
 
 Version 1 files (with `cluster_bbox`, `cluster_signature`, `baseline_id`, raster / CAD-font
 entries, `geometry_entries` and `baselines`) still load: the box is read from `cluster_bbox`,

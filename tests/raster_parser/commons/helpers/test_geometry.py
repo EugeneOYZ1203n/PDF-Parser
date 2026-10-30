@@ -191,6 +191,12 @@ def test_bboxes_intersect():
     assert not geometry.bboxes_intersect((0, 0, 10, 10), (11, 0, 20, 10))
 
 
+def test_bbox_contains():
+    assert geometry.bbox_contains((0, 0, 10, 10), 5, 5)
+    assert geometry.bbox_contains((0, 0, 10, 10), 10, 0)  # on the edge
+    assert not geometry.bbox_contains((0, 0, 10, 10), 10.5, 5)
+
+
 # --------------------------------------------------------------------------
 # transform_point / transform_direction
 # --------------------------------------------------------------------------

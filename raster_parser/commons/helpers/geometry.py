@@ -115,6 +115,11 @@ def bboxes_intersect(a: BBox, b: BBox) -> bool:
     return ax0 <= bx1 and bx0 <= ax1 and ay0 <= by1 and by0 <= ay1
 
 
+def bbox_contains(bbox: BBox, x: float, y: float) -> bool:
+    """True if the point (x, y) lies within (or on the edge of) `bbox`."""
+    return bbox[0] <= x <= bbox[2] and bbox[1] <= y <= bbox[3]
+
+
 def make_oriented_quad(bbox: BBox, dx: float, dy: float) -> Quad:
     """Build a quad around `bbox`, oriented along the text direction
     `(dx, dy)`, returned as ``(ul, ur, lr, ll)`` `(x, y)` tuples.

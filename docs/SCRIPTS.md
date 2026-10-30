@@ -19,9 +19,10 @@ output](ARCHITECTURE.md#progress-output)).
 
 ## Typical workflow
 
-1. **Label** (optional). A label JSON (`outputs/labels/<stem>.json`, format in
-   `raster_parser/evaluation/labelling/label_schema.py`) holds hand-labelled vector text.
-   Native-text labels are never made by hand: the benchmark derives them from the PDF, so a plain
+1. **Label** (optional). `scripts/label/manual_vector_text_label.py PDF` writes
+   `outputs/labels/<stem>.json` with hand-labelled vector text (format in
+   `raster_parser/evaluation/labelling/label_schema.py`), starting each page from
+   `v2_vector_class`'s drafts (`scripts/label/README.md`). Native-text labels are never made by hand: the benchmark derives them from the PDF, so a plain
    PDF works too.
 2. **Report.** Write a config (`scripts/report_configs/`, field table in its `README.md`) and
    run
@@ -78,7 +79,7 @@ exactly. The run's OCR text is scored against two kinds of ground truth:
 | Type | Labels | From |
 |---|---|---|
 | `native_to_vector` | the page's native text, one label per line | derived from the PDF (`native_label.native_label_pdf`) |
-| `original_vector` | hand-labelled vector text (text drawn as paths in the original PDF) | a label JSON |
+| `original_vector` | hand-labelled vector text (text drawn as paths in the original PDF) | a label JSON (`scripts/label/manual_vector_text_label.py`) |
 
 All metrics are reductions over one overlap graph between labels and OCR readings
 (`raster_parser/evaluation/evaluate/metrics*.py`), micro-averaged across pages and inputs (sum

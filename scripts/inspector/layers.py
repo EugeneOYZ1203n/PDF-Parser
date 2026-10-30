@@ -214,7 +214,7 @@ def summarize_selection(
     "vectors" are distinct source paths, identified by the `seqno` attr
     shared by every item belonging to the same `get_drawings()` path.
     Intersection is bbox-only (matches the existing rubber-band select in
-    scripts/label/vector_label.py).
+    scripts/label/manual_vector_text_label.py).
     """
 
     hits = [item for item in items if item.bbox.intersects(region)]
