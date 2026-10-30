@@ -13,7 +13,7 @@ and how to add a backend. For the public API (parameters, errors, wiring into a 
 | `commons/` | The shared foundation: geometry and text-orientation helpers, rendering primitives, process pools and logging. `commons/v1_commons/` holds what the v1 backends (and `extract_vectors_from_png`) share. |
 | `core/` | The orchestrator and the backend contract: `interfaces.py` (the backend protocols), `registry.py` (backend names → functions), `pipeline.py` (`run_pipeline`, `PHASE_NAMES`). |
 | `phase_native_read/` | native_read, always the same. |
-| `phase_raster_vectorize/<Name>/` | raster_vectorize backends: `stub`, `v1_raster_to_vec`, `junction`. |
+| `phase_raster_vectorize/<Name>/` | raster_vectorize backends: `stub`, `v1_raster_to_vec`, `junction`, `involution_stroke` (needs the `ml` extra). |
 | `phase_vector_classify/<Name>/` | vector_classify backends: `stub`, `v1_vector_class`, `v2_vector_class` (walked through in `docs/PIPELINE.md`, terms in `docs/Glossary.md`). |
 | `phase_output_assemble/` | output_assemble, always the same. |
 | `evaluation/` | Ground-truth labels, input conversion and the scoring behind the report tools (`docs/SCRIPTS.md`); `extract()` never uses it. |
@@ -124,9 +124,9 @@ module listed for only one family is a candidate to move into that family's own 
 | `commons/v1_commons/ocr.py` | OCR crop normalisation, PaddleOCR 2.x result walking, OCR word -> `Text` | `v1_raster_to_vec`, `v1_vector_class` |
 | `commons/v1_commons/render.py` | The original reconstructor's replay (its own `finish()` defaults) | `v1_raster_to_vec`, `v1_vector_class`, `extract_vectors_from_png` |
 | `commons/paddle_engine.py` | The one PaddleOCR 2.x engine (`PaddleBackend`: detect, classify 0/180, recognise) | `v2_vector_class`, `commons/raster_text/` |
-| `commons/raster_text/` | The raster prelude every raster_vectorize backend but `v1_raster_to_vec` runs first: tiled OCR, colour CLAHE, colour layers, text erasure (`prepare_images`), plus the backends' shared debug / sample-run helpers (`debug_tools.py`) | `junction` |
+| `commons/raster_text/` | The raster prelude every raster_vectorize backend but `v1_raster_to_vec` runs first: tiled OCR, colour CLAHE, colour layers, text erasure (`prepare_images`), plus the backends' shared debug / sample-run helpers (`debug_tools.py`) | `junction`, `involution_stroke` |
 | `commons/workers.py` | Spawned process pools and per-worker BLAS thread pinning | `v1_raster_to_vec`, `v2_vector_class`, `extract_vectors_from_png` |
-| `commons/logging_setup.py` | The `raster_parser` logger and `configure_logging` | core, `phase_native_read`, `phase_output_assemble`, `v1_raster_to_vec`, `evaluation`, `scripts`, `commons/raster_text/`, `junction` |
+| `commons/logging_setup.py` | The `raster_parser` logger and `configure_logging` | core, `phase_native_read`, `phase_output_assemble`, `v1_raster_to_vec`, `evaluation`, `scripts`, `commons/raster_text/`, `junction`, `involution_stroke` |
 | `commons/progress.py` | Stage lines and tqdm bars on stderr at DEBUG log level | core, `phase_native_read`, `v1_raster_to_vec`, `v1_vector_class`, `extract_vectors_from_png`, `scripts` |
 | `commons/step_timing.py` | `StepClock`: named step durations | `core/pipeline.py`, `v2_vector_class` |
 | `commons/paths.py` | Repo-relative output folders for the scripts | `scripts` (rasterise, report, benchmark) |

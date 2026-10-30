@@ -96,10 +96,15 @@ def test_commons_never_imports_a_phase():
 
 def test_pipeline_code_logs_instead_of_printing():
     """The pipeline (core, commons, phases, extract_vectors_from_png) logs; `evaluation` report helpers may
-    print their tables."""
+    print their tables, and vendored upstream code (`_upstream/`) is kept as
+    published."""
     import ast
 
-    pipeline = [p for p in PKG.rglob("*.py") if p.relative_to(PKG).parts[0] != "evaluation"]
+    pipeline = [
+        p
+        for p in PKG.rglob("*.py")
+        if p.relative_to(PKG).parts[0] != "evaluation" and "_upstream" not in p.parts
+    ]
     bad = [
         f"{path.relative_to(PKG)}:{node.lineno}"
         for path in pipeline
@@ -124,14 +129,14 @@ def test_import_leaves_sys_path_and_heavy_backends_alone():
 
 
 def test_data_types_are_defined_only_in_models():
-    """Dataclasses and enums live in `raster_parser/models/`; the evaluation label schema (pydantic) is
-    the one other place that declares types."""
+    """Dataclasses and enums live in `raster_parser/models/`; the evaluation label schema (pydantic) and
+    vendored upstream code (`_upstream/`) are the only other places that declare types."""
     import ast
 
     bad = []
     for path in PKG.rglob("*.py"):
         parts = path.relative_to(PKG).parts
-        if parts[0] in ("models", "evaluation"):
+        if parts[0] in ("models", "evaluation") or "_upstream" in parts:
             continue
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if not isinstance(node, ast.ClassDef):

@@ -5,3 +5,4 @@ __pycache__/
 /tmp
 /outputs
 .pytest_cache/
+/raster_parser/weights

@@ -19,6 +19,11 @@ dependencies = [
     "tqdm",  # stage progress bars (commons/progress.py)
 ]
 
+[project.optional-dependencies]
+# involution_stroke (and later raster backends): torch (CPU wheels:
+# https://download.pytorch.org/whl/cpu), plus what the vendored upstream code imports.
+ml = ["torch", "networkx", "shapely", "matplotlib"]
+
 [dependency-groups]
 test = ["pytest"]
 notebook = ["matplotlib", "scikit-learn"]

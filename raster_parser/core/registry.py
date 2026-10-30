@@ -25,6 +25,13 @@ def _junction(images, page, settings):
     return extract(images, page, settings)
 
 
+def _involution_stroke(images, page, settings):
+    """`involution_stroke.adapter.extract`, imported on first use (torch: the `ml` extra)."""
+    from raster_parser.phase_raster_vectorize.involution_stroke.adapter import extract
+
+    return extract(images, page, settings)
+
+
 def _v1_vector_class(vectors, page, settings):
     """`v1_vector_class.parse.parse`, imported on first use (PaddleOCR, PIL)."""
     from raster_parser.phase_vector_classify.v1_vector_class.parse import parse
@@ -44,6 +51,7 @@ VECTORIZE_BACKENDS: dict[str, RasterVectorizer] = {
     "stub": _p2_stub,
     "v1_raster_to_vec": _v1_raster_to_vec,
     "junction": _junction,
+    "involution_stroke": _involution_stroke,
 }
 
 CLASSIFY_BACKENDS: dict[str, VectorClassifier] = {

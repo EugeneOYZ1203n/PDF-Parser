@@ -6,12 +6,14 @@ from __future__ import annotations
 
 def test_no_local_colour_or_placement_copies():
     from raster_parser.commons.raster_text import raster_text
+    from raster_parser.phase_raster_vectorize.involution_stroke import adapter as involution
     from raster_parser.phase_raster_vectorize.junction import adapter
 
-    for module in (raster_text, adapter):
+    for module in (raster_text, adapter, involution):
         assert not hasattr(module, "_hex_rgb") and not hasattr(module, "_rgb_hex")
-    assert not hasattr(adapter, "_place_raster")
-    assert adapter.place_raster is raster_text.place_raster
+    for module in (adapter, involution):
+        assert not hasattr(module, "_place_raster")
+        assert module.place_raster is raster_text.place_raster
 
 
 def test_rgb255_to_hex():

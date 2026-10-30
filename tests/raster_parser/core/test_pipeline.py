@@ -23,7 +23,12 @@ def _pdf(tmp_pdf_path) -> str:
 
 
 def test_registry_names_and_defaults():
-    assert set(registry.VECTORIZE_BACKENDS) == {"stub", "v1_raster_to_vec", "junction"}
+    assert set(registry.VECTORIZE_BACKENDS) == {
+        "stub",
+        "v1_raster_to_vec",
+        "junction",
+        "involution_stroke",
+    }
     assert set(registry.CLASSIFY_BACKENDS) == {"stub", "v1_vector_class", "v2_vector_class"}
     assert (registry.DEFAULT_VECTORIZE, registry.DEFAULT_CLASSIFY) == (
         "v1_raster_to_vec",
