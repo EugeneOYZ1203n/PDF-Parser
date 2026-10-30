@@ -41,6 +41,11 @@ def axial_distance(a: float, b: float) -> float:
     return min(d, 180.0 - d)
 
 
+def rgb255_to_hex(color) -> str:
+    """The first three components of a 0..255 colour (ints or floats, truncated) as `#rrggbb`."""
+    return "#" + "".join(f"{int(c):02x}" for c in color[:3])
+
+
 def rgb01_to_hex(color: tuple[float, ...]) -> str:
     """An RGB colour with components in [0, 1] as `#rrggbb`; out-of-range components clamp."""
     return "#%02x%02x%02x" % tuple(min(255, max(0, round(c * 255))) for c in color)
@@ -69,6 +74,13 @@ def rect_gap(a: BBox, b: BBox) -> float:
     dx = max(bx0 - ax1, ax0 - bx1, 0.0)
     dy = max(by0 - ay1, ay0 - by1, 0.0)
     return hypot(dx, dy)
+
+
+def points_bbox(points) -> BBox:
+    """Axis-aligned bbox of a non-empty sequence of `(x, y)` points, as plain floats."""
+    xs = [float(p[0]) for p in points]
+    ys = [float(p[1]) for p in points]
+    return (min(xs), min(ys), max(xs), max(ys))
 
 
 def dims(bbox: BBox) -> tuple[float, float]:

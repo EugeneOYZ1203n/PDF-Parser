@@ -16,10 +16,9 @@ line, minAreaRect or vector-direction estimate:
    classifier) is `parse.py`'s +90/180/270 low-score retry. Both take BGR
    crops.
 
-One `PaddleOCR` engine per `(ocr_version, lang)` per process, shared by
-both backends (`_shared_engine`); `ocr_pool.py` runs them on a process pool
-when `workers > 1`. Own copy -- sibling P3 backends share no code. Imports
-`cv2`.
+The engine itself is the shared `commons/paddle_engine.py` (one `PaddleOCR` per
+`(ocr_version, lang)` per process, also used by the raster prelude); `ocr_pool.py` runs it on a
+process pool when `workers > 1`. Imports `cv2`.
 """
 
 from __future__ import annotations
@@ -30,21 +29,18 @@ import cv2
 import numpy as np
 
 # A line direction is axial (0/180 ambiguous); the angle classifier / retry sweep resolves that.
-from raster_parser.models.ocr import OcrBox
 from raster_parser.commons.helpers.geometry import wrap_axial as normalize_rotation
+from raster_parser.commons.paddle_engine import (  # noqa: F401 -- re-exported for v2's modules
+    PaddleBackend,
+    _as_bgr,
+    rgb_to_bgr,
+)
+from raster_parser.models.ocr import OcrBox
 from raster_parser.phase_vector_classify.v2_vector_class.config import (
     CROP_BORDER_PX,
     CROP_EXPAND_FRACTION,
-    OCR_BATCH_SIZE,
-    OCR_LANG,
-    OCR_VERSION,
     SINGLE_CHAR_PENALTY,
 )
-
-# PaddleOCR's own DB detector's det_limit_side_len -- a cluster render is
-# rarely anywhere near this, so it's a generous ceiling rather than a tuned
-# value.
-_DETECT_LIMIT_SIDE_LEN = 4000
 
 
 def score(box: OcrBox) -> float:
@@ -55,97 +51,6 @@ def score(box: OcrBox) -> float:
     if len(box.text) == 1:
         return box.confidence * SINGLE_CHAR_PENALTY
     return box.confidence
-
-
-def _rows_to_boxes(rows, flips) -> list[OcrBox]:
-    out: list[OcrBox] = []
-    for row, flip in zip(rows, flips):
-        text = str(row[0] or "").strip()
-        conf = float(row[1] or 0.0)
-        out.append(OcrBox(text=text, confidence=conf if text else 0.0, flip_deg=flip))
-    return out
-
-
-_ENGINES: dict[tuple[str, str], object] = {}
-
-
-def _shared_engine(ocr_version: str, lang: str):
-    """The one `PaddleOCR` instance per `(ocr_version, lang)` in this process,
-    used for detection and recognition alike -- each `PaddleOCR`
-    loads det + cls + rec, so separate instances held every model twice. The merged settings are the union of what each backend
-    needed (`det_limit_side_len` only affects `text_detector`; the batch
-    sizes only `text_classifier`/`text_recognizer`), so outputs are
-    unchanged. Every pool worker (`ocr_pool.py`) is its own process with
-    its own cache, and within a process detect/recognise run sequentially on one
-    thread, so sharing is safe."""
-    key = (ocr_version, lang)
-    if key not in _ENGINES:
-        from paddleocr import PaddleOCR
-
-        _ENGINES[key] = PaddleOCR(
-            ocr_version=ocr_version,
-            lang=lang,
-            use_angle_cls=True,  # PaddleOCR's own classifier resolves the 0/180 flip
-            show_log=False,
-            det_limit_side_len=_DETECT_LIMIT_SIDE_LEN,
-            rec_batch_num=OCR_BATCH_SIZE,
-            cls_batch_num=OCR_BATCH_SIZE,
-        )
-    return _ENGINES[key]
-
-
-class PaddleBackend:
-    """paddleocr 2.x text detection, angle classification and recognition, all on the process's
-    shared engine (`_shared_engine`, built with a generous `det_limit_side_len`)."""
-
-    def __init__(self, ocr_version: str = OCR_VERSION, lang: str = OCR_LANG) -> None:
-        self.key = (ocr_version, lang)
-
-    @classmethod
-    def warmup(cls, ocr_version: str = OCR_VERSION, lang: str = OCR_LANG) -> None:
-        """Force the (model-downloading on first ever call) engine build
-        now, in the calling process. Safe to call repeatedly."""
-        cls(ocr_version, lang)._engine()
-
-    def _engine(self):
-        return _shared_engine(*self.key)
-
-    def detect(self, bgr: np.ndarray) -> list[np.ndarray]:
-        """Every text quad PaddleOCR's DB detector (`engine.text_detector`) finds in `bgr`, each
-        a `(4, 2)` array of `(x, y)` pixel points in `bgr`'s own pixel space, PaddleOCR's own
-        corner order (clockwise from top-left)."""
-        dt_boxes, _elapse = self._engine().text_detector(bgr)
-        return [np.asarray(quad, dtype=np.float64) for quad in dt_boxes]
-
-    def recognize_crops(self, crops: list[np.ndarray]) -> list[OcrBox]:
-        """One `OcrBox` per BGR crop, in input order: PaddleOCR's angle
-        classifier labels each (already upright-rotated) crop 0 or 180, the
-        180 ones are flipped, then the whole batch is recognised in one
-        `text_recognizer` call. `flip_deg` records the flip."""
-        if not crops:
-            return []
-        bgr = [_as_bgr(c) for c in crops]
-        engine = self._engine()
-        # TextClassifier deep-copies its input itself (predict_cls.py).
-        _, cls_results, _ = engine.text_classifier(bgr)
-        flips = [180 if str(label) == "180" else 0 for label, _score in cls_results]
-        upright = [
-            np.ascontiguousarray(np.rot90(img, 2)) if flip else img for img, flip in zip(bgr, flips)
-        ]
-        rec = engine.text_recognizer(upright)
-        rows = rec[0] if isinstance(rec, tuple) else rec
-        return _rows_to_boxes(rows, flips)
-
-    def recognize_crops_raw(self, crops: list[np.ndarray]) -> list[OcrBox]:
-        """Recognise BGR `crops` as-is, no `text_classifier` call --
-        `parse.py`'s retry sweep, which has already rotated each crop to the
-        quarter-turn it wants tried. `flip_deg` is always 0."""
-        if not crops:
-            return []
-        bgr = [_as_bgr(c) for c in crops]
-        rec = self._engine().text_recognizer(bgr)
-        rows = rec[0] if isinstance(rec, tuple) else rec
-        return _rows_to_boxes(rows, [0] * len(bgr))
 
 
 # ---------------------------------------------------------------------------
@@ -301,22 +206,3 @@ def reorder_quad_reading(quad, angle_deg: float) -> tuple:
     bottom = sorted(np.argsort(across)[2:], key=lambda i: along[i])
     order = [top[0], top[1], bottom[1], bottom[0]]
     return tuple((float(q[i][0]), float(q[i][1])) for i in order)
-
-
-def _as_bgr(crop: np.ndarray) -> np.ndarray:
-    """An already-BGR crop -> a contiguous 3-channel uint8 array, copying
-    only when it isn't one already (grayscale, extra channels, a strided
-    view)."""
-    arr = np.asarray(crop, dtype=np.uint8)
-    if arr.ndim == 2:
-        return np.ascontiguousarray(np.repeat(arr[:, :, None], 3, axis=2))
-    return np.ascontiguousarray(arr[:, :, :3])
-
-
-def rgb_to_bgr(crop: np.ndarray) -> np.ndarray:
-    """An RGB image (e.g. a PIL render) -> a 3-channel BGR array (paddleocr
-    2.x's TextClassifier/TextRecognizer/TextDetector are cv2/BGR)."""
-    arr = np.asarray(crop, dtype=np.uint8)
-    if arr.ndim == 2:  # grayscale -- gray RGB and gray BGR are identical
-        return np.ascontiguousarray(np.repeat(arr[:, :, None], 3, axis=2))
-    return np.ascontiguousarray(arr[:, :, :3][:, :, ::-1])

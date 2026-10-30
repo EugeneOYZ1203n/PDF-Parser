@@ -234,3 +234,9 @@ def test_transform_direction_is_unaffected_by_position():
 
 def test_dims():
     assert geometry.dims((1, 2, 4, 10)) == (3, 8)
+
+
+def test_points_bbox():
+    from raster_parser.commons.helpers.geometry import points_bbox
+
+    assert points_bbox([(3, 4), (1, 9), (2, -1)]) == (1.0, -1.0, 3.0, 9.0)

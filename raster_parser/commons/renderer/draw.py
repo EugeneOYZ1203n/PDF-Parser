@@ -418,6 +418,11 @@ def stroke_batch_spec(polylines, color: Rgb, *, width: float = 1.0) -> StrokeBat
     )
 
 
+def dot_batch_spec(points, color: Rgb, *, radius: float = 0.8) -> StrokeBatchSpec:
+    """Many filled dots, as zero-length round-capped strokes."""
+    return stroke_batch_spec([(p,) for p in points], color, width=2.0 * radius)
+
+
 def draw_stroke_batch(page: "pymupdf.Page", spec: StrokeBatchSpec) -> None:
     """One content stream for the whole batch, coordinates written in page
     space under the page's own inverse transform (`cm`), one `S` per

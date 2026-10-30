@@ -14,6 +14,7 @@ dependencies = [
     "setuptools",  # paddleocr 2.x imports it at runtime; py3.12 venvs don't ship it
     "pyautotrace",
     "scipy",  # v2_vector_class: cKDTree in the pattern-lattice step
+    "scikit-image",  # commons.raster_text + junction: deskew, skeletons (already pulled in by paddleocr)
     "pyenchant",  # v2_vector_class: English-word scoring; Linux also needs libenchant-2-2 + hunspell-en-us
     "tqdm",  # stage progress bars (commons/progress.py)
 ]

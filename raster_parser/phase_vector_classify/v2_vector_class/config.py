@@ -7,6 +7,8 @@ split. Self-contained -- not shared with any sibling backend's config.py."""
 
 from __future__ import annotations
 
+from raster_parser.commons.paddle_engine import OCR_BATCH_SIZE, OCR_LANG, OCR_VERSION  # noqa: F401 -- one engine, one setting
+
 # ======================================================================
 # Classification chain (classify_vectors.py) -- seqno merge + spatial clustering.
 # ======================================================================
@@ -111,9 +113,6 @@ CROSS_PAIR_CHUNK = 250_000
 # OCR (paddle_engine.py, parse.py)
 # ======================================================================
 
-OCR_VERSION = "PP-OCRv4"
-OCR_LANG = "en"
-OCR_BATCH_SIZE = 128
 MIN_RENDER_SIDE_PX = 100
 MAX_RENDER_DPI = 4800
 

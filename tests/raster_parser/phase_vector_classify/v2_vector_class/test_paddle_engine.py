@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
+from raster_parser.commons import paddle_engine as shared_engine
 from raster_parser.phase_vector_classify.v2_vector_class import paddle_engine as pe
 
 _BAR = np.array([[100.0, 190.0], [300.0, 190.0], [300.0, 210.0], [100.0, 210.0]])
@@ -138,7 +139,7 @@ def test_score_penalises_single_characters_and_zeroes_blanks():
 
 def test_one_backend_detects_and_recognises_on_the_shared_engine(monkeypatch):
     sentinel = object()
-    monkeypatch.setattr(pe, "_shared_engine", lambda *key: sentinel)
+    monkeypatch.setattr(shared_engine, "_shared_engine", lambda *key: sentinel)
     backend = pe.PaddleBackend("vX", "xx")
     assert backend._engine() is sentinel
     assert all(

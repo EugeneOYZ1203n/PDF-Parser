@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 import pytest
 
+from raster_parser.commons import paddle_engine as shared_engine
 from raster_parser.commons.helpers.clustering import cluster_spatial
 from raster_parser.models.page import Page
 from raster_parser.models.settings import RunSettings
@@ -367,7 +368,7 @@ def test_on_debug_image_streams_images_into_the_report_folders(page_meta, vector
 # ---------------------------------------------------------------------------
 def test_detect_and_recognition_share_one_engine(monkeypatch):
     sentinel = object()
-    monkeypatch.setitem(pe._ENGINES, ("vX", "xx"), sentinel)
+    monkeypatch.setitem(shared_engine._ENGINES, ("vX", "xx"), sentinel)
     assert PaddleBackend("vX", "xx")._engine() is sentinel
     assert PaddleBackend("vX", "xx")._engine() is sentinel
 

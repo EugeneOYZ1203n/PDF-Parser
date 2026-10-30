@@ -13,7 +13,7 @@ and how to add a backend. For the public API (parameters, errors, wiring into a 
 | `commons/` | The shared foundation: geometry and text-orientation helpers, rendering primitives, process pools and logging. `commons/v1_commons/` holds what the v1 backends (and `extract_vectors_from_png`) share. |
 | `core/` | The orchestrator and the backend contract: `interfaces.py` (the backend protocols), `registry.py` (backend names → functions), `pipeline.py` (`run_pipeline`, `PHASE_NAMES`). |
 | `phase_native_read/` | native_read, always the same. |
-| `phase_raster_vectorize/<Name>/` | raster_vectorize backends: `stub`, `v1_raster_to_vec`. |
+| `phase_raster_vectorize/<Name>/` | raster_vectorize backends: `stub`, `v1_raster_to_vec`, `junction`. |
 | `phase_vector_classify/<Name>/` | vector_classify backends: `stub`, `v1_vector_class`, `v2_vector_class` (walked through in `docs/PIPELINE.md`, terms in `docs/Glossary.md`). |
 | `phase_output_assemble/` | output_assemble, always the same. |
 | `evaluation/` | Ground-truth labels, input conversion and the scoring behind the report tools (`docs/SCRIPTS.md`); `extract()` never uses it. |
@@ -109,22 +109,24 @@ module listed for only one family is a candidate to move into that family's own 
 
 | Module | What it is for | Used by |
 |---|---|---|
-| `commons/helpers/geometry.py` | Tuple geometry: bboxes, item points, quads, `bbox_iou`, `union_bbox`, axial angles (`wrap_axial`, `axial_distance`), colour rounding, `rgb01_to_hex`, `PDF_POINTS_PER_INCH` | models, `v1_commons`, `phase_native_read`, `v1_raster_to_vec`, `v1_vector_class`, `extract_vectors_from_png`, `v2_vector_class`, `scripts/inspector` |
+| `commons/helpers/geometry.py` | Tuple geometry: bboxes, item points, quads, `bbox_iou`, `union_bbox`, axial angles (`wrap_axial`, `axial_distance`), colour rounding, `rgb01_to_hex`, `PDF_POINTS_PER_INCH` | models, `v1_commons`, `phase_native_read`, `v1_raster_to_vec`, `v1_vector_class`, `extract_vectors_from_png`, `v2_vector_class`, `scripts/inspector`, `commons/raster_text/`, `junction` |
 | `commons/helpers/clustering.py` | `cluster_spatial` (bbox-gap single linkage on a hash grid), `UnionFind` | `v2_vector_class` |
 | `commons/helpers/layer_separation.py` | Layer / colour / width buckets | `v2_vector_class` |
 | `commons/helpers/pymupdf_geometry.py` | Live PyMuPDF objects <-> plain item tuples; hover metadata (angles, lengths, matrices) | models, `phase_native_read`, `scripts/inspector` |
-| `commons/helpers/pixmap.py` | `pixmap_to_array`, `zoom_matrix(dpi)` | `phase_native_read`, `v1_raster_to_vec`, `extract_vectors_from_png` |
+| `commons/helpers/pixmap.py` | `pixmap_to_array`, `zoom_matrix(dpi)` | `phase_native_read`, `v1_raster_to_vec`, `extract_vectors_from_png`, `commons/raster_text/` |
 | `commons/helpers/text_orientation.py` | Reading direction <-> the old `rotate` / glyph orientation | `v1_commons`; migration helpers for callers (`docs/model_migration.md`) |
 | `commons/renderer/_shapes.py` | Exact `Vector` replay onto a page (`replay_drawing_paths`, `replay_item`), `path_color_hex` | `v1_commons`, `commons/renderer/draw.py`, `v2_vector_class`, `scripts/inspector` (tests) |
-| `commons/renderer/draw.py` | The spec -> draw layer every PDF is built from (incl. bulk stroke batches); `hex_to_rgb01` | `phase_output_assemble`, `v1_raster_to_vec`, `v1_vector_class`, `evaluation/report`, `evaluation/evaluate` |
-| `commons/renderer/pdf.py` | One-layer debug PDFs (boxes, quads, text, vectors) over `draw.py`; `rasterize_pdf`, `layer_slug` | `phase_output_assemble`, `v1_raster_to_vec`, `v1_vector_class`, `evaluation/report` |
+| `commons/renderer/draw.py` | The spec -> draw layer every PDF is built from (incl. bulk stroke / dot batches); `hex_to_rgb01` | `phase_output_assemble`, `v1_raster_to_vec`, `v1_vector_class`, `evaluation/report`, `evaluation/evaluate`, `commons/raster_text/`, `junction` |
+| `commons/renderer/pdf.py` | One-layer debug PDFs (boxes, quads, text, vectors) over `draw.py`; `rasterize_pdf`, `layer_slug` | `phase_output_assemble`, `v1_raster_to_vec`, `v1_vector_class`, `evaluation/report`, `commons/raster_text/`, `junction` |
 | `commons/renderer/png.py` | Monochrome cluster renders for OCR | `v2_vector_class` |
 | `commons/renderer/ocr_prep.py` | Crop / pad / scale a render for PaddleOCR | `v2_vector_class` |
 | `commons/v1_commons/autotrace.py` | pyautotrace PNG -> SVG -> PDF -> `Vector`s | `v1_raster_to_vec`, `extract_vectors_from_png` |
 | `commons/v1_commons/ocr.py` | OCR crop normalisation, PaddleOCR 2.x result walking, OCR word -> `Text` | `v1_raster_to_vec`, `v1_vector_class` |
 | `commons/v1_commons/render.py` | The original reconstructor's replay (its own `finish()` defaults) | `v1_raster_to_vec`, `v1_vector_class`, `extract_vectors_from_png` |
+| `commons/paddle_engine.py` | The one PaddleOCR 2.x engine (`PaddleBackend`: detect, classify 0/180, recognise) | `v2_vector_class`, `commons/raster_text/` |
+| `commons/raster_text/` | The raster prelude every raster_vectorize backend but `v1_raster_to_vec` runs first: tiled OCR, colour CLAHE, colour layers, text erasure (`prepare_images`), plus the backends' shared debug / sample-run helpers (`debug_tools.py`) | `junction` |
 | `commons/workers.py` | Spawned process pools and per-worker BLAS thread pinning | `v1_raster_to_vec`, `v2_vector_class`, `extract_vectors_from_png` |
-| `commons/logging_setup.py` | The `raster_parser` logger and `configure_logging` | core, `phase_native_read`, `phase_output_assemble`, `v1_raster_to_vec`, `evaluation`, `scripts` |
+| `commons/logging_setup.py` | The `raster_parser` logger and `configure_logging` | core, `phase_native_read`, `phase_output_assemble`, `v1_raster_to_vec`, `evaluation`, `scripts`, `commons/raster_text/`, `junction` |
 | `commons/progress.py` | Stage lines and tqdm bars on stderr at DEBUG log level | core, `phase_native_read`, `v1_raster_to_vec`, `v1_vector_class`, `extract_vectors_from_png`, `scripts` |
 | `commons/step_timing.py` | `StepClock`: named step durations | `core/pipeline.py`, `v2_vector_class` |
 | `commons/paths.py` | Repo-relative output folders for the scripts | `scripts` (rasterise, report, benchmark) |

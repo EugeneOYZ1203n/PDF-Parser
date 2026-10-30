@@ -18,6 +18,13 @@ def _v1_raster_to_vec(images, page, settings):
     return extract(images, page, settings)
 
 
+def _junction(images, page, settings):
+    """`junction.adapter.extract`, imported on first use (OpenCV, scikit-image, PaddleOCR)."""
+    from raster_parser.phase_raster_vectorize.junction.adapter import extract
+
+    return extract(images, page, settings)
+
+
 def _v1_vector_class(vectors, page, settings):
     """`v1_vector_class.parse.parse`, imported on first use (PaddleOCR, PIL)."""
     from raster_parser.phase_vector_classify.v1_vector_class.parse import parse
@@ -36,6 +43,7 @@ def _v2_vector_class(vectors, page, settings):
 VECTORIZE_BACKENDS: dict[str, RasterVectorizer] = {
     "stub": _p2_stub,
     "v1_raster_to_vec": _v1_raster_to_vec,
+    "junction": _junction,
 }
 
 CLASSIFY_BACKENDS: dict[str, VectorClassifier] = {

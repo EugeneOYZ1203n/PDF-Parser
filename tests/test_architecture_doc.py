@@ -17,14 +17,19 @@ def _shared_code_map() -> str:
 
 
 def test_every_shared_module_is_in_the_map():
+    """Each module has its own row, or its package has one (`commons/models/`)."""
     section = _shared_code_map()
     modules = [
-        p.relative_to(PKG).as_posix()
+        p.relative_to(PKG)
         for d in ("commons", "core")
         for p in (PKG / d).rglob("*.py")
         if p.name != "__init__.py"
     ]
-    missing = [m for m in sorted(modules) if f"`{m}`" not in section]
+    missing = [
+        m.as_posix()
+        for m in sorted(modules)
+        if f"`{m.as_posix()}`" not in section and f"`{m.parent.as_posix()}/`" not in section
+    ]
     assert missing == []
 
 
