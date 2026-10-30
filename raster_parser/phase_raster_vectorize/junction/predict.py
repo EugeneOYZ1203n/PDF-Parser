@@ -24,8 +24,8 @@ Output: `<out>/manifest.json` + one multi-page PDF per layer, the folder
 PNG per page in `<out>/color_layer_histograms/`; the viewer command is
 printed at the end. Default `<out>`: `outputs/junction_predict/<timestamp>__<pdf stem>/`.
 
-`LayerSet` / `parse_clip` / `render_region` are copied from
-`DeepVectoriser/predict.py` (sibling P2 backends share no code)."""
+`LayerSet` / `parse_clip` / `render_region` are the raster backends' shared helpers
+(`commons/raster_text/debug_tools.py`)."""
 
 from __future__ import annotations
 

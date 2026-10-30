@@ -1,10 +1,8 @@
 """Tunables for the shared P2 raster prelude (`raster_text.prepare_images`):
 tiled OCR -> colour CLAHE -> simple colour layers -> text removal.
 
-The OCR padding/deskew values are *copied* from
-`P3_Vector_Parsing/OldVectorClassification/config.py` + `paddle_engine.py`
-(not imported -- P2 may not import P3); keep them in step by hand if you
-want the two to pad identically."""
+The OCR padding / deskew values are the prelude's own; they started as the values of the
+original vector-classification OCR this code was ported from."""
 
 from __future__ import annotations
 

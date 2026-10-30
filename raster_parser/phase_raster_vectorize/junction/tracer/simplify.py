@@ -3,13 +3,11 @@ through `fit_polyline` (`pipeline.vectorize`, `fills.outlines`); the debug
 chain display (`adapter._accumulate_trace_geometry`) thins raw chains with
 `approximate_rdp` directly.
 
-Both chain ends are always kept, so a chain's junction/end nodes never move
--- the same contract as `Evaluation/CadFont/graph.py::_rdp_chain` (not
-imported: P2 backends don't depend on Evaluation tooling). A closed loop
+Both chain ends are always kept, so a chain's junction/end nodes never move. A closed loop
 (first point == last point) works too: the zero-length chord makes the first
 split the farthest point from the start. No endpoint snapping, no
 short-segment drop and no collinear merge: those damaged real geometry
-before (see git history, commit fcd677c)."""
+in the implementation this was ported from."""
 
 from __future__ import annotations
 

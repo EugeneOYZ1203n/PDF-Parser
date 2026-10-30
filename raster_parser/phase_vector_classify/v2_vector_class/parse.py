@@ -47,8 +47,8 @@ streams each stage's PDF layers as it runs; `on_debug_image` streams each debug 
 its source array exists, into `DEBUG_IMAGE_FOLDERS`. `on_step_time` gets every sub-step's
 seconds once the page is done (`("vector_classify", name, seconds)`; `StepClock`, names in `parse`).
 
-Fully self-contained (own paddle_engine.py / config.py / line geometry) -- imports nothing from
-a sibling P3 backend or from P2.
+Self-contained apart from `commons/` (own config.py / line geometry; the PaddleOCR engine is the
+shared `commons/paddle_engine.py`) -- imports nothing from another backend.
 """
 
 from __future__ import annotations

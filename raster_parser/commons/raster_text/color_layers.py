@@ -1,5 +1,4 @@
-"""Simple colour layers for the shared P2 raster prelude (replaces each
-backend's former DBSCAN `color_separation.py`). Runs on the CLAHE'd LAB
+"""Simple colour layers for the shared P2 raster prelude. Runs on the CLAHE'd LAB
 image (`enhance.clahe_lab`):
 
 1. ink -- `L` at or below its Otsu threshold (only when the two Otsu classes are
