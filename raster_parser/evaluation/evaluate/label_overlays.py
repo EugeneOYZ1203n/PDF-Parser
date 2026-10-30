@@ -19,6 +19,7 @@ manual-label vectors lost to drawing output):
 
 from __future__ import annotations
 
+from raster_parser.models.source import Source
 from raster_parser.evaluation.evaluate.metrics import (
     MATCH_BOX_COLOR,
     MISSED_GT_BOX_COLOR,
@@ -167,7 +168,7 @@ def extra_predictions(
 ) -> "tuple[list, list, list]":
     """`(extra_texts, extra_vectors, missed_vectors)` for one page:
 
-    - extra text: an OCR `Text` (`source == "ocr"`) whose bbox touches no
+    - extra text: an OCR `Text` (any `source` but `NATIVE_TEXT`) whose bbox touches no
       GT region of any type (`gt_boxes`);
     - extra vector: a vector the pipeline sent to OCR (`text_routed`) that
       no GT region covers (`_covered`);
@@ -176,7 +177,8 @@ def extra_predictions(
     extra_texts = [
         t
         for t in texts
-        if getattr(t, "source", "ocr") == "ocr" and not _touches(tuple(t.bbox), gt_boxes)
+        if getattr(t, "source", None) != Source.NATIVE_TEXT
+        and not _touches(tuple(t.bbox), gt_boxes)
     ]
     extra_vectors = [v for v in text_routed if not _covered(tuple(v.bbox), gt_boxes)]
     missed_vectors = [v for v in drawing if _covered(tuple(v.bbox), manual_boxes)]

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+from raster_parser.models.source import Source
 from raster_parser.commons.renderer.draw import hex_to_rgb01
 
 import json
@@ -358,7 +359,9 @@ def write_label_overlays(
     for pd in dumps:
         page = pd.result.page
         regions = [g for g in gt_regions if g.page_index == page.index]
-        preds = adapters.predictions_from_texts([t for t in pd.result.texts if t.source == "ocr"])
+        preds = adapters.predictions_from_texts(
+            [t for t in pd.result.texts if t.source != Source.NATIVE_TEXT]
+        )
         graph = metrics.build_overlap_graph(regions, preds, cfg)
         bbox_pages.append(render_boxes_pdf(page, label_overlays.gt_bbox_overlay(graph)))
         text_pages.append(render_text_pdf(page, label_overlays.gt_word_overlay(graph)))

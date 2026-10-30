@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from raster_parser.models.source import Source
 from raster_parser.evaluation.evaluate.label_overlays import (
     WORD_OK_COLOR,
     WORD_PARTIAL_COLOR,
@@ -79,10 +80,10 @@ def test_extra_predictions_definitions():
     gt = [(0, 0, 10, 10), (50, 50, 60, 60)]
     manual = [(50, 50, 60, 60)]
     texts = [
-        NS(bbox=(1, 1, 5, 5), source="ocr"),  # inside GT -> not extra
-        NS(bbox=(9, 9, 20, 20), source="ocr"),  # touches GT -> not extra
-        NS(bbox=(30, 30, 40, 40), source="ocr"),  # outside -> extra
-        NS(bbox=(30, 30, 40, 40), source="native"),  # not OCR -> ignored
+        NS(bbox=(1, 1, 5, 5), source=Source.NATIVE_VECTOR),  # inside GT -> not extra
+        NS(bbox=(9, 9, 20, 20), source=Source.NATIVE_VECTOR),  # touches GT -> not extra
+        NS(bbox=(30, 30, 40, 40), source=Source.NATIVE_VECTOR),  # outside -> extra
+        NS(bbox=(30, 30, 40, 40), source=Source.NATIVE_TEXT),  # not OCR -> ignored
     ]
     routed = [
         NS(bbox=(2, 2, 4, 4)),  # covered

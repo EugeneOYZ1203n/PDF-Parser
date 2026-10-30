@@ -11,6 +11,7 @@ import pytest
 
 pytest.importorskip("matplotlib")  # the `report` dependency group
 
+from raster_parser.models.source import Source
 from raster_parser.models.page import PageMeta  # noqa: E402
 from raster_parser.models.result import ExtractResult  # noqa: E402
 from raster_parser.models.text import Text  # noqa: E402
@@ -44,7 +45,7 @@ def _text(s: str, bbox) -> Text:
         word_no=0,
         page_index=0,
         seqno=0,
-        source="ocr",
+        source=Source.NATIVE_VECTOR,
     )
 
 

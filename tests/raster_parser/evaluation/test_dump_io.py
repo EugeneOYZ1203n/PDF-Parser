@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 
+from raster_parser.models.source import Source
 from raster_parser.models.result import ExtractResult
 from raster_parser.evaluation import dump_io
 
@@ -26,7 +27,14 @@ def test_write_load_dump(tmp_path, text, vector, page_meta):
     pd = dump_io.PageDump(
         result=_page(
             page_meta(index=2, width=300, height=400),
-            [text(text="Hello", bbox=(1.0, 2.0, 3.0, 4.0), direction=(0.0, 1.0), source="ocr")],
+            [
+                text(
+                    text="Hello",
+                    bbox=(1.0, 2.0, 3.0, 4.0),
+                    direction=(0.0, 1.0),
+                    source=Source.NATIVE_VECTOR,
+                )
+            ],
             [v],
             native_read=0.5,
         ),

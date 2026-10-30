@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import NamedTuple
 
+from raster_parser.models.source import Source
 from raster_parser.evaluation import dump_io
 from raster_parser.evaluation.evaluate import adapters, timing
 from raster_parser.evaluation.evaluate.metrics import (
@@ -92,7 +93,7 @@ def load_run(run_dir: Path, parser) -> "tuple[RunMeta, dict[str, RunEntry]]":
 class TextScore(NamedTuple):
     per_page: "list[tuple[int, TextMetricSuiteResult]]"
     aggregate: "TextMetricSuiteResult | None"
-    n_ocr: int  # OCR readings, blank included (`Text.source == "ocr"`)
+    n_ocr: int  # OCR readings, blank included (every `Text` but native text)
     n_ocr_touching_gt: int  # ... that overlap at least one ground-truth region
 
 
@@ -115,7 +116,7 @@ def score_text(entry: RunEntry, cfg: MetricConfig) -> TextScore:
         entries_by_type = {
             t: [e for e in entries_by_type_all[t] if e.page_index == pi] for t in TEXT_TYPES
         }
-        ocr = [t for t in page.result.texts if t.source == "ocr"]
+        ocr = [t for t in page.result.texts if t.source != Source.NATIVE_TEXT]
         res = evaluate_text_metrics(
             gt_by_type,
             entries_by_type,

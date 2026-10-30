@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
+from raster_parser.models.source import Source
 from raster_parser.commons.helpers.geometry import compute_origin, item_points
 from raster_parser.commons.logging_setup import get_logger
 
@@ -101,7 +102,7 @@ class LabelEntry(BaseModel):
             word_no=0,
             page_index=self.page_index,
             seqno=0,
-            source="label",
+            source=Source.NATIVE_TEXT if self.source == "native" else Source.NATIVE_VECTOR,
             orientation_source="dto",
         )
 
