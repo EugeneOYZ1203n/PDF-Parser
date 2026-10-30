@@ -33,6 +33,7 @@ import dataclasses
 from dataclasses import dataclass
 from math import atan2, degrees
 
+from raster_parser.models.source import Source
 from raster_parser.commons.helpers.geometry import compute_origin, make_oriented_quad
 from raster_parser.models._convert import lists_to_tuples
 
@@ -56,7 +57,7 @@ class Text:
     page_index: int
     seqno: int
     confidence: float = 0.0
-    source: str = "native"  # "native" | "ocr"
+    source: Source = Source.NATIVE_TEXT  # where it came from (`models/source.py`)
     # Where `direction` came from: "span" -- a real get_text("dict") line
     # `dir`; "fallback" -- no span matched, defaulted to horizontal (1, 0);
     # "ocr" -- the OCR step's own orientation, folded in before the Text was
@@ -98,6 +99,8 @@ class Text:
             d["quad_points"] = tuple(tuple(pt) for pt in d["quad_points"])
         if d.get("raw_span") is not None:
             d["raw_span"] = lists_to_tuples(d["raw_span"])
+        if d.get("source") is not None:
+            d["source"] = Source(d["source"])
         names = {f.name for f in dataclasses.fields(Text)}
         return Text(**{k: v for k, v in d.items() if k in names})
 
@@ -138,7 +141,7 @@ class Text:
                 word_no=word_no,
                 page_index=page_index,
                 seqno=seqno,
-                source="native",
+                source=Source.NATIVE_TEXT,
                 orientation_source="fallback",
                 raw_word=raw_word,
                 raw_span=None,
@@ -169,7 +172,7 @@ class Text:
             word_no=word_no,
             page_index=page_index,
             seqno=seqno,
-            source="native",
+            source=Source.NATIVE_TEXT,
             orientation_source="span",
             raw_word=raw_word,
             raw_span=raw_span,

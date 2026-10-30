@@ -19,6 +19,7 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass
 
+from raster_parser.models.source import Source
 from raster_parser.commons.helpers.pymupdf_geometry import pymupdf_item, plain_item
 from raster_parser.commons.helpers.geometry import round_color
 from raster_parser.models._convert import lists_to_tuples
@@ -58,6 +59,8 @@ class Vector:
     clips: tuple = ()
     # `get_drawings(extended=True)` nesting depth of this path inside clips/groups.
     level: int = 0
+    # Where it came from: a native PDF drawing, or traced from an image (`models/source.py`).
+    source: Source = Source.NATIVE_VECTOR
 
     def __post_init__(self) -> None:
         cap = self.lineCap
@@ -96,6 +99,8 @@ class Vector:
             (tuple(lists_to_tuples(item) for item in items), bool(even_odd))
             for items, even_odd in d.get("clips") or ()
         )
+        if d.get("source") is not None:
+            d["source"] = Source(d["source"])
         names = {f.name for f in dataclasses.fields(Vector)}
         return Vector(**{k: v for k, v in d.items() if k in names})
 

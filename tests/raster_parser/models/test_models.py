@@ -368,3 +368,40 @@ def test_level_records_clip_nesting():
     assert by_type["f"].level == next(d["level"] for d in paths if d["type"] == "f") > 0
     assert by_type["s"].level == 0
     assert by_type["f"].to_pymupdf()["level"] == by_type["f"].level
+
+
+def test_text_and_vector_carry_a_source_that_round_trips():
+    from raster_parser.models.source import Source
+    from raster_parser.models.text import Text
+    from raster_parser.models.vector import Vector
+
+    assert Source("From Image") is Source.FROM_IMAGE and str(Source.NATIVE_TEXT) == "Native Text"
+    v = Vector.from_dict({"source": "From Image", "items": [], "rect": (0, 0, 1, 1)} | _VECTOR_MIN)
+    assert v.source is Source.FROM_IMAGE
+    assert Vector.from_dict(v.to_dict()).source is Source.FROM_IMAGE
+    t = Text.from_pymupdf((0, 0, 1, 1, "w", 0, 0, 0))
+    assert t.source is Source.NATIVE_TEXT
+    assert Text.from_dict({**t.to_dict(), "source": "Native Vector"}).source is Source.NATIVE_VECTOR
+
+
+_VECTOR_MIN = dict(
+    type="s",
+    color=None,
+    fill=None,
+    width=1.0,
+    dashes=None,
+    closePath=False,
+    lineCap=(0, 0, 0),
+    lineJoin=0.0,
+    even_odd=False,
+    stroke_opacity=1.0,
+    fill_opacity=None,
+    layer=None,
+    scissor=None,
+    seqno=0,
+    blendmode=None,
+    isolated=False,
+    knockout=False,
+    opacity=None,
+    page_index=0,
+)

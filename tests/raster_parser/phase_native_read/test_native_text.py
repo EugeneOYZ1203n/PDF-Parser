@@ -3,6 +3,7 @@ from __future__ import annotations
 import pymupdf
 import pytest
 
+from raster_parser.models.source import Source
 from raster_parser.models.native_read import NativeSpan
 from raster_parser.phase_native_read import native_text as native
 from raster_parser.phase_native_read.reader import Reader
@@ -39,7 +40,7 @@ def test_extract_text_basic_horizontal(synthetic_pdf_factory, tmp_pdf_path):
     word = words[0]
     assert word.text == "Hello"
     assert word.angle() == pytest.approx(0.0, abs=1e-6)
-    assert word.source == "native"
+    assert word.source == Source.NATIVE_TEXT
     assert word.raw_span is not None
     assert word.bbox[0] == pytest.approx(10, abs=1)
 
