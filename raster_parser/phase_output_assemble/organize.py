@@ -18,7 +18,6 @@ dropped or reprojected) so a backend leaking rotated-display coordinates is caug
 
 from __future__ import annotations
 
-from dataclasses import replace
 
 from raster_parser.commons.logging_setup import get_logger
 from raster_parser.models.page import Page
@@ -36,7 +35,7 @@ def _rebase_blocks(texts: list[Text], first: int) -> list[Text]:
     if not texts:
         return []
     low = min(t.block_no for t in texts)
-    return [replace(t, block_no=t.block_no - low + first) for t in texts]
+    return [t.model_copy(update=dict(block_no=t.block_no - low + first)) for t in texts]
 
 
 def _next_after(values: list[int]) -> int:
@@ -59,7 +58,7 @@ def organize_outputs(
     first_p2_seq = _next_after([v.seqno for v in vectors_p3])
     low_p2 = min((v.seqno for v in vectors_p2), default=0)
     vectors = list(vectors_p3) + [
-        replace(v, seqno=v.seqno - low_p2 + first_p2_seq) for v in vectors_p2
+        v.model_copy(update=dict(seqno=v.seqno - low_p2 + first_p2_seq)) for v in vectors_p2
     ]
 
     width, height = page.meta.width, page.meta.height

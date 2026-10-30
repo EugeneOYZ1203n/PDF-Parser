@@ -19,6 +19,7 @@ old classes are gone: `TextDTO`, `VectorDTO`, `NativePDFElements`, the old `Text
 | `NativePDFElements.model_validate_json(s)` | `ExtractResult.from_json(s)` |
 | `deserialize_text(dto)` / `deserialize_vector(dto)` | not needed: the results are already the models (`Text.from_dict` / `Vector.from_dict` load JSON) |
 | `extract_vectors_from_png(...) -> list[VectorDTO]` | `-> list[Vector]` (same for `get_image_polys`) |
+| `dto.model_copy(update=...)` | the same: `Text` and `Vector` are pydantic models too |
 
 Coordinates are unchanged: unrotated page space, relative to the CropBox's top-left corner.
 

@@ -5,7 +5,6 @@ the image's placement matrix (`page.get_image_rects(xref, transform=True)`).
 """
 
 import tempfile
-from dataclasses import replace
 from pathlib import Path
 
 from raster_parser.commons.helpers.geometry import PDF_POINTS_PER_INCH
@@ -75,7 +74,7 @@ def _calculate_vector_transparency(
 
         opaque_fraction = st.mode(vector_alpha) / 255.0
 
-        result.append(traced_vector(replace(vector, fill_opacity=opaque_fraction)))
+        result.append(traced_vector(vector.model_copy(update=dict(fill_opacity=opaque_fraction))))
 
     return result
 
@@ -130,11 +129,12 @@ def _transform_vectors_to_matrix(
         return item
 
     return [
-        replace(
-            vector,
-            rect=transform_rect(vector.rect),
-            scissor=transform_rect(vector.scissor) if vector.scissor is not None else None,
-            items=[transform_item(item) for item in vector.items],
+        vector.model_copy(
+            update=dict(
+                rect=transform_rect(vector.rect),
+                scissor=transform_rect(vector.scissor) if vector.scissor is not None else None,
+                items=[transform_item(item) for item in vector.items],
+            )
         )
         for vector in vectors
     ]

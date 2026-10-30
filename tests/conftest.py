@@ -8,6 +8,7 @@ from typing import Callable
 import pymupdf
 import pytest
 
+from raster_parser.models.source import Source
 from raster_parser.models.text import Text
 from raster_parser.models.vector import Vector
 
@@ -212,7 +213,7 @@ def text() -> Callable[..., Text]:
         page_index: int = 0,
         seqno: int = 0,
         confidence: float = 0.0,
-        source: str = "native",
+        source: Source = Source.NATIVE_TEXT,
         raw_word: tuple | None = None,
         raw_span: dict | None = None,
         quad_points: tuple | None = None,

@@ -1,4 +1,5 @@
-"""Shared dataclasses that flow between pipeline stages.
+"""Shared data types that flow between pipeline stages (`Text` and `Vector` are pydantic
+models, the rest dataclasses).
 
 Coordinate convention
 ----------------------
